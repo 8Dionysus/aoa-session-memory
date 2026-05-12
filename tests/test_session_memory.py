@@ -268,7 +268,43 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
             {
                 "timestamp": "2026-05-12T00:00:06Z",
                 "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-cache",
+                    "arguments": json.dumps({"cmd": "rm -rf /srv/AbyssOS/.aoa/scripts/__pycache__ /srv/AbyssOS/.aoa/tests/.pytest_cache"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:07Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-find-cache",
+                    "arguments": json.dumps({"cmd": "find /srv/AbyssOS/.aoa -type d -name __pycache__ -prune -exec rm -rf {} +"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:08Z",
+                "type": "response_item",
                 "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-risk", "arguments": json.dumps({"cmd": "rm -rf .aoa/recurrence"})},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:09Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-doc",
+                    "output": (
+                        "# AGENTS.md\n"
+                        "## Hard no\n"
+                        "- do not print or commit real secrets\n"
+                        "- do not read or expose secret-bearing files from live hosts\n"
+                        "## Review guidelines\n"
+                        "- committed live secrets or secret-bearing rendered configs\n"
+                    ),
+                },
             },
         ],
     )
@@ -298,7 +334,13 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
     assert records["000005"]["type"] == "SECURITY_OR_SECRET_RISK"
     assert records["000006"]["type"] == "FILE_WRITE"
     assert records["000006"]["facets"]["command_kind"] == "temporary_cleanup"
-    assert records["000007"]["type"] == "SECURITY_OR_SECRET_RISK"
+    assert records["000007"]["type"] == "FILE_WRITE"
+    assert records["000007"]["facets"]["command_kind"] == "temporary_cleanup"
+    assert records["000008"]["type"] == "FILE_WRITE"
+    assert records["000008"]["facets"]["command_kind"] == "temporary_cleanup"
+    assert records["000009"]["type"] == "SECURITY_OR_SECRET_RISK"
+    assert records["000010"]["type"] == "SECURITY_TOUCHPOINT"
+    assert "security_touchpoint_signal" in records["000010"]["tags"]
 
 
 def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path) -> None:

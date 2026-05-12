@@ -1255,11 +1255,19 @@ def rm_rf_targets(cmd: str) -> list[str]:
 
 
 def is_temporary_cleanup_command(cmd: str) -> bool:
+    lowered = cmd.lower()
+    cache_names = {"__pycache__", ".pytest_cache"}
+    if (
+        re.search(r"\bfind\b", lowered)
+        and re.search(r"-exec\s+rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\{\}\s+\+", lowered)
+        and any(name in lowered for name in cache_names)
+    ):
+        return True
     targets = rm_rf_targets(cmd)
     if not targets:
         return False
     safe_prefixes = ("/tmp/", "/var/tmp/", "tmp/")
-    return all(target.startswith(safe_prefixes) for target in targets)
+    return all(target.startswith(safe_prefixes) or Path(target.rstrip("/")).name in cache_names for target in targets)
 
 
 def has_destructive_command_signal(cmd: str) -> bool:
@@ -1269,6 +1277,59 @@ def has_destructive_command_signal(cmd: str) -> bool:
     if re.search(r"\bgit\s+checkout\s+--\b", lowered):
         return True
     return bool(rm_rf_targets(cmd)) and not is_temporary_cleanup_command(cmd)
+
+
+SECURITY_POLICY_CONTEXT_PHRASES = [
+    "leak check",
+    "secret-leak check",
+    "secret/data leak check",
+    "secret leak check",
+    "redaction check",
+    "sanitize",
+    "sanitized",
+    "do not write secrets",
+    "do not print or commit real secrets",
+    "do not read or expose secret",
+    "do not publish rendered config",
+    "do not commit private host-facts",
+    "no tokens",
+    "no passwords",
+    "not shown",
+    "redacted",
+    "public-safe",
+    "secret-bearing",
+    "нет токен",
+    "нет парол",
+    "не допускаются",
+    "не писать секрет",
+]
+
+
+def is_security_policy_line(line_lower: str) -> bool:
+    if not line_lower:
+        return False
+    if any(phrase in line_lower for phrase in SECURITY_POLICY_CONTEXT_PHRASES):
+        return True
+    if not re.search(r"\b(secret|api key|token|credential|password|секрет)s?\b", line_lower):
+        return False
+    policy_markers = [
+        "do not ",
+        "don't ",
+        "never ",
+        "must not ",
+        "should not ",
+        "without explicit",
+        "avoid ",
+        "hard no",
+        "review guidelines",
+        "treat the following as",
+        "policy",
+        "checklist",
+        "не ",
+        "нельзя",
+        "без явн",
+    ]
+    return any(marker in line_lower for marker in policy_markers)
 
 
 def has_security_risk_signal(text_lower: str) -> bool:
@@ -1282,32 +1343,10 @@ def has_security_risk_signal(text_lower: str) -> bool:
     ]
     if any(re.search(pattern, text_lower) for pattern in direct_secret_patterns):
         return True
-    policy_context_phrases = [
-        "leak check",
-        "secret-leak check",
-        "secret/data leak check",
-        "secret leak check",
-        "redaction check",
-        "sanitize",
-        "sanitized",
-        "do not write secrets",
-        "no tokens",
-        "no passwords",
-        "нет токен",
-        "нет парол",
-        "не допускаются",
-        "не писать секрет",
-    ]
-    if any(phrase in text_lower for phrase in policy_context_phrases):
-        return False
     sensitive_terms = r"(secret|api key|token|credential|password|секрет)"
     leak_terms = r"(leak|leaked|exposed|expose|printed|dumped|committed|plaintext|plain text|утек|утеч|раскрыт)"
     log_terms = r"(console\.log|logger\.|log\(|print\(|printf\()"
     assignment_terms = r"(secret|api key|token|credential|password)\s*[:=]\s*['\"]?[a-z0-9_./+=-]{12,}"
-    if re.search(fr"\b{sensitive_terms}s?\b.{{0,48}}\b{leak_terms}\b", text_lower):
-        return True
-    if re.search(fr"\b{leak_terms}\b.{{0,48}}\b{sensitive_terms}s?\b", text_lower):
-        return True
     safe_sensitive_log_phrases = [
         "present",
         "missing",
@@ -1319,36 +1358,25 @@ def has_security_risk_signal(text_lower: str) -> bool:
         "expira",
     ]
     for line in text_lower.splitlines():
+        if is_security_policy_line(line):
+            continue
+        if re.search(fr"\b{sensitive_terms}s?\b.{{0,48}}\b{leak_terms}\b", line):
+            return True
+        if re.search(fr"\b{leak_terms}\b.{{0,48}}\b{sensitive_terms}s?\b", line):
+            return True
         if (
             re.search(log_terms, line)
             and re.search(fr"\b{sensitive_terms}s?\b", line)
             and not any(phrase in line for phrase in safe_sensitive_log_phrases)
         ):
             return True
-    if re.search(assignment_terms, text_lower):
-        return True
+        if re.search(assignment_terms, line):
+            return True
     return False
 
 
 def has_security_touchpoint_signal(text_lower: str) -> bool:
     if not text_lower:
-        return False
-    policy_context_phrases = [
-        "leak check",
-        "secret-leak check",
-        "secret/data leak check",
-        "secret leak check",
-        "redaction check",
-        "sanitize",
-        "sanitized",
-        "do not write secrets",
-        "no tokens",
-        "no passwords",
-        "нет токен",
-        "нет парол",
-        "не писать секрет",
-    ]
-    if any(phrase in text_lower for phrase in policy_context_phrases):
         return False
     identifier_pattern = (
         r"\b(?:[a-z0-9]+_)+(?:secret|token|password|credential|key)\b"
@@ -1357,7 +1385,7 @@ def has_security_touchpoint_signal(text_lower: str) -> bool:
     )
     phrase_pattern = (
         r"\b(api key|secret key|client secret|access token|refresh token|bearer token|session token|"
-        r"email token|recovery token|password|credential)s?\b"
+        r"email token|recovery token|password|credential|secret-bearing)s?\b"
     )
     return bool(re.search(identifier_pattern, text_lower) or re.search(phrase_pattern, text_lower))
 
