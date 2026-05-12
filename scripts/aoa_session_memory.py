@@ -349,6 +349,19 @@ def copy_portable_bundle(
     }
 
 
+def clear_export_target_for_force(target: Path) -> None:
+    """Clear a bundle target while preserving repository metadata."""
+    if not target.exists():
+        return
+    for child in target.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def install_portable_bundle(
     *,
     source_aoa_root: Path,
@@ -2380,7 +2393,7 @@ def command_export_bundle(args: argparse.Namespace) -> int:
     source = Path(args.source_aoa_root) if args.source_aoa_root else default_source_aoa_root()
     target = Path(args.target_dir)
     if target.exists() and args.force:
-        shutil.rmtree(target)
+        clear_export_target_for_force(target)
     payload = copy_portable_bundle(
         source_aoa_root=source,
         target_aoa_root=target,

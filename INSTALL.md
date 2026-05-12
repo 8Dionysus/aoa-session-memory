@@ -25,6 +25,8 @@ This writes an empty `sessions/` directory and an empty
 `--with-sessions` is explicitly used.
 
 Use this path when preparing a standalone GitHub repository.
+When the target is already a Git repository, `--force` refreshes the portable
+bundle files but preserves `.git`.
 
 ## Workspace Install
 

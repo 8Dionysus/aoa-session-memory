@@ -315,6 +315,25 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
+def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    git_dir = target / ".git"
+    stale_dir = target / "stale"
+    stale_file = target / "stale.txt"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    stale_dir.mkdir()
+    (stale_dir / "old.txt").write_text("old\n", encoding="utf-8")
+    stale_file.write_text("old\n", encoding="utf-8")
+
+    module.clear_export_target_for_force(target)
+
+    assert git_dir.exists()
+    assert (git_dir / "HEAD").exists()
+    assert not stale_dir.exists()
+    assert not stale_file.exists()
+
+
 def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     workspace = tmp_path / "ExistingWorkspace"
