@@ -11,8 +11,13 @@
     "source_range": {"type": "object"},
     "events": {"type": "array", "items": {"type": "object"}},
     "by_type": {"type": "object"},
-    "by_tag": {"type": "object"}
+    "by_tag": {"type": "object"},
+    "by_family": {"type": "object"},
+    "by_phase": {"type": "object"},
+    "by_actor": {"type": "object"},
+    "by_action": {"type": "object"},
+    "by_outcome": {"type": "object"},
+    "by_correlation": {"type": "object"}
   },
   "additionalProperties": true
 }
-

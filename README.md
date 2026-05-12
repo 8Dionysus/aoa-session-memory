@@ -8,6 +8,7 @@ The first implementation target is Codex session capture:
 raw transcript jsonl
   -> compaction-interval Markdown segments
   -> segment indexes
+  -> universal event facets and relationships
   -> session index
   -> diagnostics
   -> later reviewed distillation
@@ -155,7 +156,21 @@ python3 scripts/aoa_session_memory.py batch-distill \
 
 The conveyor separates mechanical first-pass work from responsibility layers.
 `manual_review` means agent-assisted, project-grounded review with evidence
-refs, not that the operator must reread every raw transcript.
+refs, not that the operator must reread every raw transcript. Its priority
+lanes are `manual_review_deep`, `manual_review_standard`, and
+`manual_review_sample`. `mechanics_candidate` is reserved for significant
+failure, lesson, risk, optimization, verification, or destructive-command
+signals rather than every generic command/output pair.
+
+Regenerate generated indexes from preserved raw JSONL after classifier changes:
+
+```bash
+python3 scripts/aoa_session_memory.py reindex-sessions all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --dry-run \
+  --write-report
+```
 
 Export a clean portable bundle without session archives:
 
@@ -186,7 +201,8 @@ The top-level router is `aoa-session-memory-global-route`. Install it into
 `.aoa` session-memory guidance in every Codex session. The remaining skills stay
 inside the bundle as the narrow routes for archive init, raw archiving,
 historical import, diagnostics, rehydration, first-pass distillation, stress
-checks, batch distillation, audit, doctor, hook trust, and compact probe work.
+checks, batch distillation, reindexing, audit, doctor, hook trust, and compact
+probe work.
 
 ## Core Rule
 

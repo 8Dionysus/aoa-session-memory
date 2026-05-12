@@ -50,6 +50,7 @@ python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
+python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
@@ -60,7 +61,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `28 passed`
+- `.aoa` tests: `32 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -70,11 +71,23 @@ Last observed result:
   discovered `142` transcripts, imported `133`, skipped `9` already indexed
   sessions; reports:
   `diagnostics/20260512T172827Z__codex-session-import.json` and `.md`
+- `reindex-sessions all --write-report`: `ok=true`, selected `143`
+  sessions, reindexed `142`, skipped `1` `raw_unavailable` diagnostic
+  archive; reports:
+  `diagnostics/20260512T202941Z__reindex-sessions.json` and `.md`
 - `batch-distill --since 2026-04-21 --write-report`: `ok=true`, selected
   `143` sessions, planned `139`, skipped `3` already first-pass distilled,
-  diagnostic `1`; lanes: `auto_first_pass=142`, `manual_review=122`,
-  `mechanics_candidate=135`, `low_risk_indexed=7`, `diagnostic=1`; reports:
-  `diagnostics/20260512T181921Z__batch-distill__first-wave.json` and `.md`
+  diagnostic `1`; lanes: `auto_first_pass=142`, `manual_review=129`,
+  `manual_review_deep=17`, `manual_review_standard=32`,
+  `manual_review_sample=80`, `mechanics_candidate=127`,
+  `low_risk_indexed=10`, `diagnostic=1`; reports:
+  `diagnostics/20260512T202952Z__batch-distill__first-wave.json` and `.md`
+- Universal event index proof: segment indexes now carry `family`, `phase`,
+  `actor`, `action`, `object`, `outcome`, `correlation_id`, and sequence or
+  call/output `relationships`; the current classifier avoids tagging
+  `session_meta` from non-semantic raw JSON fields, avoids promoting stream
+  message duplicates, uses structured command status, and separates security
+  policy/check mentions from actual risk signals.
 - `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
@@ -125,9 +138,11 @@ Stress-pass evidence:
 | Real Codex CLI hooks run in standalone sessions | live `codex exec` smoke sessions under `sessions/2026-05-12__002__...` and `__003__...` |
 | Session names are readable date/sequence/title labels | naming policy, relabel test |
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
+| Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
+| Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
-| Historical sessions can be split into automatic, responsible review, mechanics, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
+| Historical sessions can be split into automatic, prioritized responsible review, mechanics, low-risk, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
 | Batch distillation keeps project grounding instead of treating sessions as generic text | `project_grounding`, workspace fallback test, batch report |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
 | User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |

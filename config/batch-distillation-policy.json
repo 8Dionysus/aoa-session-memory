@@ -15,6 +15,23 @@
   ],
   "large_session_segment_threshold": 24,
   "huge_session_segment_threshold": 100,
+  "manual_review_priority_thresholds": {
+    "deep": 100,
+    "standard": 20,
+    "sample": 1
+  },
+  "manual_review_weights": {
+    "huge_session": 100,
+    "large_session": 30,
+    "SECURITY_OR_SECRET_RISK": 12,
+    "ERROR": 2,
+    "DEAD_BRANCH": 8,
+    "PROCESS_LESSON": 6,
+    "ASSUMPTION": 4,
+    "DECISION": 3,
+    "OPEN_THREAD": 2,
+    "FINAL_STATE": 1
+  },
   "manual_review_event_types": [
     "DECISION",
     "ASSUMPTION",
@@ -38,6 +55,21 @@
     "archive_trigger_tuning",
     "resume_template_improvement",
     "hook_contract_update"
+  ],
+  "mechanics_signal_event_types": [
+    "ERROR",
+    "PROCESS_LESSON",
+    "OPTIMIZATION_CANDIDATE",
+    "SECURITY_OR_SECRET_RISK",
+    "DEAD_BRANCH"
+  ],
+  "mechanics_signal_tags": [
+    "verification_command",
+    "destructive_command_signal"
+  ],
+  "mechanics_signal_outcomes": [
+    "failed",
+    "risk"
   ],
   "auto_actions": [
     "write_provisional_first_pass_distillation"

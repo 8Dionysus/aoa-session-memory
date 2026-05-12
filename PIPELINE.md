@@ -158,6 +158,14 @@ The session must have:
 - `session.manifest.json`
 - `session-registry.json`
 
+Segment indexes must keep both the legacy event map and the universal event
+facets:
+
+- `by_type` and `by_tag`
+- `by_family`, `by_phase`, `by_actor`, `by_action`, and `by_outcome`
+- `by_correlation` for tool-call/tool-output linkage
+- per-event `relationships` for sequence and call/output refs
+
 The agent should use indexes before opening large Markdown or raw JSONL.
 
 ## Navigation Commands
@@ -217,6 +225,19 @@ Create a provisional first-pass distillation map:
 python3 scripts/aoa_session_memory.py distill latest --aoa-root .
 ```
 
+Regenerate generated indexes from preserved raw JSONL after classifier changes:
+
+```bash
+python3 scripts/aoa_session_memory.py reindex-sessions all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --dry-run \
+  --write-report
+```
+
+Remove `--dry-run` for a bounded `--limit` smoke pass before reindexing a broad
+archive set.
+
 Build a first-wave conveyor for many historical sessions:
 
 ```bash
@@ -228,10 +249,11 @@ python3 scripts/aoa_session_memory.py batch-distill \
 ```
 
 This command plans by default. It separates `auto_first_pass`,
-`manual_review`, `mechanics_candidate`, and `diagnostic` lanes. Add `--apply`
-only when writing provisional first-pass distillation artifacts is intended.
-The conveyor report is written under `diagnostics/` when `--write-report` is
-set.
+`manual_review`, `manual_review_deep`, `manual_review_standard`,
+`manual_review_sample`, `mechanics_candidate`, `low_risk_indexed`, and
+`diagnostic` lanes. Add `--apply` only when writing provisional first-pass
+distillation artifacts is intended. The conveyor report is written under
+`diagnostics/` when `--write-report` is set.
 
 `manual_review` is not a demand that the operator reread every transcript. It
 marks a responsibility layer: an agent may continue the work, but it must use
@@ -239,12 +261,18 @@ project grounding, evidence references, and promotion gates. Session profiles
 therefore keep the source `cwd` and nearest project guidance files when they
 exist.
 
+Mechanics candidates are counted from significant events only: failures,
+process lessons, optimization/risk/dead-branch signals, verification commands,
+destructive commands, and failed outcomes. Generic command output by itself is
+not enough to put a session into the mechanics queue.
+
 Use the bundle skill routes for deliberate agent work:
 
 ```text
 aoa-session-memory-global-route -> top-level user router
 aoa-session-history-import      -> historical Codex JSONL batch import
 aoa-session-batch-distill       -> first-wave historical-session conveyor
+aoa-session-reindex             -> regenerate generated indexes from raw
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness
 aoa-session-memory-doctor       -> filesystem and live health
