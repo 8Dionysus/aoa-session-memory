@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "routes": {
+    "USER_INTENT": ["intent_pattern", "prompt_template", "requirement_shape"],
+    "ASSISTANT_PLAN": ["planning_quality", "missed_step", "reusable_plan"],
+    "TOOL_CALL": ["tool_usage_pattern", "tool_sequence", "automation_macro"],
+    "TOOL_OUTPUT": ["evidence_extract", "signal_noise_ratio", "parser_candidate"],
+    "FILE_READ": ["navigation_pattern", "repo_map_update", "dependency_discovery"],
+    "FILE_WRITE": ["mutation_pattern", "safety_review", "rollback_need"],
+    "DIFF": ["change_pattern", "review_checklist", "test_gap"],
+    "COMMAND": ["command_recipe", "preflight_candidate", "safe_runner_rule"],
+    "COMMAND_OUTPUT": ["verification_signal", "error_signature", "parser_candidate"],
+    "ERROR": ["root_cause", "guardrail", "regression_test", "detector"],
+    "DECISION": ["adr", "principle", "future_constraint"],
+    "ASSUMPTION": ["assumption_risk", "verification_task", "anti_hallucination_rule"],
+    "CHECKPOINT": ["resume_quality", "memory_gap", "checkpoint_schema_improvement"],
+    "COMPACTION_EVENT": ["retention_failure", "context_budget_pattern", "archive_trigger_tuning"],
+    "RESUME_HINT": ["rehydration_quality", "missing_refs", "resume_template_improvement"],
+    "OPEN_THREAD": ["backlog_item", "route_fork", "quest_candidate"],
+    "DEAD_BRANCH": ["wasted_work_pattern", "avoid_rule", "routing_improvement"],
+    "PROCESS_LESSON": ["technique_update", "skill_amendment", "playbook_patch"],
+    "OPTIMIZATION_CANDIDATE": ["automation_seed", "metric_candidate", "owner_route"],
+    "SECURITY_OR_SECRET_RISK": ["redaction_rule", "safety_gate", "sanitizer_test"],
+    "VERIFICATION": ["proof_pattern", "test_recipe", "confidence_model"],
+    "FINAL_STATE": ["closeout_quality", "handoff_template", "next_route"]
+  }
+}
+

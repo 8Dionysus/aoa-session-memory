@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA compaction segment index",
+  "type": "object",
+  "required": ["schema_version", "segment_id", "events", "by_type", "by_tag"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "segment_id": {"type": "string"},
+    "segment_role": {"type": "string"},
+    "source_raw": {"type": "string"},
+    "source_range": {"type": "object"},
+    "events": {"type": "array", "items": {"type": "object"}},
+    "by_type": {"type": "object"},
+    "by_tag": {"type": "object"}
+  },
+  "additionalProperties": true
+}
+

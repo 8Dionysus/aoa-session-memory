@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA session manifest",
+  "type": "object",
+  "required": ["schema_version", "session_id", "archive_status", "updated_at", "segments"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "session_id": {"type": "string"},
+    "display": {
+      "type": "object",
+      "properties": {
+        "date": {"type": "string"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "title": {"type": "string"},
+        "title_source": {"type": "string"},
+        "label": {"type": "string"},
+        "path": {"type": "string"},
+        "archive_path": {"type": "string"},
+        "navigation_path": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "session_label": {"type": "string"},
+    "session_title": {"type": "string"},
+    "source": {"type": "object"},
+    "archive_status": {"type": "string"},
+    "distillation_status": {"type": "string"},
+    "distillation_iteration": {"type": "integer", "minimum": 0},
+    "review_status": {"type": "string"},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "hooks_seen": {"type": "array", "items": {"type": "string"}},
+    "raw": {"type": "object"},
+    "segments": {"type": "array", "items": {"type": "object"}},
+    "latest_event_count": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": true
+}

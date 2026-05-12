@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "canonical_session_root": "sessions",
+  "legacy_session_roots": ["codex-sessions"],
+  "session_entry_file": "SESSION.md",
+  "session_index_file": "session.index.json",
+  "raw_source_file": "raw/source.json",
+  "session_label_format": "YYYY-MM-DD__NNN__short-title",
+  "fallback_terms": {
+    "missing_session_id": "unresolved-session-<stamp>",
+    "missing_title": "untitled-session",
+    "missing_source_type": "unresolved-source"
+  },
+  "banned_durable_name_terms": [
+    "unknown",
+    "misc",
+    "tmp",
+    "new",
+    "old",
+    "stuff",
+    "placeholder"
+  ],
+  "segment_roles": [
+    "initial-to-compaction",
+    "compaction-to-compaction",
+    "initial-to-latest",
+    "compaction-to-latest"
+  ]
+}

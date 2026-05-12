@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "event_types": [
+    "SESSION_META",
+    "CONTEXT_STATE",
+    "USER_INTENT",
+    "ASSISTANT_PLAN",
+    "ASSISTANT_MESSAGE",
+    "TOOL_CALL",
+    "TOOL_OUTPUT",
+    "FILE_READ",
+    "FILE_WRITE",
+    "DIFF",
+    "COMMAND",
+    "COMMAND_OUTPUT",
+    "ERROR",
+    "DECISION",
+    "ASSUMPTION",
+    "CHECKPOINT",
+    "COMPACTION_EVENT",
+    "RESUME_HINT",
+    "OPEN_THREAD",
+    "DEAD_BRANCH",
+    "PROCESS_LESSON",
+    "OPTIMIZATION_CANDIDATE",
+    "SECURITY_OR_SECRET_RISK",
+    "VERIFICATION",
+    "FINAL_STATE",
+    "HOOK_EVENT",
+    "RAW_EVENT"
+  ],
+  "distillation_statuses": [
+    "raw_event",
+    "observed",
+    "distilled",
+    "experience_candidate",
+    "pattern_candidate",
+    "reviewed_pattern",
+    "automation_seed",
+    "implemented",
+    "validated",
+    "retired"
+  ]
+}
+

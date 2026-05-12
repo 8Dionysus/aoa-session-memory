@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA session hook receipt",
+  "type": "object",
+  "required": ["schema_version", "ok", "hook_event_name", "timestamp"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "hook_event_name": {"type": "string"},
+    "timestamp": {"type": "string"},
+    "session_id": {"type": "string"},
+    "session_dir": {"type": "string"},
+    "display_name": {"type": "string"},
+    "navigation_path": {"type": "string"},
+    "actions": {"type": "array", "items": {"type": "string"}},
+    "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

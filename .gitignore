@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local evidence archive. Keep on disk, but do not publish as portable source.
+sessions/
+session-registry.json
+
+# Legacy archive root from the first prototype. Migration should empty it.
+codex-sessions/

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA raw session incident",
+  "type": "object",
+  "required": ["schema_version", "incident_type", "created_at", "checks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "incident_type": {"type": "string"},
+    "created_at": {"type": "string"},
+    "session_id": {"type": "string"},
+    "expected_raw_source": {"type": "object"},
+    "checks": {"type": "object"},
+    "diagnosis": {"type": "object"},
+    "recovery_actions": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}
+
