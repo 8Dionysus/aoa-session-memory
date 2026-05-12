@@ -17,6 +17,7 @@ health checks and may fail honestly when the kernel still has remaining gates.
 - The user asks whether the `.aoa` mechanism is complete.
 - A code, hook, topology, export, or install behavior changed.
 - The standalone bundle or GitHub mirror needs readiness proof.
+- The user-level router skill must be proven as part of portability.
 
 ## Procedure
 
@@ -36,6 +37,7 @@ skipped.
 
 - `completion_ready=true`
 - `remaining=[]`
+- user-level router skill is installed for the current Codex user
 - standalone repo points at `/srv/AbyssOS/bundles/aoa-session-memory`
 - origin is `git@github.com:8Dionysus/aoa-session-memory.git` on this host
 

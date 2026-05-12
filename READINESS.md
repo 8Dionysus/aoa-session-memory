@@ -47,25 +47,29 @@ python3 -m py_compile scripts/aoa_session_memory.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
 python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
 python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
-python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --check-live-hooks --check-codex-grounding
+python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --check-live-hooks --check-user-skill --check-codex-grounding
 python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
 
 Last observed result:
 
-- `.aoa` tests: `20 passed`
+- `.aoa` tests: `24 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
+- `install-user-skill`: `ok=true`, user-level router points to the active
+  `.aoa` install
 - `validate`: `ok=true`
 - `codex-compact-probe --trust-hooks`: `ok=true`, live `PreCompact` and
   `PostCompact` completed and archived; latest probe raised live counts to
   `PreCompact=2`, `PostCompact=2`
 - `stress-pass --compactions 100 --write`: `ok=true` on the largest archive
-- `doctor --check-live-hooks --check-codex-grounding`: `ok=true`, no problems, no warnings
+- `doctor --check-live-hooks --check-user-skill --check-codex-grounding`:
+  `ok=true`, no problems, no warnings
 - `audit`: `completion_ready=true`, `remaining=[]`
 - local workspace doctor: `ready=True`
 - local workspace hooks doctor: `ready=True`
@@ -108,6 +112,7 @@ Stress-pass evidence:
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
+| User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
 | Live hooks match expected commands | `doctor --check-live-hooks` |
 | Native Codex hook trust is inspectable and repairable | `codex-hooks-status`, app-server `hooks/list` and `config/batchWrite` |
 | Local Codex compact/hook contract is grounded | `codex-grounding`, local `codex-cli 0.130.0`, project config |

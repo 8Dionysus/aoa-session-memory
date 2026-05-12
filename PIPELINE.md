@@ -213,6 +213,14 @@ aoa-codex-hooks-status          -> native Codex hook trust
 aoa-codex-compact-probe         -> live PreCompact/PostCompact proof
 ```
 
+Install the top-level router for the current Codex user:
+
+```bash
+python3 scripts/aoa_session_memory.py install-user-skill \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
 Generate the user-level hook config for the selected install roots:
 
 ```bash

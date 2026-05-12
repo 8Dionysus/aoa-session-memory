@@ -17,6 +17,7 @@ it does not replace `audit`.
 - A session archive looks inconsistent.
 - Required root files, indexes, manifests, or registry entries may be missing.
 - Live hook wiring or Codex grounding needs a health check.
+- The user-level router skill needs to be checked for the current Codex user.
 - A change touched bundle structure, naming, schemas, hooks, or generated
   surfaces.
 
@@ -37,6 +38,7 @@ python3 scripts/aoa_session_memory.py doctor \
   --workspace-root /srv/AbyssOS \
   --aoa-root /srv/AbyssOS/.aoa \
   --check-live-hooks \
+  --check-user-skill \
   --check-codex-grounding
 ```
 
@@ -46,6 +48,8 @@ python3 scripts/aoa_session_memory.py doctor \
 - no `problems`
 - warnings are reported, not hidden
 - if live checks were requested, hook and grounding subreports are green
+- if `--check-user-skill` was requested, the global router points at this
+  install
 
 ## Stop Line
 

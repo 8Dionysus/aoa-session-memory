@@ -50,6 +50,9 @@ Use this skill in any Codex session when the task touches:
 5. If the task changes portable behavior, export to
    `/srv/AbyssOS/bundles/aoa-session-memory` and validate both source and
    standalone surfaces.
+6. If the user-level router itself is missing or stale, run
+   `install-user-skill` from the active install root instead of hand-writing a
+   symlink.
 
 ## Skill Routing
 

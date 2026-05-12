@@ -90,6 +90,7 @@ CODEX_APP_EVENT_NAMES = {
     "Stop": "stop",
 }
 CODEX_HOOK_OUTPUT_FIELDS = {"continue", "stopReason", "suppressOutput", "systemMessage", "hookSpecificOutput"}
+USER_LEVEL_SKILL_NAME = "aoa-session-memory-global-route"
 PORTABLE_BUNDLE_ITEMS = [
     ".gitignore",
     "AGENTS.md",
@@ -263,6 +264,93 @@ def default_standalone_repo_for(aoa_root: Path) -> Path:
             return bundled_repo
         return legacy_repo
     return aoa_root
+
+
+def default_user_skills_dir() -> Path:
+    return Path.home() / ".codex" / "skills"
+
+
+def user_level_skill_source(aoa_root: Path) -> Path:
+    return aoa_root.expanduser().resolve(strict=False) / "skills" / USER_LEVEL_SKILL_NAME
+
+
+def user_level_skill_target(skills_dir: Path | None = None) -> Path:
+    return (skills_dir or default_user_skills_dir()).expanduser() / USER_LEVEL_SKILL_NAME
+
+
+def resolve_non_strict(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def user_skill_install_state(aoa_root: Path, skills_dir: Path | None = None) -> dict[str, Any]:
+    source = user_level_skill_source(aoa_root)
+    target = user_level_skill_target(skills_dir)
+    source_skill = source / "SKILL.md"
+    target_skill = target / "SKILL.md"
+    target_exists = target.exists() or target.is_symlink()
+    source_exists = source_skill.exists()
+    target_skill_exists = target_skill.exists()
+    target_resolved = resolve_non_strict(target) if target_exists else None
+    source_resolved = resolve_non_strict(source)
+    linked_to_source = target.is_symlink() and target_resolved == source_resolved
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": source_exists and linked_to_source and target_skill_exists,
+        "skill_name": USER_LEVEL_SKILL_NAME,
+        "source": str(source),
+        "source_skill_exists": source_exists,
+        "skills_dir": str((skills_dir or default_user_skills_dir()).expanduser()),
+        "target": str(target),
+        "target_exists": target_exists,
+        "target_is_symlink": target.is_symlink(),
+        "target_resolved": str(target_resolved) if target_resolved else None,
+        "target_skill_exists": target_skill_exists,
+        "linked_to_source": linked_to_source,
+    }
+
+
+def install_user_skill(
+    *,
+    aoa_root: Path,
+    skills_dir: Path | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    source = user_level_skill_source(aoa_root)
+    target = user_level_skill_target(skills_dir)
+    source_skill = source / "SKILL.md"
+    if not source_skill.exists():
+        return {
+            **user_skill_install_state(aoa_root, skills_dir),
+            "ok": False,
+            "installed": False,
+            "error": f"missing source skill: {source_skill}",
+        }
+
+    before = user_skill_install_state(aoa_root, skills_dir)
+    if before["ok"]:
+        return {**before, "installed": False, "already_installed": True, "backup_path": None}
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup_path: Path | None = None
+    if target.exists() or target.is_symlink():
+        if not force:
+            return {
+                **before,
+                "ok": False,
+                "installed": False,
+                "error": "target exists and does not point to source; rerun with --force to back it up and replace it",
+            }
+        backup_path = target.with_name(f"{target.name}.{compact_stamp()}.bak")
+        shutil.move(str(target), str(backup_path))
+
+    target.symlink_to(source, target_is_directory=True)
+    after = user_skill_install_state(aoa_root, skills_dir)
+    return {
+        **after,
+        "installed": bool(after["ok"]),
+        "already_installed": False,
+        "backup_path": str(backup_path) if backup_path else None,
+    }
 
 
 def git_remote_url(repo_root: Path, remote: str = "origin") -> str | None:
@@ -3138,6 +3226,19 @@ def command_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_install_user_skill(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    skills_dir = Path(args.skills_dir).expanduser() if args.skills_dir else None
+    payload = install_user_skill(
+        aoa_root=root,
+        skills_dir=skills_dir,
+        force=args.force,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_codex_grounding(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -3447,6 +3548,7 @@ def completion_audit(
     standalone_repo_exists = (standalone_repo / ".git").exists()
     standalone_remote = git_remote_url(standalone_repo)
     standalone_github_ready = bool(standalone_remote and "github.com" in standalone_remote.lower())
+    user_skill_state = user_skill_install_state(aoa_root)
 
     def checklist_item(requirement: str, status: str, evidence: Any, gap: str | None = None) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -3509,7 +3611,13 @@ def completion_audit(
         checklist_item(
             "Portable clean export and workspace install exist",
             "covered",
-            {"commands": ["export-bundle", "install", "hooks-config"]},
+            {"commands": ["export-bundle", "install", "hooks-config", "install-user-skill"]},
+        ),
+        checklist_item(
+            "User-level router skill is installed for the current Codex user",
+            "covered" if user_skill_state.get("ok") else "remaining",
+            user_skill_state,
+            None if user_skill_state.get("ok") else "Install the user-level router with install-user-skill.",
         ),
         checklist_item(
             "Standalone local repository is prepared for the portable bundle",
@@ -3658,6 +3766,10 @@ def command_doctor(args: argparse.Namespace) -> int:
             if expected_command not in live_commands.get(event_name, []):
                 problems.append(f"live user hooks command mismatch for {event_name}: expected {expected_command}")
 
+    user_skill_state = user_skill_install_state(root)
+    if args.check_user_skill and not user_skill_state.get("ok"):
+        problems.append(f"user-level router skill is not installed: {user_skill_state}")
+
     if args.check_codex_grounding:
         grounding = codex_grounding(workspace_root=workspace_root, aoa_root=root)
         if not grounding.get("ok"):
@@ -3761,6 +3873,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "aoa_root": str(root),
         "session_count": len(sessions) if isinstance(sessions, list) else 0,
         "archive_dir_count": len(archive_dirs),
+        "user_skill": user_skill_state,
         "problems": problems,
         "warnings": warnings,
     }
@@ -3855,6 +3968,13 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--no-hooks-backup", action="store_true", help="Do not back up an existing user hooks file.")
     install.set_defaults(func=command_install)
 
+    install_user_skill = sub.add_parser("install-user-skill", help="Install the global .aoa session-memory router skill for the current Codex user.")
+    install_user_skill.add_argument("--workspace-root")
+    install_user_skill.add_argument("--aoa-root")
+    install_user_skill.add_argument("--skills-dir", help="User skills directory; defaults to ~/.codex/skills.")
+    install_user_skill.add_argument("--force", action="store_true", help="Back up and replace an existing conflicting skill target.")
+    install_user_skill.set_defaults(func=command_install_user_skill)
+
     grounding = sub.add_parser("codex-grounding", help="Check the local Codex version, compact config, and lifecycle hook markers.")
     grounding.add_argument("--workspace-root")
     grounding.add_argument("--aoa-root")
@@ -3893,6 +4013,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--workspace-root")
     doctor.add_argument("--aoa-root")
     doctor.add_argument("--check-live-hooks", action="store_true", help="Also require current user-level hooks to cover AoA lifecycle events.")
+    doctor.add_argument("--check-user-skill", action="store_true", help="Also require the current user's global .aoa router skill to point at this install.")
     doctor.add_argument("--check-codex-grounding", action="store_true", help="Also require local Codex version/config/hook marker grounding to pass.")
     doctor.set_defaults(func=command_doctor)
     return parser

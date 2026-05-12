@@ -512,6 +512,67 @@ def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> 
     assert registry["sessions"][0]["session_id"] == "existing-session"
 
 
+def test_install_user_skill_symlinks_router_and_is_idempotent(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    skills_dir = tmp_path / "skills"
+    source_skill = source_aoa / "skills" / module.USER_LEVEL_SKILL_NAME
+
+    payload = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir)
+
+    target = skills_dir / module.USER_LEVEL_SKILL_NAME
+    assert payload["ok"] is True
+    assert payload["installed"] is True
+    assert target.is_symlink()
+    assert target.resolve() == source_skill.resolve()
+    state = module.user_skill_install_state(source_aoa, skills_dir)
+    assert state["ok"] is True
+    assert state["linked_to_source"] is True
+
+    second = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir)
+    assert second["ok"] is True
+    assert second["already_installed"] is True
+    assert second["installed"] is False
+
+
+def test_install_user_skill_backs_up_conflicting_target_on_force(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    skills_dir = tmp_path / "skills"
+    target = skills_dir / module.USER_LEVEL_SKILL_NAME
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("---\nname: old\ndescription: old\n---\n", encoding="utf-8")
+
+    blocked = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir)
+    assert blocked["ok"] is False
+    assert blocked["installed"] is False
+    assert target.is_dir()
+
+    replaced = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir, force=True)
+    assert replaced["ok"] is True
+    assert replaced["installed"] is True
+    assert replaced["backup_path"]
+    assert Path(replaced["backup_path"]).exists()
+    assert target.is_symlink()
+
+
+def test_install_user_skill_accepts_relative_aoa_root(tmp_path: Path, monkeypatch) -> None:
+    aoa_root = tmp_path / "bundle"
+    source = aoa_root / "skills" / module.USER_LEVEL_SKILL_NAME
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: aoa-session-memory-global-route\ndescription: route\n---\n",
+        encoding="utf-8",
+    )
+    skills_dir = tmp_path / "user-skills"
+
+    monkeypatch.chdir(aoa_root)
+    payload = module.install_user_skill(aoa_root=Path("."), skills_dir=skills_dir)
+
+    target = skills_dir / module.USER_LEVEL_SKILL_NAME
+    assert payload["ok"] is True
+    assert target.is_symlink()
+    assert target.resolve() == source.resolve()
+
+
 def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> None:
     workspace = tmp_path / "Workspace"
     aoa_root = workspace / ".aoa"
@@ -579,6 +640,7 @@ def test_completion_audit_reports_covered_segments_and_remaining_live_hooks(tmp_
     statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
     assert statuses["Real Codex compaction boundaries are detected from raw transcripts"] == "covered"
     assert statuses["Segment topology matches raw compaction boundaries"] == "covered"
+    assert statuses["User-level router skill is installed for the current Codex user"] == "remaining"
     assert statuses["Live PreCompact and PostCompact hook receipts observed in archived sessions"] == "remaining"
 
 
