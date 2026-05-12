@@ -166,6 +166,11 @@ def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> Non
         [
             {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "noise-session", "cwd": str(workspace)}},
             {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Give a final judgment for the current review."}]},
+            },
+            {
                 "timestamp": "2026-05-12T00:00:01Z",
                 "type": "response_item",
                 "payload": {
@@ -214,15 +219,17 @@ def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> Non
     segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
     records = {event["event_id"]: event for event in segment_index["events"]}
 
-    assert records["000002"]["type"] == "CONTEXT_STATE"
-    assert "security_policy_signal" in records["000002"]["tags"]
+    assert records["000002"]["type"] == "USER_INTENT"
     assert "final_state_signal" not in records["000002"]["tags"]
-    assert records["000003"]["type"] == "ASSISTANT_MESSAGE"
-    assert "decision_signal" in records["000003"]["tags"]
-    assert records["000004"]["type"] == "DECISION"
-    assert records["000005"]["type"] == "COMMAND_OUTPUT"
-    assert records["000005"]["outcome"] == "succeeded"
-    assert "error_signal" not in records["000005"]["tags"]
+    assert records["000003"]["type"] == "CONTEXT_STATE"
+    assert "security_policy_signal" in records["000003"]["tags"]
+    assert "final_state_signal" not in records["000003"]["tags"]
+    assert records["000004"]["type"] == "ASSISTANT_MESSAGE"
+    assert "decision_signal" in records["000004"]["tags"]
+    assert records["000005"]["type"] == "DECISION"
+    assert records["000006"]["type"] == "COMMAND_OUTPUT"
+    assert records["000006"]["outcome"] == "succeeded"
+    assert "error_signal" not in records["000006"]["tags"]
 
 
 def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> None:
@@ -246,15 +253,20 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
             {
                 "timestamp": "2026-05-12T00:00:03Z",
                 "type": "response_item",
-                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Token leaked in logs; rotate it."}]},
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "MAILERSEND_API_KEY is configured; value is not shown."}]},
             },
             {
                 "timestamp": "2026-05-12T00:00:04Z",
                 "type": "response_item",
-                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-tmp", "arguments": json.dumps({"cmd": "rm -rf /tmp/aoa-demo && mkdir -p /tmp/aoa-demo"})},
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Token leaked in logs; rotate it."}]},
             },
             {
                 "timestamp": "2026-05-12T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-tmp", "arguments": json.dumps({"cmd": "rm -rf /tmp/aoa-demo && mkdir -p /tmp/aoa-demo"})},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:06Z",
                 "type": "response_item",
                 "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-risk", "arguments": json.dumps({"cmd": "rm -rf .aoa/recurrence"})},
             },
@@ -281,10 +293,12 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
     assert "security_policy_signal" in records["000002"]["tags"]
     assert records["000003"]["type"] == "ASSISTANT_MESSAGE"
     assert "security_policy_signal" in records["000003"]["tags"]
-    assert records["000004"]["type"] == "SECURITY_OR_SECRET_RISK"
-    assert records["000005"]["type"] == "FILE_WRITE"
-    assert records["000005"]["facets"]["command_kind"] == "temporary_cleanup"
-    assert records["000006"]["type"] == "SECURITY_OR_SECRET_RISK"
+    assert records["000004"]["type"] == "SECURITY_TOUCHPOINT"
+    assert "security_touchpoint_signal" in records["000004"]["tags"]
+    assert records["000005"]["type"] == "SECURITY_OR_SECRET_RISK"
+    assert records["000006"]["type"] == "FILE_WRITE"
+    assert records["000006"]["facets"]["command_kind"] == "temporary_cleanup"
+    assert records["000007"]["type"] == "SECURITY_OR_SECRET_RISK"
 
 
 def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path) -> None:
