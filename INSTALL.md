@@ -76,6 +76,36 @@ python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py doctor \
 
 If user-level hooks were installed, add `--check-live-hooks` to `doctor`.
 
+Then verify the native Codex hook trust state:
+
+```bash
+python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+If matching hooks are present but untrusted, trust the current hashes through
+Codex app-server:
+
+```bash
+python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-current
+```
+
+To prove the compaction hook path on a live Codex install:
+
+```bash
+python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-compact-probe \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-hooks
+```
+
+This uses Codex app-server `thread/compact/start`, records a small persisted
+probe thread, and requires archived `PreCompact` and `PostCompact` receipts.
+
 ## Rules
 
 - Export is clean by default.
@@ -85,4 +115,8 @@ If user-level hooks were installed, add `--check-live-hooks` to `doctor`.
   route works.
 - A green `codex-grounding` proves the local Codex version, compact config, and
   expected hook markers are visible on this host.
+- A green `codex-hooks-status` proves native Codex hook discovery, command
+  matching, and trust state are coherent.
+- A green `codex-compact-probe` proves live `PreCompact` and `PostCompact`
+  receipts reach the archive.
 - A green `doctor` proves the installed filesystem contract is coherent.

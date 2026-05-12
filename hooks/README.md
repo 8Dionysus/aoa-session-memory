@@ -38,6 +38,33 @@ User-level hooks may run in addition to project-level hooks. The archive script
 is idempotent for the same raw transcript, but duplicate hook event receipts can
 appear in `hooks/events.jsonl`.
 
+Recent Codex builds require unmanaged hooks to be trusted before they run.
+After writing `~/.codex/hooks.json`, inspect the native hook state:
+
+```bash
+python3 .aoa/scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+If the AoA hooks are present but untrusted, trust the current matching hashes:
+
+```bash
+python3 .aoa/scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-current
+```
+
+For a live compaction check, use:
+
+```bash
+python3 .aoa/scripts/aoa_session_memory.py codex-compact-probe \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-hooks
+```
+
 ## Hook Contract
 
 - Hooks are fail-open.

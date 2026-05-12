@@ -175,6 +175,51 @@ def test_hooks_config_builder_uses_supplied_roots(tmp_path: Path) -> None:
         assert f"--event-name {event_name}" in command
 
 
+def test_codex_hook_lookup_tracks_trust_and_expected_commands(tmp_path: Path) -> None:
+    workspace = tmp_path / "portable-workspace"
+    aoa_root = workspace / ".aoa"
+    expected_commands = module.expected_hook_commands(workspace, aoa_root)
+    hooks = [
+        {
+            "key": "/home/user/.codex/hooks.json:pre_compact:0:0",
+            "eventName": "preCompact",
+            "command": expected_commands["PreCompact"],
+            "currentHash": "sha256:pre",
+            "trustStatus": "trusted",
+            "enabled": True,
+        },
+        {
+            "key": "/home/user/.codex/hooks.json:post_compact:0:0",
+            "eventName": "postCompact",
+            "command": expected_commands["PostCompact"],
+            "currentHash": "sha256:post",
+            "trustStatus": "untrusted",
+            "enabled": True,
+        },
+        {
+            "key": "/home/user/.codex/hooks.json:stop:0:0",
+            "eventName": "stop",
+            "command": "python3 wrong.py",
+            "currentHash": "sha256:wrong",
+            "trustStatus": "trusted",
+            "enabled": True,
+        },
+    ]
+
+    lookup = module.hook_lookup_from_app_hooks(hooks, expected_commands)
+    trust_state = module.hook_trust_state_from_lookup(lookup)
+
+    assert lookup["PreCompact"]["present"] is True
+    assert lookup["PreCompact"]["trusted"] is True
+    assert lookup["PostCompact"]["present"] is True
+    assert lookup["PostCompact"]["trusted"] is False
+    assert lookup["Stop"]["present"] is False
+    assert trust_state == {
+        "/home/user/.codex/hooks.json:pre_compact:0:0": {"trusted_hash": "sha256:pre"},
+        "/home/user/.codex/hooks.json:post_compact:0:0": {"trusted_hash": "sha256:post"},
+    }
+
+
 def test_default_aoa_root_uses_script_parent() -> None:
     assert module.aoa_root_for() == SCRIPT.parents[1]
 

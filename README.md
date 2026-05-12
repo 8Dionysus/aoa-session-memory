@@ -94,6 +94,23 @@ python3 scripts/aoa_session_memory.py validate \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+Inspect native Codex hook trust:
+
+```bash
+python3 scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+Run the live compaction hook probe:
+
+```bash
+python3 scripts/aoa_session_memory.py codex-compact-probe \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-hooks
+```
+
 Run the completion audit:
 
 ```bash

@@ -244,6 +244,25 @@ python3 scripts/aoa_session_memory.py codex-grounding \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+Check native Codex hook discovery and trust:
+
+```bash
+python3 scripts/aoa_session_memory.py codex-hooks-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+If matching hooks are present but untrusted, add `--trust-current`.
+
+Run a live manual compaction probe:
+
+```bash
+python3 scripts/aoa_session_memory.py codex-compact-probe \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --trust-hooks
+```
+
 Run an end-to-end pipeline validation in a temporary workspace:
 
 ```bash
@@ -287,6 +306,14 @@ Symptom: user-level and project-level hooks both fire, or an event is retried.
 Response: tolerate duplicate hook receipts; archive regeneration must remain
 idempotent for the same raw transcript.
 
+### Untrusted Native Hooks
+
+Symptom: hooks are present in `~/.codex/hooks.json`, but Codex does not run one
+or more of them.
+
+Response: run `codex-hooks-status`. If the matching AoA hooks are `untrusted`,
+rerun it with `--trust-current`.
+
 ### Premature or Repeated Compaction
 
 Symptom: context loses details before the work is complete.
@@ -308,7 +335,9 @@ Minimum gate after code or hook changes:
 python3 -m py_compile scripts/aoa_session_memory.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
 python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
 python3 scripts/aoa_session_memory.py export-bundle --target-dir /tmp/aoa-session-memory-bundle --source-aoa-root . --force
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --check-live-hooks --check-codex-grounding
 python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa

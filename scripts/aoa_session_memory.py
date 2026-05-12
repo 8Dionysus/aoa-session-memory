@@ -5,12 +5,15 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -79,6 +82,13 @@ HOOK_STATUS_MESSAGES = {
     "Stop": "AoA session memory stop",
 }
 REQUIRED_HOOK_EVENTS = HOOK_EVENT_ORDER
+CODEX_APP_EVENT_NAMES = {
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmit",
+    "PreCompact": "preCompact",
+    "PostCompact": "postCompact",
+    "Stop": "stop",
+}
 CODEX_HOOK_OUTPUT_FIELDS = {"continue", "stopReason", "suppressOutput", "systemMessage", "hookSpecificOutput"}
 PORTABLE_BUNDLE_ITEMS = [
     ".gitignore",
@@ -269,6 +279,344 @@ def git_remote_url(repo_root: Path, remote: str = "origin") -> str | None:
         return None
     value = completed.stdout.strip()
     return value or None
+
+
+class CodexAppServerClient:
+    def __init__(self, *, codex_bin: str, cwd: Path, timeout: int = 30) -> None:
+        self.codex_bin = codex_bin
+        self.cwd = cwd
+        self.timeout = timeout
+        self.process: subprocess.Popen[str] | None = None
+        self.stdout_queue: queue.Queue[str] = queue.Queue()
+        self.stderr_queue: queue.Queue[str] = queue.Queue()
+
+    def __enter__(self) -> "CodexAppServerClient":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def start(self) -> None:
+        self.process = subprocess.Popen(
+            [self.codex_bin, "app-server", "--listen", "stdio://", "-c", "features.hooks=true"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=str(self.cwd),
+        )
+        assert self.process.stdout is not None
+        assert self.process.stderr is not None
+        threading.Thread(target=self._read_stream, args=(self.process.stdout, self.stdout_queue), daemon=True).start()
+        threading.Thread(target=self._read_stream, args=(self.process.stderr, self.stderr_queue), daemon=True).start()
+
+    @staticmethod
+    def _read_stream(stream: Any, target: queue.Queue[str]) -> None:
+        for line in stream:
+            target.put(line.rstrip("\n"))
+
+    def send(self, payload: dict[str, Any]) -> None:
+        if self.process is None or self.process.stdin is None:
+            raise RuntimeError("Codex app-server is not running")
+        self.process.stdin.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n")
+        self.process.stdin.flush()
+
+    def recv_response(self, response_id: int, *, timeout: int | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        deadline = time.time() + (timeout or self.timeout)
+        seen: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            line = self._next_stdout_line(deadline)
+            if line is None:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                seen.append(payload)
+                if payload.get("id") == response_id:
+                    return payload, seen
+        raise TimeoutError(f"timed out waiting for Codex app-server response id={response_id}: {self.stderr_tail()}")
+
+    def collect_until(self, predicate: Any, *, timeout: int | None = None) -> list[dict[str, Any]]:
+        deadline = time.time() + (timeout or self.timeout)
+        seen: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            line = self._next_stdout_line(deadline)
+            if line is None:
+                if self.process is not None and self.process.poll() is not None:
+                    break
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            seen.append(payload)
+            if predicate(payload, seen):
+                return seen
+        raise TimeoutError(f"timed out waiting for Codex app-server event: {self.stderr_tail()}")
+
+    def _next_stdout_line(self, deadline: float) -> str | None:
+        remaining = max(0.05, min(0.5, deadline - time.time()))
+        try:
+            return self.stdout_queue.get(timeout=remaining)
+        except queue.Empty:
+            return None
+
+    def stderr_tail(self, limit: int = 20) -> list[str]:
+        rows: list[str] = []
+        while True:
+            try:
+                rows.append(self.stderr_queue.get_nowait())
+            except queue.Empty:
+                break
+        return rows[-limit:]
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=3)
+
+
+def initialize_codex_app_server(client: CodexAppServerClient, *, client_name: str) -> dict[str, Any]:
+    client.send(
+        {
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "clientInfo": {
+                    "name": client_name,
+                    "title": client_name.replace("_", " ").title(),
+                    "version": "0.1.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        }
+    )
+    response, _seen = client.recv_response(1)
+    if "error" in response:
+        raise RuntimeError(f"Codex app-server initialize failed: {response['error']}")
+    client.send({"method": "initialized", "params": {}})
+    return response
+
+
+def hook_lookup_from_app_hooks(hooks: list[dict[str, Any]], expected_commands: dict[str, str]) -> dict[str, dict[str, Any]]:
+    by_event: dict[str, dict[str, Any]] = {}
+    for event_name, app_event_name in CODEX_APP_EVENT_NAMES.items():
+        expected_command = expected_commands.get(event_name)
+        matches = [
+            hook
+            for hook in hooks
+            if isinstance(hook, dict)
+            and hook.get("eventName") == app_event_name
+            and hook.get("command") == expected_command
+        ]
+        hook = matches[0] if matches else None
+        by_event[event_name] = {
+            "event_name": event_name,
+            "app_event_name": app_event_name,
+            "expected_command": expected_command,
+            "present": hook is not None,
+            "trusted": bool(hook and hook.get("trustStatus") == "trusted"),
+            "trust_status": hook.get("trustStatus") if hook else None,
+            "enabled": hook.get("enabled") if hook else None,
+            "key": hook.get("key") if hook else None,
+            "current_hash": hook.get("currentHash") if hook else None,
+        }
+    return by_event
+
+
+def hook_trust_state_from_lookup(lookup: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
+    state: dict[str, dict[str, str]] = {}
+    for item in lookup.values():
+        key = item.get("key")
+        current_hash = item.get("current_hash")
+        if key and current_hash:
+            state[str(key)] = {"trusted_hash": str(current_hash)}
+    return state
+
+
+def codex_hooks_status(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    codex_bin: str = "codex",
+    trust_current: bool = False,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    expected_commands = expected_hook_commands(workspace_root, aoa_root)
+    with CodexAppServerClient(codex_bin=codex_bin, cwd=workspace_root, timeout=timeout) as client:
+        initialize_codex_app_server(client, client_name="aoa_hooks_status")
+        client.send({"method": "hooks/list", "id": 2, "params": {"cwds": [str(workspace_root)]}})
+        hooks_response, _seen = client.recv_response(2, timeout=timeout)
+        if "error" in hooks_response:
+            raise RuntimeError(f"hooks/list failed: {hooks_response['error']}")
+        data = hooks_response.get("result", {}).get("data", []) if isinstance(hooks_response.get("result"), dict) else []
+        hooks = data[0].get("hooks", []) if data and isinstance(data[0], dict) and isinstance(data[0].get("hooks"), list) else []
+        lookup = hook_lookup_from_app_hooks(hooks, expected_commands)
+        trusted_state: dict[str, dict[str, str]] = {}
+        trust_response: dict[str, Any] | None = None
+        if trust_current:
+            trusted_state = hook_trust_state_from_lookup(lookup)
+            client.send(
+                {
+                    "method": "config/batchWrite",
+                    "id": 3,
+                    "params": {
+                        "edits": [
+                            {
+                                "keyPath": "hooks.state",
+                                "value": trusted_state,
+                                "mergeStrategy": "upsert",
+                            }
+                        ],
+                        "reloadUserConfig": True,
+                    },
+                }
+            )
+            trust_response, _seen = client.recv_response(3, timeout=timeout)
+            client.send({"method": "hooks/list", "id": 4, "params": {"cwds": [str(workspace_root)]}})
+            hooks_response, _seen = client.recv_response(4, timeout=timeout)
+            data = hooks_response.get("result", {}).get("data", []) if isinstance(hooks_response.get("result"), dict) else []
+            hooks = data[0].get("hooks", []) if data and isinstance(data[0], dict) and isinstance(data[0].get("hooks"), list) else []
+            lookup = hook_lookup_from_app_hooks(hooks, expected_commands)
+
+    checks = [
+        {"name": "required_hooks_present", "ok": all(item["present"] for item in lookup.values())},
+        {"name": "required_hooks_trusted", "ok": all(item["trusted"] for item in lookup.values())},
+        {
+            "name": "required_hook_commands_match",
+            "ok": all(item["present"] and item["expected_command"] for item in lookup.values()),
+        },
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": all(check["ok"] for check in checks),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "codex_bin": codex_bin,
+        "trusted_written": trust_current,
+        "trusted_state": trusted_state,
+        "trust_response": trust_response,
+        "hooks": lookup,
+        "checks": checks,
+    }
+
+
+def codex_manual_compact_probe(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    codex_bin: str = "codex",
+    trust_hooks: bool = False,
+    timeout: int = 150,
+) -> dict[str, Any]:
+    before_counts = count_live_hook_events(aoa_root)
+    trust_payload: dict[str, Any] | None = None
+    if trust_hooks:
+        trust_payload = codex_hooks_status(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            codex_bin=codex_bin,
+            trust_current=True,
+            timeout=timeout,
+        )
+
+    with CodexAppServerClient(codex_bin=codex_bin, cwd=workspace_root, timeout=timeout) as client:
+        initialize_codex_app_server(client, client_name="aoa_compact_probe")
+        client.send({"method": "thread/start", "id": 2, "params": {"cwd": str(workspace_root), "sessionStartSource": "startup"}})
+        start_response, _seen = client.recv_response(2, timeout=timeout)
+        if "error" in start_response:
+            raise RuntimeError(f"thread/start failed: {start_response['error']}")
+        thread = start_response.get("result", {}).get("thread", {}) if isinstance(start_response.get("result"), dict) else {}
+        thread_id = str(thread.get("id") or "")
+        if not thread_id:
+            raise RuntimeError("thread/start did not return a thread id")
+        injected_items = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "AoA manual compact live hook probe. Preserve this as a tiny injected user item.",
+                    }
+                ],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "AoA compact probe assistant item present before manual compaction.",
+                    }
+                ],
+            },
+        ]
+        client.send({"method": "thread/inject_items", "id": 3, "params": {"threadId": thread_id, "items": injected_items}})
+        inject_response, _seen = client.recv_response(3, timeout=timeout)
+        if "error" in inject_response:
+            raise RuntimeError(f"thread/inject_items failed: {inject_response['error']}")
+        client.send({"method": "thread/compact/start", "id": 4, "params": {"threadId": thread_id}})
+        compact_response, _seen = client.recv_response(4, timeout=timeout)
+        if "error" in compact_response:
+            raise RuntimeError(f"thread/compact/start failed: {compact_response['error']}")
+        events = client.collect_until(
+            lambda payload, _seen: payload.get("method") == "turn/completed"
+            and payload.get("params", {}).get("threadId") == thread_id,
+            timeout=timeout,
+        )
+
+    after_counts = count_live_hook_events(aoa_root)
+    hook_events = [
+        payload
+        for payload in events
+        if payload.get("method") in {"hook/started", "hook/completed"}
+    ]
+    completed_hooks = [
+        payload
+        for payload in hook_events
+        if payload.get("method") == "hook/completed"
+        and payload.get("params", {}).get("run", {}).get("status") == "completed"
+    ]
+    completed_event_names = {
+        payload.get("params", {}).get("run", {}).get("eventName")
+        for payload in completed_hooks
+    }
+    pre_seen = "preCompact" in completed_event_names and after_counts.get("PreCompact", 0) > before_counts.get("PreCompact", 0)
+    post_seen = "postCompact" in completed_event_names and after_counts.get("PostCompact", 0) > before_counts.get("PostCompact", 0)
+    checks = [
+        {"name": "thread_started", "ok": bool(thread_id)},
+        {"name": "manual_compact_completed", "ok": any(payload.get("method") == "turn/completed" for payload in events)},
+        {"name": "precompact_hook_completed_and_archived", "ok": pre_seen},
+        {"name": "postcompact_hook_completed_and_archived", "ok": post_seen},
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": all(check["ok"] for check in checks),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "codex_bin": codex_bin,
+        "thread_id": thread_id,
+        "before_hook_counts": before_counts,
+        "after_hook_counts": after_counts,
+        "completed_hook_event_names": sorted(name for name in completed_event_names if name),
+        "hook_event_count": len(hook_events),
+        "event_count": len(events),
+        "trust_payload": trust_payload,
+        "checks": checks,
+    }
 
 
 def copytree_ignore(_directory: str, names: list[str]) -> set[str]:
@@ -2438,6 +2786,54 @@ def command_codex_grounding(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_codex_hooks_status(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace_root = workspace_root_for(explicit_workspace, root)
+    try:
+        payload = codex_hooks_status(
+            workspace_root=workspace_root,
+            aoa_root=root,
+            codex_bin=args.codex_bin,
+            trust_current=args.trust_current,
+            timeout=args.timeout,
+        )
+    except Exception as exc:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "workspace_root": str(workspace_root),
+            "aoa_root": str(root),
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_codex_compact_probe(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace_root = workspace_root_for(explicit_workspace, root)
+    try:
+        payload = codex_manual_compact_probe(
+            workspace_root=workspace_root,
+            aoa_root=root,
+            codex_bin=args.codex_bin,
+            trust_hooks=args.trust_hooks,
+            timeout=args.timeout,
+        )
+    except Exception as exc:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "workspace_root": str(workspace_root),
+            "aoa_root": str(root),
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def write_validation_config(aoa_root: Path) -> None:
     routes = {event_type: [] for event_type in EVENT_TYPE_ORDER}
     routes.update(
@@ -3077,6 +3473,22 @@ def build_parser() -> argparse.ArgumentParser:
     grounding.add_argument("--codex-bin", default="codex")
     grounding.add_argument("--codex-native-bin")
     grounding.set_defaults(func=command_codex_grounding)
+
+    hooks_status = sub.add_parser("codex-hooks-status", help="Inspect native Codex hook discovery, command matching, and trust status.")
+    hooks_status.add_argument("--workspace-root")
+    hooks_status.add_argument("--aoa-root")
+    hooks_status.add_argument("--codex-bin", default="codex")
+    hooks_status.add_argument("--timeout", type=int, default=30)
+    hooks_status.add_argument("--trust-current", action="store_true", help="Trust current matching hook hashes through Codex app-server config/batchWrite.")
+    hooks_status.set_defaults(func=command_codex_hooks_status)
+
+    compact_probe = sub.add_parser("codex-compact-probe", help="Trigger a live manual Codex compaction and verify PreCompact/PostCompact receipts.")
+    compact_probe.add_argument("--workspace-root")
+    compact_probe.add_argument("--aoa-root")
+    compact_probe.add_argument("--codex-bin", default="codex")
+    compact_probe.add_argument("--timeout", type=int, default=150)
+    compact_probe.add_argument("--trust-hooks", action="store_true", help="Trust current matching hook hashes before running the compact probe.")
+    compact_probe.set_defaults(func=command_codex_compact_probe)
 
     validate = sub.add_parser("validate", help="Run a local end-to-end preservation, compaction, rehydrate, and distill check.")
     validate.add_argument("--workspace-root")
