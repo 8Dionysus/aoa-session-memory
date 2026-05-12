@@ -31,7 +31,7 @@ Build the `.aoa` session-memory mechanism end to end:
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
   `aoa-session-memory-global-route` and narrow operation skills for stress,
-  audit, doctor, hook trust, and compact probe work
+  historical import, audit, doctor, hook trust, and compact probe work
 - CLI and hooks: `scripts/aoa_session_memory.py`
 - Tests: `tests/test_session_memory.py`
 - Standalone repository: `https://github.com/8Dionysus/aoa-session-memory`
@@ -48,6 +48,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_se
 python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
 python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
@@ -57,34 +58,38 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `24 passed`
+- `.aoa` tests: `26 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
 - `install-user-skill`: `ok=true`, user-level router points to the active
   `.aoa` install
+- `import-codex-sessions --since 2026-04-21 --write-report`: `ok=true`,
+  discovered `142` transcripts, imported `133`, skipped `9` already indexed
+  sessions; reports:
+  `diagnostics/20260512T172827Z__codex-session-import.json` and `.md`
 - `validate`: `ok=true`
 - `codex-compact-probe --trust-hooks`: `ok=true`, live `PreCompact` and
   `PostCompact` completed and archived; latest probe raised live counts to
-  `PreCompact=2`, `PostCompact=2`
+  `PreCompact=3`, `PostCompact=3`
 - `stress-pass --compactions 100 --write`: `ok=true` on the largest archive
 - `doctor --check-live-hooks --check-user-skill --check-codex-grounding`:
   `ok=true`, no problems, no warnings
-- `audit`: `completion_ready=true`, `remaining=[]`
+- `audit`: `completion_ready=true`, `remaining=[]`, `session_count=143`
 - local workspace doctor: `ready=True`
 - local workspace hooks doctor: `ready=True`
 
 Current real compaction segmentation:
 
 - `2026-05-01__001__в-прошлой-сессии-мы-на-протяжении-почти-недели`:
-  `121` logical compaction boundaries, `242` raw compaction markers -> `122` segments.
-- `2026-05-06__001__files-mentioned-by-the-user-design.md`:
+  `126` logical compaction boundaries, `252` raw compaction markers -> `127` segments.
+- `2026-05-06__001__files-mentioned-by-the-user-design-md`:
   `50` logical compaction boundaries, `100` raw compaction markers -> `51` segments.
 - `2026-05-12__001__aoa-session-dist-exp-идея`:
   `6` logical compaction boundaries, `12` raw compaction markers -> `7` segments.
-- `2026-05-12__005__aoa-manual-compact-live-hook-probe.-preserve-thi`:
+- `2026-05-12__005__aoa-manual-compact-live-hook-probe-preserve-this`:
   `1` logical compaction boundary, `2` raw compaction markers -> `2` segments.
-- `2026-05-12__006__aoa-manual-compact-live-hook-probe.-preserve-thi`:
+- `2026-05-12__006__aoa-manual-compact-live-hook-probe-preserve-this`:
   `1` logical compaction boundary, `2` raw compaction markers -> `2` segments.
 
 Stress-pass evidence:
@@ -113,6 +118,7 @@ Stress-pass evidence:
 | First-pass distillation is provisional | `distill`, tests |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
 | User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
+| Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |
 | Live hooks match expected commands | `doctor --check-live-hooks` |
 | Native Codex hook trust is inspectable and repairable | `codex-hooks-status`, app-server `hooks/list` and `config/batchWrite` |
 | Local Codex compact/hook contract is grounded | `codex-grounding`, local `codex-cli 0.130.0`, project config |

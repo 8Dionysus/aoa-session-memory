@@ -16,7 +16,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +28,11 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 
 SCHEMA_VERSION = 1
 SESSION_ROOT = Path("sessions")
+DIAGNOSTICS_ROOT = Path("diagnostics")
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
+DEFAULT_BANNED_DURABLE_NAME_TERMS = {"unknown", "misc", "tmp", "new", "old", "stuff", "placeholder"}
 SESSION_INDEX_MARKDOWN = "SESSION.md"
 SESSION_INDEX_JSON = "session.index.json"
 LEGACY_SESSION_INDEX_MARKDOWN = "00_SESSION_INDEX.md"
@@ -145,6 +147,8 @@ def readable_slug(value: str, *, fallback: str = "untitled-session", max_chars: 
     value = short_text(value, max_chars=max_chars * 2).lower()
     slug = re.sub(r"[^\w.-]+", "-", value, flags=re.UNICODE).strip("-._")
     slug = re.sub(r"-{2,}", "-", slug)
+    slug_parts = [part for part in re.split(r"[-_.]+", slug) if part and part not in DEFAULT_BANNED_DURABLE_NAME_TERMS]
+    slug = "-".join(slug_parts)
     if len(slug) > max_chars:
         slug = slug[:max_chars].rstrip("-._")
     return slug or fallback
@@ -1070,6 +1074,11 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def write_markdown(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1478,6 +1487,212 @@ def display_quality(source: str | None) -> int:
         "transcript": 1,
         "fallback": 0,
     }.get(str(source or ""), 0)
+
+
+def transcript_probe(raw_path: Path) -> dict[str, Any]:
+    sample_events = parse_raw_event_sample(raw_path, max_lines=400)
+    event: dict[str, Any] = {"transcript_path": str(raw_path)}
+    for raw_event in sample_events[:40]:
+        parsed = raw_event.parsed
+        if not isinstance(parsed, dict):
+            continue
+        payload = parsed.get("payload")
+        if parsed.get("type") == "session_meta" and isinstance(payload, dict):
+            if payload.get("id"):
+                event["session_id"] = payload.get("id")
+            if payload.get("cwd"):
+                event["cwd"] = payload.get("cwd")
+            if payload.get("timestamp"):
+                event["timestamp"] = payload.get("timestamp")
+            for key in ("model", "model_provider", "cli_version"):
+                if payload.get(key):
+                    event[key] = payload.get(key)
+            break
+    fallback = datetime.fromtimestamp(raw_path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d")
+    session_date = first_session_date(sample_events, event, raw_path, fallback)
+    title, title_source = session_title(sample_events, event, raw_path)
+    session_id = session_id_from(event, raw_path)
+    return {
+        "session_id": session_id,
+        "transcript_path": str(raw_path),
+        "session_date": session_date,
+        "title": title,
+        "title_source": title_source,
+        "cwd": event.get("cwd"),
+        "timestamp": event.get("timestamp"),
+        "model": event.get("model"),
+        "model_provider": event.get("model_provider"),
+        "cli_version": event.get("cli_version"),
+        "bytes": raw_path.stat().st_size,
+        "mtime": datetime.fromtimestamp(raw_path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def parse_date_arg(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.search(r"(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)", value)
+    if not match:
+        raise ValueError(f"expected date like YYYY-MM-DD, got {value!r}")
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def since_date_from_args(since: str | None, since_days: int | None) -> str | None:
+    explicit = parse_date_arg(since)
+    if explicit:
+        return explicit
+    if since_days is None:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%d")
+
+
+def discover_codex_transcripts(
+    *,
+    source_root: Path,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict[str, Any]]:
+    source_root = source_root.expanduser()
+    if not source_root.exists():
+        return []
+    since_date = parse_date_arg(since)
+    until_date = parse_date_arg(until)
+    records: list[dict[str, Any]] = []
+    for raw_path in sorted(source_root.rglob("*.jsonl")):
+        if not raw_path.is_file():
+            continue
+        record = transcript_probe(raw_path)
+        session_date = str(record.get("session_date") or "")
+        if since_date and session_date < since_date:
+            continue
+        if until_date and session_date > until_date:
+            continue
+        records.append(record)
+    records.sort(key=lambda item: (str(item.get("session_date") or ""), str(item.get("timestamp") or ""), str(item.get("transcript_path") or "")))
+    return records
+
+
+def existing_archive_by_session_id(aoa_root: Path) -> dict[str, dict[str, Any]]:
+    registry = read_json(aoa_root / REGISTRY_NAME, {"sessions": []})
+    sessions = registry.get("sessions", []) if isinstance(registry, dict) else []
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in sessions if isinstance(sessions, list) else []:
+        if isinstance(item, dict) and item.get("session_id"):
+            by_id[str(item["session_id"])] = item
+    return by_id
+
+
+def import_codex_sessions(
+    *,
+    aoa_root: Path,
+    source_root: Path,
+    since: str | None = None,
+    until: str | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    limit: int | None = None,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    records = discover_codex_transcripts(source_root=source_root, since=since, until=until)
+    existing = existing_archive_by_session_id(aoa_root)
+    results: list[dict[str, Any]] = []
+    selected = records[:limit] if limit is not None else records
+    counts: Counter[str] = Counter()
+    for record in selected:
+        session_id = str(record["session_id"])
+        prior = existing.get(session_id)
+        should_skip = bool(prior and prior.get("archive_status") == "indexed" and not force)
+        if should_skip:
+            status = "skipped_existing"
+            result = {**record, "status": status, "archive_path": prior.get("path"), "segment_count": prior.get("segment_count")}
+        elif dry_run:
+            status = "planned"
+            result = {**record, "status": status}
+        else:
+            event = {
+                "session_id": session_id,
+                "transcript_path": record["transcript_path"],
+                "cwd": record.get("cwd"),
+                "timestamp": record.get("timestamp"),
+                "model": record.get("model"),
+                "hook_event_name": "HistoricalImport",
+            }
+            try:
+                sync_payload = sync_session_from_transcript(
+                    aoa_root=aoa_root,
+                    event=event,
+                    transcript_path=Path(str(record["transcript_path"])),
+                    hook_event_name="HistoricalImport",
+                )
+                status = "imported"
+                result = {**record, "status": status, **sync_payload}
+                existing[session_id] = {"archive_status": "indexed", "path": sync_payload.get("session_dir")}
+            except Exception as exc:
+                status = "error"
+                result = {**record, "status": status, "error": f"{exc.__class__.__name__}: {exc}"}
+        counts[status] += 1
+        results.append(result)
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": counts.get("error", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "source_root": str(source_root.expanduser()),
+        "since": since,
+        "until": until,
+        "dry_run": dry_run,
+        "force": force,
+        "limit": limit,
+        "discovered_count": len(records),
+        "selected_count": len(selected),
+        "counts": dict(counts),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        report_json = diagnostics_dir / f"{compact_stamp()}__codex-session-import.json"
+        report_md = report_json.with_suffix(".md")
+        write_json(report_json, payload)
+        write_markdown(report_md, codex_session_import_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def codex_session_import_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Codex Session Import",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- source_root: `{payload.get('source_root')}`",
+        f"- aoa_root: `{payload.get('aoa_root')}`",
+        f"- since: `{payload.get('since')}`",
+        f"- until: `{payload.get('until')}`",
+        f"- dry_run: `{payload.get('dry_run')}`",
+        f"- discovered_count: `{payload.get('discovered_count')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
+        "",
+        "| status | date | session | title | archive |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        archive = result.get("session_dir") or result.get("archive_path") or ""
+        lines.append(
+            "| {status} | {date} | `{session}` | {title} | `{archive}` |".format(
+                status=str(result.get("status") or ""),
+                date=str(result.get("session_date") or ""),
+                session=str(result.get("session_id") or ""),
+                title=str(result.get("title") or "").replace("|", "\\|"),
+                archive=str(archive),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def label_sequence_from(label: str | None, session_date: str) -> int | None:
@@ -3117,6 +3332,30 @@ def stress_pass_print_payload(payload: dict[str, Any], *, full: bool = False, sa
     return compact
 
 
+def import_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20) -> dict[str, Any]:
+    if full:
+        return payload
+    results = payload.get("results", [])
+    result_count = len(results) if isinstance(results, list) else 0
+    sample: list[Any] = []
+    if isinstance(results, list) and results:
+        if result_count <= sample_results:
+            sample = results
+        else:
+            head_count = max(1, sample_results // 2)
+            tail_count = max(1, sample_results - head_count)
+            sample = results[:head_count] + results[-tail_count:]
+    compact = {key: value for key, value in payload.items() if key != "results"}
+    compact["result_count"] = result_count
+    compact["results_sample"] = sample
+    compact["results_omitted"] = max(0, result_count - len(sample))
+    compact["print"] = {
+        "full": False,
+        "note": "results are bounded on stdout; pass --full for complete JSON or read the written report",
+    }
+    return compact
+
+
 def command_stress_pass(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     payload = session_stress_pass(root, args.session, compaction_count=args.compactions, write=args.write)
@@ -3153,6 +3392,25 @@ def command_sync(args: argparse.Namespace) -> int:
     )
     print(json.dumps(receipt, indent=2, ensure_ascii=False))
     return 0 if receipt.get("ok") else 1
+
+
+def command_import_codex_sessions(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days)
+    source_root = Path(args.source_root).expanduser() if args.source_root else Path.home() / ".codex" / "sessions"
+    payload = import_codex_sessions(
+        aoa_root=root,
+        source_root=source_root,
+        since=since,
+        until=args.until,
+        dry_run=args.dry_run,
+        force=args.force,
+        limit=args.limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(import_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
 
 
 def command_relabel(args: argparse.Namespace) -> int:
@@ -3703,6 +3961,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-codex-session-segment-archive/SKILL.md",
     "skills/aoa-session-archive-init/SKILL.md",
     "skills/aoa-session-first-pass-distill/SKILL.md",
+    "skills/aoa-session-history-import/SKILL.md",
     "skills/aoa-session-memory-audit/SKILL.md",
     "skills/aoa-session-memory-doctor/SKILL.md",
     "skills/aoa-session-memory-global-route/SKILL.md",
@@ -3935,6 +4194,20 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--workspace-root")
     sync.add_argument("--aoa-root")
     sync.set_defaults(func=command_sync)
+
+    import_sessions = sub.add_parser("import-codex-sessions", help="Discover and sequentially import historical Codex JSONL sessions.")
+    import_sessions.add_argument("--workspace-root")
+    import_sessions.add_argument("--aoa-root")
+    import_sessions.add_argument("--source-root", help="Codex sessions root; defaults to ~/.codex/sessions.")
+    import_sessions.add_argument("--since", help="Import sessions with session dates on or after YYYY-MM-DD.")
+    import_sessions.add_argument("--since-days", type=int, default=21, help="Default rolling window when --since is not provided.")
+    import_sessions.add_argument("--until", help="Import sessions with session dates on or before YYYY-MM-DD.")
+    import_sessions.add_argument("--limit", type=int, help="Limit selected sessions after chronological discovery.")
+    import_sessions.add_argument("--dry-run", action="store_true", help="Only report planned imports and skips.")
+    import_sessions.add_argument("--force", action="store_true", help="Rebuild already indexed archives instead of skipping them.")
+    import_sessions.add_argument("--write-report", action="store_true", help="Write JSON and Markdown import reports under .aoa/diagnostics.")
+    import_sessions.add_argument("--full", action="store_true", help="Print complete import results to stdout.")
+    import_sessions.set_defaults(func=command_import_codex_sessions)
 
     relabel = sub.add_parser("relabel", help="Rebuild readable date/sequence session archive names.")
     relabel.add_argument("--workspace-root")

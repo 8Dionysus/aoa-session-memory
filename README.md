@@ -132,6 +132,17 @@ python3 scripts/aoa_session_memory.py stress-pass latest \
   --write
 ```
 
+Discover and import historical Codex JSONL sessions:
+
+```bash
+python3 scripts/aoa_session_memory.py import-codex-sessions \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --dry-run \
+  --write-report
+```
+
 Export a clean portable bundle without session archives:
 
 ```bash
@@ -160,8 +171,8 @@ The top-level router is `aoa-session-memory-global-route`. Install it into
 `~/.codex/skills` with `install-user-skill` when the current user should have
 `.aoa` session-memory guidance in every Codex session. The remaining skills stay
 inside the bundle as the narrow routes for archive init, raw archiving,
-diagnostics, rehydration, first-pass distillation, stress checks, audit, doctor,
-hook trust, and compact probe work.
+historical import, diagnostics, rehydration, first-pass distillation, stress
+checks, audit, doctor, hook trust, and compact probe work.
 
 ## Core Rule
 

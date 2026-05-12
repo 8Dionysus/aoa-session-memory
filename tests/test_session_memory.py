@@ -35,6 +35,13 @@ def test_default_standalone_repo_prefers_bundles_topology(tmp_path: Path) -> Non
     assert module.default_standalone_repo_for(aoa_root) == bundled_repo
 
 
+def test_readable_slug_removes_banned_topology_terms() -> None:
+    slug = module.readable_slug("Task in /tmp/aoa wave4 review fixes")
+
+    assert "tmp" not in slug.split("-")
+    assert slug == "task-in-aoa-wave4-review-fixes"
+
+
 def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -571,6 +578,56 @@ def test_install_user_skill_accepts_relative_aoa_root(tmp_path: Path, monkeypatc
     assert payload["ok"] is True
     assert target.is_symlink()
     assert target.resolve() == source.resolve()
+
+
+def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    transcript = source_root / "2026" / "05" / "02" / "rollout-2026-05-02T12-00-00-import-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-02T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "import-session", "cwd": str(workspace), "timestamp": "2026-05-02T12:00:00Z"},
+            },
+            {
+                "timestamp": "2026-05-02T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Import old session properly"}],
+                },
+            },
+        ],
+    )
+
+    dry = module.import_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        dry_run=True,
+        write_report=True,
+    )
+
+    assert dry["ok"] is True
+    assert dry["counts"] == {"planned": 1}
+    assert Path(dry["report_json"]).exists()
+    assert Path(dry["report_markdown"]).exists()
+
+    imported = module.import_codex_sessions(aoa_root=aoa_root, source_root=source_root, since="2026-05-01")
+    assert imported["ok"] is True
+    assert imported["counts"] == {"imported": 1}
+    session_dir = Path(imported["results"][0]["session_dir"])
+    assert session_dir.name == "2026-05-02__001__import-session-properly"
+    assert (session_dir / "raw" / "session.raw.jsonl").exists()
+
+    skipped = module.import_codex_sessions(aoa_root=aoa_root, source_root=source_root, since="2026-05-01")
+    assert skipped["ok"] is True
+    assert skipped["counts"] == {"skipped_existing": 1}
 
 
 def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> None:

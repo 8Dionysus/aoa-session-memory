@@ -196,6 +196,21 @@ python3 scripts/aoa_session_memory.py stress-pass latest \
 set and keeps stdout bounded by default. Use `--full` only for deliberate
 complete JSON output.
 
+Import historical Codex JSONL sessions in chronological order:
+
+```bash
+python3 scripts/aoa_session_memory.py import-codex-sessions \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --dry-run \
+  --write-report
+```
+
+Remove `--dry-run` only after the report count is coherent. Existing indexed
+archives are skipped by default; use `--force` only for a deliberate rebuild.
+The full import report is written under `diagnostics/`.
+
 Create a provisional first-pass distillation map:
 
 ```bash
@@ -206,6 +221,7 @@ Use the bundle skill routes for deliberate agent work:
 
 ```text
 aoa-session-memory-global-route -> top-level user router
+aoa-session-history-import      -> historical Codex JSONL batch import
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness
 aoa-session-memory-doctor       -> filesystem and live health

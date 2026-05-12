@@ -49,6 +49,7 @@ The following paths are generated or runtime-owned:
 - `sessions/*/hooks/`
 - `sessions/*/incidents/`
 - `session-registry.json`
+- `diagnostics/`
 
 Agents may regenerate these files from raw session evidence. Do not manually
 edit generated session archives unless explicitly repairing a broken archive

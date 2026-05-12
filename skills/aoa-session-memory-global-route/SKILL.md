@@ -38,6 +38,7 @@ Use this skill in any Codex session when the task touches:
 - `raw_unavailable` incidents
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
+- historical Codex session import from `~/.codex/sessions`
 - preparing or validating the portable `aoa-session-memory` bundle
 
 ## Procedure
@@ -61,6 +62,7 @@ Use this skill in any Codex session when the task touches:
 - Raw missing or hook error: `aoa-session-raw-diagnostic`
 - Resume from archive: `aoa-session-rehydrate`
 - Provisional lesson extraction: `aoa-session-first-pass-distill`
+- Historical Codex JSONL import: `aoa-session-history-import`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`
 - Completion readiness: `aoa-session-memory-audit`
 - Filesystem and live hook health: `aoa-session-memory-doctor`
