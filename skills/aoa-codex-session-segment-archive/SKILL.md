@@ -1,3 +1,12 @@
+---
+name: aoa-codex-session-segment-archive
+description: Use when a Codex raw transcript must be archived into `.aoa` compaction-interval segments with raw preservation, segment indexes, manifests, and registry updates.
+license: Apache-2.0
+metadata:
+  aoa_scope: session-memory
+  aoa_invocation_mode: manual-or-hook-route
+---
+
 # aoa-codex-session-segment-archive
 
 Use when a Codex raw transcript must be preserved as compaction-interval

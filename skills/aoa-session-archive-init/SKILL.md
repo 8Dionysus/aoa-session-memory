@@ -1,3 +1,12 @@
+---
+name: aoa-session-archive-init
+description: Use when a `.aoa` session-memory root must be created, installed, checked, repaired, or prepared for Codex hook-based session archiving.
+license: Apache-2.0
+metadata:
+  aoa_scope: session-memory
+  aoa_invocation_mode: manual
+---
+
 # aoa-session-archive-init
 
 Use when the `.aoa` session-memory root must be created, checked, or repaired

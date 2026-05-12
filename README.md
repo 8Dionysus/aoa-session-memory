@@ -152,6 +152,17 @@ python3 scripts/aoa_session_memory.py install \
 
 Detailed install rules live in `INSTALL.md`.
 
+## Skill Shape
+
+Portable bundle skills live under `skills/`.
+
+The top-level router is `aoa-session-memory-global-route`. Install it into
+`~/.codex/skills` when the current user should have `.aoa` session-memory
+guidance in every Codex session. The remaining skills stay inside the bundle as
+the narrow routes for archive init, raw archiving, diagnostics, rehydration,
+first-pass distillation, stress checks, audit, doctor, hook trust, and compact
+probe work.
+
 ## Core Rule
 
 ```text

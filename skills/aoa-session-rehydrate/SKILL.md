@@ -1,3 +1,12 @@
+---
+name: aoa-session-rehydrate
+description: Use when an agent needs to resume, inspect, or continue from an archived `.aoa` session without loading the full raw transcript.
+license: Apache-2.0
+metadata:
+  aoa_scope: session-memory
+  aoa_invocation_mode: manual
+---
+
 # aoa-session-rehydrate
 
 Use when an agent needs to resume work from an archived session without loading

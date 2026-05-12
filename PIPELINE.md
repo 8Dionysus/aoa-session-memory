@@ -202,6 +202,17 @@ Create a provisional first-pass distillation map:
 python3 scripts/aoa_session_memory.py distill latest --aoa-root .
 ```
 
+Use the bundle skill routes for deliberate agent work:
+
+```text
+aoa-session-memory-global-route -> top-level user router
+aoa-session-memory-stress-pass  -> bounded large-archive checks
+aoa-session-memory-audit        -> completion readiness
+aoa-session-memory-doctor       -> filesystem and live health
+aoa-codex-hooks-status          -> native Codex hook trust
+aoa-codex-compact-probe         -> live PreCompact/PostCompact proof
+```
+
 Generate the user-level hook config for the selected install roots:
 
 ```bash

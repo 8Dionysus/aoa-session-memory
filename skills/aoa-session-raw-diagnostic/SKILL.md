@@ -1,3 +1,12 @@
+---
+name: aoa-session-raw-diagnostic
+description: Use when a `.aoa` hook or manual archive pass cannot read the raw Codex transcript and must write an incident plus diagnostic record instead of fake memory.
+license: Apache-2.0
+metadata:
+  aoa_scope: session-memory
+  aoa_invocation_mode: manual-or-hook-route
+---
+
 # aoa-session-raw-diagnostic
 
 Use when a hook or manual archive pass cannot read the raw Codex transcript.
@@ -28,4 +37,3 @@ Use when a hook or manual archive pass cannot read the raw Codex transcript.
 ## Stop Line
 
 Raw unavailability is an infrastructure fault, not a normal memory substitute.
-

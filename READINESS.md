@@ -29,7 +29,9 @@ Build the `.aoa` session-memory mechanism end to end:
 - Distillation routes: `config/event-distillation-routes.json`
 - Hook docs and generated example: `hooks/`
 - Schemas: `schemas/`
-- Skills: `skills/`
+- Skills: `skills/`, including the user-level router
+  `aoa-session-memory-global-route` and narrow operation skills for stress,
+  audit, doctor, hook trust, and compact probe work
 - CLI and hooks: `scripts/aoa_session_memory.py`
 - Tests: `tests/test_session_memory.py`
 - Standalone repository: `https://github.com/8Dionysus/aoa-session-memory`

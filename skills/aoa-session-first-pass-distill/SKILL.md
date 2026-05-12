@@ -1,3 +1,12 @@
+---
+name: aoa-session-first-pass-distill
+description: Use when an indexed `.aoa` session needs provisional first-pass distillation into lessons, decisions, failures, and automation candidates without promoting them to reviewed truth.
+license: Apache-2.0
+metadata:
+  aoa_scope: session-memory
+  aoa_invocation_mode: manual
+---
+
 # aoa-session-first-pass-distill
 
 Use when an archived `.aoa` session needs a provisional event-to-experience
@@ -38,4 +47,3 @@ route map without promoting raw material into reviewed truth.
 ## Stop Line
 
 First-pass distillation is a map for review, not a verdict.
-

@@ -56,6 +56,22 @@ python3 scripts/aoa_session_memory.py install \
 
 Existing user hooks are backed up unless `--no-hooks-backup` is set.
 
+## User-Level Skill Entrypoint
+
+To make `.aoa` session-memory guidance available in every Codex session for
+the current user, expose the global router skill from the selected install
+root:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -sfn /path/to/workspace/.aoa/skills/aoa-session-memory-global-route \
+  ~/.codex/skills/aoa-session-memory-global-route
+```
+
+The user-level skill is only a router. It should point agents back to the
+installed bundle instead of duplicating bundle logic. Keep the narrow operating
+skills inside the bundle.
+
 ## Verification
 
 After install, run the target script from the target root:
