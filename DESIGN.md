@@ -145,6 +145,7 @@ to audit the promoted claim, not carry the full archival load alone.
 The first wave may do mechanical work:
 
 - classify indexed sessions into review lanes
+- split manual review into `deep`, `standard`, and `sample` priorities
 - count event and route signals
 - write provisional first-pass distillation artifacts
 - surface mechanics candidates for later patching
@@ -164,6 +165,13 @@ misses, missing indexes, noisy names, hook gaps, or reusable command patterns,
 the next act is a narrow improvement to the kernel followed by tests and audit.
 The conveyor improves while it works, but every improvement remains
 inspectable.
+
+The conveyor should not inflate responsibility signals. Stream copies of agent
+messages are evidence, but final response items carry the semantic promotion
+weight. A security policy mention is not a leak. A successful command that
+prints documentation about errors is not itself an error. The classifier should
+prefer structured status, correlation, and command intent before broad text
+matching.
 
 As the system matures, distillation should become layered:
 
@@ -207,6 +215,38 @@ importance, anchors, and raw references. An agent should be able to ask:
 
 The answer should be in indexes before the agent opens large raw or segment
 files.
+
+## Universal Event Ontology
+
+Every Codex session has universal motions before it has project-specific
+meaning:
+
+- a session starts
+- the user asks or corrects
+- the agent plans
+- the agent speaks
+- a tool is called
+- a command reads, writes, verifies, or mutates
+- output succeeds, fails, or becomes evidence
+- context compacts
+- a decision, assumption, open thread, lesson, risk, or final state appears
+
+The archive must index those motions explicitly. A flat `event_type` is not
+enough. Each event should also carry universal facets:
+
+- `family`: the broad domain, such as communication, command execution,
+  workspace mutation, context memory, verification, or risk
+- `phase`: where the event sits in the work cycle
+- `actor`: user, assistant, tool, Codex runtime, or unknown
+- `action`: the verb performed
+- `object`: what the action touched
+- `outcome`: requested, observed, changed, failed, succeeded, verified,
+  compacted, unresolved, candidate, and so on
+- `relationships`: nearby sequence links and correlation links such as a tool
+  output responding to a tool call
+
+This keeps the classifier portable across projects while still allowing later
+layers to ground meaning in a specific workspace.
 
 ## Event Metabolism
 

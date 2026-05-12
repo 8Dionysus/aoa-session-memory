@@ -38,6 +38,7 @@ Use this skill in any Codex session when the task touches:
 - `raw_unavailable` incidents
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
+- event taxonomy, classifier, generated segment indexes, or `reindex-sessions`
 - historical Codex session import from `~/.codex/sessions`
 - first-wave batch distillation or historical session review queues
 - preparing or validating the portable `aoa-session-memory` bundle
@@ -65,6 +66,8 @@ Use this skill in any Codex session when the task touches:
 - Provisional lesson extraction: `aoa-session-first-pass-distill`
 - Historical Codex JSONL import: `aoa-session-history-import`
 - First-wave historical-session conveyor: `aoa-session-batch-distill`
+- Regenerate generated indexes after taxonomy/classifier changes:
+  `aoa-session-reindex`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`
 - Completion readiness: `aoa-session-memory-audit`
 - Filesystem and live hook health: `aoa-session-memory-doctor`

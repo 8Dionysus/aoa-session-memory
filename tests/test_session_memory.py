@@ -96,6 +96,240 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry["sessions"][0]["session_label"] == "2026-05-12__001__start-hooks-now"
 
 
+def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-universal-events.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "universal-events", "cwd": str(workspace), "model": "final-assumption-compact"},
+            },
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Inspect the repo"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: inspect before editing"}]}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-read", "arguments": json.dumps({"cmd": "rg -n TODO README.md"})}},
+            {"timestamp": "2026-05-12T00:00:04Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-read", "output": "Chunk ID: a\nProcess exited with code 0\nOutput:\nREADME.md:1:TODO\n"}},
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "universal-events",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__inspect-the-repo"
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+
+    assert "workspace_navigation" in segment_index["by_family"]
+    assert "inspect" in segment_index["by_phase"]
+    assert "succeeded" in segment_index["by_outcome"]
+    read_event = records["000004"]
+    output_event = records["000005"]
+    assert read_event["type"] == "FILE_READ"
+    assert read_event["family"] == "workspace_navigation"
+    assert read_event["facets"]["command_kind"] == "read"
+    assert "assumption_signal" not in records["000001"]["tags"]
+    assert "final_state_signal" not in records["000001"]["tags"]
+    assert "compaction" not in records["000001"]["tags"]
+    assert output_event["outcome"] == "succeeded"
+    assert output_event["correlation_id"] == "call-read"
+    assert {"rel": "responds_to", "event_id": "000004", "correlation_id": "call-read"} in output_event["relationships"]
+
+    record = module.registry_sessions(aoa_root)[0]
+    profile = module.first_wave_session_profile(
+        aoa_root,
+        record,
+        policy=module.default_batch_distillation_policy(),
+        route_map={"COMMAND_OUTPUT": ["parser_candidate"]},
+        workspace_root=workspace,
+    )
+    assert "mechanics_candidate" not in profile["lanes"]
+
+
+def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-noise.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "noise-session", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Do not write secrets. Final assumption compact policy."}],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Decision: inspect before editing"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: inspect before editing"}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:04Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "exec_command_end",
+                    "call_id": "call-doc",
+                    "exit_code": 0,
+                    "status": "completed",
+                    "aggregated_output": "docs mention error: examples, but the command succeeded",
+                },
+            },
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "noise-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = Path(str(receipt["session_dir"]))
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+
+    assert records["000002"]["type"] == "CONTEXT_STATE"
+    assert "security_policy_signal" in records["000002"]["tags"]
+    assert "final_state_signal" not in records["000002"]["tags"]
+    assert records["000003"]["type"] == "ASSISTANT_MESSAGE"
+    assert "decision_signal" in records["000003"]["tags"]
+    assert records["000004"]["type"] == "DECISION"
+    assert records["000005"]["type"] == "COMMAND_OUTPUT"
+    assert records["000005"]["outcome"] == "succeeded"
+    assert "error_signal" not in records["000005"]["tags"]
+
+
+def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-security.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "security-session", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Do not write secrets into exports."}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Secret/data leak check completed before export."}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Token leaked in logs; rotate it."}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-tmp", "arguments": json.dumps({"cmd": "rm -rf /tmp/aoa-demo && mkdir -p /tmp/aoa-demo"})},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-risk", "arguments": json.dumps({"cmd": "rm -rf .aoa/recurrence"})},
+            },
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "security-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = Path(str(receipt["session_dir"]))
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+
+    assert records["000002"]["type"] == "ASSISTANT_MESSAGE"
+    assert "security_policy_signal" in records["000002"]["tags"]
+    assert records["000003"]["type"] == "ASSISTANT_MESSAGE"
+    assert "security_policy_signal" in records["000003"]["tags"]
+    assert records["000004"]["type"] == "SECURITY_OR_SECRET_RISK"
+    assert records["000005"]["type"] == "FILE_WRITE"
+    assert records["000005"]["facets"]["command_kind"] == "temporary_cleanup"
+    assert records["000006"]["type"] == "SECURITY_OR_SECRET_RISK"
+
+
+def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-reindex.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "reindex-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Reindex this"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-rg", "arguments": json.dumps({"cmd": "rg -n x README.md"})}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-rg", "output": "Process exited with code 0\nOutput:\n"}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "reindex-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__reindex-this"
+    index_path = session_dir / "segments" / "000__initial-to-latest.index.json"
+    broken = json.loads(index_path.read_text(encoding="utf-8"))
+    broken.pop("by_family", None)
+    for event in broken["events"]:
+        event.pop("family", None)
+    index_path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+
+    payload = module.reindex_sessions(aoa_root=aoa_root, target="all", write_report=True)
+
+    rebuilt = json.loads(index_path.read_text(encoding="utf-8"))
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert payload["counts"] == {"reindexed": 1}
+    assert Path(payload["report_json"]).exists()
+    assert "workspace_navigation" in rebuilt["by_family"]
+    assert rebuilt["events"][2]["family"] == "workspace_navigation"
+    assert manifest["index_schema"]["universal_event_facets"] is True
+
+
 def test_raw_unavailable_writes_diagnostic(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -791,7 +1025,7 @@ def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> No
     (workspace / "DESIGN.md").write_text("project design\n", encoding="utf-8")
     (aoa_root / "config").mkdir(parents=True, exist_ok=True)
     (aoa_root / "config" / "event-distillation-routes.json").write_text(
-        json.dumps({"schema_version": 1, "routes": {"DECISION": ["skill_amendment"]}}, ensure_ascii=False) + "\n",
+        json.dumps({"schema_version": 1, "routes": {"PROCESS_LESSON": ["skill_amendment"]}}, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     transcript = tmp_path / "rollout-2026-05-16T00-00-00-batch-distill.jsonl"
@@ -800,7 +1034,7 @@ def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> No
         [
             {"timestamp": "2026-05-16T00:00:00Z", "type": "session_meta", "payload": {"id": "batch-distill"}},
             {"timestamp": "2026-05-16T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build the conveyor"}]}},
-            {"timestamp": "2026-05-16T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: first wave writes only provisional evidence maps"}]}},
+            {"timestamp": "2026-05-16T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Process lesson: first wave writes only provisional evidence maps"}]}},
         ],
     )
     module.handle_hook_event(

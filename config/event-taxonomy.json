@@ -40,6 +40,83 @@
     "implemented",
     "validated",
     "retired"
-  ]
+  ],
+  "universal_facets": {
+    "families": [
+      "session_lifecycle",
+      "context_memory",
+      "communication",
+      "agent_cognition",
+      "tool_interaction",
+      "workspace_navigation",
+      "workspace_mutation",
+      "command_execution",
+      "failure_signal",
+      "decision_signal",
+      "memory_state",
+      "progress_state",
+      "distillation",
+      "optimization",
+      "risk_signal",
+      "verification",
+      "raw_evidence"
+    ],
+    "phases": [
+      "start",
+      "request",
+      "plan",
+      "act",
+      "inspect",
+      "mutate",
+      "observe",
+      "verify",
+      "decide",
+      "diagnose",
+      "checkpoint",
+      "compact",
+      "rehydrate",
+      "distill",
+      "improve",
+      "guard",
+      "close",
+      "hook"
+    ],
+    "actors": [
+      "user",
+      "assistant",
+      "tool",
+      "codex_runtime",
+      "unknown"
+    ],
+    "outcomes": [
+      "requested",
+      "planned",
+      "observed",
+      "changed",
+      "succeeded",
+      "failed",
+      "verified",
+      "decided",
+      "provisional",
+      "checkpointed",
+      "compacted",
+      "resumable",
+      "unresolved",
+      "stopped",
+      "candidate",
+      "risk",
+      "completed"
+    ],
+    "index_fields": [
+      "family",
+      "phase",
+      "actor",
+      "action",
+      "object",
+      "outcome",
+      "confidence",
+      "correlation_id",
+      "relationships"
+    ]
+  }
 }
-

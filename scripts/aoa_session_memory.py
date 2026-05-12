@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -82,6 +82,42 @@ FIRST_PASS_CANDIDATE_EVENT_TYPES = {
     "FINAL_STATE",
     "OPEN_THREAD",
 }
+FIRST_PASS_SUPPORTING_EVENT_TYPES = {
+    "USER_INTENT",
+    "FILE_WRITE",
+    "DIFF",
+    "VERIFICATION",
+}
+
+EVENT_FACETS: dict[str, dict[str, str]] = {
+    "SESSION_META": {"family": "session_lifecycle", "phase": "start", "actor": "codex_runtime", "action": "initialize", "object": "session", "outcome": "observed"},
+    "CONTEXT_STATE": {"family": "context_memory", "phase": "observe", "actor": "codex_runtime", "action": "report_context", "object": "context", "outcome": "observed"},
+    "USER_INTENT": {"family": "communication", "phase": "request", "actor": "user", "action": "request", "object": "task", "outcome": "requested"},
+    "ASSISTANT_PLAN": {"family": "agent_cognition", "phase": "plan", "actor": "assistant", "action": "reason", "object": "plan", "outcome": "planned"},
+    "ASSISTANT_MESSAGE": {"family": "communication", "phase": "respond", "actor": "assistant", "action": "respond", "object": "message", "outcome": "observed"},
+    "TOOL_CALL": {"family": "tool_interaction", "phase": "act", "actor": "assistant", "action": "call_tool", "object": "tool", "outcome": "requested"},
+    "TOOL_OUTPUT": {"family": "tool_interaction", "phase": "observe", "actor": "tool", "action": "return_output", "object": "tool_output", "outcome": "observed"},
+    "FILE_READ": {"family": "workspace_navigation", "phase": "inspect", "actor": "tool", "action": "read", "object": "file", "outcome": "observed"},
+    "FILE_WRITE": {"family": "workspace_mutation", "phase": "mutate", "actor": "tool", "action": "write", "object": "file", "outcome": "changed"},
+    "DIFF": {"family": "workspace_mutation", "phase": "mutate", "actor": "tool", "action": "patch", "object": "diff", "outcome": "changed"},
+    "COMMAND": {"family": "command_execution", "phase": "act", "actor": "assistant", "action": "run_command", "object": "command", "outcome": "requested"},
+    "COMMAND_OUTPUT": {"family": "command_execution", "phase": "observe", "actor": "tool", "action": "return_command_output", "object": "command_output", "outcome": "observed"},
+    "ERROR": {"family": "failure_signal", "phase": "diagnose", "actor": "tool", "action": "report_failure", "object": "failure", "outcome": "failed"},
+    "DECISION": {"family": "decision_signal", "phase": "decide", "actor": "assistant", "action": "decide", "object": "decision", "outcome": "decided"},
+    "ASSUMPTION": {"family": "agent_cognition", "phase": "assume", "actor": "assistant", "action": "assume", "object": "assumption", "outcome": "provisional"},
+    "CHECKPOINT": {"family": "memory_state", "phase": "checkpoint", "actor": "assistant", "action": "checkpoint", "object": "state", "outcome": "checkpointed"},
+    "COMPACTION_EVENT": {"family": "context_memory", "phase": "compact", "actor": "codex_runtime", "action": "compact", "object": "context", "outcome": "compacted"},
+    "RESUME_HINT": {"family": "memory_state", "phase": "rehydrate", "actor": "assistant", "action": "hint_resume", "object": "state", "outcome": "resumable"},
+    "OPEN_THREAD": {"family": "progress_state", "phase": "plan", "actor": "assistant", "action": "open_thread", "object": "work", "outcome": "unresolved"},
+    "DEAD_BRANCH": {"family": "progress_state", "phase": "diagnose", "actor": "assistant", "action": "abandon_branch", "object": "work", "outcome": "stopped"},
+    "PROCESS_LESSON": {"family": "distillation", "phase": "distill", "actor": "assistant", "action": "learn", "object": "process", "outcome": "candidate"},
+    "OPTIMIZATION_CANDIDATE": {"family": "optimization", "phase": "improve", "actor": "assistant", "action": "propose_optimization", "object": "system", "outcome": "candidate"},
+    "SECURITY_OR_SECRET_RISK": {"family": "risk_signal", "phase": "guard", "actor": "assistant", "action": "detect_risk", "object": "secret_or_security", "outcome": "risk"},
+    "VERIFICATION": {"family": "verification", "phase": "verify", "actor": "tool", "action": "verify", "object": "claim_or_system", "outcome": "verified"},
+    "FINAL_STATE": {"family": "progress_state", "phase": "close", "actor": "assistant", "action": "closeout", "object": "work", "outcome": "completed"},
+    "HOOK_EVENT": {"family": "session_lifecycle", "phase": "hook", "actor": "codex_runtime", "action": "emit_event", "object": "hook", "outcome": "observed"},
+    "RAW_EVENT": {"family": "raw_evidence", "phase": "observe", "actor": "unknown", "action": "preserve", "object": "raw_event", "outcome": "observed"},
+}
 HOOK_EVENT_ORDER = ["SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop"]
 HOOK_TIMEOUTS = {
     "SessionStart": 20,
@@ -139,6 +175,15 @@ class RawEvent:
     tags: list[str]
     importance: str
     compaction_boundary: bool
+    family: str = "raw_evidence"
+    phase: str = "observe"
+    actor: str = "unknown"
+    action: str = "preserve"
+    object_ref: str = "raw_event"
+    outcome: str = "observed"
+    confidence: str = "medium"
+    correlation_id: str | None = None
+    facets: dict[str, Any] = field(default_factory=dict)
 
 
 def utc_now() -> str:
@@ -1148,6 +1193,243 @@ def has_error_signal(raw_lower: str) -> bool:
     return False
 
 
+def has_success_signal(raw_lower: str) -> bool:
+    if re.search(r"(process exited with code|exit code:)\s*0", raw_lower):
+        return True
+    if re.search(r"\b\d+\s+passed\b", raw_lower):
+        return True
+    if "ok=true" in raw_lower or '"ok": true' in raw_lower:
+        return True
+    if "success. updated the following files" in raw_lower:
+        return True
+    return False
+
+
+def structured_payload_outcome(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    exit_code = payload.get("exit_code")
+    if isinstance(exit_code, int):
+        return "succeeded" if exit_code == 0 else "failed"
+    if isinstance(exit_code, str) and re.fullmatch(r"-?\d+", exit_code.strip()):
+        return "succeeded" if int(exit_code.strip()) == 0 else "failed"
+    success = payload.get("success")
+    if isinstance(success, bool):
+        return "succeeded" if success else "failed"
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"ok", "success", "succeeded", "completed", "complete"}:
+        return "succeeded"
+    if status in {"error", "failed", "failure", "timeout", "cancelled", "canceled"}:
+        return "failed"
+    return None
+
+
+def rm_rf_targets(cmd: str) -> list[str]:
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    targets: list[str] = []
+    idx = 0
+    shell_operators = {"&&", "||", ";", "|"}
+    while idx < len(words):
+        if words[idx] != "rm":
+            idx += 1
+            continue
+        idx += 1
+        has_recursive_force = False
+        current: list[str] = []
+        while idx < len(words) and words[idx] not in shell_operators:
+            word = words[idx]
+            if word.startswith("-"):
+                if "r" in word and "f" in word:
+                    has_recursive_force = True
+            else:
+                current.append(word)
+            idx += 1
+        if has_recursive_force:
+            targets.extend(current)
+    return targets
+
+
+def is_temporary_cleanup_command(cmd: str) -> bool:
+    targets = rm_rf_targets(cmd)
+    if not targets:
+        return False
+    safe_prefixes = ("/tmp/", "/var/tmp/", "tmp/")
+    return all(target.startswith(safe_prefixes) for target in targets)
+
+
+def has_destructive_command_signal(cmd: str) -> bool:
+    lowered = cmd.lower().strip()
+    if re.search(r"\bgit\s+reset\s+--hard\b", lowered):
+        return True
+    if re.search(r"\bgit\s+checkout\s+--\b", lowered):
+        return True
+    return bool(rm_rf_targets(cmd)) and not is_temporary_cleanup_command(cmd)
+
+
+def has_security_risk_signal(text_lower: str) -> bool:
+    if not text_lower:
+        return False
+    direct_secret_patterns = [
+        r"\bsk-[a-z0-9_-]{20,}\b",
+        r"\bghp_[a-z0-9_]{20,}\b",
+        r"\bgithub_pat_[a-z0-9_]{20,}\b",
+        r"\bxox[baprs]-[a-z0-9-]{20,}\b",
+    ]
+    if any(re.search(pattern, text_lower) for pattern in direct_secret_patterns):
+        return True
+    policy_context_phrases = [
+        "leak check",
+        "secret-leak check",
+        "secret/data leak check",
+        "secret leak check",
+        "redaction check",
+        "sanitize",
+        "sanitized",
+        "do not write secrets",
+        "no tokens",
+        "no passwords",
+        "нет токен",
+        "нет парол",
+        "не допускаются",
+        "не писать секрет",
+    ]
+    if any(phrase in text_lower for phrase in policy_context_phrases):
+        return False
+    sensitive_terms = r"(secret|api key|token|credential|password|секрет)"
+    leak_terms = r"(leak|leaked|exposed|expose|printed|dumped|committed|plaintext|plain text|утек|утеч|раскрыт)"
+    assignment_terms = r"(secret|api key|token|credential|password)\s*[:=]\s*['\"]?[a-z0-9_./+=-]{12,}"
+    if re.search(fr"\b{sensitive_terms}s?\b.{{0,48}}\b{leak_terms}\b", text_lower):
+        return True
+    if re.search(fr"\b{leak_terms}\b.{{0,48}}\b{sensitive_terms}s?\b", text_lower):
+        return True
+    if re.search(assignment_terms, text_lower):
+        return True
+    return False
+
+
+def json_object_from_string(value: Any) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def payload_correlation_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("call_id", "id", "tool_call_id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def command_payload_args(payload: dict[str, Any]) -> dict[str, Any]:
+    return json_object_from_string(payload.get("arguments"))
+
+
+def command_text_from_payload(payload: dict[str, Any]) -> str:
+    args = command_payload_args(payload)
+    for key in ("cmd", "command", "shell_command"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def command_classifier(cmd: str) -> dict[str, Any]:
+    lowered = cmd.lower().strip()
+    tags: set[str] = set()
+    facets: dict[str, Any] = {"command": cmd} if cmd else {}
+    if not lowered:
+        return {"event_type": "COMMAND", "tags": [], "facets": facets}
+
+    first = lowered.split(maxsplit=1)[0]
+    tags.add(f"command:{first}")
+    read_patterns = [
+        r"^(rg|grep|sed|cat|head|tail|nl|wc|jq|find|ls|tree)\b",
+        r"^git\s+(status|diff|show|log|grep|ls-files)\b",
+        r"^python3?\s+.*\b(show|list|audit|doctor|codex-hooks-status)\b",
+    ]
+    write_patterns = [
+        r"^(mkdir|cp|mv|touch)\b",
+        r"^git\s+(add|commit|push|mv|rm)\b",
+    ]
+    verify_patterns = [
+        r"\b(pytest|unittest|py_compile|mypy|ruff|eslint|tsc|vitest|cargo\s+test|go\s+test)\b",
+        r"\bdoctor\b",
+        r"\baudit\b",
+        r"\bcodex-hooks-status\b",
+        r"\bgit\s+diff\s+--check\b",
+    ]
+    if rm_rf_targets(cmd) and is_temporary_cleanup_command(cmd):
+        tags.add("temporary_cleanup_command")
+        return {"event_type": "FILE_WRITE", "tags": sorted(tags), "facets": {**facets, "command_kind": "temporary_cleanup"}}
+    if has_destructive_command_signal(cmd):
+        tags.add("destructive_command_signal")
+        return {"event_type": "SECURITY_OR_SECRET_RISK", "tags": sorted(tags), "facets": {**facets, "command_kind": "destructive"}}
+    if any(re.search(pattern, lowered) for pattern in verify_patterns):
+        tags.add("verification_command")
+        return {"event_type": "COMMAND", "tags": sorted(tags), "facets": {**facets, "command_kind": "verification"}}
+    if any(re.search(pattern, lowered) for pattern in read_patterns):
+        tags.add("file_read_command")
+        return {"event_type": "FILE_READ", "tags": sorted(tags), "facets": {**facets, "command_kind": "read"}}
+    if any(re.search(pattern, lowered) for pattern in write_patterns):
+        tags.add("file_write_command")
+        return {"event_type": "FILE_WRITE", "tags": sorted(tags), "facets": {**facets, "command_kind": "write"}}
+    return {"event_type": "COMMAND", "tags": sorted(tags), "facets": {**facets, "command_kind": "generic"}}
+
+
+def event_facets_for_type(event_type: str) -> dict[str, str]:
+    return dict(EVENT_FACETS.get(event_type, EVENT_FACETS["RAW_EVENT"]))
+
+
+def is_first_pass_candidate_event_record(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("type") or "RAW_EVENT")
+    if event_type in FIRST_PASS_CANDIDATE_EVENT_TYPES or event_type in FIRST_PASS_SUPPORTING_EVENT_TYPES:
+        return True
+    tags = {str(tag) for tag in event.get("tags", [])} if isinstance(event.get("tags"), list) else set()
+    if event_type == "COMMAND" and "verification_command" in tags:
+        return True
+    if event_type == "COMMAND_OUTPUT" and str(event.get("outcome") or "") == "failed":
+        return True
+    return False
+
+
+def semantic_text_for_classification(source_type: str, payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    if source_type == "session_meta":
+        return ""
+    if source_type == "compacted":
+        return text_from_content(payload.get("summary")) or "context compacted"
+    if source_type == "turn_context":
+        return text_from_content(payload.get("summary"))
+    if source_type == "event_msg":
+        for key in ("prompt", "user_prompt", "message", "content", "summary"):
+            text = text_from_content(payload.get(key))
+            if text:
+                return text
+        return str(payload.get("type") or "")
+    if source_type == "response_item":
+        item_type = str(payload.get("type") or "")
+        if item_type == "message":
+            return text_from_content(payload.get("content"))
+        if item_type in {"function_call", "tool_call"}:
+            return command_text_from_payload(payload) or str(payload.get("name") or payload.get("tool_name") or "")
+        if item_type in {"function_call_output", "tool_call_output"}:
+            return text_from_content(payload.get("output"))
+        if item_type == "reasoning":
+            return text_from_content(payload.get("summary")) or text_from_content(payload.get("content"))
+    return ""
+
+
 def parse_raw_events(raw_path: Path) -> list[RawEvent]:
     events: list[RawEvent] = []
     with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1204,10 +1486,16 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     payload_type = payload.get("type") if isinstance(payload, dict) else None
     timestamp = str(parsed.get("timestamp") or "") or None
     raw_lower = raw.lower()
+    semantic_text = semantic_text_for_classification(source_type, payload)
+    semantic_lower = semantic_text.lower()
     tags: set[str] = {source_type}
     event_type = "RAW_EVENT"
     title = source_type
     importance = "medium"
+    facets: dict[str, Any] = {}
+    outcome_override: str | None = None
+    correlation_id = payload_correlation_id(payload)
+    structured_outcome = structured_payload_outcome(payload)
 
     if source_type == "session_meta":
         event_type = "SESSION_META"
@@ -1232,6 +1520,7 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             importance = "critical"
     elif source_type == "response_item" and isinstance(payload, dict):
         item_type = str(payload.get("type") or "unresolved-response-item")
+        facets["payload_type"] = item_type
         tags.add(item_type)
         if item_type == "message":
             role = str(payload.get("role") or "")
@@ -1243,6 +1532,11 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             elif role == "assistant":
                 event_type = "ASSISTANT_MESSAGE"
                 title = "Assistant message"
+            elif role in {"developer", "system"}:
+                event_type = "CONTEXT_STATE"
+                title = f"{role.title()} instruction"
+                tags.update(["instruction", "context"])
+                importance = "high"
             else:
                 event_type = "RAW_EVENT"
                 title = f"Message {role}".strip()
@@ -1254,7 +1548,10 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             importance = "high"
             tool_name = str(name)
             if tool_name in {"exec_command", "write_stdin"}:
-                event_type = "COMMAND"
+                command_info = command_classifier(command_text_from_payload(payload))
+                event_type = str(command_info.get("event_type") or "COMMAND")
+                tags.update(str(tag) for tag in command_info.get("tags", []) if str(tag))
+                facets.update(command_info.get("facets", {}) if isinstance(command_info.get("facets"), dict) else {})
                 tags.add("command")
             elif tool_name == "apply_patch":
                 event_type = "DIFF"
@@ -1264,12 +1561,16 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             title = f"Tool output: {short_text(payload.get('call_id'), max_chars=80)}"
             tags.add("tool_output")
             importance = "high"
-            if "process exited" in raw_lower or "stdout" in raw_lower or "stderr" in raw_lower:
+            output_lower = semantic_lower or raw_lower
+            if "process exited" in output_lower or "stdout" in output_lower or "stderr" in output_lower:
                 event_type = "COMMAND_OUTPUT"
                 tags.add("command_output")
-            elif "success. updated the following files" in raw_lower or "apply_patch" in raw_lower:
+                if has_success_signal(output_lower):
+                    outcome_override = "succeeded"
+            elif "success. updated the following files" in output_lower or "apply_patch" in output_lower:
                 event_type = "DIFF"
                 tags.update(["patch", "file_write"])
+                outcome_override = "changed"
         elif item_type == "reasoning":
             event_type = "ASSISTANT_PLAN"
             title = "Assistant reasoning item"
@@ -1279,6 +1580,7 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     elif source_type == "event_msg" and isinstance(payload, dict):
         event_type = "HOOK_EVENT"
         msg_type = str(payload.get("type") or "event")
+        facets["message_type"] = msg_type
         title = f"Event message: {msg_type}"
         tags.add(msg_type)
         if msg_type == "user_message":
@@ -1286,6 +1588,42 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             importance = "high"
         elif msg_type == "agent_message":
             event_type = "ASSISTANT_MESSAGE"
+            tags.add("message_stream")
+        elif msg_type == "exec_command_begin":
+            event_type = "COMMAND"
+            title = "Command started"
+            tags.update(["command", "command_lifecycle"])
+            command = payload.get("command")
+            if isinstance(command, list):
+                facets["command"] = " ".join(str(part) for part in command)
+            importance = "medium"
+        elif msg_type == "exec_command_end":
+            event_type = "COMMAND_OUTPUT"
+            title = "Command finished"
+            tags.update(["command_output", "command_lifecycle"])
+            if structured_outcome == "succeeded":
+                tags.add("success_signal")
+                outcome_override = "succeeded"
+            elif structured_outcome == "failed":
+                tags.add("error_signal")
+                outcome_override = "failed"
+            importance = "medium"
+        elif msg_type == "patch_apply_begin":
+            event_type = "DIFF"
+            title = "Patch apply started"
+            tags.update(["patch", "file_write", "patch_lifecycle"])
+            importance = "medium"
+        elif msg_type == "patch_apply_end":
+            event_type = "DIFF"
+            title = "Patch apply finished"
+            tags.update(["patch", "file_write", "patch_lifecycle"])
+            if structured_outcome == "succeeded":
+                tags.add("success_signal")
+                outcome_override = "changed"
+            elif structured_outcome == "failed":
+                tags.add("error_signal")
+                outcome_override = "failed"
+            importance = "medium"
         elif msg_type == "context_compacted":
             event_type = "COMPACTION_EVENT"
             title = "Codex context compacted event message"
@@ -1294,40 +1632,135 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         elif msg_type == "token_count":
             event_type = "CONTEXT_STATE"
             tags.add("token_count")
-    if has_error_signal(raw_lower):
+    broad_diagnostic_scan = source_type == "response_item" and payload_type in {"function_call_output", "tool_call_output"}
+    diagnostic_lower = raw_lower if broad_diagnostic_scan else semantic_lower
+    if structured_outcome == "failed" and broad_diagnostic_scan:
+        tags.add("error_signal")
+        if event_type in {"RAW_EVENT", "TOOL_OUTPUT", "COMMAND_OUTPUT"}:
+            event_type = "ERROR"
+            importance = "high"
+            outcome_override = "failed"
+    elif has_error_signal(diagnostic_lower):
         tags.add("error_signal")
         if event_type in {"RAW_EVENT", "TOOL_OUTPUT", "COMMAND_OUTPUT", "HOOK_EVENT"}:
             event_type = "ERROR"
             importance = "high"
-    if "decision" in raw_lower or "решили" in raw_lower or "вердикт" in raw_lower:
+            outcome_override = "failed"
+    elif event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT"} and has_success_signal(diagnostic_lower):
+        tags.add("success_signal")
+        outcome_override = "succeeded"
+        if re.search(r"\b\d+\s+passed\b", diagnostic_lower) or "ok=true" in diagnostic_lower or '"ok": true' in diagnostic_lower:
+            event_type = "VERIFICATION"
+            importance = "high"
+    signal_lower = semantic_lower
+    semantic_signal_promotable = (
+        source_type == "response_item"
+        and isinstance(payload, dict)
+        and str(payload.get("type") or "") == "message"
+        and str(payload.get("role") or "") == "assistant"
+    )
+    semantic_signal_taggable = False
+    if isinstance(payload, dict):
+        payload_kind = str(payload.get("type") or "")
+        payload_role = str(payload.get("role") or "")
+        semantic_signal_taggable = (
+            source_type == "response_item"
+            and payload_kind == "message"
+            and payload_role in {"assistant", "user"}
+        ) or (
+            source_type == "event_msg"
+            and payload_kind in {"agent_message", "user_message"}
+        )
+    if semantic_signal_taggable and ("decision" in signal_lower or "решили" in signal_lower or "вердикт" in signal_lower):
         tags.add("decision_signal")
-        if event_type == "ASSISTANT_MESSAGE":
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
             event_type = "DECISION"
             importance = "high"
-    if "checkpoint" in raw_lower or "чекпо" in raw_lower:
+    if semantic_signal_taggable and ("assumption" in signal_lower or "предполож" in signal_lower):
+        tags.add("assumption_signal")
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+            event_type = "ASSUMPTION"
+            importance = "high"
+    if semantic_signal_taggable and ("open thread" in signal_lower or "follow-up" in signal_lower or "todo" in signal_lower or "осталось" in signal_lower):
+        tags.add("open_thread_signal")
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+            event_type = "OPEN_THREAD"
+            importance = "high"
+    if semantic_signal_taggable and ("process lesson" in signal_lower or "lesson" in signal_lower or "вывод" in signal_lower):
+        tags.add("lesson_signal")
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+            event_type = "PROCESS_LESSON"
+            importance = "high"
+    security_risk = has_security_risk_signal(signal_lower)
+    if security_risk:
+        tags.add("security_signal")
+        if event_type in {"ASSISTANT_MESSAGE", "TOOL_OUTPUT", "COMMAND_OUTPUT", "RAW_EVENT"}:
+            event_type = "SECURITY_OR_SECRET_RISK"
+            importance = "critical"
+    security_policy_taggable = semantic_signal_taggable or (
+        source_type == "response_item"
+        and isinstance(payload, dict)
+        and str(payload.get("type") or "") == "message"
+        and str(payload.get("role") or "") in {"developer", "system"}
+    )
+    if not security_risk and security_policy_taggable and (
+        "secret" in signal_lower
+        or "api key" in signal_lower
+        or "token" in signal_lower
+        or "credential" in signal_lower
+        or "секрет" in signal_lower
+    ):
+        tags.add("security_policy_signal")
+    if semantic_signal_taggable and ("checkpoint" in signal_lower or "чекпо" in signal_lower):
         tags.add("checkpoint")
-    if "compact" in raw_lower or "compaction" in raw_lower or "сжати" in raw_lower:
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+            event_type = "CHECKPOINT"
+            importance = "high"
+    if semantic_signal_taggable and ("final" in signal_lower or "итог" in signal_lower or "готово" in signal_lower):
+        tags.add("final_state_signal")
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+            event_type = "FINAL_STATE"
+            importance = "high"
+    if source_type == "compacted" or payload_has_compaction_boundary(payload) or (
+        semantic_signal_taggable and ("compact" in signal_lower or "compaction" in signal_lower or "сжати" in signal_lower)
+    ):
         tags.add("compaction")
 
     compaction_boundary = event_type == "COMPACTION_EVENT" and (
         source_type == "compacted"
-        or "compact" in raw_lower
-        or "summary" in raw_lower
-        or "сжати" in raw_lower
+        or payload_has_compaction_boundary(payload)
+        or "compact" in signal_lower
+        or "summary" in signal_lower
+        or "сжати" in signal_lower
     )
+
+    canonical_event_type = event_type if event_type in EVENT_TYPE_ORDER else "RAW_EVENT"
+    universal = event_facets_for_type(canonical_event_type)
+    if outcome_override:
+        universal["outcome"] = outcome_override
+    confidence = "high" if canonical_event_type != "RAW_EVENT" else "medium"
 
     return RawEvent(
         event_id=event_id,
         line_no=line_no,
         raw=raw,
         parsed=parsed,
-        event_type=event_type if event_type in EVENT_TYPE_ORDER else "RAW_EVENT",
+        event_type=canonical_event_type,
         source_type=source_type,
         title=title,
         timestamp=timestamp,
         tags=sorted(tag for tag in tags if tag),
         importance=importance,
         compaction_boundary=compaction_boundary,
+        family=universal["family"],
+        phase=universal["phase"],
+        actor=universal["actor"],
+        action=universal["action"],
+        object_ref=universal["object"],
+        outcome=universal["outcome"],
+        confidence=confidence,
+        correlation_id=correlation_id,
+        facets=facets,
     )
 
 
@@ -1955,11 +2388,49 @@ def markdown_escape_fence(raw: str) -> str:
     return raw
 
 
-def event_index_record(event: RawEvent, md_name: str) -> dict[str, Any]:
-    return {
+def event_relationships(events: list[RawEvent]) -> dict[str, list[dict[str, Any]]]:
+    relationships: dict[str, list[dict[str, Any]]] = {event.event_id: [] for event in events}
+    by_correlation: dict[str, list[RawEvent]] = defaultdict(list)
+    for idx, event in enumerate(events):
+        if idx > 0:
+            relationships[event.event_id].append({"rel": "previous_event", "event_id": events[idx - 1].event_id})
+        if idx + 1 < len(events):
+            relationships[event.event_id].append({"rel": "next_event", "event_id": events[idx + 1].event_id})
+        if event.correlation_id:
+            by_correlation[event.correlation_id].append(event)
+
+    for correlation_id, related in by_correlation.items():
+        calls = [
+            event
+            for event in related
+            if event.facets.get("payload_type") in {"function_call", "tool_call"}
+        ]
+        outputs = [
+            event
+            for event in related
+            if event.facets.get("payload_type") in {"function_call_output", "tool_call_output"}
+        ]
+        for call in calls:
+            for output in outputs:
+                if call.event_id == output.event_id:
+                    continue
+                relationships[call.event_id].append({"rel": "answered_by", "event_id": output.event_id, "correlation_id": correlation_id})
+                relationships[output.event_id].append({"rel": "responds_to", "event_id": call.event_id, "correlation_id": correlation_id})
+    return relationships
+
+
+def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    record = {
         "event_id": event.event_id,
         "line": event.line_no,
         "type": event.event_type,
+        "family": event.family,
+        "phase": event.phase,
+        "actor": event.actor,
+        "action": event.action,
+        "object": event.object_ref,
+        "outcome": event.outcome,
+        "confidence": event.confidence,
         "title": event.title,
         "importance": event.importance,
         "tags": event.tags,
@@ -1968,6 +2439,13 @@ def event_index_record(event: RawEvent, md_name: str) -> dict[str, Any]:
         "timestamp": event.timestamp,
         "source_type": event.source_type,
     }
+    if event.correlation_id:
+        record["correlation_id"] = event.correlation_id
+    if event.facets:
+        record["facets"] = event.facets
+    if relationships:
+        record["relationships"] = relationships
+    return record
 
 
 def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, events: list[RawEvent]) -> dict[str, Any]:
@@ -2013,7 +2491,14 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
                 f"- line: {event.line_no}",
                 f"- time: {event.timestamp or ''}",
                 f"- source: {event.source_type}",
+                f"- family: {event.family}",
+                f"- phase: {event.phase}",
+                f"- actor: {event.actor}",
+                f"- action: {event.action}",
+                f"- object: {event.object_ref}",
+                f"- outcome: {event.outcome}",
                 f"- refs: raw:line:{event.line_no}",
+                f"- correlation_id: {event.correlation_id or ''}",
                 f"- tags: {json.dumps(event.tags, ensure_ascii=False)}",
                 "",
                 "### Title",
@@ -2030,13 +2515,27 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
         )
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
-    records = [event_index_record(event, md_name) for event in events]
+    relationship_map = event_relationships(events)
+    records = [event_index_record(event, md_name, relationship_map.get(event.event_id, [])) for event in events]
     by_type: dict[str, list[str]] = defaultdict(list)
     by_tag: dict[str, list[str]] = defaultdict(list)
     by_source_type: dict[str, list[str]] = defaultdict(list)
+    by_family: dict[str, list[str]] = defaultdict(list)
+    by_phase: dict[str, list[str]] = defaultdict(list)
+    by_actor: dict[str, list[str]] = defaultdict(list)
+    by_action: dict[str, list[str]] = defaultdict(list)
+    by_outcome: dict[str, list[str]] = defaultdict(list)
+    by_correlation: dict[str, list[str]] = defaultdict(list)
     for event in events:
         by_type[event.event_type].append(event.event_id)
         by_source_type[event.source_type].append(event.event_id)
+        by_family[event.family].append(event.event_id)
+        by_phase[event.phase].append(event.event_id)
+        by_actor[event.actor].append(event.event_id)
+        by_action[event.action].append(event.event_id)
+        by_outcome[event.outcome].append(event.event_id)
+        if event.correlation_id:
+            by_correlation[event.correlation_id].append(event.event_id)
         for tag in event.tags:
             by_tag[tag].append(event.event_id)
 
@@ -2051,6 +2550,12 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
         "by_type": dict(sorted(by_type.items())),
         "by_tag": dict(sorted(by_tag.items())),
         "by_source_type": dict(sorted(by_source_type.items())),
+        "by_family": dict(sorted(by_family.items())),
+        "by_phase": dict(sorted(by_phase.items())),
+        "by_actor": dict(sorted(by_actor.items())),
+        "by_action": dict(sorted(by_action.items())),
+        "by_outcome": dict(sorted(by_outcome.items())),
+        "by_correlation": dict(sorted(by_correlation.items())),
     }
     write_json(index_path, index)
     return {
@@ -2075,6 +2580,10 @@ def clear_generated_segments(session_dir: Path) -> None:
 def write_session_index(session_dir: Path, manifest: dict[str, Any], events: list[RawEvent]) -> None:
     counts = Counter(event.event_type for event in events)
     by_type = {event_type: counts[event_type] for event_type in EVENT_TYPE_ORDER if counts[event_type]}
+    family_counts = dict(sorted(Counter(event.family for event in events).items()))
+    phase_counts = dict(sorted(Counter(event.phase for event in events).items()))
+    actor_counts = dict(sorted(Counter(event.actor for event in events).items()))
+    outcome_counts = dict(sorted(Counter(event.outcome for event in events).items()))
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     session_index_json = {
         "schema_version": SCHEMA_VERSION,
@@ -2085,6 +2594,10 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "distillation_status": manifest.get("distillation_status", "raw_archived"),
         "event_count": len(events),
         "event_counts": by_type,
+        "family_counts": family_counts,
+        "phase_counts": phase_counts,
+        "actor_counts": actor_counts,
+        "outcome_counts": outcome_counts,
         "segments": manifest.get("segments", []),
         "read_order": [
             "session.manifest.json",
@@ -2147,6 +2660,18 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     lines.extend(["", "## Event Counts", ""])
     for event_type, count in by_type.items():
         lines.append(f"- `{event_type}`: {count}")
+    lines.extend(["", "## Universal Facets", ""])
+    lines.append("### Families")
+    for family, count in family_counts.items():
+        lines.append(f"- `{family}`: {count}")
+    lines.append("")
+    lines.append("### Phases")
+    for phase, count in phase_counts.items():
+        lines.append(f"- `{phase}`: {count}")
+    lines.append("")
+    lines.append("### Outcomes")
+    for outcome, count in outcome_counts.items():
+        lines.append(f"- `{outcome}`: {count}")
     lines.append("")
     (session_dir / SESSION_INDEX_MARKDOWN).write_text("\n".join(lines), encoding="utf-8")
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
@@ -2658,17 +3183,22 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
             if not isinstance(event, dict):
                 continue
             event_type = str(event.get("type") or "RAW_EVENT")
+            importance = str(event.get("importance") or "")
             event_counts[event_type] += 1
             routes = [str(route) for route in route_map.get(event_type, [])] if isinstance(route_map.get(event_type, []), list) else []
             for route in routes:
                 route_counts[route] += 1
-            importance = str(event.get("importance") or "")
-            keep = importance in {"critical", "high"} or event_type in FIRST_PASS_CANDIDATE_EVENT_TYPES
+            keep = is_first_pass_candidate_event_record(event)
             if keep and len(selected_by_type[event_type]) < max_events_per_type:
                 selected_by_type[event_type].append(
                     {
                         "event_id": event.get("event_id"),
                         "type": event_type,
+                        "family": event.get("family"),
+                        "phase": event.get("phase"),
+                        "actor": event.get("actor"),
+                        "action": event.get("action"),
+                        "outcome": event.get("outcome"),
                         "title": event.get("title"),
                         "importance": importance,
                         "routes": routes,
@@ -2773,6 +3303,163 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
     }
 
 
+def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {
+            "session_id": record.get("session_id"),
+            "session_label": record.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "diagnostic",
+            "diagnostics": ["missing_session_manifest"],
+        }
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path") or ""))
+    if manifest.get("archive_status") != "indexed":
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "skipped",
+            "diagnostics": [f"archive_status:{manifest.get('archive_status')}"],
+        }
+    if not raw_path.is_file():
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "diagnostic",
+            "diagnostics": ["raw_missing"],
+        }
+
+    if dry_run:
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "planned",
+            "raw_path": str(raw_path),
+            "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+        }
+
+    now = utc_now()
+    events = parse_raw_events(raw_path)
+    clear_generated_segments(session_dir)
+    raw_rel = "raw/session.raw.jsonl"
+    segment_payloads = [
+        write_segment(session_dir, raw_rel, segment_no, role, events[start:end])
+        for segment_no, (start, end, role) in enumerate(segment_ranges(events))
+    ]
+    manifest["segments"] = segment_payloads
+    manifest["latest_event_count"] = len(events)
+    manifest["updated_at"] = now
+    manifest["index_schema"] = {
+        "universal_event_facets": True,
+        "relationships": True,
+        "reindexed_at": now,
+    }
+    if isinstance(manifest.get("raw"), dict):
+        manifest["raw"]["line_count"] = len(events)
+        manifest["raw"]["bytes"] = raw_path.stat().st_size
+        manifest["raw"]["sha256"] = sha256_file(raw_path)
+    write_json(manifest_path, manifest)
+    write_session_index(session_dir, manifest, events)
+    update_registry(aoa_root, manifest, session_dir)
+    return {
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "status": "reindexed",
+        "event_count": len(events),
+        "segment_count": len(segment_payloads),
+    }
+
+
+def reindex_sessions(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    if target and target != "all":
+        records = [resolve_session_record(aoa_root, target)]
+    else:
+        records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    counts: Counter[str] = Counter()
+    results: list[dict[str, Any]] = []
+    for record in records:
+        result = reindex_session_from_raw(aoa_root, record, dry_run=dry_run)
+        counts[str(result.get("status") or "unknown")] += 1
+        results.append(result)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_reindex",
+        "generated_at": now,
+        "ok": counts.get("diagnostic", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "dry_run": dry_run,
+        "selected_count": len(records),
+        "counts": dict(counts),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__reindex-sessions"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, reindex_sessions_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def reindex_sessions_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Reindex",
+        "",
+        "Regenerates generated segment Markdown and segment indexes from preserved raw JSONL.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- aoa_root: `{payload.get('aoa_root')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- since: `{payload.get('since')}`",
+        f"- until: `{payload.get('until')}`",
+        f"- dry_run: `{payload.get('dry_run')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
+        "",
+        "| status | session | events | segments | diagnostics |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| {status} | `{session}` | {events} | {segments} | {diagnostics} |".format(
+                status=str(result.get("status") or ""),
+                session=str(result.get("session_label") or result.get("session_id") or ""),
+                events=str(result.get("event_count") or ""),
+                segments=str(result.get("segment_count") or ""),
+                diagnostics=", ".join(str(item) for item in result.get("diagnostics", [])),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def default_batch_distillation_policy() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2787,6 +3474,23 @@ def default_batch_distillation_policy() -> dict[str, Any]:
         "project_grounding_file_names": DEFAULT_PROJECT_GROUNDING_FILE_NAMES,
         "large_session_segment_threshold": 24,
         "huge_session_segment_threshold": 100,
+        "manual_review_priority_thresholds": {
+            "deep": 100,
+            "standard": 20,
+            "sample": 1,
+        },
+        "manual_review_weights": {
+            "huge_session": 100,
+            "large_session": 30,
+            "SECURITY_OR_SECRET_RISK": 12,
+            "ERROR": 2,
+            "DEAD_BRANCH": 8,
+            "PROCESS_LESSON": 6,
+            "ASSUMPTION": 4,
+            "DECISION": 3,
+            "OPEN_THREAD": 2,
+            "FINAL_STATE": 1,
+        },
         "manual_review_event_types": [
             "DECISION",
             "ASSUMPTION",
@@ -2810,6 +3514,21 @@ def default_batch_distillation_policy() -> dict[str, Any]:
             "archive_trigger_tuning",
             "resume_template_improvement",
             "hook_contract_update",
+        ],
+        "mechanics_signal_event_types": [
+            "ERROR",
+            "PROCESS_LESSON",
+            "OPTIMIZATION_CANDIDATE",
+            "SECURITY_OR_SECRET_RISK",
+            "DEAD_BRANCH",
+        ],
+        "mechanics_signal_tags": [
+            "verification_command",
+            "destructive_command_signal",
+        ],
+        "mechanics_signal_outcomes": [
+            "failed",
+            "risk",
         ],
         "auto_actions": ["write_provisional_first_pass_distillation"],
     }
@@ -2952,11 +3671,17 @@ def first_wave_session_profile(
     manifest = read_json(manifest_path, {})
     event_counts: Counter[str] = Counter()
     route_counts: Counter[str] = Counter()
+    mechanics_signal_counts: Counter[str] = Counter()
     tag_counts: Counter[str] = Counter()
+    family_counts: Counter[str] = Counter()
+    phase_counts: Counter[str] = Counter()
+    actor_counts: Counter[str] = Counter()
+    outcome_counts: Counter[str] = Counter()
     missing_indexes: list[str] = []
     diagnostics: list[str] = []
     manual_review_reasons: list[str] = []
     mechanics_reasons: list[str] = []
+    candidate_event_count = 0
 
     if not isinstance(manifest, dict) or not manifest:
         diagnostics.append("missing_session_manifest")
@@ -2977,6 +3702,22 @@ def first_wave_session_profile(
     if not segments and archive_status == "indexed":
         diagnostics.append("no_segments")
 
+    mechanics_event_types = {
+        str(item)
+        for item in policy.get("mechanics_signal_event_types", [])
+        if str(item)
+    }
+    mechanics_tags = {
+        str(item)
+        for item in policy.get("mechanics_signal_tags", [])
+        if str(item)
+    }
+    mechanics_outcomes = {
+        str(item)
+        for item in policy.get("mechanics_signal_outcomes", [])
+        if str(item)
+    }
+
     for segment in segments:
         if not isinstance(segment, dict) or not segment.get("index"):
             missing_indexes.append(str(segment.get("segment_id") or "unknown"))
@@ -2992,11 +3733,26 @@ def first_wave_session_profile(
                 continue
             event_type = str(event.get("type") or "RAW_EVENT")
             event_counts[event_type] += 1
-            for route in route_map.get(event_type, []):
+            if is_first_pass_candidate_event_record(event):
+                candidate_event_count += 1
+            family_counts[str(event.get("family") or "unclassified")] += 1
+            phase_counts[str(event.get("phase") or "unclassified")] += 1
+            actor_counts[str(event.get("actor") or "unclassified")] += 1
+            outcome_counts[str(event.get("outcome") or "unclassified")] += 1
+            tags = [str(tag) for tag in event.get("tags", [])] if isinstance(event.get("tags"), list) else []
+            routes = route_map.get(event_type, [])
+            for route in routes:
                 route_counts[route] += 1
-            tags = event.get("tags", [])
-            for tag in tags if isinstance(tags, list) else []:
-                tag_counts[str(tag)] += 1
+            for tag in tags:
+                tag_counts[tag] += 1
+            mechanics_relevant = (
+                event_type in mechanics_event_types
+                or bool(mechanics_tags.intersection(tags))
+                or str(event.get("outcome") or "") in mechanics_outcomes
+            )
+            if mechanics_relevant:
+                for route in routes:
+                    mechanics_signal_counts[route] += 1
 
     if missing_indexes:
         diagnostics.append("missing_segment_indexes")
@@ -3004,25 +3760,44 @@ def first_wave_session_profile(
     large_threshold = int(policy.get("large_session_segment_threshold", 24) or 24)
     huge_threshold = int(policy.get("huge_session_segment_threshold", 100) or 100)
     segment_count = len(segments)
+    review_score = 0
+    review_weights = policy.get("manual_review_weights", {})
+    if not isinstance(review_weights, dict):
+        review_weights = {}
     if segment_count >= huge_threshold:
         manual_review_reasons.append("huge_session")
+        review_score += int(review_weights.get("huge_session", 100) or 100)
     elif segment_count >= large_threshold:
         manual_review_reasons.append("large_session")
+        review_score += int(review_weights.get("large_session", 30) or 30)
 
     manual_types = [str(item) for item in policy.get("manual_review_event_types", []) if str(item)]
     for event_type in manual_types:
         count = event_counts.get(event_type, 0)
         if count:
             manual_review_reasons.append(f"{event_type}:{count}")
+            review_score += min(count, 50) * int(review_weights.get(event_type, 1) or 1)
+
+    thresholds = policy.get("manual_review_priority_thresholds", {})
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+    deep_threshold = int(thresholds.get("deep", 100) or 100)
+    standard_threshold = int(thresholds.get("standard", 20) or 20)
+    sample_threshold = int(thresholds.get("sample", 1) or 1)
+    if review_score >= deep_threshold:
+        review_priority = "deep"
+    elif review_score >= standard_threshold:
+        review_priority = "standard"
+    elif review_score >= sample_threshold:
+        review_priority = "sample"
+    else:
+        review_priority = "none"
 
     mechanics_routes = [str(item) for item in policy.get("mechanics_routes", []) if str(item)]
     for route in mechanics_routes:
-        count = route_counts.get(route, 0)
+        count = mechanics_signal_counts.get(route, 0)
         if count:
             mechanics_reasons.append(f"{route}:{count}")
-
-    candidate_event_count = sum(event_counts.get(event_type, 0) for event_type in FIRST_PASS_CANDIDATE_EVENT_TYPES)
-    candidate_event_count += sum(count for event_type, count in event_counts.items() if event_type and event_type not in FIRST_PASS_CANDIDATE_EVENT_TYPES and count and event_type in manual_types)
 
     lanes: list[str] = []
     if diagnostics:
@@ -3031,6 +3806,7 @@ def first_wave_session_profile(
         lanes.append("auto_first_pass")
     if manual_review_reasons:
         lanes.append("manual_review")
+        lanes.append(f"manual_review_{review_priority}")
     if mechanics_reasons:
         lanes.append("mechanics_candidate")
     if not diagnostics and not manual_review_reasons and not mechanics_reasons:
@@ -3047,7 +3823,12 @@ def first_wave_session_profile(
         "event_count": sum(event_counts.values()) or int(record.get("event_count", 0) or 0),
         "candidate_event_count": candidate_event_count,
         "event_counts": dict(sorted(event_counts.items())),
+        "family_counts": dict(sorted(family_counts.items())),
+        "phase_counts": dict(sorted(phase_counts.items())),
+        "actor_counts": dict(sorted(actor_counts.items())),
+        "outcome_counts": dict(sorted(outcome_counts.items())),
         "route_counts": dict(sorted(route_counts.items())),
+        "mechanics_signal_counts": dict(sorted(mechanics_signal_counts.items())),
         "tag_counts": dict(sorted(tag_counts.items())),
         "project_grounding": project_grounding,
         "raw_exists": raw_exists,
@@ -3055,6 +3836,8 @@ def first_wave_session_profile(
         "missing_indexes_sample": missing_indexes[:12],
         "diagnostics": diagnostics,
         "manual_review_reasons": manual_review_reasons,
+        "manual_review_score": review_score,
+        "manual_review_priority": review_priority,
         "mechanics_reasons": mechanics_reasons,
         "lanes": lanes,
         "auto_actions": [] if diagnostics else list(policy.get("auto_actions", [])),
@@ -3064,7 +3847,14 @@ def first_wave_session_profile(
 def batch_distillation_improvements(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     missing_index_sessions = [item for item in results if int(item.get("missing_index_count", 0) or 0)]
     raw_missing_sessions = [item for item in results if "raw_missing" in item.get("diagnostics", [])]
-    no_candidate_sessions = [item for item in results if item.get("action_status") in {"planned", "distilled"} and int(item.get("candidate_event_count", 0) or 0) == 0]
+    no_candidate_sessions = [
+        item
+        for item in results
+        if item.get("action_status") in {"planned", "distilled"}
+        and int(item.get("candidate_event_count", 0) or 0) == 0
+        and "low_risk_indexed" not in item.get("lanes", [])
+        and int(item.get("event_count", 0) or 0) > 1
+    ]
     mechanics_sessions = [item for item in results if "mechanics_candidate" in item.get("lanes", [])]
     improvements: list[dict[str, Any]] = []
     if missing_index_sessions:
@@ -3850,14 +4640,42 @@ def import_print_payload(payload: dict[str, Any], *, full: bool = False, sample_
     return compact
 
 
+def reindex_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20) -> dict[str, Any]:
+    if full:
+        return payload
+    results = payload.get("results", [])
+    result_count = len(results) if isinstance(results, list) else 0
+    sample: list[Any] = []
+    if isinstance(results, list) and results:
+        if result_count <= sample_results:
+            sample = results
+        else:
+            head_count = max(1, sample_results // 2)
+            tail_count = max(1, sample_results - head_count)
+            sample = results[:head_count] + results[-tail_count:]
+    compact = {key: value for key, value in payload.items() if key != "results"}
+    compact["result_count"] = result_count
+    compact["results_sample"] = sample
+    compact["results_omitted"] = max(0, result_count - len(sample))
+    compact["print"] = {
+        "full": False,
+        "note": "results are bounded on stdout; pass --full or read the written report for the complete reindex queue",
+    }
+    return compact
+
+
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
     grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
+    family_counts = result.get("family_counts") if isinstance(result.get("family_counts"), dict) else {}
+    outcome_counts = result.get("outcome_counts") if isinstance(result.get("outcome_counts"), dict) else {}
     return {
         "session_label": result.get("session_label"),
         "action_status": result.get("action_status"),
         "lanes": result.get("lanes", []),
         "segment_count": result.get("segment_count"),
         "candidate_event_count": result.get("candidate_event_count"),
+        "family_counts_sample": dict(list(family_counts.items())[:8]),
+        "outcome_counts_sample": dict(list(outcome_counts.items())[:8]),
         "project_grounding": {
             "cwd": grounding.get("cwd"),
             "status": grounding.get("status"),
@@ -3948,6 +4766,23 @@ def command_import_codex_sessions(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     print(json.dumps(import_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_reindex_sessions(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = reindex_sessions(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        dry_run=args.dry_run,
+        write_report=args.write_report,
+    )
+    print(json.dumps(reindex_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -4528,6 +5363,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-memory-global-route/SKILL.md",
     "skills/aoa-session-memory-stress-pass/SKILL.md",
     "skills/aoa-session-raw-diagnostic/SKILL.md",
+    "skills/aoa-session-reindex/SKILL.md",
     "skills/aoa-session-rehydrate/SKILL.md",
 ]
 
@@ -4784,6 +5620,19 @@ def build_parser() -> argparse.ArgumentParser:
     import_sessions.add_argument("--write-report", action="store_true", help="Write JSON and Markdown import reports under .aoa/diagnostics.")
     import_sessions.add_argument("--full", action="store_true", help="Print complete import results to stdout.")
     import_sessions.set_defaults(func=command_import_codex_sessions)
+
+    reindex = sub.add_parser("reindex-sessions", help="Regenerate generated segment Markdown and indexes from preserved raw JSONL.")
+    reindex.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    reindex.add_argument("--workspace-root")
+    reindex.add_argument("--aoa-root")
+    reindex.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    reindex.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    reindex.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    reindex.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    reindex.add_argument("--dry-run", action="store_true", help="Only report which archives would be regenerated.")
+    reindex.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reindex reports under .aoa/diagnostics.")
+    reindex.add_argument("--full", action="store_true", help="Print complete reindex results to stdout.")
+    reindex.set_defaults(func=command_reindex_sessions)
 
     relabel = sub.add_parser("relabel", help="Rebuild readable date/sequence session archive names.")
     relabel.add_argument("--workspace-root")
