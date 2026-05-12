@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
+  "review_layers": [
+    "machine_index_layer",
+    "agent_project_grounded_layer",
+    "operator_sampling_layer",
+    "promotion_review_layer"
+  ],
+  "promotion_limit": "automatic layers may write provisional artifacts only",
+  "operator_reading_strategy": "sample evidence and review promoted claims, not reread every raw transcript",
+  "project_grounding_file_names": [
+    "AGENTS.md",
+    "DESIGN.md",
+    "README.md"
+  ],
   "large_session_segment_threshold": 24,
   "huge_session_segment_threshold": 100,
   "manual_review_event_types": [

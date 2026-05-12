@@ -34,6 +34,7 @@ REGISTRY_NAME = "session-registry.json"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
 DEFAULT_BANNED_DURABLE_NAME_TERMS = {"unknown", "misc", "tmp", "new", "old", "stuff", "placeholder"}
 BATCH_DISTILLATION_POLICY_PATH = Path("config/batch-distillation-policy.json")
+DEFAULT_PROJECT_GROUNDING_FILE_NAMES = ["AGENTS.md", "DESIGN.md", "README.md"]
 SESSION_INDEX_MARKDOWN = "SESSION.md"
 SESSION_INDEX_JSON = "session.index.json"
 LEGACY_SESSION_INDEX_MARKDOWN = "00_SESSION_INDEX.md"
@@ -2775,6 +2776,15 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
 def default_batch_distillation_policy() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
+        "review_layers": [
+            "machine_index_layer",
+            "agent_project_grounded_layer",
+            "operator_sampling_layer",
+            "promotion_review_layer",
+        ],
+        "promotion_limit": "automatic layers may write provisional artifacts only",
+        "operator_reading_strategy": "sample evidence and review promoted claims, not reread every raw transcript",
+        "project_grounding_file_names": DEFAULT_PROJECT_GROUNDING_FILE_NAMES,
         "large_session_segment_threshold": 24,
         "huge_session_segment_threshold": 100,
         "manual_review_event_types": [
@@ -2814,6 +2824,62 @@ def batch_distillation_policy(aoa_root: Path) -> dict[str, Any]:
                 continue
             policy[key] = value
     return policy
+
+
+def find_project_grounding_files(start: Path, names: list[str]) -> list[dict[str, str]]:
+    if start.is_file():
+        start = start.parent
+    files: list[dict[str, str]] = []
+    for parent in [start, *start.parents]:
+        for name in names:
+            candidate = parent / name
+            if candidate.is_file():
+                files.append({"name": name, "path": str(candidate)})
+        if files:
+            break
+        if parent.parent == parent:
+            break
+    return files
+
+
+def project_grounding_for_session(
+    manifest: dict[str, Any],
+    record: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    fallback_workspace_root: Path | None = None,
+) -> dict[str, Any]:
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    cwd_value = source.get("cwd") or record.get("cwd")
+    grounding: dict[str, Any] = {
+        "cwd": cwd_value,
+        "files": [],
+        "status": "not_found",
+    }
+    configured_names = policy.get("project_grounding_file_names", DEFAULT_PROJECT_GROUNDING_FILE_NAMES)
+    names = [str(item) for item in configured_names if str(item)] if isinstance(configured_names, list) else DEFAULT_PROJECT_GROUNDING_FILE_NAMES
+
+    files: list[dict[str, str]] = []
+    if cwd_value:
+        start = Path(str(cwd_value)).expanduser()
+        if start.exists():
+            files = find_project_grounding_files(start, names)
+        else:
+            grounding["status"] = "cwd_not_found"
+    else:
+        grounding["status"] = "cwd_missing"
+
+    if not files and fallback_workspace_root and fallback_workspace_root.exists():
+        files = find_project_grounding_files(fallback_workspace_root.expanduser(), names)
+        if files:
+            grounding["fallback_workspace_root"] = str(fallback_workspace_root)
+            grounding["fallback_used"] = True
+    grounding["files"] = files
+    if files:
+        grounding["status"] = "workspace_fallback_grounded" if grounding.get("fallback_used") else "grounded"
+    elif grounding["status"] == "not_found":
+        grounding["status"] = "no_project_files_found"
+    return grounding
 
 
 def session_record_date(record: dict[str, Any]) -> str:
@@ -2879,6 +2945,7 @@ def first_wave_session_profile(
     *,
     policy: dict[str, Any],
     route_map: dict[str, list[str]],
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -2901,6 +2968,7 @@ def first_wave_session_profile(
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     raw_path = Path(str(raw.get("path") or "")) if raw.get("path") else None
     raw_exists = bool(raw_path and raw_path.exists())
+    project_grounding = project_grounding_for_session(manifest, record, policy, fallback_workspace_root=workspace_root)
 
     if archive_status != "indexed":
         diagnostics.append(f"archive_status:{archive_status or 'missing'}")
@@ -2981,6 +3049,7 @@ def first_wave_session_profile(
         "event_counts": dict(sorted(event_counts.items())),
         "route_counts": dict(sorted(route_counts.items())),
         "tag_counts": dict(sorted(tag_counts.items())),
+        "project_grounding": project_grounding,
         "raw_exists": raw_exists,
         "missing_index_count": len(missing_indexes),
         "missing_indexes_sample": missing_indexes[:12],
@@ -3036,6 +3105,7 @@ def batch_distillation_improvements(results: list[dict[str, Any]]) -> list[dict[
 def batch_distill_sessions(
     *,
     aoa_root: Path,
+    workspace_root: Path | None = None,
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
@@ -3054,7 +3124,7 @@ def batch_distill_sessions(
     results: list[dict[str, Any]] = []
 
     for record in records:
-        profile = first_wave_session_profile(aoa_root, record, policy=policy, route_map=route_map)
+        profile = first_wave_session_profile(aoa_root, record, policy=policy, route_map=route_map, workspace_root=workspace_root)
         for lane in profile.get("lanes", []):
             lane_counts[str(lane)] += 1
         if profile.get("diagnostics"):
@@ -3087,6 +3157,7 @@ def batch_distill_sessions(
         "generated_at": now,
         "ok": counts.get("error", 0) == 0,
         "aoa_root": str(aoa_root),
+        "workspace_root": str(workspace_root) if workspace_root else None,
         "since": since,
         "until": until,
         "limit": limit,
@@ -3118,10 +3189,12 @@ def batch_distillation_markdown(payload: dict[str, Any]) -> str:
         "# First-Wave Batch Distillation",
         "",
         "This report is a conveyor map, not reviewed truth.",
-        "Automatic action is limited to provisional first-pass distillation; manual review lanes remain explicit.",
+        "Automatic action is limited to provisional first-pass distillation.",
+        "`manual_review` means a responsible review layer, not that the operator must reread every raw transcript.",
         "",
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- aoa_root: `{payload.get('aoa_root')}`",
+        f"- workspace_root: `{payload.get('workspace_root')}`",
         f"- since: `{payload.get('since')}`",
         f"- until: `{payload.get('until')}`",
         f"- apply: `{payload.get('apply')}`",
@@ -3129,9 +3202,32 @@ def batch_distillation_markdown(payload: dict[str, Any]) -> str:
         f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
         f"- lane_counts: `{json.dumps(payload.get('lane_counts', {}), ensure_ascii=False)}`",
         "",
-        "## Improvement Candidates",
+        "## Review Layers",
         "",
     ]
+    policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+    for layer in policy.get("review_layers", []) if isinstance(policy.get("review_layers"), list) else []:
+        lines.append(f"- `{layer}`")
+    if policy.get("promotion_limit"):
+        lines.append(f"- promotion_limit: `{policy.get('promotion_limit')}`")
+    if policy.get("operator_reading_strategy"):
+        lines.append(f"- operator_reading_strategy: `{policy.get('operator_reading_strategy')}`")
+    lines.extend(
+        [
+            "",
+            "## Project Grounding",
+            "",
+            "Each session profile keeps the originating `cwd` and nearest project guidance files when available.",
+            "Later review agents should use those files before promoting project-specific claims.",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+        "## Improvement Candidates",
+        "",
+        ]
+    )
     improvements = payload.get("improvement_candidates", [])
     if improvements:
         for item in improvements if isinstance(improvements, list) else []:
@@ -3755,12 +3851,18 @@ def import_print_payload(payload: dict[str, Any], *, full: bool = False, sample_
 
 
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
+    grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
     return {
         "session_label": result.get("session_label"),
         "action_status": result.get("action_status"),
         "lanes": result.get("lanes", []),
         "segment_count": result.get("segment_count"),
         "candidate_event_count": result.get("candidate_event_count"),
+        "project_grounding": {
+            "cwd": grounding.get("cwd"),
+            "status": grounding.get("status"),
+            "files": grounding.get("files", [])[:3] if isinstance(grounding.get("files"), list) else [],
+        },
         "manual_review_reasons": result.get("manual_review_reasons", [])[:8],
         "mechanics_reasons": result.get("mechanics_reasons", [])[:8],
         "diagnostics": result.get("diagnostics", [])[:8],
@@ -3852,9 +3954,11 @@ def command_import_codex_sessions(args: argparse.Namespace) -> int:
 def command_batch_distill(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace_root = workspace_root_for(explicit_workspace, root)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     payload = batch_distill_sessions(
         aoa_root=root,
+        workspace_root=workspace_root,
         since=since,
         until=args.until,
         limit=args.limit,

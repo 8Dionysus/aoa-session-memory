@@ -60,7 +60,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `27 passed`
+- `.aoa` tests: `28 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -75,6 +75,10 @@ Last observed result:
   diagnostic `1`; lanes: `auto_first_pass=142`, `manual_review=122`,
   `mechanics_candidate=135`, `low_risk_indexed=7`, `diagnostic=1`; reports:
   `diagnostics/20260512T181921Z__batch-distill__first-wave.json` and `.md`
+- `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
+  grounding fallback is present for broad `cwd=/srv` sessions through
+  `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
+  `diagnostics/20260512T183224Z__batch-distill__first-wave.json` and `.md`
 - `validate`: `ok=true`
 - `codex-compact-probe --trust-hooks`: `ok=true`, live `PreCompact` and
   `PostCompact` completed and archived; latest probe raised live counts to
@@ -123,7 +127,8 @@ Stress-pass evidence:
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
-| Historical sessions can be split into automatic, manual, mechanics, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
+| Historical sessions can be split into automatic, responsible review, mechanics, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
+| Batch distillation keeps project grounding instead of treating sessions as generic text | `project_grounding`, workspace fallback test, batch report |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
 | User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
 | Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |

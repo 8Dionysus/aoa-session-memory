@@ -153,6 +153,10 @@ python3 scripts/aoa_session_memory.py batch-distill \
   --write-report
 ```
 
+The conveyor separates mechanical first-pass work from responsibility layers.
+`manual_review` means agent-assisted, project-grounded review with evidence
+refs, not that the operator must reread every raw transcript.
+
 Export a clean portable bundle without session archives:
 
 ```bash

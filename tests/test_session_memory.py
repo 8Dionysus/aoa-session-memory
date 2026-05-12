@@ -786,6 +786,9 @@ def test_first_pass_distillation_writes_reviewable_route_map(tmp_path: Path) -> 
 def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
+    (workspace / "AGENTS.md").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text("project law\n", encoding="utf-8")
+    (workspace / "DESIGN.md").write_text("project design\n", encoding="utf-8")
     (aoa_root / "config").mkdir(parents=True, exist_ok=True)
     (aoa_root / "config" / "event-distillation-routes.json").write_text(
         json.dumps({"schema_version": 1, "routes": {"DECISION": ["skill_amendment"]}}, ensure_ascii=False) + "\n",
@@ -820,6 +823,8 @@ def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> No
     assert "manual_review" in planned["results"][0]["lanes"]
     assert "mechanics_candidate" in planned["results"][0]["lanes"]
     assert planned["results"][0]["auto_actions"] == ["write_provisional_first_pass_distillation"]
+    assert planned["results"][0]["project_grounding"]["status"] == "grounded"
+    assert {item["name"] for item in planned["results"][0]["project_grounding"]["files"]} == {"AGENTS.md", "DESIGN.md"}
 
     applied = module.batch_distill_sessions(aoa_root=aoa_root, since="2026-05-16", apply=True)
 
@@ -828,6 +833,39 @@ def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> No
     assert applied["counts"] == {"distilled": 1}
     assert manifest["distillation_status"] == "first_pass_distilled"
     assert (session_dir / "distillation" / "distillation.index.json").exists()
+
+
+def test_batch_distill_uses_workspace_grounding_fallback(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    (workspace / "AGENTS.md").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text("workspace law\n", encoding="utf-8")
+    transcript = tmp_path / "rollout-2026-05-16T00-00-00-grounding-fallback.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-16T00:00:00Z", "type": "session_meta", "payload": {"id": "grounding-fallback"}},
+            {"timestamp": "2026-05-16T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Ground this session"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "grounding-fallback",
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path / "missing-cwd"),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    planned = module.batch_distill_sessions(aoa_root=aoa_root, workspace_root=workspace, since="2026-05-16")
+
+    grounding = planned["results"][0]["project_grounding"]
+    assert grounding["status"] == "workspace_fallback_grounded"
+    assert grounding["fallback_used"] is True
+    assert grounding["files"][0]["path"] == str(workspace / "AGENTS.md")
 
 
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:

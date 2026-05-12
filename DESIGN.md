@@ -136,6 +136,12 @@ Do not collapse these layers.
 
 Historical sessions should move through a conveyor, not a blind summarizer.
 
+Manual review does not mean the operator must personally reread the whole
+archive. It means the claim has entered a responsibility layer: an agent may
+read, compare, sample, and connect evidence, but it must do so with project
+grounding and explicit raw/index references. The human operator should be able
+to audit the promoted claim, not carry the full archival load alone.
+
 The first wave may do mechanical work:
 
 - classify indexed sessions into review lanes
@@ -143,6 +149,8 @@ The first wave may do mechanical work:
 - write provisional first-pass distillation artifacts
 - surface mechanics candidates for later patching
 - surface diagnostic failures before review
+- record project grounding such as the originating `cwd` and nearest
+  `AGENTS.md`, `DESIGN.md`, or README files
 
 The first wave may not do judgment work:
 
@@ -156,6 +164,16 @@ misses, missing indexes, noisy names, hook gaps, or reusable command patterns,
 the next act is a narrow improvement to the kernel followed by tests and audit.
 The conveyor improves while it works, but every improvement remains
 inspectable.
+
+As the system matures, distillation should become layered:
+
+- machine index layer: counts, routes, refs, and provisional candidates
+- agent project-grounded layer: reads with the local project laws in view
+- operator sampling layer: reviews promoted claims and suspicious clusters
+- promotion review layer: turns reviewed patterns into skills or automation
+
+This keeps scale from forcing shallow summaries while still respecting that
+real understanding must be grounded in the project where the session happened.
 
 ## Raw Truth and Reviewed Truth
 

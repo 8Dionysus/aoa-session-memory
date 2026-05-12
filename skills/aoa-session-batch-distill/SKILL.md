@@ -37,8 +37,8 @@ Review the report lanes:
 
 - `auto_first_pass`: safe to write provisional first-pass artifacts from
   indexes.
-- `manual_review`: requires human or deliberate agent reading before
-  promotion.
+- `manual_review`: requires a responsible review layer before promotion; this
+  can be agent-assisted and evidence-sampled, not raw rereading by the operator.
 - `mechanics_candidate`: may imply tests, skills, hooks, docs, or CLI
   improvements.
 - `diagnostic`: repair raw/index health before distillation.
@@ -62,6 +62,11 @@ first-pass artifact must be rebuilt.
 Automatic work may write only provisional first-pass distillation artifacts.
 It may not promote a pattern, amend a skill, add automation, or mark a claim as
 reviewed.
+
+Manual review means project-grounded review. Before promoting a claim, inspect
+the session's `project_grounding` entry and read the nearest relevant
+`AGENTS.md`, `DESIGN.md`, or README. The operator should review promoted
+claims and samples, not carry the entire archive in active attention.
 
 ## Adaptive Rule
 

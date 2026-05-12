@@ -233,6 +233,12 @@ only when writing provisional first-pass distillation artifacts is intended.
 The conveyor report is written under `diagnostics/` when `--write-report` is
 set.
 
+`manual_review` is not a demand that the operator reread every transcript. It
+marks a responsibility layer: an agent may continue the work, but it must use
+project grounding, evidence references, and promotion gates. Session profiles
+therefore keep the source `cwd` and nearest project guidance files when they
+exist.
+
 Use the bundle skill routes for deliberate agent work:
 
 ```text
@@ -455,3 +461,8 @@ raw event
 
 This keeps preservation cheap, stable, and evidence-heavy while still giving
 the system a path to learn from its history.
+
+The review path is layered. First-wave automation writes provisional maps.
+Project-grounded agents connect those maps to the actual repository or
+workspace laws. Operators sample and approve promoted claims. Only after that
+may patterns become skills or automation.
