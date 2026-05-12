@@ -64,6 +64,7 @@ EVENT_TYPE_ORDER = [
     "DEAD_BRANCH",
     "PROCESS_LESSON",
     "OPTIMIZATION_CANDIDATE",
+    "SECURITY_TOUCHPOINT",
     "SECURITY_OR_SECRET_RISK",
     "VERIFICATION",
     "FINAL_STATE",
@@ -112,6 +113,7 @@ EVENT_FACETS: dict[str, dict[str, str]] = {
     "DEAD_BRANCH": {"family": "progress_state", "phase": "diagnose", "actor": "assistant", "action": "abandon_branch", "object": "work", "outcome": "stopped"},
     "PROCESS_LESSON": {"family": "distillation", "phase": "distill", "actor": "assistant", "action": "learn", "object": "process", "outcome": "candidate"},
     "OPTIMIZATION_CANDIDATE": {"family": "optimization", "phase": "improve", "actor": "assistant", "action": "propose_optimization", "object": "system", "outcome": "candidate"},
+    "SECURITY_TOUCHPOINT": {"family": "risk_signal", "phase": "guard", "actor": "tool", "action": "detect_touchpoint", "object": "secret_or_security", "outcome": "observed"},
     "SECURITY_OR_SECRET_RISK": {"family": "risk_signal", "phase": "guard", "actor": "assistant", "action": "detect_risk", "object": "secret_or_security", "outcome": "risk"},
     "VERIFICATION": {"family": "verification", "phase": "verify", "actor": "tool", "action": "verify", "object": "claim_or_system", "outcome": "verified"},
     "FINAL_STATE": {"family": "progress_state", "phase": "close", "actor": "assistant", "action": "closeout", "object": "work", "outcome": "completed"},
@@ -1300,14 +1302,64 @@ def has_security_risk_signal(text_lower: str) -> bool:
         return False
     sensitive_terms = r"(secret|api key|token|credential|password|секрет)"
     leak_terms = r"(leak|leaked|exposed|expose|printed|dumped|committed|plaintext|plain text|утек|утеч|раскрыт)"
+    log_terms = r"(console\.log|logger\.|log\(|print\(|printf\()"
     assignment_terms = r"(secret|api key|token|credential|password)\s*[:=]\s*['\"]?[a-z0-9_./+=-]{12,}"
     if re.search(fr"\b{sensitive_terms}s?\b.{{0,48}}\b{leak_terms}\b", text_lower):
         return True
     if re.search(fr"\b{leak_terms}\b.{{0,48}}\b{sensitive_terms}s?\b", text_lower):
         return True
+    safe_sensitive_log_phrases = [
+        "present",
+        "missing",
+        "configured",
+        "not shown",
+        "hashed",
+        "hash",
+        "expires",
+        "expira",
+    ]
+    for line in text_lower.splitlines():
+        if (
+            re.search(log_terms, line)
+            and re.search(fr"\b{sensitive_terms}s?\b", line)
+            and not any(phrase in line for phrase in safe_sensitive_log_phrases)
+        ):
+            return True
     if re.search(assignment_terms, text_lower):
         return True
     return False
+
+
+def has_security_touchpoint_signal(text_lower: str) -> bool:
+    if not text_lower:
+        return False
+    policy_context_phrases = [
+        "leak check",
+        "secret-leak check",
+        "secret/data leak check",
+        "secret leak check",
+        "redaction check",
+        "sanitize",
+        "sanitized",
+        "do not write secrets",
+        "no tokens",
+        "no passwords",
+        "нет токен",
+        "нет парол",
+        "не писать секрет",
+    ]
+    if any(phrase in text_lower for phrase in policy_context_phrases):
+        return False
+    identifier_pattern = (
+        r"\b(?:[a-z0-9]+_)+(?:secret|token|password|credential|key)\b"
+        r"|\b[a-z0-9_]*(?:api_key|apikey|secret_key|client_secret|private_key|password_hash)[a-z0-9_]*\b"
+        r"|\b(?:secret|token|password|credential|key)_[a-z0-9_]+\b"
+    )
+    phrase_pattern = (
+        r"\b(api key|secret key|client secret|access token|refresh token|bearer token|session token|"
+        r"email token|recovery token|password|credential)s?\b"
+    )
+    return bool(re.search(identifier_pattern, text_lower) or re.search(phrase_pattern, text_lower))
 
 
 def json_object_from_string(value: Any) -> dict[str, Any]:
@@ -1660,16 +1712,25 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         and str(payload.get("role") or "") == "assistant"
     )
     semantic_signal_taggable = False
+    user_intent_taggable = False
     if isinstance(payload, dict):
         payload_kind = str(payload.get("type") or "")
         payload_role = str(payload.get("role") or "")
         semantic_signal_taggable = (
             source_type == "response_item"
             and payload_kind == "message"
-            and payload_role in {"assistant", "user"}
+            and payload_role == "assistant"
         ) or (
             source_type == "event_msg"
-            and payload_kind in {"agent_message", "user_message"}
+            and payload_kind == "agent_message"
+        )
+        user_intent_taggable = (
+            source_type == "response_item"
+            and payload_kind == "message"
+            and payload_role == "user"
+        ) or (
+            source_type == "event_msg"
+            and payload_kind == "user_message"
         )
     if semantic_signal_taggable and ("decision" in signal_lower or "решили" in signal_lower or "вердикт" in signal_lower):
         tags.add("decision_signal")
@@ -1697,11 +1758,16 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         if event_type in {"ASSISTANT_MESSAGE", "TOOL_OUTPUT", "COMMAND_OUTPUT", "RAW_EVENT"}:
             event_type = "SECURITY_OR_SECRET_RISK"
             importance = "critical"
-    security_policy_taggable = semantic_signal_taggable or (
+    security_policy_taggable = semantic_signal_taggable or user_intent_taggable or (
         source_type == "response_item"
         and isinstance(payload, dict)
         and str(payload.get("type") or "") == "message"
         and str(payload.get("role") or "") in {"developer", "system"}
+    )
+    security_touchpoint_taggable = (
+        source_type == "response_item"
+        and isinstance(payload, dict)
+        and str(payload.get("type") or "") in {"message", "function_call_output", "tool_call_output"}
     )
     if not security_risk and security_policy_taggable and (
         "secret" in signal_lower
@@ -1711,6 +1777,11 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         or "секрет" in signal_lower
     ):
         tags.add("security_policy_signal")
+    if not security_risk and security_touchpoint_taggable and has_security_touchpoint_signal(signal_lower):
+        tags.add("security_touchpoint_signal")
+        if event_type in {"ASSISTANT_MESSAGE", "TOOL_OUTPUT", "COMMAND_OUTPUT", "RAW_EVENT"}:
+            event_type = "SECURITY_TOUCHPOINT"
+            importance = "high"
     if semantic_signal_taggable and ("checkpoint" in signal_lower or "чекпо" in signal_lower):
         tags.add("checkpoint")
         if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
@@ -1721,9 +1792,7 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
             event_type = "FINAL_STATE"
             importance = "high"
-    if source_type == "compacted" or payload_has_compaction_boundary(payload) or (
-        semantic_signal_taggable and ("compact" in signal_lower or "compaction" in signal_lower or "сжати" in signal_lower)
-    ):
+    if source_type == "compacted" or payload_has_compaction_boundary(payload):
         tags.add("compaction")
 
     compaction_boundary = event_type == "COMPACTION_EVENT" and (
@@ -3523,7 +3592,6 @@ def default_batch_distillation_policy() -> dict[str, Any]:
             "DEAD_BRANCH",
         ],
         "mechanics_signal_tags": [
-            "verification_command",
             "destructive_command_signal",
         ],
         "mechanics_signal_outcomes": [

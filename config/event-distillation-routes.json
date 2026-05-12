@@ -20,9 +20,9 @@
     "DEAD_BRANCH": ["wasted_work_pattern", "avoid_rule", "routing_improvement"],
     "PROCESS_LESSON": ["technique_update", "skill_amendment", "playbook_patch"],
     "OPTIMIZATION_CANDIDATE": ["automation_seed", "metric_candidate", "owner_route"],
+    "SECURITY_TOUCHPOINT": ["sensitive_surface_map", "redaction_candidate", "security_review_hint"],
     "SECURITY_OR_SECRET_RISK": ["redaction_rule", "safety_gate", "sanitizer_test"],
     "VERIFICATION": ["proof_pattern", "test_recipe", "confidence_model"],
     "FINAL_STATE": ["closeout_quality", "handoff_template", "next_route"]
   }
 }
-

@@ -64,7 +64,6 @@
     "DEAD_BRANCH"
   ],
   "mechanics_signal_tags": [
-    "verification_command",
     "destructive_command_signal"
   ],
   "mechanics_signal_outcomes": [

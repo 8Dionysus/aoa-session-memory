@@ -262,9 +262,9 @@ therefore keep the source `cwd` and nearest project guidance files when they
 exist.
 
 Mechanics candidates are counted from significant events only: failures,
-process lessons, optimization/risk/dead-branch signals, verification commands,
-destructive commands, and failed outcomes. Generic command output by itself is
-not enough to put a session into the mechanics queue.
+process lessons, optimization/risk/dead-branch signals, destructive commands,
+and failed outcomes. Generic command output or a successful verification
+command by itself is not enough to put a session into the mechanics queue.
 
 Use the bundle skill routes for deliberate agent work:
 

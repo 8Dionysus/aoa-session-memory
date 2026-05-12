@@ -74,20 +74,20 @@ Last observed result:
 - `reindex-sessions all --write-report`: `ok=true`, selected `143`
   sessions, reindexed `142`, skipped `1` `raw_unavailable` diagnostic
   archive; reports:
-  `diagnostics/20260512T202941Z__reindex-sessions.json` and `.md`
+  `diagnostics/20260512T210121Z__reindex-sessions.json` and `.md`
 - `batch-distill --since 2026-04-21 --write-report`: `ok=true`, selected
   `143` sessions, planned `139`, skipped `3` already first-pass distilled,
   diagnostic `1`; lanes: `auto_first_pass=142`, `manual_review=129`,
-  `manual_review_deep=17`, `manual_review_standard=32`,
-  `manual_review_sample=80`, `mechanics_candidate=127`,
-  `low_risk_indexed=10`, `diagnostic=1`; reports:
-  `diagnostics/20260512T202952Z__batch-distill__first-wave.json` and `.md`
+  `manual_review_deep=17`, `manual_review_standard=33`,
+  `manual_review_sample=79`, `mechanics_candidate=119`,
+  `low_risk_indexed=13`, `diagnostic=1`; reports:
+  `diagnostics/20260512T210131Z__batch-distill__first-wave.json` and `.md`
 - Universal event index proof: segment indexes now carry `family`, `phase`,
   `actor`, `action`, `object`, `outcome`, `correlation_id`, and sequence or
   call/output `relationships`; the current classifier avoids tagging
   `session_meta` from non-semantic raw JSON fields, avoids promoting stream
   message duplicates, uses structured command status, and separates security
-  policy/check mentions from actual risk signals.
+  policy/check mentions and sensitive touchpoints from actual risk signals.
 - `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:

@@ -159,8 +159,9 @@ The conveyor separates mechanical first-pass work from responsibility layers.
 refs, not that the operator must reread every raw transcript. Its priority
 lanes are `manual_review_deep`, `manual_review_standard`, and
 `manual_review_sample`. `mechanics_candidate` is reserved for significant
-failure, lesson, risk, optimization, verification, or destructive-command
-signals rather than every generic command/output pair.
+failure, lesson, risk, optimization, destructive-command, or failed-outcome
+signals rather than every generic command/output pair or every successful
+verification command.
 
 Regenerate generated indexes from preserved raw JSONL after classifier changes:
 
