@@ -123,6 +123,15 @@ python3 scripts/aoa_session_memory.py audit \
 the local kernel is healthy but the end-to-end objective still has remaining
 gates.
 
+Stress-test a large archive without opening bulk raw material:
+
+```bash
+python3 scripts/aoa_session_memory.py stress-pass latest \
+  --aoa-root /path/to/workspace/.aoa \
+  --compactions 100 \
+  --write
+```
+
 Export a clean portable bundle without session archives:
 
 ```bash

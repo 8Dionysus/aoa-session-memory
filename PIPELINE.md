@@ -139,6 +139,11 @@ Real Codex raw transcripts may express a compaction boundary as:
 - `{"type": "event_msg", "payload": {"type": "context_compacted"}}`
 - `turn_context` payloads with a non-empty compaction summary
 
+Treat the adjacent `compacted` -> post-compact `turn_context` / `token_count`
+-> `context_compacted` marker sequence as one logical compaction boundary.
+Keep those raw events in the same closing segment. Do not split them into
+marker-only microsegments.
+
 Do not create semantic micro-shards at the preservation layer. Semantic
 extraction belongs to distillation.
 
@@ -169,11 +174,27 @@ Show a session:
 python3 scripts/aoa_session_memory.py show latest --aoa-root .
 ```
 
+`show` bounds segment lists by default. Use `--full` only when the full
+manifest payload is intentionally needed.
+
 Create a rehydration packet:
 
 ```bash
 python3 scripts/aoa_session_memory.py rehydrate latest --aoa-root .
 ```
+
+Run a focused stress pass over the first 100 compaction-closing intervals:
+
+```bash
+python3 scripts/aoa_session_memory.py stress-pass latest \
+  --aoa-root . \
+  --compactions 100 \
+  --write
+```
+
+`stress-pass` writes the complete JSON/Markdown artifact when `--write` is
+set and keeps stdout bounded by default. Use `--full` only for deliberate
+complete JSON output.
 
 Create a provisional first-pass distillation map:
 
@@ -338,6 +359,7 @@ python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
+python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
 python3 scripts/aoa_session_memory.py export-bundle --target-dir /tmp/aoa-session-memory-bundle --source-aoa-root . --force
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --check-live-hooks --check-codex-grounding
 python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa

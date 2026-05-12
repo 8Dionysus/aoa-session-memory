@@ -1216,16 +1216,63 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     )
 
 
+def event_msg_type(event: RawEvent) -> str:
+    parsed = event.parsed
+    if not isinstance(parsed, dict):
+        return ""
+    payload = parsed.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("type") or "")
+
+
+def compacted_event_cluster_end(events: list[RawEvent], start_index: int) -> int:
+    event = events[start_index]
+    if event.source_type != "compacted":
+        return start_index
+    end_index = start_index
+    search_limit = min(len(events), start_index + 12)
+    idx = start_index + 1
+    while idx < search_limit:
+        candidate = events[idx]
+        if candidate.source_type == "turn_context":
+            end_index = idx
+            idx += 1
+            continue
+        if candidate.source_type == "event_msg" and event_msg_type(candidate) == "token_count":
+            end_index = idx
+            idx += 1
+            continue
+        if candidate.source_type == "event_msg" and event_msg_type(candidate) == "context_compacted":
+            return idx
+        break
+    return end_index
+
+
+def compaction_boundary_groups(events: list[RawEvent]) -> list[tuple[int, int]]:
+    groups: list[tuple[int, int]] = []
+    idx = 0
+    while idx < len(events):
+        event = events[idx]
+        if not event.compaction_boundary:
+            idx += 1
+            continue
+        end_index = compacted_event_cluster_end(events, idx)
+        groups.append((idx, end_index))
+        idx = end_index + 1
+    return groups
+
+
 def segment_ranges(events: list[RawEvent]) -> list[tuple[int, int, str]]:
     if not events:
         return []
-    boundary_indexes = [idx for idx, event in enumerate(events) if event.compaction_boundary]
+    boundary_groups = compaction_boundary_groups(events)
     ranges: list[tuple[int, int, str]] = []
     start = 0
-    for segment_no, boundary_index in enumerate(boundary_indexes):
+    for segment_no, (_boundary_start, boundary_end) in enumerate(boundary_groups):
         role = "initial-to-compaction" if segment_no == 0 else "compaction-to-compaction"
-        ranges.append((start, boundary_index + 1, role))
-        start = boundary_index + 1
+        ranges.append((start, boundary_end + 1, role))
+        start = boundary_end + 1
     if start < len(events):
         role = "initial-to-latest" if not ranges else "compaction-to-latest"
         ranges.append((start, len(events), role))
@@ -1867,14 +1914,51 @@ Always read:
     )
 
 
-def session_source(event: dict[str, Any], transcript_path: Path | None) -> dict[str, Any]:
-    return {
+def hook_source_metadata(session_dir: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    events_path = session_dir / "hooks" / "events.jsonl"
+    if not events_path.exists():
+        return metadata
+    with events_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event = row.get("event")
+            if not isinstance(event, dict):
+                continue
+            for key in ("cwd", "model", "permission_mode"):
+                value = event.get(key)
+                if value:
+                    metadata[key] = value
+            if event.get("turn_id"):
+                metadata["last_turn_id"] = event.get("turn_id")
+    return metadata
+
+
+def session_source(
+    event: dict[str, Any],
+    transcript_path: Path | None,
+    *,
+    existing_source: dict[str, Any] | None = None,
+    hook_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = {
         "transcript_path": str(transcript_path) if transcript_path else None,
         "cwd": event.get("cwd"),
         "model": event.get("model"),
         "permission_mode": event.get("permission_mode"),
         "last_turn_id": event.get("turn_id"),
     }
+    for key in ("cwd", "model", "permission_mode", "last_turn_id"):
+        if source.get(key):
+            continue
+        for fallback in (hook_source, existing_source):
+            if isinstance(fallback, dict) and fallback.get(key):
+                source[key] = fallback.get(key)
+                break
+    return source
 
 
 def sync_session_from_transcript(
@@ -1909,6 +1993,13 @@ def sync_session_from_transcript(
     raw_dir = session_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     write_session_agents(session_dir)
+    existing_source = existing.get("source") if isinstance(existing.get("source"), dict) else {}
+    source_payload = session_source(
+        event,
+        transcript_path,
+        existing_source=existing_source,
+        hook_source=hook_source_metadata(session_dir),
+    )
 
     raw_path = raw_dir / "session.raw.jsonl"
     shutil.copy2(transcript_path, raw_path)
@@ -1929,7 +2020,7 @@ def sync_session_from_transcript(
         "session_title": display["title"],
         "created_at": created_at,
         "updated_at": now,
-        "source": session_source(event, transcript_path),
+        "source": source_payload,
         "archive_status": "indexed",
         "distillation_status": existing.get("distillation_status", "raw_archived"),
         "distillation_iteration": int(existing.get("distillation_iteration", 0) or 0),
@@ -2641,18 +2732,46 @@ def command_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_show(args: argparse.Namespace) -> int:
-    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
-    record = resolve_session_record(root, args.session)
+def bounded_index_document(document: dict[str, Any], *, max_segments: int, full: bool) -> dict[str, Any]:
+    if full:
+        return document
+    bounded = {key: value for key, value in document.items() if key != "segments"}
+    segments = document.get("segments", [])
+    if isinstance(segments, list):
+        preview_count = max(0, max_segments)
+        bounded["segment_count"] = len(segments)
+        bounded["segments_preview"] = segments[:preview_count]
+        bounded["segments_truncated"] = len(segments) > preview_count
+    return bounded
+
+
+def session_show_payload(aoa_root: Path, target: str | None, *, max_segments: int = 24, full: bool = False) -> dict[str, Any]:
+    record = resolve_session_record(aoa_root, target)
     session_dir = session_dir_from_record(record)
     manifest = read_json(session_dir / "session.manifest.json", {})
     session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
-    payload = {
+    manifest_payload = bounded_index_document(manifest, max_segments=max_segments, full=full) if isinstance(manifest, dict) else manifest
+    session_index_payload = (
+        bounded_index_document(session_index, max_segments=max_segments, full=full)
+        if isinstance(session_index, dict)
+        else session_index
+    )
+    return {
         "schema_version": SCHEMA_VERSION,
         "session": record,
-        "manifest": manifest,
-        "session_index": session_index,
+        "manifest": manifest_payload,
+        "session_index": session_index_payload,
+        "show": {
+            "full": full,
+            "max_segments": None if full else max_segments,
+            "note": "segment lists are bounded by default; pass --full for complete manifest output",
+        },
     }
+
+
+def command_show(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = session_show_payload(root, args.session, max_segments=args.max_segments, full=args.full)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
@@ -2667,6 +2786,248 @@ def command_distill(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     payload = distill_session_first_pass(root, args.session, max_events_per_type=args.max_events_per_type)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def line_from_raw_ref(value: Any) -> int | None:
+    match = re.search(r"raw:line:(\d+)", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def segment_role_closes_compaction(segment: dict[str, Any]) -> bool:
+    return str(segment.get("role") or "") in {"initial-to-compaction", "compaction-to-compaction"}
+
+
+def session_stress_pass(
+    aoa_root: Path,
+    target: str | None,
+    *,
+    compaction_count: int = 100,
+    write: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    record = resolve_session_record(aoa_root, target)
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError(f"missing session manifest: {session_dir}")
+
+    segments = [segment for segment in manifest.get("segments", []) if isinstance(segment, dict)]
+    closing_segments = [segment for segment in segments if segment_role_closes_compaction(segment)]
+    selected = closing_segments[: max(0, compaction_count)]
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path") or ""))
+    raw_exists = raw_path.exists()
+
+    event_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    missing_indexes: list[str] = []
+    range_mismatches: list[dict[str, Any]] = []
+    segment_summaries: list[dict[str, Any]] = []
+    suspicious_microsegments: list[dict[str, Any]] = []
+
+    for segment in selected:
+        index_path = Path(str(segment.get("index") or ""))
+        segment_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
+        from_line = int(segment_range.get("from_line") or 0)
+        to_line = int(segment_range.get("to_line") or 0)
+        if not index_path.exists():
+            missing_indexes.append(str(index_path))
+            continue
+        segment_index = read_json(index_path, {})
+        events = segment_index.get("events", []) if isinstance(segment_index, dict) else []
+        segment_event_counts: Counter[str] = Counter()
+        segment_source_counts: Counter[str] = Counter()
+        raw_ref_lines: list[int] = []
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "RAW_EVENT")
+            source_type = str(event.get("source_type") or "")
+            event_counts[event_type] += 1
+            source_counts[source_type] += 1
+            segment_event_counts[event_type] += 1
+            segment_source_counts[source_type] += 1
+            line_no = line_from_raw_ref(event.get("raw_ref"))
+            if line_no is not None:
+                raw_ref_lines.append(line_no)
+        out_of_range = [
+            line_no
+            for line_no in raw_ref_lines
+            if (from_line and line_no < from_line) or (to_line and line_no > to_line)
+        ]
+        if out_of_range:
+            range_mismatches.append(
+                {
+                    "segment_id": segment.get("segment_id"),
+                    "index": str(index_path),
+                    "source_range": segment_range,
+                    "out_of_range_raw_lines": out_of_range[:20],
+                }
+            )
+        type_names = sorted(segment_event_counts)
+        summary = {
+            "segment_id": segment.get("segment_id"),
+            "role": segment.get("role"),
+            "event_count": segment.get("event_count"),
+            "source_range": segment_range,
+            "index": str(index_path),
+            "markdown": segment.get("markdown"),
+            "event_types": dict(sorted(segment_event_counts.items())),
+            "source_types": dict(sorted(segment_source_counts.items())),
+            "compaction_event_count": segment_event_counts.get("COMPACTION_EVENT", 0),
+        }
+        segment_summaries.append(summary)
+        if int(segment.get("event_count", 0) or 0) <= 8 and set(type_names).issubset({"COMPACTION_EVENT", "CONTEXT_STATE"}):
+            suspicious_microsegments.append(summary)
+
+    selected_positions = [segments.index(segment) for segment in selected] if selected else []
+    selected_contiguous_from_start = selected_positions == list(range(len(selected_positions)))
+    first_range = selected[0].get("source_range") if selected and isinstance(selected[0].get("source_range"), dict) else {}
+    last_range = selected[-1].get("source_range") if selected and isinstance(selected[-1].get("source_range"), dict) else {}
+    selected_span = {
+        "from_line": first_range.get("from_line"),
+        "to_line": last_range.get("to_line"),
+    }
+    checks = [
+        {"name": "raw_copy_exists", "ok": raw_exists, "detail": str(raw_path)},
+        {
+            "name": "requested_compaction_count_available",
+            "ok": len(selected) == compaction_count,
+            "detail": {"requested": compaction_count, "available": len(closing_segments), "selected": len(selected)},
+        },
+        {"name": "selected_segments_are_contiguous_from_start", "ok": selected_contiguous_from_start},
+        {"name": "selected_segment_indexes_exist", "ok": not missing_indexes, "detail": missing_indexes[:20]},
+        {"name": "selected_raw_refs_stay_inside_segment_ranges", "ok": not range_mismatches, "detail": range_mismatches[:20]},
+        {"name": "selected_segments_close_compactions", "ok": all(item["compaction_event_count"] > 0 for item in segment_summaries)},
+        {
+            "name": "no_compaction_marker_microsegments",
+            "ok": not suspicious_microsegments,
+            "detail": [
+                {
+                    "segment_id": item.get("segment_id"),
+                    "event_count": item.get("event_count"),
+                    "source_range": item.get("source_range"),
+                }
+                for item in suspicious_microsegments[:20]
+            ],
+        },
+    ]
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "stress_pass_first_compactions",
+        "generated_at": now,
+        "ok": all(check["ok"] for check in checks),
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "requested_compactions": compaction_count,
+        "available_compaction_closing_segments": len(closing_segments),
+        "selected_segment_count": len(selected),
+        "selected_segment_ids": [str(segment.get("segment_id") or "") for segment in selected],
+        "selected_source_span": selected_span,
+        "selected_event_counts": dict(sorted(event_counts.items())),
+        "selected_source_counts": dict(sorted(source_counts.items())),
+        "raw": {
+            "path": str(raw_path),
+            "exists": raw_exists,
+            "bytes": raw.get("bytes"),
+            "line_count": raw.get("line_count"),
+            "sha256": raw.get("sha256"),
+        },
+        "segment_summaries": segment_summaries,
+        "checks": checks,
+    }
+
+    if write:
+        diagnostics_dir = session_dir / "diagnostics"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__stress-pass__first-{compaction_count}-compactions"
+        json_path = diagnostics_dir / f"{stem}.json"
+        markdown_path = diagnostics_dir / f"{stem}.md"
+        payload["artifacts"] = {"json": str(json_path), "markdown": str(markdown_path)}
+        write_json(json_path, payload)
+        lines = [
+            "---",
+            "aoa_artifact_type: stress_pass_first_compactions",
+            "schema_version: 1",
+            f"session_id: {manifest.get('session_id')}",
+            f"session_label: {manifest.get('session_label')}",
+            f"generated_at: {now}",
+            f"requested_compactions: {compaction_count}",
+            f"ok: {str(payload['ok']).lower()}",
+            f"index: ./{json_path.name}",
+            "---",
+            "",
+            f"# Stress Pass: First {compaction_count} Compactions",
+            "",
+            "## Source",
+            "",
+            f"- session: `{manifest.get('session_label')}`",
+            f"- raw: `{raw_path}`",
+            f"- selected segments: `{len(selected)}` of `{len(closing_segments)}` compaction-closing segments",
+            f"- selected raw span: `{selected_span.get('from_line')}..{selected_span.get('to_line')}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for check in checks:
+            lines.append(f"- `{check['name']}`: `{str(check['ok']).lower()}`")
+        lines.extend(["", "## Event Counts", ""])
+        for event_type, count in sorted(event_counts.items()):
+            lines.append(f"- `{event_type}`: {count}")
+        lines.extend(["", "## Segment Coverage", ""])
+        for item in segment_summaries:
+            source_range = item.get("source_range") if isinstance(item.get("source_range"), dict) else {}
+            lines.append(
+                f"- `{item.get('segment_id')}` `{item.get('role')}` "
+                f"events=`{item.get('event_count')}` lines=`{source_range.get('from_line')}..{source_range.get('to_line')}` "
+                f"compaction_events=`{item.get('compaction_event_count')}`"
+            )
+        if suspicious_microsegments:
+            lines.extend(["", "## Suspicious Microsegments", ""])
+            for item in suspicious_microsegments:
+                lines.append(f"- `{item.get('segment_id')}` range=`{item.get('source_range')}` events=`{item.get('event_count')}`")
+        lines.append("")
+        markdown_path.write_text("\n".join(lines), encoding="utf-8")
+        write_json(json_path, payload)
+    return payload
+
+
+def stress_pass_print_payload(payload: dict[str, Any], *, full: bool = False, sample_segments: int = 6) -> dict[str, Any]:
+    if full:
+        return payload
+    summaries = payload.get("segment_summaries", [])
+    segment_count = len(summaries) if isinstance(summaries, list) else 0
+    sample: list[Any] = []
+    if isinstance(summaries, list) and summaries:
+        if segment_count <= sample_segments:
+            sample = summaries
+        else:
+            head_count = max(1, sample_segments // 2)
+            tail_count = max(1, sample_segments - head_count)
+            sample = summaries[:head_count] + summaries[-tail_count:]
+    compact = {key: value for key, value in payload.items() if key != "segment_summaries"}
+    selected_ids = compact.get("selected_segment_ids")
+    if isinstance(selected_ids, list) and len(selected_ids) > 24:
+        compact["selected_segment_id_count"] = len(selected_ids)
+        compact["selected_segment_ids_sample"] = selected_ids[:12] + selected_ids[-12:]
+        compact["selected_segment_ids_omitted"] = len(selected_ids) - 24
+        del compact["selected_segment_ids"]
+    compact["segment_summary_count"] = segment_count
+    compact["segment_summaries_sample"] = sample
+    compact["segment_summaries_omitted"] = max(0, segment_count - len(sample))
+    compact["print"] = {
+        "full": False,
+        "note": "segment_summaries are bounded on stdout; pass --full for complete JSON or read the written artifact",
+    }
+    return compact
+
+
+def command_stress_pass(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = session_stress_pass(root, args.session, compaction_count=args.compactions, write=args.write)
+    print(json.dumps(stress_pass_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -3019,12 +3380,14 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
         raw_path = Path(str(raw.get("path") or ""))
         segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
         boundary_count = 0
+        compaction_marker_count = 0
         source_compacted_count = 0
         context_compacted_event_count = 0
         expected_segment_count = 0
         if raw_path.exists():
             events = parse_raw_events(raw_path)
-            boundary_count = sum(1 for event in events if event.compaction_boundary)
+            boundary_count = len(compaction_boundary_groups(events))
+            compaction_marker_count = sum(1 for event in events if event.compaction_boundary)
             source_compacted_count = sum(1 for event in events if event.source_type == "compacted")
             context_compacted_event_count = sum(
                 1
@@ -3043,6 +3406,7 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
                 "archive_status": manifest.get("archive_status"),
                 "raw_exists": raw_path.exists(),
                 "compaction_boundary_count": boundary_count,
+                "compaction_marker_count": compaction_marker_count,
                 "source_compacted_count": source_compacted_count,
                 "context_compacted_event_count": context_compacted_event_count,
                 "expected_segment_count": expected_segment_count,
@@ -3405,6 +3769,8 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("session", nargs="?", default="latest")
     show.add_argument("--workspace-root")
     show.add_argument("--aoa-root")
+    show.add_argument("--max-segments", type=int, default=24, help="Maximum segment records to show unless --full is used.")
+    show.add_argument("--full", action="store_true", help="Print complete segment lists.")
     show.set_defaults(func=command_show)
 
     rehydrate = sub.add_parser("rehydrate", help="Print a compact rehydration packet for a session.")
@@ -3420,6 +3786,15 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--aoa-root")
     distill.add_argument("--max-events-per-type", type=int, default=30)
     distill.set_defaults(func=command_distill)
+
+    stress_pass = sub.add_parser("stress-pass", help="Audit the first N compaction-closing intervals for a session.")
+    stress_pass.add_argument("session", nargs="?", default="latest")
+    stress_pass.add_argument("--workspace-root")
+    stress_pass.add_argument("--aoa-root")
+    stress_pass.add_argument("--compactions", type=int, default=100)
+    stress_pass.add_argument("--write", action="store_true", help="Write JSON and Markdown diagnostics into the session archive.")
+    stress_pass.add_argument("--full", action="store_true", help="Print complete segment summaries to stdout.")
+    stress_pass.set_defaults(func=command_stress_pass)
 
     hook = sub.add_parser("hook", help="Run from a Codex hook event.")
     hook.add_argument("--event-name", required=True)

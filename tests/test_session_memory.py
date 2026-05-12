@@ -307,13 +307,93 @@ def test_real_codex_compacted_events_define_segments(tmp_path: Path) -> None:
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert [segment["role"] for segment in manifest["segments"]] == [
         "initial-to-compaction",
-        "compaction-to-compaction",
         "compaction-to-latest",
     ]
     first_index = json.loads(Path(manifest["segments"][0]["index"]).read_text(encoding="utf-8"))
-    second_index = json.loads(Path(manifest["segments"][1]["index"]).read_text(encoding="utf-8"))
-    assert "COMPACTION_EVENT" in first_index["by_type"]
-    assert "COMPACTION_EVENT" in second_index["by_type"]
+    assert first_index["source_range"] == {"from_line": 1, "to_line": 4}
+    assert first_index["by_type"]["COMPACTION_EVENT"] == ["000003", "000004"]
+
+
+def test_stress_pass_audits_first_compaction_intervals(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-14T03-00-00-session-stress.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-14T03:00:00Z", "type": "session_meta", "payload": {"id": "session-stress"}},
+            {"timestamp": "2026-05-14T03:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Stress compact intervals"}]}},
+            {"timestamp": "2026-05-14T03:00:02Z", "type": "compacted", "payload": {"replacement_history": []}},
+            {"timestamp": "2026-05-14T03:00:03Z", "type": "turn_context", "payload": {"summary": "none"}},
+            {"timestamp": "2026-05-14T03:00:04Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_count": 100}}},
+            {"timestamp": "2026-05-14T03:00:05Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-14T03:00:06Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "first interval closed"}]}},
+            {"timestamp": "2026-05-14T03:00:07Z", "type": "compacted", "payload": {"replacement_history": []}},
+            {"timestamp": "2026-05-14T03:00:08Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-14T03:00:09Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "tail"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "session-stress",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    stress = module.session_stress_pass(aoa_root, "latest", compaction_count=2, write=True)
+
+    assert stress["ok"] is True
+    assert stress["selected_segment_ids"] == ["000", "001"]
+    assert stress["selected_source_span"] == {"from_line": 1, "to_line": 9}
+    assert stress["selected_event_counts"]["COMPACTION_EVENT"] == 4
+    assert Path(stress["artifacts"]["json"]).exists()
+    assert Path(stress["artifacts"]["markdown"]).exists()
+    compact_print = module.stress_pass_print_payload(stress)
+    assert "segment_summaries" not in compact_print
+    assert compact_print["segment_summary_count"] == 2
+    assert compact_print["segment_summaries_omitted"] == 0
+
+    show = module.session_show_payload(aoa_root, "latest", max_segments=1)
+    assert show["manifest"]["segment_count"] == 3
+    assert len(show["manifest"]["segments_preview"]) == 1
+    assert show["manifest"]["segments_truncated"] is True
+    full = module.session_show_payload(aoa_root, "latest", full=True)
+    assert len(full["manifest"]["segments"]) == 3
+
+
+def test_session_source_uses_hook_metadata_for_manual_sync(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    write_jsonl(
+        session_dir / "hooks" / "events.jsonl",
+        [
+            {
+                "schema_version": 1,
+                "timestamp": "2026-05-14T04:00:00Z",
+                "hook_event_name": "Stop",
+                "event": {
+                    "cwd": "/workspace/AbyssOS",
+                    "model": "gpt-5.5",
+                    "permission_mode": "bypassPermissions",
+                    "turn_id": "turn-from-hook",
+                },
+            }
+        ],
+    )
+
+    source = module.session_source(
+        {"cwd": "/workspace/AbyssOS"},
+        tmp_path / "session.raw.jsonl",
+        hook_source=module.hook_source_metadata(session_dir),
+    )
+
+    assert source["model"] == "gpt-5.5"
+    assert source["permission_mode"] == "bypassPermissions"
+    assert source["last_turn_id"] == "turn-from-hook"
 
 
 def test_validate_pipeline_runs_end_to_end(tmp_path: Path) -> None:
