@@ -217,11 +217,28 @@ Create a provisional first-pass distillation map:
 python3 scripts/aoa_session_memory.py distill latest --aoa-root .
 ```
 
+Build a first-wave conveyor for many historical sessions:
+
+```bash
+python3 scripts/aoa_session_memory.py batch-distill \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
+This command plans by default. It separates `auto_first_pass`,
+`manual_review`, `mechanics_candidate`, and `diagnostic` lanes. Add `--apply`
+only when writing provisional first-pass distillation artifacts is intended.
+The conveyor report is written under `diagnostics/` when `--write-report` is
+set.
+
 Use the bundle skill routes for deliberate agent work:
 
 ```text
 aoa-session-memory-global-route -> top-level user router
 aoa-session-history-import      -> historical Codex JSONL batch import
+aoa-session-batch-distill       -> first-wave historical-session conveyor
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness
 aoa-session-memory-doctor       -> filesystem and live health

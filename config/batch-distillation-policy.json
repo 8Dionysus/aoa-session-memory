@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "large_session_segment_threshold": 24,
+  "huge_session_segment_threshold": 100,
+  "manual_review_event_types": [
+    "DECISION",
+    "ASSUMPTION",
+    "ERROR",
+    "OPEN_THREAD",
+    "DEAD_BRANCH",
+    "PROCESS_LESSON",
+    "SECURITY_OR_SECRET_RISK",
+    "FINAL_STATE"
+  ],
+  "mechanics_routes": [
+    "automation_macro",
+    "automation_seed",
+    "preflight_candidate",
+    "safe_runner_rule",
+    "parser_candidate",
+    "detector",
+    "regression_test",
+    "skill_amendment",
+    "playbook_patch",
+    "archive_trigger_tuning",
+    "resume_template_improvement",
+    "hook_contract_update"
+  ],
+  "auto_actions": [
+    "write_provisional_first_pass_distillation"
+  ]
+}

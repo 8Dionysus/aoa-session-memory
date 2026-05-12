@@ -132,6 +132,31 @@ What matured into repeatable action?
 
 Do not collapse these layers.
 
+## First-Wave Conveyor
+
+Historical sessions should move through a conveyor, not a blind summarizer.
+
+The first wave may do mechanical work:
+
+- classify indexed sessions into review lanes
+- count event and route signals
+- write provisional first-pass distillation artifacts
+- surface mechanics candidates for later patching
+- surface diagnostic failures before review
+
+The first wave may not do judgment work:
+
+- mark a claim as reviewed truth
+- promote a pattern into a skill
+- create automation from one raw incident
+- hide manual-review needs behind a clean status
+
+The correct conveyor shape is adaptive. If a batch reveals repeated parser
+misses, missing indexes, noisy names, hook gaps, or reusable command patterns,
+the next act is a narrow improvement to the kernel followed by tests and audit.
+The conveyor improves while it works, but every improvement remains
+inspectable.
+
 ## Raw Truth and Reviewed Truth
 
 Raw JSONL is evidence, not final truth.

@@ -39,6 +39,7 @@ Use this skill in any Codex session when the task touches:
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
 - historical Codex session import from `~/.codex/sessions`
+- first-wave batch distillation or historical session review queues
 - preparing or validating the portable `aoa-session-memory` bundle
 
 ## Procedure
@@ -63,6 +64,7 @@ Use this skill in any Codex session when the task touches:
 - Resume from archive: `aoa-session-rehydrate`
 - Provisional lesson extraction: `aoa-session-first-pass-distill`
 - Historical Codex JSONL import: `aoa-session-history-import`
+- First-wave historical-session conveyor: `aoa-session-batch-distill`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`
 - Completion readiness: `aoa-session-memory-audit`
 - Filesystem and live hook health: `aoa-session-memory-doctor`

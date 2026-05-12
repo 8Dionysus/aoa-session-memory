@@ -143,6 +143,16 @@ python3 scripts/aoa_session_memory.py import-codex-sessions \
   --write-report
 ```
 
+Build a first-wave conveyor before applying batch distillation:
+
+```bash
+python3 scripts/aoa_session_memory.py batch-distill \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
 Export a clean portable bundle without session archives:
 
 ```bash
@@ -172,7 +182,7 @@ The top-level router is `aoa-session-memory-global-route`. Install it into
 `.aoa` session-memory guidance in every Codex session. The remaining skills stay
 inside the bundle as the narrow routes for archive init, raw archiving,
 historical import, diagnostics, rehydration, first-pass distillation, stress
-checks, audit, doctor, hook trust, and compact probe work.
+checks, batch distillation, audit, doctor, hook trust, and compact probe work.
 
 ## Core Rule
 

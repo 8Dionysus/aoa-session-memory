@@ -33,6 +33,7 @@ LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
 DEFAULT_BANNED_DURABLE_NAME_TERMS = {"unknown", "misc", "tmp", "new", "old", "stuff", "placeholder"}
+BATCH_DISTILLATION_POLICY_PATH = Path("config/batch-distillation-policy.json")
 SESSION_INDEX_MARKDOWN = "SESSION.md"
 SESSION_INDEX_JSON = "session.index.json"
 LEGACY_SESSION_INDEX_MARKDOWN = "00_SESSION_INDEX.md"
@@ -68,6 +69,18 @@ EVENT_TYPE_ORDER = [
     "HOOK_EVENT",
     "RAW_EVENT",
 ]
+
+FIRST_PASS_CANDIDATE_EVENT_TYPES = {
+    "DECISION",
+    "ERROR",
+    "PROCESS_LESSON",
+    "OPTIMIZATION_CANDIDATE",
+    "DEAD_BRANCH",
+    "SECURITY_OR_SECRET_RISK",
+    "COMPACTION_EVENT",
+    "FINAL_STATE",
+    "OPEN_THREAD",
+}
 HOOK_EVENT_ORDER = ["SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop"]
 HOOK_TIMEOUTS = {
     "SessionStart": 20,
@@ -2649,17 +2662,7 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
             for route in routes:
                 route_counts[route] += 1
             importance = str(event.get("importance") or "")
-            keep = importance in {"critical", "high"} or event_type in {
-                "DECISION",
-                "ERROR",
-                "PROCESS_LESSON",
-                "OPTIMIZATION_CANDIDATE",
-                "DEAD_BRANCH",
-                "SECURITY_OR_SECRET_RISK",
-                "COMPACTION_EVENT",
-                "FINAL_STATE",
-                "OPEN_THREAD",
-            }
+            keep = importance in {"critical", "high"} or event_type in FIRST_PASS_CANDIDATE_EVENT_TYPES
             if keep and len(selected_by_type[event_type]) < max_events_per_type:
                 selected_by_type[event_type].append(
                     {
@@ -2767,6 +2770,401 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
         "candidate_count": candidate_total,
         "event_counts": dict(sorted(event_counts.items())),
     }
+
+
+def default_batch_distillation_policy() -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "large_session_segment_threshold": 24,
+        "huge_session_segment_threshold": 100,
+        "manual_review_event_types": [
+            "DECISION",
+            "ASSUMPTION",
+            "ERROR",
+            "OPEN_THREAD",
+            "DEAD_BRANCH",
+            "PROCESS_LESSON",
+            "SECURITY_OR_SECRET_RISK",
+            "FINAL_STATE",
+        ],
+        "mechanics_routes": [
+            "automation_macro",
+            "automation_seed",
+            "preflight_candidate",
+            "safe_runner_rule",
+            "parser_candidate",
+            "detector",
+            "regression_test",
+            "skill_amendment",
+            "playbook_patch",
+            "archive_trigger_tuning",
+            "resume_template_improvement",
+            "hook_contract_update",
+        ],
+        "auto_actions": ["write_provisional_first_pass_distillation"],
+    }
+
+
+def batch_distillation_policy(aoa_root: Path) -> dict[str, Any]:
+    policy = default_batch_distillation_policy()
+    configured = read_json(aoa_root / BATCH_DISTILLATION_POLICY_PATH, {})
+    if isinstance(configured, dict):
+        for key, value in configured.items():
+            if key == "schema_version":
+                continue
+            policy[key] = value
+    return policy
+
+
+def session_record_date(record: dict[str, Any]) -> str:
+    display = record.get("display") if isinstance(record.get("display"), dict) else {}
+    for value in (display.get("date"), record.get("session_label"), record.get("updated_at")):
+        if not value:
+            continue
+        match = re.search(r"(20\d{2})-([01]\d)-([0-3]\d)", str(value))
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return ""
+
+
+def session_record_sequence(record: dict[str, Any]) -> int:
+    label = str(record.get("session_label") or "")
+    match = re.match(r"20\d{2}-[01]\d-[0-3]\d__(\d{3})__", label)
+    return int(match.group(1)) if match else 0
+
+
+def chronological_session_records(
+    aoa_root: Path,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    since_date = parse_date_arg(since)
+    until_date = parse_date_arg(until)
+    records: list[dict[str, Any]] = []
+    for record in registry_sessions(aoa_root):
+        record_date = session_record_date(record)
+        if since_date and record_date < since_date:
+            continue
+        if until_date and record_date > until_date:
+            continue
+        records.append(record)
+    records.sort(
+        key=lambda item: (
+            session_record_date(item),
+            session_record_sequence(item),
+            str(item.get("session_label") or ""),
+            str(item.get("session_id") or ""),
+        )
+    )
+    return records[:limit] if limit is not None else records
+
+
+def route_map_for_distillation(aoa_root: Path) -> dict[str, list[str]]:
+    routes_config = read_json(aoa_root / "config/event-distillation-routes.json", {})
+    raw_routes = routes_config.get("routes", {}) if isinstance(routes_config, dict) else {}
+    if not isinstance(raw_routes, dict):
+        return {}
+    route_map: dict[str, list[str]] = {}
+    for event_type, routes in raw_routes.items():
+        if isinstance(routes, list):
+            route_map[str(event_type)] = [str(route) for route in routes]
+    return route_map
+
+
+def first_wave_session_profile(
+    aoa_root: Path,
+    record: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    route_map: dict[str, list[str]],
+) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    event_counts: Counter[str] = Counter()
+    route_counts: Counter[str] = Counter()
+    tag_counts: Counter[str] = Counter()
+    missing_indexes: list[str] = []
+    diagnostics: list[str] = []
+    manual_review_reasons: list[str] = []
+    mechanics_reasons: list[str] = []
+
+    if not isinstance(manifest, dict) or not manifest:
+        diagnostics.append("missing_session_manifest")
+        manifest = {}
+
+    archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "")
+    distillation_status = str(manifest.get("distillation_status") or record.get("distillation_status") or "raw_archived")
+    segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path") or "")) if raw.get("path") else None
+    raw_exists = bool(raw_path and raw_path.exists())
+
+    if archive_status != "indexed":
+        diagnostics.append(f"archive_status:{archive_status or 'missing'}")
+    if raw_path and not raw_exists:
+        diagnostics.append("raw_missing")
+    if not segments and archive_status == "indexed":
+        diagnostics.append("no_segments")
+
+    for segment in segments:
+        if not isinstance(segment, dict) or not segment.get("index"):
+            missing_indexes.append(str(segment.get("segment_id") or "unknown"))
+            continue
+        index_path = Path(str(segment["index"]))
+        if not index_path.exists():
+            missing_indexes.append(str(index_path))
+            continue
+        segment_index = read_json(index_path, {})
+        events = segment_index.get("events", []) if isinstance(segment_index, dict) else []
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "RAW_EVENT")
+            event_counts[event_type] += 1
+            for route in route_map.get(event_type, []):
+                route_counts[route] += 1
+            tags = event.get("tags", [])
+            for tag in tags if isinstance(tags, list) else []:
+                tag_counts[str(tag)] += 1
+
+    if missing_indexes:
+        diagnostics.append("missing_segment_indexes")
+
+    large_threshold = int(policy.get("large_session_segment_threshold", 24) or 24)
+    huge_threshold = int(policy.get("huge_session_segment_threshold", 100) or 100)
+    segment_count = len(segments)
+    if segment_count >= huge_threshold:
+        manual_review_reasons.append("huge_session")
+    elif segment_count >= large_threshold:
+        manual_review_reasons.append("large_session")
+
+    manual_types = [str(item) for item in policy.get("manual_review_event_types", []) if str(item)]
+    for event_type in manual_types:
+        count = event_counts.get(event_type, 0)
+        if count:
+            manual_review_reasons.append(f"{event_type}:{count}")
+
+    mechanics_routes = [str(item) for item in policy.get("mechanics_routes", []) if str(item)]
+    for route in mechanics_routes:
+        count = route_counts.get(route, 0)
+        if count:
+            mechanics_reasons.append(f"{route}:{count}")
+
+    candidate_event_count = sum(event_counts.get(event_type, 0) for event_type in FIRST_PASS_CANDIDATE_EVENT_TYPES)
+    candidate_event_count += sum(count for event_type, count in event_counts.items() if event_type and event_type not in FIRST_PASS_CANDIDATE_EVENT_TYPES and count and event_type in manual_types)
+
+    lanes: list[str] = []
+    if diagnostics:
+        lanes.append("diagnostic")
+    else:
+        lanes.append("auto_first_pass")
+    if manual_review_reasons:
+        lanes.append("manual_review")
+    if mechanics_reasons:
+        lanes.append("mechanics_candidate")
+    if not diagnostics and not manual_review_reasons and not mechanics_reasons:
+        lanes.append("low_risk_indexed")
+
+    return {
+        "session_id": record.get("session_id") or manifest.get("session_id"),
+        "session_label": record.get("session_label") or manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "session_date": session_record_date(record),
+        "archive_status": archive_status,
+        "distillation_status": distillation_status,
+        "segment_count": segment_count,
+        "event_count": sum(event_counts.values()) or int(record.get("event_count", 0) or 0),
+        "candidate_event_count": candidate_event_count,
+        "event_counts": dict(sorted(event_counts.items())),
+        "route_counts": dict(sorted(route_counts.items())),
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "raw_exists": raw_exists,
+        "missing_index_count": len(missing_indexes),
+        "missing_indexes_sample": missing_indexes[:12],
+        "diagnostics": diagnostics,
+        "manual_review_reasons": manual_review_reasons,
+        "mechanics_reasons": mechanics_reasons,
+        "lanes": lanes,
+        "auto_actions": [] if diagnostics else list(policy.get("auto_actions", [])),
+    }
+
+
+def batch_distillation_improvements(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    missing_index_sessions = [item for item in results if int(item.get("missing_index_count", 0) or 0)]
+    raw_missing_sessions = [item for item in results if "raw_missing" in item.get("diagnostics", [])]
+    no_candidate_sessions = [item for item in results if item.get("action_status") in {"planned", "distilled"} and int(item.get("candidate_event_count", 0) or 0) == 0]
+    mechanics_sessions = [item for item in results if "mechanics_candidate" in item.get("lanes", [])]
+    improvements: list[dict[str, Any]] = []
+    if missing_index_sessions:
+        improvements.append(
+            {
+                "kind": "repair",
+                "title": "Repair missing segment indexes before review",
+                "session_count": len(missing_index_sessions),
+            }
+        )
+    if raw_missing_sessions:
+        improvements.append(
+            {
+                "kind": "diagnostic",
+                "title": "Run raw-unavailable recovery before distillation",
+                "session_count": len(raw_missing_sessions),
+            }
+        )
+    if no_candidate_sessions:
+        improvements.append(
+            {
+                "kind": "classifier",
+                "title": "Improve event classification for sessions with zero first-wave candidates",
+                "session_count": len(no_candidate_sessions),
+            }
+        )
+    if mechanics_sessions:
+        improvements.append(
+            {
+                "kind": "review_queue",
+                "title": "Review mechanics candidates for possible tests, skills, hooks, or CLI changes",
+                "session_count": len(mechanics_sessions),
+            }
+        )
+    return improvements
+
+
+def batch_distill_sessions(
+    *,
+    aoa_root: Path,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    apply: bool = False,
+    force: bool = False,
+    include_distilled: bool = False,
+    write_report: bool = False,
+    max_events_per_type: int = 30,
+) -> dict[str, Any]:
+    now = utc_now()
+    policy = batch_distillation_policy(aoa_root)
+    route_map = route_map_for_distillation(aoa_root)
+    records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    counts: Counter[str] = Counter()
+    lane_counts: Counter[str] = Counter()
+    results: list[dict[str, Any]] = []
+
+    for record in records:
+        profile = first_wave_session_profile(aoa_root, record, policy=policy, route_map=route_map)
+        for lane in profile.get("lanes", []):
+            lane_counts[str(lane)] += 1
+        if profile.get("diagnostics"):
+            action_status = "diagnostic"
+        elif profile.get("distillation_status") == "first_pass_distilled" and not force and not include_distilled:
+            action_status = "skipped_distilled"
+        elif apply:
+            try:
+                distilled = distill_session_first_pass(
+                    aoa_root,
+                    str(profile.get("session_label") or profile.get("session_id") or ""),
+                    max_events_per_type=max_events_per_type,
+                )
+                action_status = "distilled"
+                profile["distillation_index"] = distilled.get("distillation_index")
+                profile["distillation_markdown"] = distilled.get("distillation_markdown")
+                profile["distilled_candidate_count"] = distilled.get("candidate_count")
+            except Exception as exc:
+                action_status = "error"
+                profile["error"] = f"{exc.__class__.__name__}: {exc}"
+        else:
+            action_status = "planned"
+        profile["action_status"] = action_status
+        counts[action_status] += 1
+        results.append(profile)
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "first_wave_batch_distillation",
+        "generated_at": now,
+        "ok": counts.get("error", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "apply": apply,
+        "force": force,
+        "include_distilled": include_distilled,
+        "selected_count": len(records),
+        "counts": dict(counts),
+        "lane_counts": dict(lane_counts),
+        "policy": policy,
+        "improvement_candidates": batch_distillation_improvements(results),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__batch-distill__first-wave"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, batch_distillation_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def batch_distillation_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# First-Wave Batch Distillation",
+        "",
+        "This report is a conveyor map, not reviewed truth.",
+        "Automatic action is limited to provisional first-pass distillation; manual review lanes remain explicit.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- aoa_root: `{payload.get('aoa_root')}`",
+        f"- since: `{payload.get('since')}`",
+        f"- until: `{payload.get('until')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
+        f"- lane_counts: `{json.dumps(payload.get('lane_counts', {}), ensure_ascii=False)}`",
+        "",
+        "## Improvement Candidates",
+        "",
+    ]
+    improvements = payload.get("improvement_candidates", [])
+    if improvements:
+        for item in improvements if isinstance(improvements, list) else []:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('kind')}` {item.get('title')} sessions=`{item.get('session_count')}`")
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Session Queue",
+            "",
+            "| action | lanes | date | session | segments | candidates | manual reasons | mechanics reasons |",
+            "| --- | --- | --- | --- | ---: | ---: | --- | --- |",
+        ]
+    )
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| {action} | {lanes} | {date} | `{session}` | {segments} | {candidates} | {manual} | {mechanics} |".format(
+                action=str(result.get("action_status") or ""),
+                lanes=", ".join(str(item) for item in result.get("lanes", [])),
+                date=str(result.get("session_date") or ""),
+                session=str(result.get("session_label") or result.get("session_id") or ""),
+                segments=str(result.get("segment_count") or 0),
+                candidates=str(result.get("candidate_event_count") or 0),
+                manual=", ".join(str(item) for item in result.get("manual_review_reasons", [])) or "",
+                mechanics=", ".join(str(item) for item in result.get("mechanics_reasons", [])) or "",
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def write_raw_unavailable_incident(
@@ -3356,6 +3754,44 @@ def import_print_payload(payload: dict[str, Any], *, full: bool = False, sample_
     return compact
 
 
+def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_label": result.get("session_label"),
+        "action_status": result.get("action_status"),
+        "lanes": result.get("lanes", []),
+        "segment_count": result.get("segment_count"),
+        "candidate_event_count": result.get("candidate_event_count"),
+        "manual_review_reasons": result.get("manual_review_reasons", [])[:8],
+        "mechanics_reasons": result.get("mechanics_reasons", [])[:8],
+        "diagnostics": result.get("diagnostics", [])[:8],
+    }
+
+
+def batch_distill_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20) -> dict[str, Any]:
+    if full:
+        return payload
+    results = payload.get("results", [])
+    result_count = len(results) if isinstance(results, list) else 0
+    sample: list[Any] = []
+    if isinstance(results, list) and results:
+        if result_count <= sample_results:
+            sample = results
+        else:
+            head_count = max(1, sample_results // 2)
+            tail_count = max(1, sample_results - head_count)
+            sample = results[:head_count] + results[-tail_count:]
+    sample = [compact_batch_distill_result(item) for item in sample if isinstance(item, dict)]
+    compact = {key: value for key, value in payload.items() if key != "results"}
+    compact["result_count"] = result_count
+    compact["results_sample"] = sample
+    compact["results_omitted"] = max(0, result_count - len(sample))
+    compact["print"] = {
+        "full": False,
+        "note": "results are bounded on stdout; pass --full or read the written report for the complete queue",
+    }
+    return compact
+
+
 def command_stress_pass(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     payload = session_stress_pass(root, args.session, compaction_count=args.compactions, write=args.write)
@@ -3410,6 +3846,25 @@ def command_import_codex_sessions(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     print(json.dumps(import_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_batch_distill(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = batch_distill_sessions(
+        aoa_root=root,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        apply=args.apply,
+        force=args.force,
+        include_distilled=args.include_distilled,
+        write_report=args.write_report,
+        max_events_per_type=args.max_events_per_type,
+    )
+    print(json.dumps(batch_distill_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -3946,6 +4401,7 @@ REQUIRED_ROOT_FILES = [
     "READINESS.md",
     "README.md",
     "NAMING.md",
+    "config/batch-distillation-policy.json",
     "config/event-distillation-routes.json",
     "config/event-taxonomy.json",
     "config/naming-policy.json",
@@ -3960,6 +4416,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-codex-hooks-status/SKILL.md",
     "skills/aoa-codex-session-segment-archive/SKILL.md",
     "skills/aoa-session-archive-init/SKILL.md",
+    "skills/aoa-session-batch-distill/SKILL.md",
     "skills/aoa-session-first-pass-distill/SKILL.md",
     "skills/aoa-session-history-import/SKILL.md",
     "skills/aoa-session-memory-audit/SKILL.md",
@@ -4171,6 +4628,21 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--aoa-root")
     distill.add_argument("--max-events-per-type", type=int, default=30)
     distill.set_defaults(func=command_distill)
+
+    batch_distill = sub.add_parser("batch-distill", help="Build a first-wave distillation conveyor across many indexed sessions.")
+    batch_distill.add_argument("--workspace-root")
+    batch_distill.add_argument("--aoa-root")
+    batch_distill.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD.")
+    batch_distill.add_argument("--since-days", type=int, help="Rolling window when --since is not provided.")
+    batch_distill.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD.")
+    batch_distill.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering.")
+    batch_distill.add_argument("--apply", action="store_true", help="Write provisional first-pass distillation artifacts. Default only plans.")
+    batch_distill.add_argument("--force", action="store_true", help="Rebuild first-pass distillation even when it already exists.")
+    batch_distill.add_argument("--include-distilled", action="store_true", help="Include already first-pass-distilled sessions in the queue.")
+    batch_distill.add_argument("--write-report", action="store_true", help="Write JSON and Markdown conveyor reports under .aoa/diagnostics.")
+    batch_distill.add_argument("--max-events-per-type", type=int, default=30)
+    batch_distill.add_argument("--full", action="store_true", help="Print complete queue results to stdout.")
+    batch_distill.set_defaults(func=command_batch_distill)
 
     stress_pass = sub.add_parser("stress-pass", help="Audit the first N compaction-closing intervals for a session.")
     stress_pass.add_argument("session", nargs="?", default="latest")

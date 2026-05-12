@@ -783,6 +783,53 @@ def test_first_pass_distillation_writes_reviewable_route_map(tmp_path: Path) -> 
     assert "raw=`raw:line:" in distillation_md
 
 
+def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    (aoa_root / "config").mkdir(parents=True, exist_ok=True)
+    (aoa_root / "config" / "event-distillation-routes.json").write_text(
+        json.dumps({"schema_version": 1, "routes": {"DECISION": ["skill_amendment"]}}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    transcript = tmp_path / "rollout-2026-05-16T00-00-00-batch-distill.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-16T00:00:00Z", "type": "session_meta", "payload": {"id": "batch-distill"}},
+            {"timestamp": "2026-05-16T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build the conveyor"}]}},
+            {"timestamp": "2026-05-16T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: first wave writes only provisional evidence maps"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "batch-distill",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    planned = module.batch_distill_sessions(aoa_root=aoa_root, since="2026-05-16", write_report=True)
+
+    assert planned["ok"] is True
+    assert planned["counts"] == {"planned": 1}
+    assert Path(planned["report_json"]).exists()
+    assert "manual_review" in planned["results"][0]["lanes"]
+    assert "mechanics_candidate" in planned["results"][0]["lanes"]
+    assert planned["results"][0]["auto_actions"] == ["write_provisional_first_pass_distillation"]
+
+    applied = module.batch_distill_sessions(aoa_root=aoa_root, since="2026-05-16", apply=True)
+
+    session_dir = aoa_root / "sessions" / "2026-05-16__001__build-the-conveyor"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert applied["counts"] == {"distilled": 1}
+    assert manifest["distillation_status"] == "first_pass_distilled"
+    assert (session_dir / "distillation" / "distillation.index.json").exists()
+
+
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     legacy_dir = aoa_root / "codex-sessions" / "legacy-session"

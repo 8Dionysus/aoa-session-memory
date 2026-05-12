@@ -27,6 +27,7 @@ Build the `.aoa` session-memory mechanism end to end:
 - Naming policy: `NAMING.md` and `config/naming-policy.json`
 - Event taxonomy: `config/event-taxonomy.json`
 - Distillation routes: `config/event-distillation-routes.json`
+- Batch distillation policy: `config/batch-distillation-policy.json`
 - Hook docs and generated example: `hooks/`
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
@@ -49,6 +50,7 @@ python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
+python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
 python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
@@ -58,7 +60,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `26 passed`
+- `.aoa` tests: `27 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -68,10 +70,15 @@ Last observed result:
   discovered `142` transcripts, imported `133`, skipped `9` already indexed
   sessions; reports:
   `diagnostics/20260512T172827Z__codex-session-import.json` and `.md`
+- `batch-distill --since 2026-04-21 --write-report`: `ok=true`, selected
+  `143` sessions, planned `139`, skipped `3` already first-pass distilled,
+  diagnostic `1`; lanes: `auto_first_pass=142`, `manual_review=122`,
+  `mechanics_candidate=135`, `low_risk_indexed=7`, `diagnostic=1`; reports:
+  `diagnostics/20260512T181921Z__batch-distill__first-wave.json` and `.md`
 - `validate`: `ok=true`
 - `codex-compact-probe --trust-hooks`: `ok=true`, live `PreCompact` and
   `PostCompact` completed and archived; latest probe raised live counts to
-  `PreCompact=3`, `PostCompact=3`
+  `PreCompact=4`, `PostCompact=4`
 - `stress-pass --compactions 100 --write`: `ok=true` on the largest archive
 - `doctor --check-live-hooks --check-user-skill --check-codex-grounding`:
   `ok=true`, no problems, no warnings
@@ -116,6 +123,7 @@ Stress-pass evidence:
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
+| Historical sessions can be split into automatic, manual, mechanics, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
 | User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
 | Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |
