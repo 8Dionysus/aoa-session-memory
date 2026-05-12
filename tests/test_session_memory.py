@@ -566,6 +566,32 @@ def test_completion_audit_reports_covered_segments_and_remaining_live_hooks(tmp_
     assert statuses["Live PreCompact and PostCompact hook receipts observed in archived sessions"] == "remaining"
 
 
+def test_completion_audit_handles_raw_unavailable_archives(tmp_path: Path) -> None:
+    workspace = tmp_path / "Workspace"
+    aoa_root = workspace / ".aoa"
+    missing = tmp_path / "missing-transcript.jsonl"
+    module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "missing-audit-session",
+            "transcript_path": str(missing),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    payload = module.completion_audit(workspace_root=workspace, aoa_root=aoa_root, check_codex=False)
+
+    unavailable = [
+        item for item in payload["archive_compaction_audit"] if item["session_id"] == "missing-audit-session"
+    ][0]
+    assert unavailable["archive_status"] == "raw_unavailable"
+    assert unavailable["raw_exists"] is False
+    assert unavailable["expected_segment_count"] == 0
+
+
 def test_first_pass_distillation_writes_reviewable_route_map(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

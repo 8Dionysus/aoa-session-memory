@@ -2816,8 +2816,9 @@ def session_stress_pass(
     closing_segments = [segment for segment in segments if segment_role_closes_compaction(segment)]
     selected = closing_segments[: max(0, compaction_count)]
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
-    raw_path = Path(str(raw.get("path") or ""))
-    raw_exists = raw_path.exists()
+    raw_value = raw.get("path")
+    raw_path = Path(str(raw_value)) if raw_value else Path()
+    raw_exists = bool(raw_value and raw_path.is_file())
 
     event_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
@@ -3377,14 +3378,16 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
         if not isinstance(manifest, dict):
             continue
         raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
-        raw_path = Path(str(raw.get("path") or ""))
+        raw_value = raw.get("path")
+        raw_path = Path(str(raw_value)) if raw_value else Path()
+        raw_exists = bool(raw_value and raw_path.is_file())
         segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
         boundary_count = 0
         compaction_marker_count = 0
         source_compacted_count = 0
         context_compacted_event_count = 0
         expected_segment_count = 0
-        if raw_path.exists():
+        if raw_exists:
             events = parse_raw_events(raw_path)
             boundary_count = len(compaction_boundary_groups(events))
             compaction_marker_count = sum(1 for event in events if event.compaction_boundary)
@@ -3404,7 +3407,7 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
                 "session_id": manifest.get("session_id"),
                 "session_label": manifest.get("session_label"),
                 "archive_status": manifest.get("archive_status"),
-                "raw_exists": raw_path.exists(),
+                "raw_exists": raw_exists,
                 "compaction_boundary_count": boundary_count,
                 "compaction_marker_count": compaction_marker_count,
                 "source_compacted_count": source_compacted_count,

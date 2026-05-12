@@ -319,6 +319,8 @@ on stdout.
 Symptom: `transcript_path` is missing, unreadable, moved, or stale.
 
 Response: write `INCIDENT.md` and `DIAGNOSTIC.json`; do not create fake memory.
+Global audit must treat this as `raw_exists=false` and skip raw parsing unless
+the raw path points to a real file.
 
 ### Duplicate Hook Receipts
 

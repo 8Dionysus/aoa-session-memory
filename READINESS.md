@@ -53,7 +53,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `19 passed`
+- `.aoa` tests: `20 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -93,6 +93,7 @@ Stress-pass evidence:
 | --- | --- |
 | Full raw transcript mirror when `transcript_path` is readable | `handle_hook_event`, `sync_session_from_transcript`, tests for raw mirror |
 | Raw unavailable is diagnostic, not fake memory | `write_raw_unavailable_incident`, raw-unavailable test |
+| `raw_unavailable` archives do not crash global audit | raw-unavailable completion-audit regression test |
 | PreCompact/PostCompact route compaction intervals | `validate`, compaction hook tests |
 | Real Codex `compacted` and `context_compacted` raw events define one logical segment boundary | rebuilt live archives, `audit`, real compact marker regression test |
 | Large-session stress pass can audit the first 100 compaction intervals without loading bulk raw into the agent context | `stress-pass --compactions 100 --write`, largest-session diagnostics |
