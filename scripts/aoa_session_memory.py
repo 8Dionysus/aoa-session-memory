@@ -257,7 +257,11 @@ def default_standalone_repo_for(aoa_root: Path) -> Path:
     if (aoa_root / ".git").exists():
         return aoa_root
     if aoa_root.name == ".aoa":
-        return aoa_root.parent / "aoa-session-memory"
+        bundled_repo = aoa_root.parent / "bundles" / "aoa-session-memory"
+        legacy_repo = aoa_root.parent / "aoa-session-memory"
+        if bundled_repo.exists() or not legacy_repo.exists():
+            return bundled_repo
+        return legacy_repo
     return aoa_root
 
 

@@ -33,6 +33,7 @@ Build the `.aoa` session-memory mechanism end to end:
 - CLI and hooks: `scripts/aoa_session_memory.py`
 - Tests: `tests/test_session_memory.py`
 - Standalone repository: `https://github.com/8Dionysus/aoa-session-memory`
+- Local standalone mirror: `/srv/AbyssOS/bundles/aoa-session-memory`
 
 ## Current Green Gates
 

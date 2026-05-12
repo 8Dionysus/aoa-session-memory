@@ -19,6 +19,22 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
 
 
+def test_default_standalone_repo_prefers_bundles_topology(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    assert module.default_standalone_repo_for(aoa_root) == workspace / "bundles" / "aoa-session-memory"
+
+    legacy_repo = workspace / "aoa-session-memory"
+    legacy_repo.mkdir()
+    assert module.default_standalone_repo_for(aoa_root) == legacy_repo
+
+    bundled_repo = workspace / "bundles" / "aoa-session-memory"
+    bundled_repo.mkdir(parents=True)
+    assert module.default_standalone_repo_for(aoa_root) == bundled_repo
+
+
 def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
