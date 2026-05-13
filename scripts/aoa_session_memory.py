@@ -4779,6 +4779,171 @@ def promotion_index_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def wave_number_from_id(wave_id: str | None) -> int | None:
+    match = re.search(r"(?:^|[-_])wave[-_]?(\d+)(?:$|[-_])", str(wave_id or "").lower())
+    return int(match.group(1)) if match else None
+
+
+def packet_wave_entry(packet_path: Path) -> dict[str, Any] | None:
+    packet = read_json(packet_path, {})
+    if not isinstance(packet, dict) or not packet:
+        return None
+    return {
+        "wave_id": str(packet.get("wave_id") or packet_path.name),
+        "wave_sequence": int(packet.get("wave_sequence", 0) or 0) or sequence_from_wave_filename(packet_path),
+        "packet": str(packet_path),
+        "markdown": str(packet_path.with_suffix(".md")),
+        "status": str(packet.get("status") or "agent_assisted_review_packet"),
+        "review_truth_status": str(packet.get("review_truth_status") or "not_reviewed_truth"),
+        "promotion_candidate_count": int(packet.get("promotion_candidate_count", 0) or 0),
+        "created_at": packet.get("created_at"),
+    }
+
+
+def sequence_from_wave_filename(path: Path) -> int:
+    match = re.match(r"^(\d{3})__", path.name)
+    return int(match.group(1)) if match else 0
+
+
+def manual_review_packet_paths(session_dir: Path) -> list[Path]:
+    review_dir = session_dir / "distillation" / "manual-review"
+    paths: list[Path] = []
+    for directory in (review_dir, review_dir / "waves"):
+        if directory.exists():
+            paths.extend(sorted(directory.glob("*__manual-review-packet.json")))
+    return sorted({path.resolve(): path for path in paths}.values(), key=lambda path: (sequence_from_wave_filename(path), path.name))
+
+
+def promotion_index_paths(session_dir: Path, manifest: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    promotion = manifest.get("promotion") if isinstance(manifest.get("promotion"), dict) else {}
+    waves = promotion.get("waves") if isinstance(promotion.get("waves"), list) else []
+    for wave in waves:
+        if isinstance(wave, dict) and wave.get("index"):
+            paths.append(Path(str(wave["index"])))
+    latest = promotion.get("latest_index")
+    if latest:
+        paths.append(Path(str(latest)))
+    legacy = session_dir / "distillation" / "promotion" / "promotion.index.json"
+    if legacy.exists():
+        paths.append(legacy)
+    wave_dir = session_dir / "distillation" / "promotion" / "waves"
+    if wave_dir.exists():
+        paths.extend(sorted(wave_dir.glob("*__promotion.index.json")))
+    unique: dict[str, Path] = {}
+    for path in paths:
+        unique[str(path)] = path
+    return sorted(unique.values(), key=lambda path: (sequence_from_wave_filename(path), path.name))
+
+
+def next_session_wave_sequence(session_dir: Path) -> int:
+    sequences = [sequence_from_wave_filename(path) for path in manual_review_packet_paths(session_dir)]
+    return max(sequences, default=0) + 1
+
+
+def next_manual_review_wave_id(aoa_root: Path) -> str:
+    max_wave = 0
+    for record in registry_sessions(aoa_root):
+        session_dir = session_dir_from_record(record)
+        for packet_path in manual_review_packet_paths(session_dir):
+            entry = packet_wave_entry(packet_path)
+            wave_no = wave_number_from_id(entry.get("wave_id") if entry else packet_path.name)
+            if wave_no is not None:
+                max_wave = max(max_wave, wave_no)
+    return f"manual-review-wave{max_wave + 1}"
+
+
+def legacy_wave_entries_from_manifest(session_dir: Path, manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    manual = manifest.get("manual_review") if isinstance(manifest.get("manual_review"), dict) else {}
+    promotion = manifest.get("promotion") if isinstance(manifest.get("promotion"), dict) else {}
+    manual_waves = [item for item in manual.get("waves", []) if isinstance(item, dict)] if isinstance(manual.get("waves"), list) else []
+    promotion_waves = [item for item in promotion.get("waves", []) if isinstance(item, dict)] if isinstance(promotion.get("waves"), list) else []
+
+    if not manual_waves:
+        latest_packet = manual.get("latest_packet")
+        if latest_packet and Path(str(latest_packet)).exists():
+            entry = packet_wave_entry(Path(str(latest_packet)))
+            if entry:
+                manual_waves.append(entry)
+    if not promotion_waves:
+        latest_index = promotion.get("latest_index")
+        if latest_index and Path(str(latest_index)).exists():
+            index = read_json(Path(str(latest_index)), {})
+            if isinstance(index, dict) and index:
+                promotion_waves.append(
+                    {
+                        "wave_id": str(index.get("wave_id") or "manual-review-wave1"),
+                        "wave_sequence": sequence_from_wave_filename(Path(str(latest_index))) or 1,
+                        "index": str(latest_index),
+                        "markdown": str(Path(str(latest_index)).with_suffix(".md")),
+                        "status": str(index.get("status") or "promotion_candidates_unreviewed"),
+                        "candidate_count": int(index.get("candidate_count", 0) or 0),
+                        "promoted_claim_count": int(index.get("promoted_claim_count", 0) or 0),
+                        "created_at": index.get("created_at"),
+                    }
+                )
+    return manual_waves, promotion_waves
+
+
+def review_index_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Review Wave Index",
+        "",
+        "This index keeps review waves open and append-only. It is not reviewed truth.",
+        "",
+        f"- session: `{payload.get('session_label')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- manual_wave_count: `{payload.get('manual_wave_count')}`",
+        f"- promotion_wave_count: `{payload.get('promotion_wave_count')}`",
+        f"- promoted_claim_count: `{payload.get('promoted_claim_count')}`",
+        "",
+        "## Manual Review Waves",
+        "",
+        "| wave | status | packet | candidates |",
+        "| --- | --- | --- | ---: |",
+    ]
+    for wave in payload.get("manual_review_waves", []) if isinstance(payload.get("manual_review_waves"), list) else []:
+        if isinstance(wave, dict):
+            lines.append(
+                f"| `{wave.get('wave_id')}` | `{wave.get('status')}` | `{wave.get('packet')}` | {wave.get('promotion_candidate_count', 0)} |"
+            )
+    lines.extend(["", "## Promotion Waves", "", "| wave | status | index | candidates | promoted |", "| --- | --- | --- | ---: | ---: |"])
+    for wave in payload.get("promotion_waves", []) if isinstance(payload.get("promotion_waves"), list) else []:
+        if isinstance(wave, dict):
+            lines.append(
+                f"| `{wave.get('wave_id')}` | `{wave.get('status')}` | `{wave.get('index')}` | {wave.get('candidate_count', 0)} | {wave.get('promoted_claim_count', 0)} |"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_review_wave_index(session_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    manual = manifest.get("manual_review") if isinstance(manifest.get("manual_review"), dict) else {}
+    promotion = manifest.get("promotion") if isinstance(manifest.get("promotion"), dict) else {}
+    manual_waves = [item for item in manual.get("waves", []) if isinstance(item, dict)] if isinstance(manual.get("waves"), list) else []
+    promotion_waves = [item for item in promotion.get("waves", []) if isinstance(item, dict)] if isinstance(promotion.get("waves"), list) else []
+    promoted = sum(int(item.get("promoted_claim_count", 0) or 0) for item in promotion_waves if isinstance(item, dict))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "review_wave_index",
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "updated_at": utc_now(),
+        "status": "open_for_future_passes",
+        "review_truth_status": "not_reviewed_truth",
+        "manual_wave_count": len(manual_waves),
+        "promotion_wave_count": len(promotion_waves),
+        "promoted_claim_count": promoted,
+        "manual_review_waves": manual_waves,
+        "promotion_waves": promotion_waves,
+    }
+    index_json = session_dir / "distillation" / "review.index.json"
+    index_md = session_dir / "distillation" / "review.index.md"
+    write_json(index_json, payload)
+    write_markdown(index_md, review_index_markdown(payload))
+    return {"latest_index": str(index_json), "latest_markdown": str(index_md), "status": payload["status"]}
+
+
 def write_manual_review_packet(
     aoa_root: Path,
     profile: dict[str, Any],
@@ -4797,8 +4962,12 @@ def write_manual_review_packet(
     candidates = promotion_candidates_from_review_events(review_events)
     review_dir = session_dir / "distillation" / "manual-review"
     promotion_dir = session_dir / "distillation" / "promotion"
-    review_dir.mkdir(parents=True, exist_ok=True)
-    promotion_dir.mkdir(parents=True, exist_ok=True)
+    review_waves_dir = review_dir / "waves"
+    promotion_waves_dir = promotion_dir / "waves"
+    review_waves_dir.mkdir(parents=True, exist_ok=True)
+    promotion_waves_dir.mkdir(parents=True, exist_ok=True)
+    wave_sequence = next_session_wave_sequence(session_dir)
+    wave_slug = safe_slug(wave_id)
 
     packet = {
         "schema_version": SCHEMA_VERSION,
@@ -4807,7 +4976,9 @@ def write_manual_review_packet(
         "session_label": manifest.get("session_label"),
         "created_at": now,
         "wave_id": wave_id,
+        "wave_sequence": wave_sequence,
         "status": "agent_assisted_review_packet",
+        "open_status": "open_for_future_passes",
         "review_truth_status": "not_reviewed_truth",
         "operator_review_required": True,
         "manual_review_priority": profile.get("manual_review_priority"),
@@ -4818,10 +4989,16 @@ def write_manual_review_packet(
         "review_events": review_events,
         "promotion_candidate_count": len(candidates),
     }
-    packet_json = review_dir / f"001__{wave_id}__manual-review-packet.json"
-    packet_md = review_dir / f"001__{wave_id}__manual-review-packet.md"
+    packet_json = review_waves_dir / f"{wave_sequence:03d}__{wave_slug}__manual-review-packet.json"
+    packet_md = review_waves_dir / f"{wave_sequence:03d}__{wave_slug}__manual-review-packet.md"
     write_json(packet_json, packet)
     write_markdown(packet_md, manual_review_packet_markdown(packet))
+
+    for candidate in candidates:
+        candidate["wave_id"] = wave_id
+        candidate["wave_sequence"] = wave_sequence
+        candidate["review_status"] = "open"
+        candidate["closed"] = False
 
     promotion_index = {
         "schema_version": SCHEMA_VERSION,
@@ -4830,33 +5007,70 @@ def write_manual_review_packet(
         "session_label": manifest.get("session_label"),
         "created_at": now,
         "wave_id": wave_id,
+        "wave_sequence": wave_sequence,
         "status": "promotion_candidates_unreviewed",
+        "open_status": "open_for_future_passes",
         "review_truth_status": "not_reviewed_truth",
         "candidate_count": len(candidates),
         "promoted_claim_count": 0,
         "candidates": candidates,
         "source_manual_review_packet": str(packet_json),
     }
-    promotion_json = promotion_dir / "promotion.index.json"
-    promotion_md = promotion_dir / "promotion.index.md"
+    promotion_json = promotion_waves_dir / f"{wave_sequence:03d}__{wave_slug}__promotion.index.json"
+    promotion_md = promotion_waves_dir / f"{wave_sequence:03d}__{wave_slug}__promotion.index.md"
     write_json(promotion_json, promotion_index)
     write_markdown(promotion_md, promotion_index_markdown(promotion_index))
 
-    manifest["review_status"] = "manual_review_wave1_packet_ready"
+    existing_manual_waves, existing_promotion_waves = legacy_wave_entries_from_manifest(session_dir, manifest)
+    manual_entry = {
+        "wave_id": wave_id,
+        "wave_sequence": wave_sequence,
+        "packet": str(packet_json),
+        "markdown": str(packet_md),
+        "status": "agent_assisted_review_packet",
+        "review_truth_status": "not_reviewed_truth",
+        "promotion_candidate_count": len(candidates),
+        "created_at": now,
+    }
+    promotion_entry = {
+        "wave_id": wave_id,
+        "wave_sequence": wave_sequence,
+        "index": str(promotion_json),
+        "markdown": str(promotion_md),
+        "status": "promotion_candidates_unreviewed",
+        "candidate_count": len(candidates),
+        "promoted_claim_count": 0,
+        "created_at": now,
+    }
+    manual_waves = [item for item in existing_manual_waves if str(item.get("packet")) != str(packet_json)]
+    promotion_waves = [item for item in existing_promotion_waves if str(item.get("index")) != str(promotion_json)]
+    manual_waves.append(manual_entry)
+    promotion_waves.append(promotion_entry)
+
+    manifest["review_status"] = "manual_review_open"
     manifest["manual_review"] = {
         "latest_packet": str(packet_json),
         "latest_markdown": str(packet_md),
         "wave_id": wave_id,
+        "latest_wave_id": wave_id,
+        "wave_count": len(manual_waves),
         "review_truth_status": "not_reviewed_truth",
+        "open_status": "open_for_future_passes",
         "promotion_candidate_count": len(candidates),
+        "waves": manual_waves,
     }
     manifest["promotion"] = {
         "latest_index": str(promotion_json),
         "latest_markdown": str(promotion_md),
         "status": "promotion_candidates_unreviewed",
+        "open_status": "open_for_future_passes",
         "promoted_claim_count": 0,
         "candidate_count": len(candidates),
+        "latest_wave_id": wave_id,
+        "wave_count": len(promotion_waves),
+        "waves": promotion_waves,
     }
+    manifest["review_index"] = write_review_wave_index(session_dir, manifest)
     manifest["updated_at"] = now
     update_session_status_files(session_dir, manifest)
     return {
@@ -4864,6 +5078,9 @@ def write_manual_review_packet(
         "session_label": manifest.get("session_label"),
         "session_dir": str(session_dir),
         "status": "packet_written",
+        "wave_id": wave_id,
+        "wave_sequence": wave_sequence,
+        "review_open_status": "open_for_future_passes",
         "manual_review_priority": profile.get("manual_review_priority"),
         "manual_review_score": profile.get("manual_review_score"),
         "manual_review_reasons": profile.get("manual_review_reasons", []),
@@ -4873,6 +5090,8 @@ def write_manual_review_packet(
         "promotion_index": str(promotion_json),
         "promotion_markdown": str(promotion_md),
         "promotion_candidate_count": len(candidates),
+        "manual_review_wave_count": len(manual_waves),
+        "promotion_wave_count": len(promotion_waves),
     }
 
 
@@ -4891,9 +5110,10 @@ def manual_review_wave(
     apply: bool = False,
     write_report: bool = False,
     max_events_per_type: int = 20,
+    wave_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
-    wave_id = "manual-review-wave1"
+    wave_id = wave_id or next_manual_review_wave_id(aoa_root)
     policy = batch_distillation_policy(aoa_root)
     route_map = route_map_for_distillation(aoa_root)
     records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
@@ -4933,6 +5153,8 @@ def manual_review_wave(
                 "session_label": profile.get("session_label"),
                 "session_dir": profile.get("session_dir"),
                 "status": "planned",
+                "wave_id": wave_id,
+                "review_open_status": "open_for_future_passes",
                 "manual_review_priority": profile.get("manual_review_priority"),
                 "manual_review_score": profile.get("manual_review_score"),
                 "manual_review_reasons": profile.get("manual_review_reasons", []),
@@ -4952,6 +5174,7 @@ def manual_review_wave(
         "until": until,
         "limit": limit,
         "priority": priority,
+        "wave_id": wave_id,
         "apply": apply,
         "selected_count": len(selected),
         "counts": dict(counts),
@@ -4960,7 +5183,7 @@ def manual_review_wave(
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{compact_stamp()}__manual-review-wave1"
+        stem = f"{compact_stamp()}__{safe_slug(wave_id)}"
         report_json = diagnostics_dir / f"{stem}.json"
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
@@ -4972,11 +5195,12 @@ def manual_review_wave(
 
 def manual_review_wave_markdown(payload: dict[str, Any]) -> str:
     lines = [
-        "# Manual Review Wave 1",
+        "# Manual Review Wave",
         "",
         "This is a review packet queue. It does not promote reviewed truth.",
         "",
         f"- generated_at: `{payload.get('generated_at')}`",
+        f"- wave_id: `{payload.get('wave_id')}`",
         f"- priority: `{payload.get('priority')}`",
         f"- apply: `{payload.get('apply')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
@@ -5014,35 +5238,69 @@ def build_promotion_review_layer(
     results: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()
     candidate_total = 0
+    raw_candidate_total = 0
     promoted_total = 0
     for record in records:
         session_dir = session_dir_from_record(record)
         manifest = read_json(session_dir / "session.manifest.json", {})
         if not isinstance(manifest, dict):
             continue
-        promotion = manifest.get("promotion") if isinstance(manifest.get("promotion"), dict) else {}
-        index_path_value = promotion.get("latest_index")
-        if not index_path_value:
+        index_paths = [path for path in promotion_index_paths(session_dir, manifest) if path.exists()]
+        if not index_paths:
             continue
-        index_path = Path(str(index_path_value))
-        index = read_json(index_path, {})
-        if not isinstance(index, dict) or not index:
-            status_counts["missing_index"] += 1
-            continue
-        candidate_count = int(index.get("candidate_count", 0) or 0)
-        promoted_count = int(index.get("promoted_claim_count", 0) or 0)
+        candidate_by_id: dict[str, dict[str, Any]] = {}
+        promoted_count = 0
+        statuses: Counter[str] = Counter()
+        for index_path in index_paths:
+            index = read_json(index_path, {})
+            if not isinstance(index, dict) or not index:
+                status_counts["missing_index"] += 1
+                continue
+            status = str(index.get("status") or "unknown")
+            statuses[status] += 1
+            status_counts[status] += 1
+            promoted_count += int(index.get("promoted_claim_count", 0) or 0)
+            for candidate in index.get("candidates", []) if isinstance(index.get("candidates"), list) else []:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_id = str(candidate.get("candidate_id") or "")
+                if not candidate_id:
+                    continue
+                existing = candidate_by_id.setdefault(
+                    candidate_id,
+                    {
+                        "candidate_id": candidate_id,
+                        "status": candidate.get("status"),
+                        "event_type": candidate.get("event_type"),
+                        "action": candidate.get("action"),
+                        "title": candidate.get("title"),
+                        "seen_in_waves": [],
+                        "latest_wave_id": None,
+                        "latest_index": str(index_path),
+                    },
+                )
+                wave_id = str(index.get("wave_id") or candidate.get("wave_id") or "")
+                if wave_id and wave_id not in existing["seen_in_waves"]:
+                    existing["seen_in_waves"].append(wave_id)
+                existing["latest_wave_id"] = wave_id or existing.get("latest_wave_id")
+                existing["latest_index"] = str(index_path)
+        candidate_count = len(candidate_by_id)
+        raw_candidate_count = sum(len(item.get("seen_in_waves", [])) or 1 for item in candidate_by_id.values())
         candidate_total += candidate_count
+        raw_candidate_total += raw_candidate_count
         promoted_total += promoted_count
-        status = str(index.get("status") or "unknown")
-        status_counts[status] += 1
         results.append(
             {
                 "session_id": manifest.get("session_id"),
                 "session_label": manifest.get("session_label"),
                 "session_dir": str(session_dir),
-                "promotion_index": str(index_path),
-                "status": status,
+                "promotion_index": str(index_paths[-1]),
+                "promotion_indexes": [str(path) for path in index_paths],
+                "status": "promotion_candidates_open",
+                "status_counts": dict(statuses),
+                "wave_count": len(index_paths),
                 "candidate_count": candidate_count,
+                "raw_candidate_count": raw_candidate_count,
                 "promoted_claim_count": promoted_count,
             }
         )
@@ -5057,6 +5315,7 @@ def build_promotion_review_layer(
         "limit": limit,
         "selected_count": len(results),
         "candidate_count": candidate_total,
+        "raw_candidate_count": raw_candidate_total,
         "promoted_claim_count": promoted_total,
         "status_counts": dict(status_counts),
         "results": results,
@@ -5083,20 +5342,23 @@ def promotion_review_layer_markdown(payload: dict[str, Any]) -> str:
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- candidate_count: `{payload.get('candidate_count')}`",
+        f"- raw_candidate_count: `{payload.get('raw_candidate_count')}`",
         f"- promoted_claim_count: `{payload.get('promoted_claim_count')}`",
         f"- status_counts: `{json.dumps(payload.get('status_counts', {}), ensure_ascii=False)}`",
         "",
-        "| status | session | candidates | promoted | index |",
-        "| --- | --- | ---: | ---: | --- |",
+        "| status | session | waves | candidates | raw candidates | promoted | index |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
         if not isinstance(result, dict):
             continue
         lines.append(
-            "| {status} | `{session}` | {candidates} | {promoted} | `{index}` |".format(
+            "| {status} | `{session}` | {waves} | {candidates} | {raw_candidates} | {promoted} | `{index}` |".format(
                 status=str(result.get("status") or ""),
                 session=str(result.get("session_label") or result.get("session_id") or ""),
+                waves=str(result.get("wave_count") or 0),
                 candidates=str(result.get("candidate_count") or 0),
+                raw_candidates=str(result.get("raw_candidate_count") or 0),
                 promoted=str(result.get("promoted_claim_count") or 0),
                 index=str(result.get("promotion_index") or ""),
             )
@@ -5821,6 +6083,9 @@ def compact_manual_review_result(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_label": result.get("session_label"),
         "status": result.get("status"),
+        "wave_id": result.get("wave_id"),
+        "wave_sequence": result.get("wave_sequence"),
+        "review_open_status": result.get("review_open_status"),
         "manual_review_priority": result.get("manual_review_priority"),
         "manual_review_score": result.get("manual_review_score"),
         "manual_review_reasons": result.get("manual_review_reasons", [])[:8],
@@ -5832,6 +6097,8 @@ def compact_manual_review_result(result: dict[str, Any]) -> dict[str, Any]:
         "manual_review_packet": result.get("manual_review_packet"),
         "promotion_index": result.get("promotion_index"),
         "promotion_candidate_count": result.get("promotion_candidate_count"),
+        "manual_review_wave_count": result.get("manual_review_wave_count"),
+        "promotion_wave_count": result.get("promotion_wave_count"),
         "diagnostics": result.get("diagnostics", [])[:8],
     }
 
@@ -5985,6 +6252,7 @@ def command_manual_review(args: argparse.Namespace) -> int:
         apply=args.apply,
         write_report=args.write_report,
         max_events_per_type=args.max_events_per_type,
+        wave_id=args.wave_id,
     )
     print(
         json.dumps(
@@ -6825,6 +7093,7 @@ def build_parser() -> argparse.ArgumentParser:
     manual_review.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering.")
     manual_review.add_argument("--priority", choices=["sample", "standard", "deep"], default="deep", help="Minimum manual review priority to packetize.")
     manual_review.add_argument("--apply", action="store_true", help="Write manual review packets and promotion indexes. Default only plans.")
+    manual_review.add_argument("--wave-id", help="Explicit append-only wave id. Defaults to the next manual-review-waveN.")
     manual_review.add_argument("--write-report", action="store_true", help="Write JSON and Markdown wave reports under .aoa/diagnostics.")
     manual_review.add_argument("--max-events-per-type", type=int, default=20)
     manual_review.add_argument("--full", action="store_true", help="Print complete manual-review results to stdout.")

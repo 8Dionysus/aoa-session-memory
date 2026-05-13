@@ -180,6 +180,11 @@ The promotion layer may queue candidates for skills, playbooks, root-cause
 notes, decisions, or automation, but every candidate remains unpromoted until a
 reviewed distillation path accepts it.
 
+Manual-review passes are append-only waves. Re-running a pass creates another
+wave, records it in the session review index, and leaves earlier packets open
+for future passes. A found candidate is indexed evidence, not a closed item.
+Only a later reviewed distillation or promotion path may close or promote it.
+
 The conveyor should not inflate responsibility signals. Stream copies of agent
 messages are evidence, but final response items carry the semantic promotion
 weight. A security policy mention is not a leak. A successful command that
