@@ -1211,21 +1211,56 @@ def test_manual_review_wave_writes_packets_and_promotion_layer(tmp_path: Path) -
 
     session_dir = aoa_root / "sessions" / "2026-05-16__001__review-this-session"
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
-    packet = json.loads((session_dir / "distillation" / "manual-review" / "001__manual-review-wave1__manual-review-packet.json").read_text(encoding="utf-8"))
-    promotion = json.loads((session_dir / "distillation" / "promotion" / "promotion.index.json").read_text(encoding="utf-8"))
+    packet_path = Path(applied["results"][0]["manual_review_packet"])
+    promotion_path = Path(applied["results"][0]["promotion_index"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    promotion = json.loads(promotion_path.read_text(encoding="utf-8"))
     assert planned["counts"] == {"planned": 1}
+    assert planned["wave_id"] == "manual-review-wave1"
     assert applied["counts"] == {"packet_written": 1}
+    assert applied["wave_id"] == "manual-review-wave1"
+    assert applied["results"][0]["wave_sequence"] == 1
     assert applied["results"][0]["manual_review_priority"] == "sample"
     assert applied["results"][0]["owner_resolution"]["status"] == "resolved"
     assert Path(applied["report_json"]).exists()
-    assert manifest["review_status"] == "manual_review_wave1_packet_ready"
+    assert manifest["review_status"] == "manual_review_open"
+    assert manifest["manual_review"]["wave_count"] == 1
+    assert manifest["promotion"]["wave_count"] == 1
+    assert manifest["review_index"]["status"] == "open_for_future_passes"
+    assert packet_path.name == "001__manual-review-wave1__manual-review-packet.json"
+    assert packet_path.parent.name == "waves"
     assert packet["review_truth_status"] == "not_reviewed_truth"
+    assert packet["open_status"] == "open_for_future_passes"
+    assert packet["wave_sequence"] == 1
     assert packet["promotion_candidate_count"] >= 2
     assert promotion["promoted_claim_count"] == 0
     assert promotion["status"] == "promotion_candidates_unreviewed"
+    assert promotion["open_status"] == "open_for_future_passes"
     assert layer["selected_count"] == 1
     assert layer["candidate_count"] == promotion["candidate_count"]
+    assert layer["raw_candidate_count"] == promotion["candidate_count"]
     assert layer["promoted_claim_count"] == 0
+
+    second = module.manual_review_wave(aoa_root=aoa_root, workspace_root=workspace, since="2026-05-16", priority="sample", apply=True)
+    second_packet_path = Path(second["results"][0]["manual_review_packet"])
+    second_promotion_path = Path(second["results"][0]["promotion_index"])
+    second_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    second_layer = module.build_promotion_review_layer(aoa_root=aoa_root, since="2026-05-16")
+
+    assert second["wave_id"] == "manual-review-wave2"
+    assert second["results"][0]["wave_sequence"] == 2
+    assert second_packet_path.name == "002__manual-review-wave2__manual-review-packet.json"
+    assert packet_path.exists()
+    assert second_packet_path.exists()
+    assert promotion_path.exists()
+    assert second_promotion_path.exists()
+    assert second_manifest["manual_review"]["wave_count"] == 2
+    assert second_manifest["promotion"]["wave_count"] == 2
+    assert (session_dir / "distillation" / "review.index.json").exists()
+    assert second_layer["selected_count"] == 1
+    assert second_layer["candidate_count"] == promotion["candidate_count"]
+    assert second_layer["raw_candidate_count"] == promotion["candidate_count"] * 2
+    assert second_layer["promoted_claim_count"] == 0
 
 
 def test_batch_distill_uses_workspace_grounding_fallback(tmp_path: Path) -> None:

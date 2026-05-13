@@ -50,10 +50,14 @@ python3 scripts/aoa_session_memory.py promotion-review \
 ## Rules
 
 - Manual-review packets are review surfaces, not reviewed truth.
+- Manual-review applies are append-only waves. Re-run only when another layer
+  is intended, and keep prior packets open for future passes.
+- Use `--wave-id` when the operator needs a semantic wave name; otherwise let
+  the command choose the next `manual-review-waveN`.
 - Promotion indexes may queue candidates, but `promoted_claim_count` must stay
   `0` until reviewed distillation accepts a claim.
+- A promotion candidate is indexed evidence, not a closed item.
 - Use `owner_resolution` before reading project-specific evidence. If it is
   `ambiguous`, `unresolved`, or `fallback_only`, do not promote
   project-specific claims.
 - Use packet evidence refs and segment indexes before opening large raw JSONL.
-

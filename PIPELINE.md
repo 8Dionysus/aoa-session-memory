@@ -288,6 +288,12 @@ python3 scripts/aoa_session_memory.py manual-review \
   --write-report
 ```
 
+Manual-review apply is append-only. The first apply writes
+`manual-review-wave1`; later applies choose the next `manual-review-waveN`
+unless `--wave-id` is supplied. Each session keeps all waves in its manifest and
+`distillation/review.index.*`, and every packet remains
+`open_for_future_passes` until a reviewed promotion/distillation path closes it.
+
 Then aggregate promotion candidates without promoting them:
 
 ```bash

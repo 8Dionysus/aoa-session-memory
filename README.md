@@ -189,6 +189,11 @@ python3 scripts/aoa_session_memory.py manual-review \
   --write-report
 ```
 
+Manual-review applies are append-only waves. Re-running the command writes the
+next `manual-review-waveN` unless `--wave-id` is supplied. The session manifest
+and `distillation/review.index.*` keep every wave open for later passes, so a
+candidate is indexed without being treated as closed or reviewed truth.
+
 Aggregate unreviewed promotion candidates without promoting them:
 
 ```bash
