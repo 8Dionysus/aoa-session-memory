@@ -22,7 +22,7 @@ active context.
 
 ## Procedure
 
-1. Read `AGENTS.md`, `DESIGN.md`, and `PIPELINE.md`.
+1. Read `AGENTS.md`, `DESIGN.md`, `DESIGN.AGENTS.md`, and `PIPELINE.md`.
 2. Resolve the target session from `session-registry.json`; default to
    `latest` only when the user did not name a session.
 3. Inspect `session.manifest.json` and segment indexes before opening bulk

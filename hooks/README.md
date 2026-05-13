@@ -69,12 +69,16 @@ python3 .aoa/scripts/aoa_session_memory.py codex-compact-probe \
 
 - Hooks are fail-open.
 - Raw transcript unavailability writes `INCIDENT.md` and `DIAGNOSTIC.json`.
-- SessionStart, PreCompact, PostCompact, and Stop preserve or refresh the raw
-  transcript and segment indexes when `transcript_path` is available.
+- SessionStart may refresh the raw transcript and indexes when
+  `transcript_path` is available.
+- PreCompact and PostCompact preserve the hook receipt and mirror raw
+  transcript state by default, then defer segment/index regeneration.
+- Stop may full-sync small transcripts, but mirrors raw and defers indexing
+  once the transcript is over `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES`.
 - UserPromptSubmit records the hook event by default, but does not run the full
   transcript sync unless `AOA_SESSION_MEMORY_FULL_PROMPT_SYNC=1` is set.
-- PreCompact and PostCompact return only schema-valid Codex protocol fields and
-  never block compaction by default.
+- PreCompact, PostCompact, and large Stop hooks return only schema-valid Codex
+  protocol fields and must not block the active lifecycle by default.
 - Indexed sessions are stored directly under
   `sessions/YYYY-MM-DD__NNN__short-title`.
 - Distillation is not performed in hooks.

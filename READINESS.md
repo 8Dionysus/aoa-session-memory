@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-Date: 2026-05-12
+Date: 2026-05-13
 
 This file maps the current `.aoa` session-memory goal to concrete evidence.
 It is a readiness snapshot for agents, not a substitute for running the gates.
@@ -22,6 +22,7 @@ Build the `.aoa` session-memory mechanism end to end:
 ## Implemented Surfaces
 
 - Design: `DESIGN.md`
+- Agent route design: `DESIGN.AGENTS.md`
 - Operation route: `PIPELINE.md`
 - Install/export route: `INSTALL.md`
 - Naming policy: `NAMING.md` and `config/naming-policy.json`
@@ -61,7 +62,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `37 passed`
+- `.aoa` tests: `40 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -99,22 +100,41 @@ Last observed result:
 - `stress-pass --compactions 100 --write`: `ok=true` on the largest archive
 - `doctor --check-live-hooks --check-user-skill --check-codex-grounding`:
   `ok=true`, no problems, no warnings
-- `audit`: `completion_ready=true`, `remaining=[]`, `session_count=143`
+- `audit`: `completion_ready=true`, `remaining=[]`, `session_count=147`;
+  indexed archive topology has `mismatch_count=0`. The audit separates
+  deferred hook mirrors from indexed archives so `raw_mirrored_index_deferred`
+  sessions do not masquerade as complete indexed topology.
+- 2026-05-13 route-design verification: `DESIGN.AGENTS.md` is present in the
+  source root and exported bundle; `sessions/AGENTS.md` is present as the
+  archive-district route card; portable source district cards are present for
+  `config/`, `hooks/`, `schemas/`, `scripts/`, `skills/`, and `tests/`;
+  `diagnostics/AGENTS.md` is present as a live-only evidence guard; required
+  root-file checks include the portable route layers; source `doctor` is
+  `ok=true` with no problems or warnings, and the standalone mirror validates
+  as a clean bundle.
 - local workspace doctor: `ready=True`
 - local workspace hooks doctor: `ready=True`
 
-Current real compaction segmentation:
+Current real compaction segmentation, from the 2026-05-13 audit expected/actual
+segment evidence:
 
 - `2026-05-01__001__в-прошлой-сессии-мы-на-протяжении-почти-недели`:
-  `126` logical compaction boundaries, `252` raw compaction markers -> `127` segments.
-- `2026-05-06__001__files-mentioned-by-the-user-design-md`:
-  `50` logical compaction boundaries, `100` raw compaction markers -> `51` segments.
+  expected `157`, actual `157`.
+- `2026-05-06__001__codex-in-abyssos`:
+  expected `51`, actual `51`.
 - `2026-05-12__001__aoa-session-dist-exp-идея`:
-  `6` logical compaction boundaries, `12` raw compaction markers -> `7` segments.
+  expected `18`, actual `18`.
 - `2026-05-12__005__aoa-manual-compact-live-hook-probe-preserve-this`:
-  `1` logical compaction boundary, `2` raw compaction markers -> `2` segments.
+  expected `2`, actual `2`.
 - `2026-05-12__006__aoa-manual-compact-live-hook-probe-preserve-this`:
-  `1` logical compaction boundary, `2` raw compaction markers -> `2` segments.
+  expected `2`, actual `2`.
+
+Current deferred hook mirror:
+
+- `2026-05-07__001__srv-abyssos-abyss-stack-и-src-abyss-stack-нам-на`:
+  `archive_status=raw_mirrored_index_deferred`, expected after reindex `36`,
+  current actual `36`. This is a live hook-preservation state, not reviewed
+  completion of that active source session.
 
 Stress-pass evidence:
 
@@ -127,16 +147,22 @@ Stress-pass evidence:
 
 | Requirement | Evidence |
 | --- | --- |
+| Agent-facing route shape is documented separately from root law and system design | `DESIGN.AGENTS.md`, required root file checks, install/export regression test |
+| Portable source districts have local route cards before agents edit them | `config/AGENTS.md`, `hooks/AGENTS.md`, `schemas/AGENTS.md`, `scripts/AGENTS.md`, `skills/AGENTS.md`, `tests/AGENTS.md`, required root file checks |
 | Full raw transcript mirror when `transcript_path` is readable | `handle_hook_event`, `sync_session_from_transcript`, tests for raw mirror |
 | Raw unavailable is diagnostic, not fake memory | `write_raw_unavailable_incident`, raw-unavailable test |
 | `raw_unavailable` archives do not crash global audit | raw-unavailable completion-audit regression test |
-| PreCompact/PostCompact route compaction intervals | `validate`, compaction hook tests |
+| PreCompact/PostCompact and large Stop hooks stay timeout-safe by mirroring raw and deferring indexing | deferred lifecycle hook regression test, largest-transcript hook benchmark |
+| Explicit full-sync routes regenerate compaction interval indexes | manual sync regression test, `validate`, `sync`, import, reindex |
 | Real Codex `compacted` and `context_compacted` raw events define one logical segment boundary | rebuilt live archives, `audit`, real compact marker regression test |
 | Large-session stress pass can audit the first 100 compaction intervals without loading bulk raw into the agent context | `stress-pass --compactions 100 --write`, largest-session diagnostics |
 | Hook stdout is schema-limited | `codex_hook_output`, protocol-field tests |
 | UserPromptSubmit stays light by default | prompt-hook test |
 | Real Codex CLI hooks run in standalone sessions | live `codex exec` smoke sessions under `sessions/2026-05-12__002__...` and `__003__...` |
 | Session names are readable date/sequence/title labels | naming policy, relabel test |
+| Later semantic names can route agents without renaming archives or weakening raw provenance | `name-session`, scoped `semantic_names`, raw anchor regression tests |
+| Session/phase names are comparable through a lightweight root name index | `session-name-index.json`, `SESSION_NAMES.md`, scoped name index regression tests |
+| Session archives have a local route card and table of contents before agents open individual sessions | `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`, doctor checks, semantic-name and registry recovery regression tests |
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |

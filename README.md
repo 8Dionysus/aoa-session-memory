@@ -45,10 +45,22 @@ Existing Codex hooks call into this layer on:
 The hook path is fail-open. If raw session access fails, it writes an incident
 and diagnostic record instead of blocking the active Codex session.
 
+`PreCompact` and `PostCompact` stay deliberately light: they record the hook
+receipt, mirror the readable raw transcript state when available, and defer
+segment/index regeneration. `Stop` is size-bounded: small transcripts may be
+indexed immediately, while large transcripts are mirrored and left for manual
+`sync`, import, or reindex. Set `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1` or
+`AOA_SESSION_MEMORY_FULL_STOP_SYNC=1` only for deliberate debugging, not for
+normal long-session hooks. `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES` controls
+the default Stop full-sync threshold.
+
 ## Session Shape
 
 ```text
 sessions/
+  AGENTS.md
+  INDEX.md
+  index.json
   2026-05-12__001__short-title/
     AGENTS.md
     SESSION.md
@@ -71,7 +83,15 @@ directory. Codex transcript identity remains inside `session.manifest.json` as
 `session_id`. `codex-sessions/` is legacy-only and should be empty after
 migration.
 
+`sessions/AGENTS.md` is the archive-district route card.
+`sessions/INDEX.md` and `sessions/index.json` are generated archive-local
+tables of contents. They group sessions by date, list named sessions, surface
+the largest archives, and point agents to the right `SESSION.md` before they
+open heavy generated or raw material.
+
 Naming rules live in `NAMING.md` and `config/naming-policy.json`.
+
+Agent-facing route design lives in `DESIGN.AGENTS.md`.
 
 The operational route lives in `PIPELINE.md`.
 

@@ -6,8 +6,8 @@
 kernel into another workspace or preparing a clean bundle for a future
 repository.
 
-Read `DESIGN.md` and `PIPELINE.md` first. This file is about installation, not
-memory doctrine.
+Read `DESIGN.md`, `DESIGN.AGENTS.md`, and `PIPELINE.md` first. This file is
+about installation, not memory doctrine.
 
 ## Clean Bundle Export
 
@@ -20,9 +20,9 @@ python3 scripts/aoa_session_memory.py export-bundle \
   --force
 ```
 
-This writes an empty `sessions/` directory and an empty
-`session-registry.json`. It does not copy raw transcripts unless
-`--with-sessions` is explicitly used.
+This writes an empty `sessions/` archive directory with `AGENTS.md`,
+`INDEX.md`, and `index.json`, plus an empty `session-registry.json`. It does
+not copy raw transcripts unless `--with-sessions` is explicitly used.
 
 Use this path when preparing a standalone GitHub repository.
 When the target is already a Git repository, `--force` refreshes the portable
@@ -130,8 +130,8 @@ probe thread, and requires archived `PreCompact` and `PostCompact` receipts.
 - Export is clean by default.
 - Session archives and raw transcripts move only with `--with-sessions`.
 - Hook commands are generated from selected absolute roots.
-- A green `validate` proves the temporary PreCompact/PostCompact/Stop archive
-  route works.
+- A green `validate` proves the temporary PreCompact/PostCompact/Stop light
+  preservation route and the explicit full-sync archive route work.
 - A green `codex-grounding` proves the local Codex version, compact config, and
   expected hook markers are visible on this host.
 - A green `codex-hooks-status` proves native Codex hook discovery, command

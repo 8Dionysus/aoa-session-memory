@@ -29,9 +29,11 @@ before Codex session archiving starts.
 1. Read nearest `AGENTS.md`.
 2. Confirm the `.aoa` root is inside the intended workspace or explicit
    storage root.
-3. Ensure `AGENTS.md`, `DESIGN.md`, `PIPELINE.md`, `NAMING.md`, `README.md`,
-   `INSTALL.md`, `schemas/`, `config/`, `scripts/`, `skills/`, and
-   `sessions/` exist.
+3. Ensure `AGENTS.md`, `DESIGN.md`, `DESIGN.AGENTS.md`, `PIPELINE.md`,
+   `NAMING.md`, `README.md`, `INSTALL.md`, `config/AGENTS.md`,
+   `hooks/AGENTS.md`, `schemas/AGENTS.md`, `scripts/AGENTS.md`,
+   `skills/AGENTS.md`, `tests/AGENTS.md`, `sessions/`, and
+   `sessions/AGENTS.md` exist.
 4. For a new workspace, use `install --workspace-root <root>` rather than
    copying hook JSON by hand.
 5. Generate hook config with
@@ -50,7 +52,8 @@ before Codex session archiving starts.
 - `hooks-config` emits all required Codex lifecycle hooks for the selected
   roots.
 - `codex-grounding` passes on a host with Codex installed.
-- `validate` passes the temporary PreCompact/PostCompact/Stop archive run.
+- `validate` passes the temporary light-hook preservation run and explicit
+  full-sync archive run.
 - `doctor` exits successfully before any session exists.
 
 ## Stop Line

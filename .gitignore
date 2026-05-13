@@ -3,8 +3,12 @@ __pycache__/
 .pytest_cache/
 
 # Local evidence archive. Keep on disk, but do not publish as portable source.
-sessions/
+sessions/*
+!sessions/
+!sessions/AGENTS.md
 session-registry.json
+SESSION_NAMES.md
+session-name-index.json
 
 # Legacy archive root from the first prototype. Migration should empty it.
 codex-sessions/

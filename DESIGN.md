@@ -10,7 +10,7 @@ distillation report. It answers one question:
 What shape must this memory system preserve as it grows?
 
 Agents should read this file immediately after `AGENTS.md` when working inside
-`.aoa`.
+`.aoa`, then read `DESIGN.AGENTS.md` for the agent-facing route mesh.
 
 ## Design Thesis
 
@@ -42,6 +42,9 @@ Treat the Codex context window as working memory, not as the archive.
 - Segment Markdown is the readable flight recorder.
 - Segment index is the local event map.
 - Session index is the atlas.
+- The sessions directory index is the table of contents for the atlas.
+- Agent-facing design is the route law for moving through the atlas without
+  flattening its layers.
 - Distillation is later reviewed metabolism.
 - Skills and automation are mature organs, not raw memory.
 
@@ -57,6 +60,19 @@ belongs, and where it sits in the archive. Date, day-local sequence, short
 title, segment role, event type, and status are routing signals. A good agent
 will still inspect the evidence, but a good name reduces the chance that the
 first move is already wrong.
+
+There are several naming layers. The canonical archive label is the stable
+physical coordinate. A `session` semantic name is the mutable umbrella essence
+when the whole session becomes clearer than the first prompt. `phase` and
+`topic` names describe bounded processes inside the session. Semantic names
+must not be naked aliases. They carry a bridge anchor back to `session_id`, raw
+transcript provenance, raw sha256, canonical label, explicit raw refs, and
+optional coverage ranges. This keeps names useful for agents without letting
+them replace evidence.
+
+The name index is a light map, not an authority. It should help agents compare
+candidate session names and phase names before choosing a better working title.
+It must stay small enough to read before opening heavy session material.
 
 Avoid vague durable names because they create false topology:
 
@@ -235,6 +251,25 @@ importance, anchors, and raw references. An agent should be able to ask:
 The answer should be in indexes before the agent opens large raw or segment
 files.
 
+## Layer Ladder
+
+Every late-stage operation is also a quality check on the layers beneath it.
+
+Naming is the clearest pressure test. A broad session naming pass should be
+fast and accurate only when raw preservation, segmentation, indexing, registry
+sync, archive-local TOC, rehydration, and review packets are already coherent.
+If naming becomes confusing, the naming task should reveal which earlier layer
+is weak instead of hiding that weakness behind a clever title.
+
+The intended ladder is:
+
+```text
+preservation -> segmentation -> indexing -> routing -> review -> naming -> promotion
+```
+
+Each layer may send work back down the ladder. It must not pretend the lower
+layer is healthy when evidence says otherwise.
+
 ## Universal Event Ontology
 
 Every Codex session has universal motions before it has project-specific
@@ -317,6 +352,12 @@ Hooks should be minimal, schema-valid, fail-open, and biased toward preserving
 or refreshing evidence. They must not perform heavy interpretation inside the
 active Codex lifecycle unless the operator deliberately enables that mode.
 
+Compaction hooks are preservation hooks before they are indexing hooks. They
+should capture the receipt and mirror readable raw state, then allow a later
+manual rebuild, import, or reindex pass to do the heavier segment and index
+work. A hook that times out has failed its first duty, even if its intended
+work was useful.
+
 Skills should handle the work that benefits from deliberate attention:
 
 - manually rebuilding an archive from raw JSONL
@@ -335,13 +376,15 @@ When an agent enters `.aoa`, it should proceed in this order:
 
 1. Read nearest `AGENTS.md`.
 2. Read this `DESIGN.md`.
-3. Read `README.md` for current implementation shape.
-4. Read `NAMING.md` before touching paths or generated names.
-5. Read `session-registry.json` before choosing a session.
-6. Inside a session, read `AGENTS.md`, then `SESSION.md`, then
+3. Read `DESIGN.AGENTS.md` for agent-facing route shape.
+4. Read `README.md` for current implementation shape.
+5. Read `NAMING.md` before touching paths or generated names.
+6. Read `sessions/AGENTS.md`, `sessions/INDEX.md`, `SESSION_NAMES.md`, and
+   `session-registry.json` before choosing a session.
+7. Inside a session, read `AGENTS.md`, then `SESSION.md`, then
    `session.manifest.json`.
-7. Read the relevant segment index before opening a full segment.
-8. Use raw JSONL only to verify, recover, or inspect exact evidence.
+8. Read the relevant segment index before opening a full segment.
+9. Use raw JSONL only to verify, recover, or inspect exact evidence.
 
 This route keeps the agent from eating the whole archive when it only needs a
 map.
