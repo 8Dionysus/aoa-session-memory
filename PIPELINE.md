@@ -4,8 +4,8 @@
 
 `PIPELINE.md` is the operational route for the `.aoa` session-memory kernel.
 
-Read it after `DESIGN.md` when changing hooks, archive generation, indexes,
-diagnostics, rehydration, or tests.
+Read it after `DESIGN.md` and `DESIGN.AGENTS.md` when changing hooks, archive
+generation, indexes, diagnostics, rehydration, or tests.
 
 ## Current Codex Grounding
 
@@ -51,6 +51,8 @@ Codex hook event
   -> aoa_session_memory.py hook
   -> hooks/events.jsonl receipt
   -> raw transcript mirror when transcript_path is readable
+  -> light hook closeout for prompt, compaction, and large stop lifecycle hooks
+  -> full sync on manual sync, import, or reindex
   -> JSONL event classification
   -> compaction-interval segment Markdown
   -> sibling segment index JSON
@@ -95,8 +97,12 @@ Behavior:
 
 - records the hook event
 - mirrors raw when available
-- regenerates the archive from raw
+- marks segment and index regeneration as deferred by default
+- full-syncs only when `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1`
 - returns only `{"continue": true}` by default
+
+Reason: pre-compact hooks run on the active lifecycle path and must preserve
+raw state without risking a timeout on large transcripts.
 
 ### PostCompact
 
@@ -106,19 +112,34 @@ Behavior:
 
 - records the hook event
 - mirrors raw when available
-- regenerates the archive from raw
+- marks segment and index regeneration as deferred by default
+- full-syncs only when `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1`
 - returns only `{"continue": true}` by default
+
+Reason: post-compact hooks are preservation receipts. Full interval indexing
+belongs to manual `sync`, import, or reindex unless explicitly enabled for
+debugging.
 
 ### Stop
 
-Purpose: final turn-close refresh.
+Purpose: final turn-close preservation receipt.
 
 Behavior:
 
 - records the hook event
 - mirrors raw when available
-- regenerates the archive from raw
+- regenerates the archive from raw only when the transcript is under
+  `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES`
+- marks segment and index regeneration as deferred when the transcript is over
+  that threshold
+- full-syncs only when `AOA_SESSION_MEMORY_FULL_STOP_SYNC=1`
 - writes diagnostics when raw is unavailable
+- returns only `{"continue": true}` by default
+
+Reason: stop hooks often fire after the longest and noisiest part of a session.
+They must not block session closeout while parsing and indexing a very large
+transcript. The next deliberate layer for deferred sessions is manual `sync`,
+import, or reindex.
 
 ## Segment Rule
 
@@ -157,6 +178,12 @@ The session must have:
 - `session.index.json`
 - `session.manifest.json`
 - `session-registry.json`
+
+The archive directory must have:
+
+- `sessions/AGENTS.md`
+- `sessions/INDEX.md`
+- `sessions/index.json`
 
 Segment indexes must keep both the legacy event map and the universal event
 facets:

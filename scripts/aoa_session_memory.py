@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -31,6 +32,8 @@ SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
+SESSION_NAME_INDEX_JSON = "session-name-index.json"
+SESSION_NAME_INDEX_MARKDOWN = "SESSION_NAMES.md"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
 DEFAULT_BANNED_DURABLE_NAME_TERMS = {"unknown", "misc", "tmp", "new", "old", "stuff", "placeholder"}
 GENERIC_TITLE_PREFIXES = (
@@ -43,6 +46,9 @@ BATCH_DISTILLATION_POLICY_PATH = Path("config/batch-distillation-policy.json")
 DEFAULT_PROJECT_GROUNDING_FILE_NAMES = ["AGENTS.md", "DESIGN.md", "README.md"]
 SESSION_INDEX_MARKDOWN = "SESSION.md"
 SESSION_INDEX_JSON = "session.index.json"
+SESSIONS_INDEX_MARKDOWN = "INDEX.md"
+SESSIONS_INDEX_JSON = "index.json"
+SESSIONS_AGENTS_MARKDOWN = "AGENTS.md"
 LEGACY_SESSION_INDEX_MARKDOWN = "00_SESSION_INDEX.md"
 LEGACY_SESSION_INDEX_JSON = "00_SESSION_INDEX.json"
 RAW_SOURCE_JSON = "source.json"
@@ -134,6 +140,7 @@ HOOK_TIMEOUTS = {
     "PostCompact": 30,
     "Stop": 20,
 }
+DEFAULT_STOP_SYNC_MAX_BYTES = 4 * 1024 * 1024
 HOOK_STATUS_MESSAGES = {
     "SessionStart": "AoA session memory start",
     "UserPromptSubmit": "AoA session memory prompt",
@@ -155,6 +162,7 @@ PORTABLE_BUNDLE_ITEMS = [
     ".gitignore",
     "AGENTS.md",
     "DESIGN.md",
+    "DESIGN.AGENTS.md",
     "INSTALL.md",
     "NAMING.md",
     "PIPELINE.md",
@@ -827,7 +835,7 @@ def copy_portable_bundle(
             copied.append(rel_name)
 
     if include_sessions:
-        for rel_name in (str(SESSION_ROOT), REGISTRY_NAME):
+        for rel_name in (str(SESSION_ROOT), REGISTRY_NAME, SESSION_NAME_INDEX_JSON, SESSION_NAME_INDEX_MARKDOWN):
             source_path = source_aoa_root / rel_name
             target_path = target_aoa_root / rel_name
             if not source_path.exists():
@@ -842,10 +850,16 @@ def copy_portable_bundle(
             copied.append(rel_name)
     else:
         session_root = target_aoa_root / SESSION_ROOT
-        existing_sessions = session_root.exists() and any(session_root.iterdir())
+        existing_archive_dirs = session_root.exists() and any(child.is_dir() for child in session_root.iterdir())
         session_root.mkdir(parents=True, exist_ok=True)
-        if not existing_sessions:
+        if existing_archive_dirs:
+            existing_records = registry_sessions(target_aoa_root)
+            write_session_name_index(target_aoa_root, existing_records)
+            write_sessions_directory_index(target_aoa_root, existing_records)
+        else:
             write_json(target_aoa_root / REGISTRY_NAME, {"schema_version": SCHEMA_VERSION, "updated_at": utc_now(), "sessions": []})
+            write_session_name_index(target_aoa_root, [])
+            write_sessions_directory_index(target_aoa_root, [])
 
     legacy_root = target_aoa_root / LEGACY_SESSION_ROOT
     if legacy_root.exists() and not include_sessions:
@@ -1127,7 +1141,9 @@ def read_json(path: Path, default: Any) -> Any:
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -2083,6 +2099,256 @@ def display_quality(source: str | None) -> int:
     }.get(str(source or ""), 0)
 
 
+def semantic_name_slug(value: str) -> str:
+    return readable_slug(value, fallback="semantic-session-name", max_chars=80)
+
+
+def semantic_name_scope(item: dict[str, Any]) -> str:
+    scope = str(item.get("scope") or "").strip()
+    if scope in {"session", "phase", "topic", "alias"}:
+        return scope
+    kind = str(item.get("kind") or "")
+    if kind in {"session_essence", "operator_name"}:
+        return "session"
+    if kind in {"dominant_topic", "continuation_name"}:
+        return "phase"
+    return "topic"
+
+
+def semantic_name_status_for_scope(scope: str) -> str:
+    return "active" if scope == "session" else scope
+
+
+def count_file_lines(path: Path) -> int:
+    count = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            count += chunk.count(b"\n")
+    return count
+
+
+def semantic_names_payload(manifest: dict[str, Any]) -> dict[str, Any]:
+    payload = manifest.get("semantic_names")
+    if not isinstance(payload, dict):
+        return {"schema_version": SCHEMA_VERSION, "active": None, "active_session": None, "names": []}
+    names = [item for item in payload.get("names", []) if isinstance(item, dict)]
+    active = payload.get("active")
+    if not active and names:
+        active = names[0].get("slug")
+    active_session = payload.get("active_session")
+    if not active_session:
+        for item in names:
+            if semantic_name_scope(item) == "session" and item.get("status") == "active":
+                active_session = item.get("slug")
+                break
+    if not active_session and active:
+        for item in names:
+            if item.get("slug") == active and semantic_name_scope(item) == "session":
+                active_session = active
+                break
+    return {
+        "schema_version": int(payload.get("schema_version", SCHEMA_VERSION) or SCHEMA_VERSION),
+        "active": str(active) if active else None,
+        "active_session": str(active_session) if active_session else None,
+        "names": names,
+    }
+
+
+def active_semantic_name(manifest: dict[str, Any], *, scope: str | None = None) -> dict[str, Any] | None:
+    payload = semantic_names_payload(manifest)
+    active = payload.get("active_session") if scope == "session" else payload.get("active")
+    names = payload.get("names", [])
+    for item in names:
+        if item.get("slug") == active and (scope is None or semantic_name_scope(item) == scope):
+            return item
+    if scope is not None:
+        scoped = [item for item in names if semantic_name_scope(item) == scope]
+        return scoped[0] if scoped else None
+    return names[0] if names else None
+
+
+def semantic_name_summary(manifest: dict[str, Any], *, scope: str | None = None) -> dict[str, Any] | None:
+    active = active_semantic_name(manifest, scope=scope)
+    if not active:
+        return None
+    return {
+        "name": active.get("name"),
+        "slug": active.get("slug"),
+        "scope": semantic_name_scope(active),
+        "kind": active.get("kind"),
+        "status": active.get("status"),
+        "source": active.get("source"),
+    }
+
+
+def build_identity_anchor(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    verify_raw_hash: bool = False,
+) -> dict[str, Any]:
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    raw_path_value = raw.get("path") or session_dir / "raw" / "session.raw.jsonl"
+    raw_path = Path(str(raw_path_value))
+    raw_sha256 = raw.get("sha256")
+    raw_bytes = raw.get("bytes")
+    raw_line_count = raw.get("line_count")
+    verified_at: str | None = None
+    if verify_raw_hash:
+        if not raw_path.exists():
+            raise ValueError(f"raw archive is missing: {raw_path}")
+        actual_sha = sha256_file(raw_path)
+        if raw_sha256 and str(raw_sha256) != actual_sha:
+            raise ValueError(f"raw sha256 mismatch for {raw_path}")
+        raw_sha256 = actual_sha
+        raw_bytes = raw_path.stat().st_size
+        if raw_line_count is None:
+            raw_line_count = count_file_lines(raw_path)
+        verified_at = utc_now()
+    elif raw_path.exists():
+        raw_bytes = raw_bytes if raw_bytes is not None else raw_path.stat().st_size
+
+    anchor = {
+        "schema_version": SCHEMA_VERSION,
+        "session_id": manifest.get("session_id"),
+        "canonical_label": display.get("label") or manifest.get("session_label") or session_dir.name,
+        "archive_path": str(session_dir),
+        "raw_path": str(raw_path),
+        "source_transcript_path": source.get("transcript_path"),
+        "raw_sha256": raw_sha256,
+        "raw_bytes": raw_bytes,
+        "raw_line_count": raw_line_count,
+    }
+    if verified_at:
+        anchor["verified_at"] = verified_at
+    return anchor
+
+
+def semantic_name_identity_lines(manifest: dict[str, Any]) -> list[str]:
+    payload = semantic_names_payload(manifest)
+    names = payload.get("names", [])
+    if not names:
+        return []
+    active = str(payload.get("active") or "")
+    active_session = str(payload.get("active_session") or "")
+    lines = [f"- semantic_active_session: `{active_session}`"]
+    if active and active != active_session:
+        lines.append(f"- semantic_active: `{active}`")
+    for item in names:
+        status = str(item.get("status") or "")
+        kind = str(item.get("kind") or "")
+        scope = semantic_name_scope(item)
+        slug = str(item.get("slug") or "")
+        name = str(item.get("name") or "")
+        if slug == active_session:
+            prefix = "active session name"
+        elif slug == active:
+            prefix = "active semantic name"
+        else:
+            prefix = "semantic name"
+        coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+        coverage_note = str(coverage.get("note") or "")
+        coverage_suffix = f" - {coverage_note}" if coverage_note else ""
+        lines.append(f"- {prefix}: `{slug}` ({scope}, {kind}, {status}) - {name}{coverage_suffix}")
+    return lines
+
+
+def refresh_semantic_name_anchors(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    verify_raw_hash: bool = False,
+) -> None:
+    payload = semantic_names_payload(manifest)
+    names = payload.get("names", [])
+    if not names:
+        return
+    anchor = build_identity_anchor(session_dir, manifest, verify_raw_hash=verify_raw_hash)
+    refreshed_at = utc_now()
+    for item in names:
+        prior = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
+        item["anchor"] = {
+            **prior,
+            **anchor,
+            "anchored_at": prior.get("anchored_at") or item.get("created_at") or refreshed_at,
+            "refreshed_at": refreshed_at,
+        }
+    manifest["semantic_names"] = payload
+
+
+def validate_semantic_name_record(
+    manifest: dict[str, Any],
+    session_dir: Path,
+    item: dict[str, Any],
+    *,
+    banned_terms: set[str] | None = None,
+) -> list[str]:
+    problems: list[str] = []
+    name = str(item.get("name") or "").strip()
+    slug = str(item.get("slug") or "").strip()
+    scope = semantic_name_scope(item)
+    if not name:
+        problems.append("semantic_name_missing_name")
+    if not slug:
+        problems.append("semantic_name_missing_slug")
+    elif slug != semantic_name_slug(name):
+        problems.append(f"semantic_name_slug_mismatch:{slug}")
+    raw_name_terms = {term for term in re.split(r"[^\w]+", name.lower(), flags=re.UNICODE) if term}
+    bad_terms = (name_terms(slug) | raw_name_terms) & banned_terms if banned_terms else set()
+    if bad_terms:
+        problems.append(f"semantic_name_banned_terms:{sorted(bad_terms)}")
+    if scope not in {"session", "phase", "topic", "alias"}:
+        problems.append(f"semantic_name_invalid_scope:{scope}")
+    coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+    raw_ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+    evidence = item.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        problems.append(f"semantic_name_missing_evidence:{slug or name}")
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_line_count = raw.get("line_count")
+    for ref in evidence if isinstance(evidence, list) else []:
+        ref_text = str(ref)
+        match = re.fullmatch(r"raw:line:(\d+)(?:-(\d+))?", ref_text)
+        if not match:
+            problems.append(f"semantic_name_invalid_evidence_ref:{ref_text}")
+            continue
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start <= 0 or end < start:
+            problems.append(f"semantic_name_invalid_evidence_range:{ref_text}")
+        if raw_line_count is not None and end > int(raw_line_count):
+            problems.append(f"semantic_name_evidence_out_of_range:{ref_text}>{raw_line_count}")
+    for raw_range in raw_ranges:
+        if not isinstance(raw_range, dict):
+            problems.append(f"semantic_name_invalid_coverage_range:{slug or name}")
+            continue
+        start = int(raw_range.get("from_line") or 0)
+        end = int(raw_range.get("to_line") or 0)
+        if start <= 0 or end < start:
+            problems.append(f"semantic_name_invalid_coverage_range:{slug or name}")
+        if raw_line_count is not None and end > int(raw_line_count):
+            problems.append(f"semantic_name_coverage_out_of_range:{slug or name}:{end}>{raw_line_count}")
+    anchor = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
+    if not anchor:
+        problems.append(f"semantic_name_missing_anchor:{slug or name}")
+    else:
+        if anchor.get("session_id") != manifest.get("session_id"):
+            problems.append(f"semantic_name_anchor_session_mismatch:{slug or name}")
+        display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+        label = display.get("label") or manifest.get("session_label") or session_dir.name
+        if anchor.get("canonical_label") != label:
+            problems.append(f"semantic_name_anchor_label_mismatch:{slug or name}")
+        raw_path = str(raw.get("path") or session_dir / "raw" / "session.raw.jsonl")
+        if anchor.get("raw_path") != raw_path:
+            problems.append(f"semantic_name_anchor_raw_path_mismatch:{slug or name}")
+        raw_sha = raw.get("sha256")
+        if raw_sha and anchor.get("raw_sha256") and anchor.get("raw_sha256") != raw_sha:
+            problems.append(f"semantic_name_anchor_raw_sha_mismatch:{slug or name}")
+    return problems
+
+
 def transcript_probe(raw_path: Path) -> dict[str, Any]:
     sample_events = parse_raw_event_sample(raw_path, max_lines=400)
     event: dict[str, Any] = {"transcript_path": str(raw_path)}
@@ -2416,6 +2682,7 @@ def update_artifact_paths_after_move(session_dir: Path, manifest: dict[str, Any]
         write_json(raw_source_path, raw_source)
     if legacy_raw_source_path.exists():
         legacy_raw_source_path.unlink()
+    refresh_semantic_name_anchors(session_dir, manifest)
 
 
 def target_session_dir_for_display(aoa_root: Path, display: dict[str, Any]) -> Path:
@@ -2732,10 +2999,12 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     actor_counts = dict(sorted(Counter(event.actor for event in events).items()))
     outcome_counts = dict(sorted(Counter(event.outcome for event in events).items()))
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
+    semantic_names = semantic_names_payload(manifest)
     session_index_json = {
         "schema_version": SCHEMA_VERSION,
         "session_id": manifest["session_id"],
         "display": display,
+        "semantic_names": semantic_names,
         "updated_at": manifest["updated_at"],
         "archive_status": manifest["archive_status"],
         "distillation_status": manifest.get("distillation_status", "raw_archived"),
@@ -2781,6 +3050,7 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         f"- session_id: `{manifest['session_id']}`",
         f"- path: `{display.get('path', str(session_dir))}`",
         f"- source transcript: `{manifest.get('source', {}).get('transcript_path', '') if isinstance(manifest.get('source'), dict) else ''}`",
+        *semantic_name_identity_lines(manifest),
         "",
         "## Status",
         "",
@@ -2837,6 +3107,7 @@ def update_session_index_identity(session_dir: Path, manifest: dict[str, Any]) -
             session_index["display"] = display
             session_index["session_label"] = display.get("label")
             session_index["session_title"] = display.get("title")
+            session_index["semantic_names"] = semantic_names_payload(manifest)
             session_index["segments"] = manifest.get("segments", [])
             write_json(json_path, session_index)
     if legacy_json_path.exists():
@@ -2861,6 +3132,7 @@ def update_session_index_identity(session_dir: Path, manifest: dict[str, Any]) -
             f"- session_id: `{manifest.get('session_id', '')}`",
             f"- path: `{display.get('path', str(session_dir))}`",
             f"- source transcript: `{manifest.get('source', {}).get('transcript_path', '') if isinstance(manifest.get('source'), dict) else ''}`",
+            *semantic_name_identity_lines(manifest),
             "",
         ]
     )
@@ -3030,6 +3302,9 @@ def sync_session_from_transcript(
         "segments": segment_payloads,
         "latest_event_count": len(events),
     }
+    if isinstance(existing.get("semantic_names"), dict):
+        manifest["semantic_names"] = existing["semantic_names"]
+        refresh_semantic_name_anchors(session_dir, manifest)
     write_json(manifest_path, manifest)
     write_json(
         raw_dir / RAW_SOURCE_JSON,
@@ -3059,12 +3334,164 @@ def sync_session_from_transcript(
     }
 
 
+def light_hook_display(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    event: dict[str, Any],
+    transcript_path: Path | None,
+    existing: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    existing_display = existing.get("display") if isinstance(existing.get("display"), dict) else {}
+    if existing_display.get("label"):
+        return dict(existing_display)
+    title, title_source = session_title([], event, transcript_path)
+    session_date = first_session_date([], event, transcript_path, now[:10])
+    sequence = next_daily_sequence(aoa_root, session_date, session_id)
+    label = f"{session_date}__{sequence:03d}__{readable_slug(title)}"
+    archive_path = aoa_root / SESSION_ROOT / label
+    return {
+        "date": session_date,
+        "sequence": sequence,
+        "title": title,
+        "title_source": title_source,
+        "label": label,
+        "path": str(archive_path),
+        "archive_path": str(archive_path),
+        "navigation_path": str(archive_path),
+    }
+
+
+def mirror_transcript_without_indexing(
+    *,
+    aoa_root: Path,
+    event: dict[str, Any],
+    transcript_path: Path,
+    hook_event_name: str,
+    now: str,
+) -> dict[str, Any]:
+    session_id = session_id_from(event, transcript_path)
+    initial_session_dir = session_dir_for_id(aoa_root, session_id)
+    existing = read_json(initial_session_dir / "session.manifest.json", {})
+    display = light_hook_display(
+        aoa_root=aoa_root,
+        session_id=session_id,
+        event=event,
+        transcript_path=transcript_path,
+        existing=existing,
+        now=now,
+    )
+    session_dir = target_session_dir_for_display(aoa_root, display)
+    display["path"] = str(session_dir)
+    display["archive_path"] = str(session_dir)
+    display["navigation_path"] = str(session_dir)
+    session_dir = merge_or_move_session_dir(initial_session_dir, session_dir)
+    raw_dir = session_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    write_session_agents(session_dir)
+
+    existing_source = existing.get("source") if isinstance(existing.get("source"), dict) else {}
+    source_payload = session_source(
+        event,
+        transcript_path,
+        existing_source=existing_source,
+        hook_source=hook_source_metadata(session_dir),
+    )
+    raw_path = raw_dir / "session.raw.jsonl"
+    shutil.copy2(transcript_path, raw_path)
+    raw_rel = "raw/session.raw.jsonl"
+    raw_source = {
+        "schema_version": SCHEMA_VERSION,
+        "session_id": session_id,
+        "source_path": str(transcript_path),
+        "copied_to": str(raw_path),
+        "sha256": None,
+        "updated_at": now,
+        "indexing_status": "deferred_from_hook",
+    }
+    write_json(raw_dir / RAW_SOURCE_JSON, raw_source)
+    legacy_raw_source = raw_dir / LEGACY_RAW_SOURCE_JSON
+    if legacy_raw_source.exists():
+        legacy_raw_source.unlink()
+
+    hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
+    segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "session_id": session_id,
+        "display": display,
+        "session_label": display["label"],
+        "session_title": display["title"],
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+        "source": source_payload,
+        "archive_status": "raw_mirrored_index_deferred",
+        "distillation_status": existing.get("distillation_status", "raw_archived"),
+        "distillation_iteration": int(existing.get("distillation_iteration", 0) or 0),
+        "review_status": existing.get("review_status", "provisional"),
+        "hooks_seen": hooks_seen,
+        "raw": {
+            "path": str(raw_path),
+            "source_path": str(transcript_path),
+            "bytes": raw_path.stat().st_size,
+            "sha256": None,
+            "line_count": None,
+            "copied_at": now,
+            "indexing_status": "deferred_from_hook",
+        },
+        "segments": segments,
+        "latest_event_count": existing.get("latest_event_count", 0),
+    }
+    if isinstance(existing.get("semantic_names"), dict):
+        manifest["semantic_names"] = existing["semantic_names"]
+        refresh_semantic_name_anchors(session_dir, manifest)
+    write_json(session_dir / "session.manifest.json", manifest)
+    if (session_dir / SESSION_INDEX_JSON).exists():
+        update_session_index_identity(session_dir, manifest)
+    update_registry(aoa_root, manifest, session_dir)
+    return {
+        "session_id": session_id,
+        "display_name": display["label"],
+        "navigation_path": display["navigation_path"],
+        "session_dir": str(session_dir),
+        "raw_path": str(raw_path),
+        "raw_bytes": raw_path.stat().st_size,
+        "raw_rel": raw_rel,
+        "indexing_status": "deferred_from_hook",
+    }
+
+
+def stop_hook_should_defer_indexing(transcript_path: Path | None) -> bool:
+    if os.environ.get("AOA_SESSION_MEMORY_FULL_STOP_SYNC") == "1":
+        return False
+    if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
+        return False
+    threshold_value = os.environ.get("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES")
+    try:
+        threshold = int(threshold_value) if threshold_value is not None else DEFAULT_STOP_SYNC_MAX_BYTES
+    except ValueError:
+        threshold = DEFAULT_STOP_SYNC_MAX_BYTES
+    return transcript_path.stat().st_size > threshold
+
+
 def update_registry(aoa_root: Path, manifest: dict[str, Any], session_dir: Path) -> None:
+    lock_path = aoa_root / ".session-registry.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        update_registry_locked(aoa_root, manifest, session_dir)
+
+
+def update_registry_locked(aoa_root: Path, manifest: dict[str, Any], session_dir: Path) -> None:
     registry_path = aoa_root / REGISTRY_NAME
     registry = read_json(registry_path, {"schema_version": SCHEMA_VERSION, "sessions": []})
     sessions = registry.get("sessions", [])
     if not isinstance(sessions, list):
         sessions = []
+    manifest_paths = sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json"))
+    if registry_path.exists() and not sessions and len(manifest_paths) > 1:
+        sessions = registry_records_from_manifests(aoa_root)
     updated: list[dict[str, Any]] = []
     seen = False
     for item in sessions:
@@ -3084,14 +3511,375 @@ def update_registry(aoa_root: Path, manifest: dict[str, Any], session_dir: Path)
             "sessions": updated,
         },
     )
+    write_session_name_index(aoa_root, updated)
+    write_sessions_directory_index(aoa_root, updated)
+
+
+def registry_records_from_manifests(aoa_root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for manifest_path in sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json")):
+        manifest = read_json(manifest_path, {})
+        if isinstance(manifest, dict) and manifest:
+            records.append(registry_record(manifest, manifest_path.parent))
+    records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    return records
+
+
+def semantic_name_index_item(item: dict[str, Any]) -> dict[str, Any]:
+    coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+    anchor = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
+    return {
+        "name": item.get("name"),
+        "slug": item.get("slug"),
+        "scope": semantic_name_scope(item),
+        "kind": item.get("kind"),
+        "status": item.get("status"),
+        "source": item.get("source"),
+        "evidence": item.get("evidence", []) if isinstance(item.get("evidence"), list) else [],
+        "coverage": coverage,
+        "anchor": {
+            "session_id": anchor.get("session_id"),
+            "canonical_label": anchor.get("canonical_label"),
+            "raw_sha256": anchor.get("raw_sha256"),
+            "raw_line_count": anchor.get("raw_line_count"),
+        },
+    }
+
+
+def build_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    sessions = sessions if sessions is not None else registry_sessions(aoa_root)
+    records: list[dict[str, Any]] = []
+    slug_index: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for record in sessions:
+        if not isinstance(record, dict):
+            continue
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        if not isinstance(manifest, dict) or not manifest:
+            continue
+        display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+        semantic_names = semantic_names_payload(manifest)
+        names = [semantic_name_index_item(item) for item in semantic_names.get("names", []) if isinstance(item, dict)]
+        for name_item in names:
+            slug = str(name_item.get("slug") or "")
+            if slug:
+                slug_index[slug].append(
+                    {
+                        "session_id": str(manifest.get("session_id") or ""),
+                        "session_label": str(display.get("label") or manifest.get("session_label") or session_dir.name),
+                        "scope": str(name_item.get("scope") or ""),
+                    }
+                )
+        records.append(
+            {
+                "session_id": manifest.get("session_id"),
+                "session_label": display.get("label") or manifest.get("session_label") or session_dir.name,
+                "session_title": display.get("title") or manifest.get("session_title"),
+                "path": str(session_dir),
+                "event_count": manifest.get("latest_event_count", 0),
+                "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+                "semantic_names": {
+                    "active": semantic_names.get("active"),
+                    "active_session": semantic_names.get("active_session"),
+                    "names": names,
+                },
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_name_index",
+        "generated_at": utc_now(),
+        "session_count": len(records),
+        "named_session_count": sum(1 for item in records if item["semantic_names"]["names"]),
+        "sessions": records,
+        "slug_index": dict(sorted(slug_index.items())),
+    }
+
+
+def write_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> None:
+    payload = build_session_name_index(aoa_root, sessions)
+    write_json(aoa_root / SESSION_NAME_INDEX_JSON, payload)
+    write_markdown(aoa_root / SESSION_NAME_INDEX_MARKDOWN, session_name_index_markdown(payload))
+
+
+def session_name_index_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Name Index",
+        "",
+        "Lightweight map of canonical session labels, mutable session names, phase/topic names, and raw anchors.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- session_count: `{payload.get('session_count')}`",
+        f"- named_session_count: `{payload.get('named_session_count')}`",
+        "",
+        "| session | active session name | phase/topic names |",
+        "| --- | --- | --- |",
+    ]
+    for record in payload.get("sessions", []) if isinstance(payload.get("sessions"), list) else []:
+        if not isinstance(record, dict):
+            continue
+        semantic = record.get("semantic_names") if isinstance(record.get("semantic_names"), dict) else {}
+        active_session = str(semantic.get("active_session") or "")
+        names = semantic.get("names", []) if isinstance(semantic.get("names"), list) else []
+        phase_names = [
+            f"`{item.get('slug')}`"
+            for item in names
+            if isinstance(item, dict) and item.get("slug") != active_session
+        ]
+        active_label = active_session
+        for item in names:
+            if isinstance(item, dict) and item.get("slug") == active_session:
+                active_name_text = str(item.get("name") or "").replace("|", "\\|")
+                active_label = f"`{item.get('slug')}` - {active_name_text}"
+                break
+        lines.append(
+            "| `{session}` | {active} | {phases} |".format(
+                session=str(record.get("session_label") or record.get("session_id") or ""),
+                active=active_label or "",
+                phases=", ".join(phase_names),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def markdown_cell(value: Any) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def session_directory_record(item: dict[str, Any]) -> dict[str, Any]:
+    semantic = item.get("semantic_names") if isinstance(item.get("semantic_names"), dict) else {}
+    names = semantic.get("names", []) if isinstance(semantic.get("names"), list) else []
+    active_session = str(semantic.get("active_session") or "")
+    active_name = item.get("active_session_name") if isinstance(item.get("active_session_name"), dict) else {}
+    phase_names = [
+        {
+            "slug": name.get("slug"),
+            "name": name.get("name"),
+            "scope": name.get("scope"),
+            "kind": name.get("kind"),
+        }
+        for name in names
+        if isinstance(name, dict) and name.get("slug") != active_session
+    ]
+    label = str(item.get("session_label") or "")
+    date = label[:10] if re.match(r"^20\d{2}-[01]\d-[0-3]\d__", label) else ""
+    return {
+        "session_id": item.get("session_id"),
+        "session_label": label,
+        "date": date,
+        "title": item.get("session_title"),
+        "active_session_name": active_name,
+        "phase_names": phase_names,
+        "archive_status": item.get("archive_status"),
+        "distillation_status": item.get("distillation_status"),
+        "event_count": item.get("event_count", 0),
+        "segment_count": item.get("segment_count", 0),
+        "cwd": item.get("cwd"),
+        "updated_at": item.get("updated_at"),
+        "path": item.get("path"),
+        "entry": f"{label}/{SESSION_INDEX_MARKDOWN}" if label else None,
+    }
+
+
+def build_sessions_directory_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    sessions = sessions if sessions is not None else registry_sessions(aoa_root)
+    records = [session_directory_record(item) for item in sessions if isinstance(item, dict)]
+    records.sort(key=lambda item: (str(item.get("date") or ""), str(item.get("session_label") or "")), reverse=True)
+    by_date: dict[str, list[str]] = defaultdict(list)
+    for record in records:
+        by_date[str(record.get("date") or "undated")].append(str(record.get("session_label") or ""))
+    largest = sorted(records, key=lambda item: int(item.get("event_count") or 0), reverse=True)[:25]
+    named = [
+        record
+        for record in records
+        if (record.get("active_session_name") if isinstance(record.get("active_session_name"), dict) else {}).get("slug")
+        or record.get("phase_names")
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "sessions_directory_index",
+        "generated_at": utc_now(),
+        "session_count": len(records),
+        "named_session_count": len(named),
+        "sessions_root": str(aoa_root / SESSION_ROOT),
+        "read_order": [
+            SESSIONS_AGENTS_MARKDOWN,
+            SESSIONS_INDEX_MARKDOWN,
+            "../SESSION_NAMES.md",
+            "../session-registry.json",
+            "<session>/AGENTS.md",
+            "<session>/SESSION.md",
+            "<session>/session.index.json",
+            "<session>/session.manifest.json",
+            "<session>/segments/*.index.json",
+        ],
+        "by_date": dict(sorted(by_date.items(), reverse=True)),
+        "largest_sessions": largest,
+        "named_sessions": named,
+        "sessions": records,
+    }
+
+
+def write_sessions_directory_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> None:
+    session_root = aoa_root / SESSION_ROOT
+    session_root.mkdir(parents=True, exist_ok=True)
+    write_sessions_directory_agents(session_root)
+    payload = build_sessions_directory_index(aoa_root, sessions)
+    write_json(session_root / SESSIONS_INDEX_JSON, payload)
+    write_markdown(session_root / SESSIONS_INDEX_MARKDOWN, sessions_directory_index_markdown(payload))
+
+
+def write_sessions_directory_agents(session_root: Path) -> None:
+    lines = [
+        "# Sessions AGENTS.md",
+        "",
+        "## Purpose",
+        "",
+        "This directory is the archive district for preserved Codex sessions.",
+        "",
+        "It contains generated archive-local navigation plus one directory per",
+        "session. Do not treat a raw filesystem listing as the route. Start from",
+        "this card, then use the generated indexes and session-local cards.",
+        "",
+        "## Read Order",
+        "",
+        "1. `AGENTS.md`",
+        f"2. `{SESSIONS_INDEX_MARKDOWN}`",
+        "3. `../SESSION_NAMES.md`",
+        "4. `../session-registry.json`",
+        "5. `<session>/AGENTS.md`",
+        f"6. `<session>/{SESSION_INDEX_MARKDOWN}`",
+        "7. `<session>/session.manifest.json`",
+        f"8. `<session>/{SESSION_INDEX_JSON}`",
+        "9. `<session>/segments/*.index.json` before opening segment Markdown",
+        "10. `<session>/raw/session.raw.jsonl` only for exact verification,",
+        "    recovery, or durable evidence anchors",
+        "",
+        "## Authority",
+        "",
+        f"- `{SESSIONS_INDEX_MARKDOWN}` and `{SESSIONS_INDEX_JSON}` are generated",
+        "  tables of contents for navigation.",
+        "- `../SESSION_NAMES.md`, `../session-name-index.json`, and",
+        "  `../session-registry.json` are root-level generated maps.",
+        "- `<session>/session.manifest.json` owns technical identity and archive",
+        "  status for a single session.",
+        "- `<session>/raw/session.raw.jsonl` is preserved evidence.",
+        "- Review, distillation, naming, and promotion outputs remain provisional",
+        "  until their own reviewed route says otherwise.",
+        "",
+        "## Rules",
+        "",
+        "- Do not manually rename archive directories without following",
+        "  `../NAMING.md` and preserving the `session_id` bridge.",
+        "- Prefer semantic `name-session` entries before physical relabels when",
+        "  the archive already has stable raw provenance.",
+        "- Treat `raw_unavailable` and `raw_mirrored_index_deferred` as explicit",
+        "  states, not as understood sessions.",
+        "- Do not open bulk raw before checking the target session indexes.",
+        "- Keep generated indexes reproducible from raw evidence or explicit",
+        "  review artifacts.",
+        "",
+    ]
+    write_markdown(session_root / SESSIONS_AGENTS_MARKDOWN, "\n".join(lines))
+
+
+def sessions_directory_index_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Sessions Directory Index",
+        "",
+        "Generated table of contents for the session archive directory.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- session_count: `{payload.get('session_count')}`",
+        f"- named_session_count: `{payload.get('named_session_count')}`",
+        f"- machine index: `./{SESSIONS_INDEX_JSON}`",
+        f"- name map: `../{SESSION_NAME_INDEX_MARKDOWN}`",
+        "",
+        "## Read Order",
+        "",
+    ]
+    for index, item in enumerate(payload.get("read_order", []), start=1):
+        lines.append(f"{index}. `{item}`")
+    lines.extend(["", "## Named Sessions", ""])
+    named = payload.get("named_sessions", []) if isinstance(payload.get("named_sessions"), list) else []
+    if named:
+        lines.extend(["| session | active session name | phase/topic names | size |", "| --- | --- | --- | --- |"])
+        for record in named:
+            active = record.get("active_session_name") if isinstance(record.get("active_session_name"), dict) else {}
+            active_text = active.get("slug") or active.get("name") or ""
+            phases = record.get("phase_names") if isinstance(record.get("phase_names"), list) else []
+            phase_text = ", ".join(f"`{item.get('slug')}`" for item in phases if isinstance(item, dict) and item.get("slug"))
+            lines.append(
+                "| [{label}](./{entry}) | {active} | {phases} | `{events}` events / `{segments}` segments |".format(
+                    label=markdown_cell(record.get("session_label")),
+                    entry=markdown_cell(record.get("entry") or ""),
+                    active=markdown_cell(active_text),
+                    phases=phase_text,
+                    events=record.get("event_count", 0),
+                    segments=record.get("segment_count", 0),
+                )
+            )
+    else:
+        lines.append("- No semantic session names have been attached yet.")
+    lines.extend(["", "## Largest Sessions", ""])
+    largest = payload.get("largest_sessions", []) if isinstance(payload.get("largest_sessions"), list) else []
+    if largest:
+        lines.extend(["| session | name/title | size | status |", "| --- | --- | --- | --- |"])
+        for record in largest:
+            active = record.get("active_session_name") if isinstance(record.get("active_session_name"), dict) else {}
+            name_text = active.get("name") or record.get("title") or ""
+            status = f"{record.get('archive_status')}/{record.get('distillation_status')}"
+            lines.append(
+                "| [{label}](./{entry}) | {name} | `{events}` events / `{segments}` segments | `{status}` |".format(
+                    label=markdown_cell(record.get("session_label")),
+                    entry=markdown_cell(record.get("entry") or ""),
+                    name=markdown_cell(name_text),
+                    events=record.get("event_count", 0),
+                    segments=record.get("segment_count", 0),
+                    status=markdown_cell(status),
+                )
+            )
+    lines.extend(["", "## All Sessions By Date", ""])
+    by_date = payload.get("by_date", {}) if isinstance(payload.get("by_date"), dict) else {}
+    records_by_label = {
+        str(record.get("session_label") or ""): record
+        for record in payload.get("sessions", [])
+        if isinstance(record, dict)
+    }
+    for date, labels in by_date.items():
+        lines.extend([f"### {date}", ""])
+        lines.extend(["| session | name/title | size | cwd |", "| --- | --- | --- | --- |"])
+        for label in labels if isinstance(labels, list) else []:
+            record = records_by_label.get(str(label), {})
+            active = record.get("active_session_name") if isinstance(record.get("active_session_name"), dict) else {}
+            name_text = active.get("name") or record.get("title") or ""
+            lines.append(
+                "| [{label}](./{entry}) | {name} | `{events}` / `{segments}` | `{cwd}` |".format(
+                    label=markdown_cell(record.get("session_label")),
+                    entry=markdown_cell(record.get("entry") or ""),
+                    name=markdown_cell(name_text),
+                    events=record.get("event_count", 0),
+                    segments=record.get("segment_count", 0),
+                    cwd=markdown_cell(record.get("cwd")),
+                )
+            )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def registry_record(manifest: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     source = manifest.get("source", {})
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
+    semantic_names = semantic_names_payload(manifest)
+    active_name = semantic_name_summary(manifest)
+    active_session_name = semantic_name_summary(manifest, scope="session")
     return {
         "session_id": manifest["session_id"],
         "display": display,
+        "semantic_names": semantic_names,
+        "active_semantic_name": active_name,
+        "active_session_name": active_session_name,
         "session_label": display.get("label") or manifest.get("session_label"),
         "session_title": display.get("title") or manifest.get("session_title"),
         "navigation_path": display.get("navigation_path") or str(session_dir),
@@ -3127,6 +3915,12 @@ def resolve_session_record(aoa_root: Path, target: str | None) -> dict[str, Any]
         ]
         display = item.get("display") if isinstance(item.get("display"), dict) else {}
         candidates.extend([str(display.get("label") or ""), str(display.get("title") or "")])
+        semantic_names = item.get("semantic_names") if isinstance(item.get("semantic_names"), dict) else {}
+        candidates.append(str(semantic_names.get("active") or ""))
+        candidates.append(str(semantic_names.get("active_session") or ""))
+        for semantic in semantic_names.get("names", []) if isinstance(semantic_names.get("names"), list) else []:
+            if isinstance(semantic, dict):
+                candidates.extend([str(semantic.get("slug") or ""), str(semantic.get("name") or "")])
         if target_text in candidates:
             return item
     lowered = target_text.lower()
@@ -3136,6 +3930,17 @@ def resolve_session_record(aoa_root: Path, target: str | None) -> dict[str, Any]
         if lowered in str(item.get("session_label") or "").lower()
         or lowered in str(item.get("session_title") or "").lower()
         or lowered in str(item.get("session_id") or "").lower()
+        or any(
+            lowered in str(semantic.get("slug") or "").lower()
+            or lowered in str(semantic.get("name") or "").lower()
+            for semantic in (
+                item.get("semantic_names", {}).get("names", [])
+                if isinstance(item.get("semantic_names"), dict)
+                and isinstance(item.get("semantic_names", {}).get("names"), list)
+                else []
+            )
+            if isinstance(semantic, dict)
+        )
     ]
     if len(fuzzy) == 1:
         return fuzzy[0]
@@ -3167,6 +3972,8 @@ def rehydrate_packet(aoa_root: Path, target: str | None, *, max_events: int = 24
     if not isinstance(manifest, dict) or not manifest:
         raise ValueError(f"missing session manifest: {session_dir}")
     display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    semantic_names = semantic_names_payload(manifest)
+    active_session_name = active_semantic_name(manifest, scope="session")
     segment = latest_segment(manifest)
     segment_index: dict[str, Any] = {}
     if segment and segment.get("index"):
@@ -3206,23 +4013,61 @@ def rehydrate_packet(aoa_root: Path, target: str | None, *, max_events: int = 24
         f"- title: `{display.get('title') or record.get('session_title', '')}`",
         f"- path: `{session_dir}`",
         "",
-        "## Status",
-        "",
-        f"- archive_status: `{manifest.get('archive_status', '')}`",
-        f"- distillation_status: `{manifest.get('distillation_status', '')}`",
-        f"- review_status: `{manifest.get('review_status', '')}`",
-        f"- events: `{manifest.get('latest_event_count', 0)}`",
-        f"- segments: `{len(manifest.get('segments', []) if isinstance(manifest.get('segments'), list) else [])}`",
-        "",
-        "## Read First",
-        "",
-        "1. `AGENTS.md`",
-        f"2. `{SESSION_INDEX_MARKDOWN}`",
-        "3. `session.manifest.json`",
-        "4. latest relevant `segments/*.index.json`",
-        "5. only then relevant `segments/*.md` or raw refs",
-        "",
     ]
+    if active_session_name:
+        anchor = active_session_name.get("anchor") if isinstance(active_session_name.get("anchor"), dict) else {}
+        evidence = active_session_name.get("evidence") if isinstance(active_session_name.get("evidence"), list) else []
+        coverage = active_session_name.get("coverage") if isinstance(active_session_name.get("coverage"), dict) else {}
+        lines.extend(
+            [
+                "## Session Name Anchor",
+                "",
+                f"- active_session: `{semantic_names.get('active_session')}`",
+                f"- name: {active_session_name.get('name')}",
+                f"- kind: `{active_session_name.get('kind')}`",
+                f"- evidence: `{', '.join(str(ref) for ref in evidence)}`",
+                f"- coverage: `{json.dumps(coverage, ensure_ascii=False)}`",
+                f"- raw_sha256: `{anchor.get('raw_sha256', '')}`",
+                f"- raw_path: `{anchor.get('raw_path', '')}`",
+                f"- source transcript: `{anchor.get('source_transcript_path', '')}`",
+                "",
+            ]
+        )
+    other_names = [
+            item
+            for item in semantic_names.get("names", [])
+            if isinstance(item, dict) and item.get("slug") != semantic_names.get("active_session")
+    ]
+    if other_names:
+        lines.extend(["## Phase And Topic Names", ""])
+        for item in other_names:
+            coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+            coverage_note = str(coverage.get("note") or "")
+            coverage_suffix = f" - {coverage_note}" if coverage_note else ""
+            lines.append(
+                f"- `{item.get('slug')}` ({semantic_name_scope(item)}, {item.get('kind')}, {item.get('status')}) - {item.get('name')}{coverage_suffix}"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "## Status",
+            "",
+            f"- archive_status: `{manifest.get('archive_status', '')}`",
+            f"- distillation_status: `{manifest.get('distillation_status', '')}`",
+            f"- review_status: `{manifest.get('review_status', '')}`",
+            f"- events: `{manifest.get('latest_event_count', 0)}`",
+            f"- segments: `{len(manifest.get('segments', []) if isinstance(manifest.get('segments'), list) else [])}`",
+            "",
+            "## Read First",
+            "",
+            "1. `AGENTS.md`",
+            f"2. `{SESSION_INDEX_MARKDOWN}`",
+            "3. `session.manifest.json`",
+            "4. latest relevant `segments/*.index.json`",
+            "5. only then relevant `segments/*.md` or raw refs",
+            "",
+        ]
+    )
     if segment:
         lines.extend(
             [
@@ -3464,13 +4309,14 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         }
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     raw_path = Path(str(raw.get("path") or ""))
-    if manifest.get("archive_status") != "indexed":
+    archive_status = str(manifest.get("archive_status") or "")
+    if archive_status not in {"indexed", "raw_mirrored_index_deferred"}:
         return {
             "session_id": manifest.get("session_id"),
             "session_label": manifest.get("session_label"),
             "session_dir": str(session_dir),
             "status": "skipped",
-            "diagnostics": [f"archive_status:{manifest.get('archive_status')}"],
+            "diagnostics": [f"archive_status:{archive_status or 'missing'}"],
         }
     if not raw_path.is_file():
         return {
@@ -3499,6 +4345,7 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         write_segment(session_dir, raw_rel, segment_no, role, events[start:end])
         for segment_no, (start, end, role) in enumerate(segment_ranges(events))
     ]
+    manifest["archive_status"] = "indexed"
     manifest["segments"] = segment_payloads
     manifest["latest_event_count"] = len(events)
     manifest["updated_at"] = now
@@ -3511,7 +4358,16 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         manifest["raw"]["line_count"] = len(events)
         manifest["raw"]["bytes"] = raw_path.stat().st_size
         manifest["raw"]["sha256"] = sha256_file(raw_path)
+        manifest["raw"]["indexing_status"] = "indexed"
+    refresh_semantic_name_anchors(session_dir, manifest)
     write_json(manifest_path, manifest)
+    raw_source_path = session_dir / "raw" / RAW_SOURCE_JSON
+    raw_source = read_json(raw_source_path, {})
+    if isinstance(raw_source, dict) and raw_source:
+        raw_source["sha256"] = manifest.get("raw", {}).get("sha256") if isinstance(manifest.get("raw"), dict) else raw_source.get("sha256")
+        raw_source["updated_at"] = now
+        raw_source["indexing_status"] = "indexed"
+        write_json(raw_source_path, raw_source)
     write_session_index(session_dir, manifest, events)
     update_registry(aoa_root, manifest, session_dir)
     return {
@@ -3819,6 +4675,167 @@ def repair_session_titles_markdown(payload: dict[str, Any]) -> str:
             )
         )
     lines.append("")
+    return "\n".join(lines)
+
+
+def set_session_semantic_name(
+    *,
+    aoa_root: Path,
+    target: str,
+    name: str,
+    kind: str = "semantic_alias",
+    scope: str = "session",
+    evidence_refs: list[str] | None = None,
+    from_line: int | None = None,
+    to_line: int | None = None,
+    coverage_note: str | None = None,
+    source: str = "operator",
+    note: str | None = None,
+    apply: bool = False,
+    replace: bool = False,
+    verify_raw_hash: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    record = resolve_session_record(aoa_root, target)
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError(f"missing session manifest: {session_dir}")
+    if scope not in {"session", "phase", "topic", "alias"}:
+        raise ValueError(f"invalid semantic name scope: {scope}")
+    slug = semantic_name_slug(name)
+    payload = semantic_names_payload(manifest)
+    existing_names = payload.get("names", [])
+    evidence = [str(ref).strip() for ref in evidence_refs or [] if str(ref).strip()]
+    raw_ranges: list[dict[str, int]] = []
+    if from_line is not None or to_line is not None:
+        start = int(from_line or 0)
+        end = int(to_line or from_line or 0)
+        raw_ranges.append({"from_line": start, "to_line": end})
+    anchor: dict[str, Any] = {}
+    diagnostics: list[str] = []
+    try:
+        anchor = build_identity_anchor(session_dir, manifest, verify_raw_hash=verify_raw_hash)
+    except ValueError as exc:
+        diagnostics.append(str(exc))
+        anchor = build_identity_anchor(session_dir, manifest, verify_raw_hash=False)
+    proposed = {
+        "schema_version": SCHEMA_VERSION,
+        "name": name.strip(),
+        "slug": slug,
+        "scope": scope,
+        "kind": kind,
+        "status": semantic_name_status_for_scope(scope),
+        "source": source,
+        "created_at": now,
+        "updated_at": now,
+        "note": note or "",
+        "evidence": evidence,
+        "coverage": {
+            "scope": scope,
+            "raw_ranges": raw_ranges,
+            "note": coverage_note or "",
+        },
+        "anchor": {**anchor, "anchored_at": now, "refreshed_at": now},
+    }
+    policy = naming_policy(aoa_root)
+    banned_terms = (
+        set(policy.get("banned_durable_name_terms", []))
+        if isinstance(policy.get("banned_durable_name_terms"), list)
+        else set(DEFAULT_BANNED_DURABLE_NAME_TERMS)
+    )
+    diagnostics.extend(validate_semantic_name_record(manifest, session_dir, proposed, banned_terms=banned_terms))
+    duplicate = next((item for item in existing_names if isinstance(item, dict) and item.get("slug") == slug), None)
+    if duplicate and not replace:
+        diagnostics.append(f"semantic_name_already_exists:{slug}")
+
+    ok_to_apply = apply and not diagnostics
+    result_status = "planned"
+    if ok_to_apply:
+        updated_names: list[dict[str, Any]] = []
+        replaced = False
+        for item in existing_names:
+            if isinstance(item, dict) and item.get("slug") == slug:
+                updated_names.append({**item, **proposed, "created_at": item.get("created_at") or proposed["created_at"]})
+                replaced = True
+            elif isinstance(item, dict):
+                if scope == "session" and semantic_name_scope(item) == "session" and item.get("status") == "active":
+                    item = {**item, "status": "alias", "updated_at": now}
+                updated_names.append(item)
+        if not replaced:
+            updated_names.append(proposed)
+        payload["active"] = slug
+        if scope == "session":
+            payload["active_session"] = slug
+        payload["names"] = updated_names
+        manifest["semantic_names"] = payload
+        refresh_semantic_name_anchors(session_dir, manifest, verify_raw_hash=verify_raw_hash)
+        manifest["updated_at"] = now
+        write_json(manifest_path, manifest)
+        update_session_index_identity(session_dir, manifest)
+        update_registry(aoa_root, manifest, session_dir)
+        result_status = "applied"
+    elif diagnostics:
+        result_status = "diagnostic"
+
+    out = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_semantic_name",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "status": result_status,
+        "apply": apply,
+        "aoa_root": str(aoa_root),
+        "session_id": manifest.get("session_id"),
+        "session_label": (manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("label")
+        or manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "proposed": proposed,
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__session-semantic-name__{slug}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, out)
+        write_markdown(report_md, session_semantic_name_markdown(out))
+        out["report_json"] = str(report_json)
+        out["report_markdown"] = str(report_md)
+    return out
+
+
+def session_semantic_name_markdown(payload: dict[str, Any]) -> str:
+    proposed = payload.get("proposed") if isinstance(payload.get("proposed"), dict) else {}
+    anchor = proposed.get("anchor") if isinstance(proposed.get("anchor"), dict) else {}
+    coverage = proposed.get("coverage") if isinstance(proposed.get("coverage"), dict) else {}
+    lines = [
+        "# Session Semantic Name",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- session: `{payload.get('session_label') or payload.get('session_id')}`",
+        f"- name: {proposed.get('name')}",
+        f"- slug: `{proposed.get('slug')}`",
+        f"- scope: `{proposed.get('scope')}`",
+        f"- kind: `{proposed.get('kind')}`",
+        f"- evidence: `{', '.join(str(ref) for ref in proposed.get('evidence', []) if ref)}`",
+        f"- coverage: `{json.dumps(coverage, ensure_ascii=False)}`",
+        f"- raw_sha256: `{anchor.get('raw_sha256', '')}`",
+        f"- raw_path: `{anchor.get('raw_path', '')}`",
+        f"- source transcript: `{anchor.get('source_transcript_path', '')}`",
+        "",
+    ]
+    diagnostics = payload.get("diagnostics", [])
+    if diagnostics:
+        lines.extend(["## Diagnostics", ""])
+        for item in diagnostics if isinstance(diagnostics, list) else []:
+            lines.append(f"- `{item}`")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -5534,6 +6551,52 @@ def handle_hook_event(
             "actions": actions,
             "errors": errors,
         }
+    compact_hook_light = event_name in {"PreCompact", "PostCompact"} and os.environ.get("AOA_SESSION_MEMORY_FULL_COMPACT_SYNC") != "1"
+    stop_hook_light = event_name == "Stop" and stop_hook_should_defer_indexing(transcript_path)
+    if compact_hook_light or stop_hook_light:
+        try:
+            if transcript_path is not None and transcript_path.exists() and os.access(transcript_path, os.R_OK):
+                mirrored = mirror_transcript_without_indexing(
+                    aoa_root=root,
+                    event=event,
+                    transcript_path=transcript_path,
+                    hook_event_name=event_name,
+                    now=now,
+                )
+                actions.append("raw_mirrored")
+                actions.append("indexing_deferred")
+                return {
+                    "schema_version": SCHEMA_VERSION,
+                    "ok": True,
+                    "hook_event_name": event_name,
+                    "timestamp": now,
+                    "session_id": mirrored["session_id"],
+                    "session_dir": mirrored["session_dir"],
+                    "display_name": mirrored.get("display_name"),
+                    "navigation_path": mirrored.get("navigation_path"),
+                    "actions": actions,
+                    "archive": mirrored,
+                    "errors": errors,
+                }
+        except Exception as exc:
+            errors.append(f"{exc.__class__.__name__}: {exc}")
+            actions.append("light_mirror_failed")
+        else:
+            # No readable transcript: fall through to the normal diagnostic path.
+            pass
+        if errors:
+            actions.append(f"{event_name.lower()}_hook_light_recorded")
+            actions.append("indexing_deferred")
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": False,
+                "hook_event_name": event_name,
+                "timestamp": now,
+                "session_id": session_id,
+                "session_dir": str(session_dir),
+                "actions": actions,
+                "errors": errors,
+            }
     try:
         if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
             incident = write_raw_unavailable_incident(
@@ -5685,6 +6748,29 @@ def command_rehydrate(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     print(rehydrate_packet(root, args.session, max_events=args.max_events))
     return 0
+
+
+def command_name_session(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = set_session_semantic_name(
+        aoa_root=root,
+        target=args.session,
+        name=args.name,
+        kind=args.kind,
+        scope=args.scope,
+        evidence_refs=args.evidence or [],
+        from_line=args.from_line,
+        to_line=args.to_line,
+        coverage_note=args.coverage_note,
+        source=args.source,
+        note=args.note,
+        apply=args.apply,
+        replace=args.replace,
+        verify_raw_hash=not args.skip_raw_hash_check,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
 
 
 def command_distill(args: argparse.Namespace) -> int:
@@ -6540,16 +7626,37 @@ def validate_pipeline(*, workspace_root: Path | None = None, aoa_root: Path | No
                 "turn_id": "validate-turn",
             }
             receipts: dict[str, dict[str, Any]] = {}
-            for hook_name in ("PreCompact", "PostCompact", "Stop"):
-                receipts[hook_name] = handle_hook_event(
-                    hook_name,
-                    {**event, "hook_event_name": hook_name},
-                    workspace_root=temp_workspace,
-                    aoa_root=temp_aoa,
-                )
-                add_check(f"{hook_name.lower()}_receipt_ok", receipts[hook_name].get("ok") is True, receipts[hook_name].get("errors"))
+            old_stop_sync_max = os.environ.get("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES")
+            os.environ["AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES"] = "0"
+            try:
+                for hook_name in ("PreCompact", "PostCompact", "Stop"):
+                    receipts[hook_name] = handle_hook_event(
+                        hook_name,
+                        {**event, "hook_event_name": hook_name},
+                        workspace_root=temp_workspace,
+                        aoa_root=temp_aoa,
+                    )
+                    add_check(f"{hook_name.lower()}_receipt_ok", receipts[hook_name].get("ok") is True, receipts[hook_name].get("errors"))
+            finally:
+                if old_stop_sync_max is None:
+                    os.environ.pop("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", None)
+                else:
+                    os.environ["AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES"] = old_stop_sync_max
 
-            session_dir = Path(str(receipts["Stop"].get("session_dir") or ""))
+            add_check(
+                "lifecycle_hooks_defer_indexing",
+                all("indexing_deferred" in receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")),
+                {name: receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")},
+            )
+            synced = sync_session_from_transcript(
+                aoa_root=temp_aoa,
+                event={**event, "hook_event_name": "ManualSync"},
+                transcript_path=transcript_path,
+                hook_event_name="ManualSync",
+            )
+            add_check("manual_full_sync_after_light_hooks", synced.get("segment_count") == 2, synced)
+
+            session_dir = Path(str(synced.get("session_dir") or receipts["Stop"].get("session_dir") or ""))
             manifest = read_json(session_dir / "session.manifest.json", {})
             segments = manifest.get("segments", []) if isinstance(manifest, dict) else []
             segment_roles = [segment.get("role") for segment in segments if isinstance(segment, dict)]
@@ -6674,11 +7781,24 @@ def completion_audit(
     now = utc_now()
     sessions = registry_sessions(aoa_root)
     root_files_missing = [rel for rel in REQUIRED_ROOT_FILES if not (aoa_root / rel).exists()]
+    sessions_index_path = aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON
+    sessions_index_markdown_path = aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN
+    sessions_index_payload = read_json(sessions_index_path, {})
+    sessions_index_ok = (
+        isinstance(sessions_index_payload, dict)
+        and sessions_index_payload.get("artifact_type") == "sessions_directory_index"
+        and int(sessions_index_payload.get("session_count", -1)) == len(sessions)
+        and sessions_index_markdown_path.exists()
+    )
     hook_counts = count_live_hook_events(aoa_root)
     compaction_archives = archive_compaction_audit(aoa_root)
     indexed_archives = [item for item in compaction_archives if item.get("archive_status") == "indexed"]
+    deferred_archives = [
+        item for item in compaction_archives if item.get("archive_status") == "raw_mirrored_index_deferred"
+    ]
     real_compaction_archives = [item for item in compaction_archives if int(item.get("compaction_boundary_count", 0) or 0) > 0]
-    segments_match = bool(indexed_archives) and all(item.get("matches_expected_segments") for item in indexed_archives)
+    segment_mismatches = [item for item in indexed_archives if not item.get("matches_expected_segments")]
+    segments_match = bool(indexed_archives) and not segment_mismatches
     raw_preserved = bool(indexed_archives) and all(item.get("raw_exists") for item in indexed_archives)
     live_prepost_seen = hook_counts.get("PreCompact", 0) > 0 and hook_counts.get("PostCompact", 0) > 0
     grounding_payload: dict[str, Any] | None = codex_grounding(workspace_root=workspace_root, aoa_root=aoa_root) if check_codex else None
@@ -6706,6 +7826,16 @@ def completion_audit(
             {"missing": root_files_missing, "required_count": len(REQUIRED_ROOT_FILES)},
         ),
         checklist_item(
+            "Session archive directory has a local table of contents",
+            "covered" if sessions_index_ok else "missing",
+            {
+                "markdown": str(sessions_index_markdown_path),
+                "json": str(sessions_index_path),
+                "index_session_count": sessions_index_payload.get("session_count") if isinstance(sessions_index_payload, dict) else None,
+                "registry_session_count": len(sessions),
+            },
+        ),
+        checklist_item(
             "Raw session material is preserved for indexed archives",
             "covered" if raw_preserved else "missing",
             {"indexed_archive_count": len(indexed_archives)},
@@ -6722,15 +7852,35 @@ def completion_audit(
             "Segment topology matches raw compaction boundaries",
             "covered" if segments_match else "missing",
             {
-                "archives": [
+                "indexed_archive_count": len(indexed_archives),
+                "mismatch_count": len(segment_mismatches),
+                "mismatches": [
                     {
                         "session_label": item["session_label"],
                         "expected": item["expected_segment_count"],
                         "actual": item["actual_segment_count"],
                     }
-                    for item in compaction_archives
-                ]
+                    for item in segment_mismatches
+                ],
+                "indexed_archives": [
+                    {
+                        "session_label": item["session_label"],
+                        "expected": item["expected_segment_count"],
+                        "actual": item["actual_segment_count"],
+                    }
+                    for item in indexed_archives
+                ],
+                "deferred_archives": [
+                    {
+                        "session_label": item["session_label"],
+                        "expected_after_reindex": item["expected_segment_count"],
+                        "current_actual": item["actual_segment_count"],
+                        "archive_status": item["archive_status"],
+                    }
+                    for item in deferred_archives
+                ],
             },
+            None if segments_match else "Reindex indexed archives whose segment counts no longer match raw boundaries.",
         ),
         checklist_item(
             "Hook output remains schema-limited and fail-open",
@@ -6823,21 +7973,28 @@ def command_audit(args: argparse.Namespace) -> int:
 REQUIRED_ROOT_FILES = [
     "AGENTS.md",
     "DESIGN.md",
+    "DESIGN.AGENTS.md",
     "PIPELINE.md",
     "READINESS.md",
     "README.md",
     "NAMING.md",
+    "config/AGENTS.md",
     "config/batch-distillation-policy.json",
     "config/event-distillation-routes.json",
     "config/event-taxonomy.json",
     "config/naming-policy.json",
+    "hooks/AGENTS.md",
     "hooks/README.md",
     "hooks/codex-hooks.user.example.json",
+    "schemas/AGENTS.md",
     "schemas/hook-receipt.schema.json",
     "schemas/incident.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",
+    "scripts/AGENTS.md",
     "scripts/aoa_session_memory.py",
+    "sessions/AGENTS.md",
+    "skills/AGENTS.md",
     "skills/aoa-codex-compact-probe/SKILL.md",
     "skills/aoa-codex-hooks-status/SKILL.md",
     "skills/aoa-codex-session-segment-archive/SKILL.md",
@@ -6852,6 +8009,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-raw-diagnostic/SKILL.md",
     "skills/aoa-session-reindex/SKILL.md",
     "skills/aoa-session-rehydrate/SKILL.md",
+    "tests/AGENTS.md",
 ]
 
 def configured_hook_events(path: Path) -> set[str]:
@@ -6926,6 +8084,24 @@ def command_doctor(args: argparse.Namespace) -> int:
     archive_dirs = [path for path in session_root.iterdir() if path.is_dir()] if session_root.exists() else []
     if isinstance(sessions, list) and len(sessions) != len(archive_dirs):
         problems.append(f"session registry count {len(sessions)} does not match archive directory count {len(archive_dirs)}")
+    name_index = read_json(root / SESSION_NAME_INDEX_JSON, {})
+    if isinstance(sessions, list) and sessions:
+        if not isinstance(name_index, dict) or name_index.get("artifact_type") != "session_name_index":
+            problems.append(f"missing or invalid session name index: {root / SESSION_NAME_INDEX_JSON}")
+        elif int(name_index.get("session_count", -1)) != len(sessions):
+            problems.append(f"session name index count {name_index.get('session_count')} does not match registry count {len(sessions)}")
+        if not (root / SESSION_NAME_INDEX_MARKDOWN).exists():
+            problems.append(f"missing session name index markdown: {root / SESSION_NAME_INDEX_MARKDOWN}")
+    if session_root.exists():
+        if not (session_root / SESSIONS_AGENTS_MARKDOWN).exists():
+            problems.append(f"missing sessions AGENTS.md: {session_root / SESSIONS_AGENTS_MARKDOWN}")
+        sessions_index = read_json(session_root / SESSIONS_INDEX_JSON, {})
+        if not isinstance(sessions_index, dict) or sessions_index.get("artifact_type") != "sessions_directory_index":
+            problems.append(f"missing or invalid sessions directory index: {session_root / SESSIONS_INDEX_JSON}")
+        elif int(sessions_index.get("session_count", -1)) != len(sessions):
+            problems.append(f"sessions directory index count {sessions_index.get('session_count')} does not match registry count {len(sessions)}")
+        if not (session_root / SESSIONS_INDEX_MARKDOWN).exists():
+            problems.append(f"missing sessions directory index markdown: {session_root / SESSIONS_INDEX_MARKDOWN}")
     for item in sessions if isinstance(sessions, list) else []:
         if not isinstance(item, dict):
             continue
@@ -6959,6 +8135,30 @@ def command_doctor(args: argparse.Namespace) -> int:
         navigation_value = item.get("navigation_path") or display.get("navigation_path") or item.get("path")
         if navigation_value and not Path(str(navigation_value)).exists():
             problems.append(f"missing navigation path: {navigation_value}")
+        semantic_payload = semantic_names_payload(manifest_payload)
+        semantic_items = semantic_payload.get("names", [])
+        if semantic_items:
+            active = semantic_payload.get("active")
+            active_session = semantic_payload.get("active_session")
+            slugs = {str(semantic.get("slug")) for semantic in semantic_items if isinstance(semantic, dict)}
+            if active not in slugs:
+                problems.append(f"semantic active name is not present in names: {session_path}")
+            if active_session and active_session not in slugs:
+                problems.append(f"semantic active session name is not present in names: {session_path}")
+            registry_semantic = item.get("semantic_names") if isinstance(item.get("semantic_names"), dict) else {}
+            if registry_semantic.get("active") != active:
+                problems.append(f"registry semantic active name is stale: {session_path}")
+            if registry_semantic.get("active_session") != active_session:
+                problems.append(f"registry semantic active session name is stale: {session_path}")
+            for semantic in semantic_items:
+                if isinstance(semantic, dict):
+                    for problem in validate_semantic_name_record(
+                        manifest_payload,
+                        session_path,
+                        semantic,
+                        banned_terms=banned_terms,
+                    ):
+                        problems.append(f"{problem}: {session_path}")
         archive_status = str(manifest_payload.get("archive_status") or item.get("archive_status") or "")
         if archive_status == "indexed":
             raw = manifest_payload.get("raw") if isinstance(manifest_payload.get("raw"), dict) else {}
@@ -7048,6 +8248,34 @@ def build_parser() -> argparse.ArgumentParser:
     rehydrate.add_argument("--aoa-root")
     rehydrate.add_argument("--max-events", type=int, default=24)
     rehydrate.set_defaults(func=command_rehydrate)
+
+    name_session = sub.add_parser("name-session", help="Attach a semantic custom name to a session without renaming the archive.")
+    name_session.add_argument("session", help="Session label/id/title/name fragment.")
+    name_session.add_argument("--workspace-root")
+    name_session.add_argument("--aoa-root")
+    name_session.add_argument("--name", required=True, help="Human-readable semantic name for navigation.")
+    name_session.add_argument(
+        "--scope",
+        choices=["session", "phase", "topic", "alias"],
+        default="session",
+        help="Name scope. session is the mutable umbrella name; phase/topic names are local anchors.",
+    )
+    name_session.add_argument(
+        "--kind",
+        choices=["session_essence", "semantic_alias", "dominant_topic", "continuation_name", "operator_name"],
+        default="session_essence",
+    )
+    name_session.add_argument("--evidence", action="append", help="Raw evidence ref such as raw:line:123. Required for --apply.")
+    name_session.add_argument("--from-line", type=int, help="Optional first raw line covered by this name.")
+    name_session.add_argument("--to-line", type=int, help="Optional last raw line covered by this name.")
+    name_session.add_argument("--coverage-note", default="", help="Short note explaining what the raw range covers.")
+    name_session.add_argument("--source", default="operator")
+    name_session.add_argument("--note", default="")
+    name_session.add_argument("--apply", action="store_true", help="Write manifest, registry, and session index. Default only plans.")
+    name_session.add_argument("--replace", action="store_true", help="Replace an existing semantic name with the same slug.")
+    name_session.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing.")
+    name_session.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
+    name_session.set_defaults(func=command_name_session)
 
     distill = sub.add_parser("distill", help="Write a provisional first-pass distillation route map for a session.")
     distill.add_argument("session", nargs="?", default="latest")

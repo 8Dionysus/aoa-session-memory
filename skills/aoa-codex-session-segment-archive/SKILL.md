@@ -14,8 +14,10 @@ segments with indexes.
 
 ## Trigger Boundary
 
-- Codex `SessionStart`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, or
-  `Stop` hook provides a `transcript_path`.
+- Codex `SessionStart` or manual recovery provides a `transcript_path` for a
+  full archive rebuild.
+- Codex `PreCompact`, `PostCompact`, or `Stop` has mirrored raw with deferred
+  indexing, and the archive now needs a deliberate full rebuild.
 - Manual recovery has found a raw session JSONL.
 - A segment/index needs to be rebuilt from raw.
 

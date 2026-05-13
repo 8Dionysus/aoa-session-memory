@@ -45,7 +45,8 @@ Use this skill in any Codex session when the task touches:
 
 ## Procedure
 
-1. Read `/srv/AbyssOS/.aoa/AGENTS.md`, then `/srv/AbyssOS/.aoa/DESIGN.md`.
+1. Read `/srv/AbyssOS/.aoa/AGENTS.md`, `/srv/AbyssOS/.aoa/DESIGN.md`, and
+   `/srv/AbyssOS/.aoa/DESIGN.AGENTS.md`.
 2. Choose the narrow bundle skill from `/srv/AbyssOS/.aoa/skills/`.
 3. Use `/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py` for commands.
 4. Keep historical raw/session material intact unless the user explicitly asks

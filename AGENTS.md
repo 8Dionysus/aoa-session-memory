@@ -26,16 +26,24 @@ recovery and later distillation.
 When working here, read:
 
 1. `DESIGN.md`
-2. `PIPELINE.md`
-3. `INSTALL.md` when changing portability, export, or hook installation
-4. `READINESS.md`
-5. `README.md`
-6. `NAMING.md`
-7. `session-registry.json` if present
-8. The target session `AGENTS.md`
-9. The target session `SESSION.md`
-10. The target session `session.manifest.json`
-11. The relevant segment index before opening a full segment
+2. `DESIGN.AGENTS.md`
+3. `PIPELINE.md`
+4. `INSTALL.md` when changing portability, export, or hook installation
+5. `READINESS.md`
+6. `README.md`
+7. `NAMING.md`
+8. `sessions/AGENTS.md` if present
+9. `sessions/INDEX.md` if present
+10. `SESSION_NAMES.md` and `session-registry.json` if present
+11. The target session `AGENTS.md`
+12. The target session `SESSION.md`
+13. The target session `session.manifest.json`
+14. The relevant segment index before opening a full segment
+
+When editing a source district, also read that directory's own `AGENTS.md`
+first: `config/`, `hooks/`, `schemas/`, `scripts/`, `skills/`, `tests/`, or
+`sessions/`. When inspecting live reports, read `diagnostics/AGENTS.md`; it is
+a runtime evidence district, not portable source.
 
 ## Generated Material
 
@@ -43,12 +51,17 @@ The following paths are generated or runtime-owned:
 
 - `sessions/*/raw/`
 - `sessions/*/segments/`
+- `sessions/AGENTS.md`
+- `sessions/INDEX.md`
+- `sessions/index.json`
 - `sessions/*/SESSION.md`
 - `sessions/*/session.index.json`
 - `sessions/*/session.manifest.json`
 - `sessions/*/hooks/`
 - `sessions/*/incidents/`
 - `session-registry.json`
+- `session-name-index.json`
+- `SESSION_NAMES.md`
 - `diagnostics/`
 
 Agents may regenerate these files from raw session evidence. Do not manually

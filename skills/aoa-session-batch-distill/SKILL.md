@@ -85,8 +85,9 @@ reviewed.
 
 Manual review means project-grounded review. Before promoting a claim, inspect
 the session's `project_grounding` entry and read the nearest relevant
-`AGENTS.md`, `DESIGN.md`, or README. The operator should review promoted
-claims and samples, not carry the entire archive in active attention.
+`AGENTS.md`, `DESIGN.md`, agent-facing design surface such as
+`DESIGN.AGENTS.md` when present, or README. The operator should review
+promoted claims and samples, not carry the entire archive in active attention.
 
 ## Adaptive Rule
 

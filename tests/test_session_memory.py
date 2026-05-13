@@ -573,7 +573,7 @@ def test_default_aoa_root_uses_script_parent() -> None:
     assert module.aoa_root_for() == SCRIPT.parents[1]
 
 
-def test_compaction_hooks_full_sync_and_rehydrate_packet(tmp_path: Path) -> None:
+def test_lifecycle_hooks_defer_indexing_and_manual_sync_full_syncs(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-14T00-00-00-session-compact.jsonl"
@@ -586,6 +586,9 @@ def test_compaction_hooks_full_sync_and_rehydrate_packet(tmp_path: Path) -> None
             {"timestamp": "2026-05-14T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: keep interval archive"}]}},
         ],
     )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_COMPACT_SYNC", raising=False)
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", raising=False)
+    monkeypatch.setenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", "0")
 
     pre = module.handle_hook_event(
         "PreCompact",
@@ -614,10 +617,61 @@ def test_compaction_hooks_full_sync_and_rehydrate_packet(tmp_path: Path) -> None
 
     assert pre["ok"] is True
     assert post["ok"] is True
+    assert "indexing_deferred" in pre["actions"]
+    assert "indexing_deferred" in post["actions"]
+    light_session_dir = aoa_root / "sessions" / "2026-05-14__001__codex-in-abyssos"
+    light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert light_manifest["archive_status"] == "raw_mirrored_index_deferred"
+    assert light_manifest["hooks_seen"] == ["PostCompact", "PreCompact"]
+    assert light_manifest["segments"] == []
+    assert (light_session_dir / "raw" / "session.raw.jsonl").exists()
+
+    stop = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "session-compact",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert stop["ok"] is True
+    assert "indexing_deferred" in stop["actions"]
+    light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert light_manifest["archive_status"] == "raw_mirrored_index_deferred"
+    assert light_manifest["hooks_seen"] == ["PostCompact", "PreCompact", "Stop"]
+    assert light_manifest["segments"] == []
+
+    deferred_audit = module.completion_audit(workspace_root=workspace, aoa_root=aoa_root, check_codex=False)
+    topology = [
+        item for item in deferred_audit["checklist"] if item["requirement"] == "Segment topology matches raw compaction boundaries"
+    ][0]
+    assert topology["status"] == "missing"
+    assert topology["evidence"]["indexed_archives"] == []
+    assert topology["evidence"]["deferred_archives"][0]["archive_status"] == "raw_mirrored_index_deferred"
+
+    reindexed = module.reindex_sessions(aoa_root=aoa_root, target="latest")
+    assert reindexed["counts"] == {"reindexed": 1}
+    light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert light_manifest["archive_status"] == "indexed"
+    assert [segment["role"] for segment in light_manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
+
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={"session_id": "session-compact", "transcript_path": str(transcript), "cwd": str(workspace)},
+        transcript_path=transcript,
+        hook_event_name="ManualSync",
+    )
+    assert synced["segment_count"] == 2
     session_dir = aoa_root / "sessions" / "2026-05-14__001__archive-compaction-intervals"
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
-    assert manifest["hooks_seen"] == ["PostCompact", "PreCompact"]
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["hooks_seen"] == ["ManualSync", "PostCompact", "PreCompact", "Stop"]
     assert [segment["role"] for segment in manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
+    assert not light_session_dir.exists()
     packet = module.rehydrate_packet(aoa_root, "latest")
     assert "AoA Session Rehydration Packet" in packet
     assert "2026-05-14__001__archive-compaction-intervals" in packet
@@ -774,11 +828,23 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
 
     assert payload["ok"] is True
     assert (aoa_root / "INSTALL.md").exists()
+    assert (aoa_root / "DESIGN.AGENTS.md").exists()
+    assert (aoa_root / "config" / "AGENTS.md").exists()
+    assert (aoa_root / "hooks" / "AGENTS.md").exists()
+    assert (aoa_root / "schemas" / "AGENTS.md").exists()
+    assert (aoa_root / "scripts" / "AGENTS.md").exists()
+    assert (aoa_root / "sessions" / "AGENTS.md").exists()
+    assert (aoa_root / "skills" / "AGENTS.md").exists()
+    assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"] == []
-    assert list((aoa_root / "sessions").iterdir()) == []
+    session_entries = sorted(path.name for path in (aoa_root / "sessions").iterdir())
+    sessions_index = json.loads((aoa_root / "sessions" / module.SESSIONS_INDEX_JSON).read_text(encoding="utf-8"))
+    assert session_entries == [module.SESSIONS_AGENTS_MARKDOWN, module.SESSIONS_INDEX_MARKDOWN, module.SESSIONS_INDEX_JSON]
+    assert sessions_index["read_order"][0] == module.SESSIONS_AGENTS_MARKDOWN
+    assert sessions_index["session_count"] == 0
     hook_example = json.loads((aoa_root / "hooks" / "codex-hooks.user.example.json").read_text(encoding="utf-8"))
     rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered_hooks
@@ -1400,6 +1466,189 @@ def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
     assert repaired_manifest["display"]["title"] == "Repair the session naming topology"
     assert repaired_manifest["raw"]["path"] == str(repaired_dir / "raw" / "session.raw.jsonl")
     assert not session_dir.exists()
+
+
+def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-18T00-00-00-semantic-name.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-18T00:00:00Z", "type": "session_meta", "payload": {"id": "semantic-name-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Continue the work"}]}},
+            {"timestamp": "2026-05-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Finish the aoa-techniques final residual promotion pass"}]}},
+            {"timestamp": "2026-05-18T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: use raw refs before promotion."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "semantic-name-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-18__001__continue-the-work"
+    manifest_before = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    raw_sha = manifest_before["raw"]["sha256"]
+    payload = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="continue-the-work",
+        name="aoa-techniques continuation",
+        scope="session",
+        kind="session_essence",
+        evidence_refs=["raw:line:2", "raw:line:3"],
+        from_line=2,
+        to_line=4,
+        coverage_note="Umbrella continuation intent and later specific phase.",
+        source="operator",
+        note="Mutable session-level name, anchored to raw evidence.",
+        apply=True,
+        verify_raw_hash=True,
+    )
+    phase_payload = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="continue-the-work",
+        name="aoa-techniques final residual promotion pass",
+        scope="phase",
+        kind="dominant_topic",
+        evidence_refs=["raw:line:3"],
+        from_line=3,
+        to_line=4,
+        coverage_note="Later phase, not the umbrella session name.",
+        source="operator",
+        note="Dominant later topic, anchored to raw evidence.",
+        apply=True,
+        verify_raw_hash=True,
+    )
+
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    semantic_by_slug = {item["slug"]: item for item in manifest["semantic_names"]["names"]}
+    semantic = semantic_by_slug["aoa-techniques-continuation"]
+    phase = semantic_by_slug["aoa-techniques-final-residual-promotion-pass"]
+    registry_record = module.resolve_session_record(aoa_root, "aoa-techniques-continuation")
+    phase_record = module.resolve_session_record(aoa_root, "aoa-techniques-final-residual-promotion-pass")
+    packet = module.rehydrate_packet(aoa_root, "aoa-techniques-final-residual-promotion-pass")
+    session_md = (session_dir / "SESSION.md").read_text(encoding="utf-8")
+    name_index = json.loads((aoa_root / module.SESSION_NAME_INDEX_JSON).read_text(encoding="utf-8"))
+    name_index_md = (aoa_root / module.SESSION_NAME_INDEX_MARKDOWN).read_text(encoding="utf-8")
+    sessions_index = json.loads((aoa_root / "sessions" / module.SESSIONS_INDEX_JSON).read_text(encoding="utf-8"))
+    sessions_index_md = (aoa_root / "sessions" / module.SESSIONS_INDEX_MARKDOWN).read_text(encoding="utf-8")
+
+    assert payload["ok"] is True
+    assert phase_payload["ok"] is True
+    assert payload["status"] == "applied"
+    assert session_dir.exists()
+    assert manifest["display"]["label"] == "2026-05-18__001__continue-the-work"
+    assert manifest["raw"]["sha256"] == raw_sha
+    assert manifest["semantic_names"]["active_session"] == "aoa-techniques-continuation"
+    assert manifest["semantic_names"]["active"] == "aoa-techniques-final-residual-promotion-pass"
+    assert semantic["scope"] == "session"
+    assert phase["scope"] == "phase"
+    assert semantic["anchor"]["session_id"] == "semantic-name-session"
+    assert semantic["anchor"]["canonical_label"] == "2026-05-18__001__continue-the-work"
+    assert semantic["anchor"]["raw_sha256"] == raw_sha
+    assert semantic["evidence"] == ["raw:line:2", "raw:line:3"]
+    assert phase["evidence"] == ["raw:line:3"]
+    assert phase["coverage"]["raw_ranges"] == [{"from_line": 3, "to_line": 4}]
+    assert registry_record["session_id"] == "semantic-name-session"
+    assert phase_record["session_id"] == "semantic-name-session"
+    assert "Session Name Anchor" in packet
+    assert "Phase And Topic Names" in packet
+    assert "raw:line:3" in packet
+    assert "semantic_active_session" in session_md
+    assert name_index["named_session_count"] == 1
+    assert "aoa-techniques-final-residual-promotion-pass" in name_index["slug_index"]
+    assert "aoa-techniques-continuation" in name_index_md
+    assert sessions_index["artifact_type"] == "sessions_directory_index"
+    assert sessions_index["session_count"] == 1
+    assert sessions_index["named_session_count"] == 1
+    assert sessions_index["sessions"][0]["entry"] == "2026-05-18__001__continue-the-work/SESSION.md"
+    assert "aoa-techniques-continuation" in sessions_index_md
+    assert "aoa-techniques-final-residual-promotion-pass" in sessions_index_md
+    assert "2026-05-18__001__continue-the-work/SESSION.md" in sessions_index_md
+
+
+def test_semantic_session_name_rejects_unanchored_out_of_range_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-18T00-00-00-bad-semantic-name.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-18T00:00:00Z", "type": "session_meta", "payload": {"id": "bad-semantic-name", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Short session"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "bad-semantic-name",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    payload = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="short-session",
+        name="aoa-techniques final residual promotion pass",
+        evidence_refs=["raw:line:99"],
+        apply=True,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-18__001__short-session"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+
+    assert payload["ok"] is False
+    assert payload["status"] == "diagnostic"
+    assert any("semantic_name_evidence_out_of_range" in item for item in payload["diagnostics"])
+    assert "semantic_names" not in manifest
+
+
+def test_registry_update_recovers_from_invalid_registry_when_manifests_exist(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    for session_id, title in [("registry-a", "First recovery session"), ("registry-b", "Second recovery session")]:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": "2026-05-19T00:00:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(workspace)}},
+                {"timestamp": "2026-05-19T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": title}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry_path.write_text('{"sessions":[]}\n{"broken":true}\n', encoding="utf-8")
+    session_dir = aoa_root / "sessions" / "2026-05-19__001__first-recovery-session"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    module.update_registry(aoa_root, manifest, session_dir)
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    name_index = json.loads((aoa_root / module.SESSION_NAME_INDEX_JSON).read_text(encoding="utf-8"))
+    sessions_index = json.loads((aoa_root / "sessions" / module.SESSIONS_INDEX_JSON).read_text(encoding="utf-8"))
+    assert len(registry["sessions"]) == 2
+    assert name_index["session_count"] == 2
+    assert sessions_index["session_count"] == 2
 
 
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:
