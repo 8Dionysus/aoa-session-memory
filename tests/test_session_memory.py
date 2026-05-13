@@ -40,6 +40,7 @@ def test_readable_slug_removes_banned_topology_terms() -> None:
 
     assert "tmp" not in slug.split("-")
     assert slug == "task-in-aoa-wave4-review-fixes"
+    assert module.weak_title_text("# Files mentioned by the user: ## seed.zip")
 
 
 def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
@@ -230,6 +231,41 @@ def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> Non
     assert records["000006"]["type"] == "COMMAND_OUTPUT"
     assert records["000006"]["outcome"] == "succeeded"
     assert "error_signal" not in records["000006"]["tags"]
+
+
+def test_empty_nonzero_command_output_is_not_promoted_to_error(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-empty-nonzero.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "empty-nonzero", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Search for a marker"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-rg", "arguments": json.dumps({"cmd": "rg -n missing-marker README.md"})}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-rg", "output": "Chunk ID: x\nProcess exited with code 1\nOriginal token count: 0\nOutput:\n"}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "empty-nonzero",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__search-for-a-marker"
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    output_event = {event["event_id"]: event for event in segment_index["events"]}["000004"]
+    assert output_event["type"] == "COMMAND_OUTPUT"
+    assert output_event["outcome"] == "failed"
+    assert "empty_nonzero_output_signal" in output_event["tags"]
+    assert "error_signal" not in output_event["tags"]
 
 
 def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> None:
@@ -1125,6 +1161,73 @@ def test_batch_distill_builds_first_wave_queue_and_applies(tmp_path: Path) -> No
     assert (session_dir / "distillation" / "distillation.index.json").exists()
 
 
+def test_manual_review_wave_writes_packets_and_promotion_layer(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    (workspace / "AGENTS.md").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text("project law\n", encoding="utf-8")
+    (aoa_root / "config").mkdir(parents=True, exist_ok=True)
+    (aoa_root / "config" / "event-distillation-routes.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "routes": {
+                    "DECISION": ["adr"],
+                    "PROCESS_LESSON": ["skill_amendment"],
+                    "ERROR": ["root_cause"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    transcript = tmp_path / "rollout-2026-05-16T00-00-00-manual-review.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-16T00:00:00Z", "type": "session_meta", "payload": {"id": "manual-review", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-16T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review this session"}]}},
+            {"timestamp": "2026-05-16T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: keep raw evidence before summaries"}]}},
+            {"timestamp": "2026-05-16T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Process lesson: review packets must stay provisional"}]}},
+            {"timestamp": "2026-05-16T00:00:04Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-fail", "output": "Process exited with code 1\nOutput:\nerror: broken fixture\n"}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "manual-review",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    planned = module.manual_review_wave(aoa_root=aoa_root, workspace_root=workspace, since="2026-05-16", priority="sample")
+    applied = module.manual_review_wave(aoa_root=aoa_root, workspace_root=workspace, since="2026-05-16", priority="sample", apply=True, write_report=True)
+    layer = module.build_promotion_review_layer(aoa_root=aoa_root, since="2026-05-16", write_report=True)
+
+    session_dir = aoa_root / "sessions" / "2026-05-16__001__review-this-session"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    packet = json.loads((session_dir / "distillation" / "manual-review" / "001__manual-review-wave1__manual-review-packet.json").read_text(encoding="utf-8"))
+    promotion = json.loads((session_dir / "distillation" / "promotion" / "promotion.index.json").read_text(encoding="utf-8"))
+    assert planned["counts"] == {"planned": 1}
+    assert applied["counts"] == {"packet_written": 1}
+    assert applied["results"][0]["manual_review_priority"] == "sample"
+    assert applied["results"][0]["owner_resolution"]["status"] == "resolved"
+    assert Path(applied["report_json"]).exists()
+    assert manifest["review_status"] == "manual_review_wave1_packet_ready"
+    assert packet["review_truth_status"] == "not_reviewed_truth"
+    assert packet["promotion_candidate_count"] >= 2
+    assert promotion["promoted_claim_count"] == 0
+    assert promotion["status"] == "promotion_candidates_unreviewed"
+    assert layer["selected_count"] == 1
+    assert layer["candidate_count"] == promotion["candidate_count"]
+    assert layer["promoted_claim_count"] == 0
+
+
 def test_batch_distill_uses_workspace_grounding_fallback(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -1156,6 +1259,112 @@ def test_batch_distill_uses_workspace_grounding_fallback(tmp_path: Path) -> None
     assert grounding["status"] == "workspace_fallback_grounded"
     assert grounding["fallback_used"] is True
     assert grounding["files"][0]["path"] == str(workspace / "AGENTS.md")
+
+
+def test_owner_path_inference_is_fail_open_when_home_is_missing(monkeypatch) -> None:
+    monkeypatch.delenv("HOME", raising=False)
+
+    owner = module.inferred_owner_root_for_path("~/missing")
+    assert owner in {None, "/home/dionysus"}
+
+
+def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    (workspace / "AGENTS.md").parent.mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text("workspace law\n", encoding="utf-8")
+    transcript = tmp_path / "rollout-2026-05-16T00-00-00-owner-resolution.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-16T00:00:00Z", "type": "session_meta", "payload": {"id": "owner-resolution"}},
+            {"timestamp": "2026-05-16T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find the real owner"}]}},
+            {
+                "timestamp": "2026-05-16T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-owner", "arguments": json.dumps({"cmd": "rg -n TODO /srv/aoa-sdk/README.md"})},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "owner-resolution",
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path / "missing-cwd"),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    planned = module.batch_distill_sessions(aoa_root=aoa_root, workspace_root=workspace, since="2026-05-16")
+    owner = planned["results"][0]["owner_resolution"]
+
+    assert planned["results"][0]["project_grounding"]["status"] == "workspace_fallback_grounded"
+    assert owner["status"] == "resolved_from_evidence"
+    assert owner["owner_root"] == "/srv/aoa-sdk"
+    assert owner["confidence"] == "medium"
+
+
+def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-05-17__001__files-mentioned-by-the-user"
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {"timestamp": "2026-05-17T10:00:00Z", "type": "session_meta", "payload": {"id": "weak-title-session"}},
+            {
+                "timestamp": "2026-05-17T10:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Files mentioned by the user:\n- /srv/AbyssOS/.aoa/DESIGN.md"}]},
+            },
+            {
+                "timestamp": "2026-05-17T10:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Repair the session naming topology"}]},
+            },
+        ],
+    )
+    manifest = {
+        "schema_version": 1,
+        "session_id": "weak-title-session",
+        "created_at": "2026-05-17T10:00:00Z",
+        "updated_at": "2026-05-17T10:00:03Z",
+        "source": {"transcript_path": "/tmp/rollout-2026-05-17T10-00-00-weak-title-session.jsonl"},
+        "archive_status": "indexed",
+        "distillation_status": "raw_archived",
+        "raw": {"path": str(raw_path)},
+        "segments": [],
+        "latest_event_count": 3,
+        "display": {
+            "date": "2026-05-17",
+            "sequence": 1,
+            "title": "Files mentioned by the user",
+            "title_source": "first_user_message",
+            "label": "2026-05-17__001__files-mentioned-by-the-user",
+            "path": str(session_dir),
+            "archive_path": str(session_dir),
+            "navigation_path": str(session_dir),
+        },
+        "session_label": "2026-05-17__001__files-mentioned-by-the-user",
+        "session_title": "Files mentioned by the user",
+    }
+    (session_dir / "session.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+    module.update_registry(aoa_root, manifest, session_dir)
+
+    planned = module.repair_session_titles(aoa_root=aoa_root, since="2026-05-17")
+    applied = module.repair_session_titles(aoa_root=aoa_root, since="2026-05-17", apply=True)
+
+    repaired_dir = aoa_root / "sessions" / "2026-05-17__001__repair-the-session-naming-topology"
+    repaired_manifest = json.loads((repaired_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert planned["counts"] == {"planned": 1}
+    assert "weak_title" in planned["results"][0]["reasons"]
+    assert applied["counts"] == {"repaired": 1}
+    assert repaired_manifest["display"]["title"] == "Repair the session naming topology"
+    assert repaired_manifest["raw"]["path"] == str(repaired_dir / "raw" / "session.raw.jsonl")
+    assert not session_dir.exists()
 
 
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:

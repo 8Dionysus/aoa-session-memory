@@ -163,6 +163,42 @@ failure, lesson, risk, optimization, destructive-command, or failed-outcome
 signals rather than every generic command/output pair or every successful
 verification command.
 
+Repair weak generated session names after imports or classifier/title changes:
+
+```bash
+python3 scripts/aoa_session_memory.py repair-session-titles all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
+Add `--apply` after reviewing the planned changes. This moves archive
+directories and rewrites generated identity surfaces, but does not alter raw
+session evidence.
+
+Create first-wave manual review packets for deep review lanes:
+
+```bash
+python3 scripts/aoa_session_memory.py manual-review \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --priority deep \
+  --apply \
+  --write-report
+```
+
+Aggregate unreviewed promotion candidates without promoting them:
+
+```bash
+python3 scripts/aoa_session_memory.py promotion-review \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
 Regenerate generated indexes from preserved raw JSONL after classifier changes:
 
 ```bash

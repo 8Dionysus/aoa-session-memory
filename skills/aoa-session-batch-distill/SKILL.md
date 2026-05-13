@@ -43,6 +43,22 @@ Review the report lanes:
   improvements.
 - `diagnostic`: repair raw/index health before distillation.
 
+Inspect owner quality before applying a broad pass. Each profile contains
+`project_grounding` and `owner_resolution`; fallback grounding is not the same
+as a resolved owner.
+
+Repair weak imported titles before a broad manual review wave:
+
+```bash
+python3 scripts/aoa_session_memory.py repair-session-titles all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
+Add `--apply` only after checking the plan.
+
 Apply only after the queue shape is coherent:
 
 ```bash
@@ -56,6 +72,10 @@ python3 scripts/aoa_session_memory.py batch-distill \
 
 Use `--limit` for the first smoke batch. Use `--force` only when an existing
 first-pass artifact must be rebuilt.
+
+After the automatic first-pass layer is coherent, use
+`aoa-session-manual-review` for packetizing manual-review lanes and aggregating
+promotion candidates without promoting them.
 
 ## Review Rule
 

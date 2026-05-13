@@ -66,6 +66,8 @@ Use this skill in any Codex session when the task touches:
 - Provisional lesson extraction: `aoa-session-first-pass-distill`
 - Historical Codex JSONL import: `aoa-session-history-import`
 - First-wave historical-session conveyor: `aoa-session-batch-distill`
+- Manual review packets and promotion queue:
+  `aoa-session-manual-review`
 - Regenerate generated indexes after taxonomy/classifier changes:
   `aoa-session-reindex`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`
