@@ -259,7 +259,44 @@ distillation artifacts is intended. The conveyor report is written under
 marks a responsibility layer: an agent may continue the work, but it must use
 project grounding, evidence references, and promotion gates. Session profiles
 therefore keep the source `cwd` and nearest project guidance files when they
-exist.
+exist. Owner resolution is recorded separately so fallback-grounded sessions
+can still recover a likely real owner from indexed paths without pretending the
+fallback workspace is the owner.
+
+Repair weak generated titles before a broad manual pass:
+
+```bash
+python3 scripts/aoa_session_memory.py repair-session-titles all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
+
+Add `--apply` only after the plan is coherent. This repairs names and generated
+identity surfaces; it does not change raw evidence.
+
+Write manual-review packets for the deep lane:
+
+```bash
+python3 scripts/aoa_session_memory.py manual-review \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --priority deep \
+  --apply \
+  --write-report
+```
+
+Then aggregate promotion candidates without promoting them:
+
+```bash
+python3 scripts/aoa_session_memory.py promotion-review \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --write-report
+```
 
 Mechanics candidates are counted from significant events only: failures,
 process lessons, optimization/risk/dead-branch signals, destructive commands,
@@ -272,6 +309,7 @@ Use the bundle skill routes for deliberate agent work:
 aoa-session-memory-global-route -> top-level user router
 aoa-session-history-import      -> historical Codex JSONL batch import
 aoa-session-batch-distill       -> first-wave historical-session conveyor
+aoa-session-manual-review       -> manual-review packets and promotion queue
 aoa-session-reindex             -> regenerate generated indexes from raw
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness

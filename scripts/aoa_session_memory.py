@@ -33,6 +33,12 @@ LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
 DEFAULT_BANNED_DURABLE_NAME_TERMS = {"unknown", "misc", "tmp", "new", "old", "stuff", "placeholder"}
+GENERIC_TITLE_PREFIXES = (
+    "files mentioned by the user",
+    "context from my ide setup",
+    "context from my ide",
+    "<workspace_context>",
+)
 BATCH_DISTILLATION_POLICY_PATH = Path("config/batch-distillation-policy.json")
 DEFAULT_PROJECT_GROUNDING_FILE_NAMES = ["AGENTS.md", "DESIGN.md", "README.md"]
 SESSION_INDEX_MARKDOWN = "SESSION.md"
@@ -1195,6 +1201,22 @@ def has_error_signal(raw_lower: str) -> bool:
     return False
 
 
+def is_empty_nonzero_command_output(raw_lower: str) -> bool:
+    if not re.search(r"(process exited with code|exit code:)\s*[1-9]", raw_lower):
+        return False
+    if any(marker in raw_lower for marker in ("traceback", "exception", "permission denied", "no such file or directory")):
+        return False
+    if re.search(r"\b(error|failed|failure):", raw_lower):
+        return False
+    output_match = re.search(r"\boutput:\s*(.*)\Z", raw_lower, flags=re.DOTALL)
+    if output_match is None:
+        return False
+    output = output_match.group(1).strip()
+    if not output:
+        return True
+    return output in {"<empty>", "(empty)", "none"}
+
+
 def has_success_signal(raw_lower: str) -> bool:
     if re.search(r"(process exited with code|exit code:)\s*0", raw_lower):
         return True
@@ -1714,7 +1736,11 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             tags.add("token_count")
     broad_diagnostic_scan = source_type == "response_item" and payload_type in {"function_call_output", "tool_call_output"}
     diagnostic_lower = raw_lower if broad_diagnostic_scan else semantic_lower
-    if structured_outcome == "failed" and broad_diagnostic_scan:
+    if broad_diagnostic_scan and event_type in {"TOOL_OUTPUT", "COMMAND_OUTPUT"} and is_empty_nonzero_command_output(semantic_lower or diagnostic_lower):
+        tags.add("empty_nonzero_output_signal")
+        event_type = "COMMAND_OUTPUT"
+        outcome_override = "failed"
+    elif structured_outcome == "failed" and broad_diagnostic_scan:
         tags.add("error_signal")
         if event_type in {"RAW_EVENT", "TOOL_OUTPUT", "COMMAND_OUTPUT"}:
             event_type = "ERROR"
@@ -1961,6 +1987,8 @@ def usable_title_text(text: str) -> bool:
     if not stripped:
         return False
     lowered = stripped.lower()
+    if weak_title_text(stripped):
+        return False
     if lowered.startswith("# agents.md instructions"):
         return False
     if lowered.startswith("<environment_context"):
@@ -1972,6 +2000,28 @@ def usable_title_text(text: str) -> bool:
     if "--- project-doc ---" in lowered and "</instructions>" in lowered:
         return False
     return True
+
+
+def weak_title_text(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", text.strip())
+    if not compact:
+        return True
+    lowered = compact.lower()
+    normalized = re.sub(r"^[#>\-\s]+", "", lowered).strip()
+    first_line = text.strip().splitlines()[0].strip().lower()
+    normalized_first_line = re.sub(r"^[#>\-\s]+", "", first_line).strip()
+    if any(lowered.startswith(prefix) or first_line.startswith(prefix) for prefix in GENERIC_TITLE_PREFIXES):
+        return True
+    if any(normalized.startswith(prefix) or normalized_first_line.startswith(prefix) for prefix in GENERIC_TITLE_PREFIXES):
+        return True
+    if first_line in {"untitled session", "codex session", "new session"}:
+        return True
+    return False
+
+
+def weak_label_text(label: str) -> bool:
+    lowered = label.lower()
+    return any(readable_slug(prefix, max_chars=80) in lowered for prefix in GENERIC_TITLE_PREFIXES)
 
 
 def first_user_message(events: list[RawEvent]) -> str:
@@ -3557,6 +3607,221 @@ def reindex_sessions_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def title_repair_candidate(aoa_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {
+            "session_id": record.get("session_id"),
+            "session_label": record.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "diagnostic",
+            "diagnostics": ["missing_session_manifest"],
+        }
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path") or "")) if raw.get("path") else session_dir / "raw" / "session.raw.jsonl"
+    if not raw_path.is_file():
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "diagnostic",
+            "diagnostics": ["raw_missing"],
+        }
+
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    transcript_value = source.get("transcript_path")
+    transcript_path = Path(str(transcript_value)) if transcript_value else None
+    events = parse_raw_event_sample(raw_path, max_lines=5000)
+    fallback = str(manifest.get("created_at") or manifest.get("updated_at") or utc_now())
+    entry_event = {
+        "cwd": source.get("cwd") or record.get("cwd"),
+        "model": source.get("model"),
+        "permission_mode": source.get("permission_mode"),
+    }
+    proposed_date = first_session_date(events, entry_event, transcript_path, fallback)
+    proposed_title, proposed_source = session_title(events, entry_event, transcript_path)
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    current_title = str(display.get("title") or manifest.get("session_title") or "")
+    current_label = str(display.get("label") or manifest.get("session_label") or session_dir.name)
+    current_source = str(display.get("title_source") or "")
+    sequence = label_sequence_from(current_label, proposed_date) or int(display.get("sequence") or 0) or next_daily_sequence(aoa_root, proposed_date, str(manifest.get("session_id") or ""))
+    base_label = f"{proposed_date}__{sequence:03d}__{readable_slug(proposed_title)}"
+    reasons: list[str] = []
+    if not current_title.strip():
+        reasons.append("missing_title")
+    if weak_title_text(current_title):
+        reasons.append("weak_title")
+    if weak_label_text(current_label):
+        reasons.append("weak_label")
+    if display_quality(current_source) < display_quality(proposed_source):
+        reasons.append(f"title_source_upgrade:{current_source or 'missing'}->{proposed_source}")
+    if current_label != base_label and reasons:
+        reasons.append("label_would_change")
+    repair_needed = bool(reasons) and bool(proposed_title.strip()) and not weak_title_text(proposed_title)
+    return {
+        "session_id": manifest.get("session_id"),
+        "session_label": current_label,
+        "session_dir": str(session_dir),
+        "status": "candidate" if repair_needed else "unchanged",
+        "repair_needed": repair_needed,
+        "reasons": reasons,
+        "current": {
+            "title": current_title,
+            "title_source": current_source,
+            "label": current_label,
+            "path": str(session_dir),
+        },
+        "proposed": {
+            "date": proposed_date,
+            "sequence": sequence,
+            "title": proposed_title,
+            "title_source": proposed_source,
+            "label": base_label,
+            "path": str(aoa_root / SESSION_ROOT / base_label),
+        },
+    }
+
+
+def unique_session_label(aoa_root: Path, base_label: str, session_id: str, current_dir: Path) -> str:
+    label = base_label
+    for suffix in ["", *[f"-{idx:02d}" for idx in range(2, 100)]]:
+        label = f"{base_label}{suffix}"
+        target_dir = aoa_root / SESSION_ROOT / label
+        if target_dir == current_dir or not target_dir.exists():
+            return label
+        target_manifest = read_json(target_dir / "session.manifest.json", {})
+        if isinstance(target_manifest, dict) and target_manifest.get("session_id") == session_id:
+            return label
+    return f"{base_label}-{safe_slug(session_id)[:10]}"
+
+
+def apply_title_repair(aoa_root: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+    session_dir = Path(str(candidate.get("session_dir") or ""))
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {**candidate, "status": "diagnostic", "diagnostics": ["missing_session_manifest"]}
+    proposed = candidate.get("proposed") if isinstance(candidate.get("proposed"), dict) else {}
+    session_id = str(manifest.get("session_id") or candidate.get("session_id") or "")
+    label = unique_session_label(aoa_root, str(proposed.get("label") or session_dir.name), session_id, session_dir)
+    target_dir = aoa_root / SESSION_ROOT / label
+    session_dir = merge_or_move_session_dir(session_dir, target_dir)
+    display = {
+        "date": proposed.get("date"),
+        "sequence": proposed.get("sequence"),
+        "title": proposed.get("title"),
+        "title_source": proposed.get("title_source"),
+        "label": label,
+        "path": str(session_dir),
+        "archive_path": str(session_dir),
+        "navigation_path": str(session_dir),
+    }
+    now = utc_now()
+    manifest["display"] = display
+    manifest["session_label"] = label
+    manifest["session_title"] = proposed.get("title")
+    manifest["updated_at"] = now
+    update_artifact_paths_after_move(session_dir, manifest)
+    write_json(session_dir / "session.manifest.json", manifest)
+    update_session_index_identity(session_dir, manifest)
+    update_registry(aoa_root, manifest, session_dir)
+    repaired = {**candidate, "status": "repaired", "session_label": label, "session_dir": str(session_dir)}
+    repaired["proposed"] = {**proposed, "label": label, "path": str(session_dir)}
+    return repaired
+
+
+def repair_session_titles(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    apply: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    if target and target != "all":
+        records = [resolve_session_record(aoa_root, target)]
+    else:
+        records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    results: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    for record in records:
+        candidate = title_repair_candidate(aoa_root, record)
+        if candidate.get("status") == "diagnostic":
+            result = candidate
+        elif candidate.get("repair_needed"):
+            result = apply_title_repair(aoa_root, candidate) if apply else {**candidate, "status": "planned"}
+        else:
+            result = candidate
+        counts[str(result.get("status") or "unknown")] += 1
+        results.append(result)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_title_repair",
+        "generated_at": now,
+        "ok": counts.get("diagnostic", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "apply": apply,
+        "selected_count": len(records),
+        "counts": dict(counts),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__repair-session-titles"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, repair_session_titles_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def repair_session_titles_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Title Repair",
+        "",
+        "Repairs weak generated session titles without changing preserved raw evidence.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- aoa_root: `{payload.get('aoa_root')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- since: `{payload.get('since')}`",
+        f"- until: `{payload.get('until')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
+        "",
+        "| status | session | current | proposed | reasons |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        current = result.get("current") if isinstance(result.get("current"), dict) else {}
+        proposed = result.get("proposed") if isinstance(result.get("proposed"), dict) else {}
+        lines.append(
+            "| {status} | `{session}` | {current} | {proposed} | {reasons} |".format(
+                status=str(result.get("status") or ""),
+                session=str(result.get("session_label") or result.get("session_id") or ""),
+                current=str(current.get("label") or current.get("title") or "").replace("|", "\\|"),
+                proposed=str(proposed.get("label") or proposed.get("title") or "").replace("|", "\\|"),
+                reasons=", ".join(str(item) for item in result.get("reasons", [])),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def default_batch_distillation_policy() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -3655,6 +3920,159 @@ def find_project_grounding_files(start: Path, names: list[str]) -> list[dict[str
         if parent.parent == parent:
             break
     return files
+
+
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])(?:~|/)[^\s`\"'<>|),;]+")
+
+
+def path_mentions_from_text(text: str) -> list[str]:
+    mentions: list[str] = []
+    for match in ABSOLUTE_PATH_RE.finditer(text or ""):
+        value = match.group(0).rstrip(".,:;)]}")
+        if value in {"/", "~"}:
+            continue
+        mentions.append(value)
+    return mentions
+
+
+def inferred_owner_root_for_path(path_value: str) -> str | None:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    try:
+        expanded = str(Path(raw).expanduser())
+    except RuntimeError:
+        expanded = raw
+    parts = Path(expanded).parts
+    if len(parts) < 3 or parts[0] != "/":
+        return None
+    if len(parts) >= 5 and parts[:3] == ("/", "srv", "work"):
+        return str(Path(*parts[:4]))
+    if len(parts) >= 6 and parts[:4] == ("/", "srv", "games", "modding"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 3 and parts[:2] == ("/", "srv"):
+        return str(Path(*parts[:3]))
+    if len(parts) >= 5 and parts[:4] == ("/", "home", "dionysus", "src"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 6 and parts[:5] == ("/", "home", "dionysus", ".codex", "memories"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 3 and parts[:3] == ("/", "home", "dionysus"):
+        return "/home/dionysus"
+    return None
+
+
+def owner_name_from_root(owner_root: str | None) -> str | None:
+    if not owner_root:
+        return None
+    path = Path(owner_root)
+    if str(path) == "/home/dionysus":
+        return "home"
+    if path.name:
+        return path.name
+    return owner_root
+
+
+def owner_resolution_for_session(
+    manifest: dict[str, Any],
+    record: dict[str, Any],
+    project_grounding: dict[str, Any],
+) -> dict[str, Any]:
+    scores: Counter[str] = Counter()
+    evidence_by_root: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def add_evidence(owner_root: str | None, *, score: int, kind: str, value: Any, ref: str | None = None) -> None:
+        if not owner_root:
+            return
+        scores[owner_root] += score
+        bucket = evidence_by_root[owner_root]
+        if len(bucket) < 12:
+            item: dict[str, Any] = {"kind": kind, "value": short_text(value, max_chars=160), "score": score}
+            if ref:
+                item["ref"] = ref
+            bucket.append(item)
+
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    cwd_value = source.get("cwd") or record.get("cwd") or project_grounding.get("cwd")
+    if cwd_value:
+        cwd_path = Path(str(cwd_value)).expanduser()
+        add_evidence(inferred_owner_root_for_path(str(cwd_value)), score=8 if cwd_path.exists() else 1, kind="cwd", value=cwd_value)
+
+    for file_record in project_grounding.get("files", []) if isinstance(project_grounding.get("files"), list) else []:
+        if isinstance(file_record, dict) and file_record.get("path"):
+            score = 1 if project_grounding.get("fallback_used") else 4
+            add_evidence(inferred_owner_root_for_path(str(file_record["path"])), score=score, kind="grounding_file", value=file_record.get("path"))
+
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict) or not segment.get("index"):
+            continue
+        segment_index = read_json(Path(str(segment["index"])), {})
+        events = segment_index.get("events", []) if isinstance(segment_index, dict) else []
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            texts: list[str] = [str(event.get("title") or "")]
+            facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+            for key in ("command", "object", "path"):
+                if facets.get(key):
+                    texts.append(str(facets[key]))
+            for text in texts:
+                for mention in path_mentions_from_text(text):
+                    add_evidence(
+                        inferred_owner_root_for_path(mention),
+                        score=4,
+                        kind="indexed_path",
+                        value=mention,
+                        ref=str(event.get("md_anchor") or event.get("raw_ref") or ""),
+                    )
+
+    if not scores:
+        return {
+            "status": "unresolved",
+            "owner_root": None,
+            "owner_name": None,
+            "confidence": "none",
+            "score": 0,
+            "fallback_grounding_used": bool(project_grounding.get("fallback_used")),
+            "evidence": [],
+            "alternates": [],
+        }
+
+    ranked = scores.most_common()
+    owner_root, score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    if second_score and second_score >= max(4, int(score * 0.75)):
+        status = "ambiguous"
+        confidence = "low"
+    elif score >= 10:
+        status = "resolved_from_evidence" if project_grounding.get("fallback_used") else "resolved"
+        confidence = "high"
+    elif score >= 4:
+        status = "resolved_from_evidence" if project_grounding.get("fallback_used") else "resolved_low_confidence"
+        confidence = "medium"
+    else:
+        status = "weak_signal"
+        confidence = "low"
+    fallback_root = None
+    fallback_workspace = project_grounding.get("fallback_workspace_root")
+    if fallback_workspace:
+        fallback_root = inferred_owner_root_for_path(str(fallback_workspace))
+    if project_grounding.get("fallback_used") and owner_root == fallback_root and score <= 4:
+        status = "fallback_only"
+        confidence = "low"
+
+    return {
+        "status": status,
+        "owner_root": owner_root,
+        "owner_name": owner_name_from_root(owner_root),
+        "confidence": confidence,
+        "score": score,
+        "fallback_grounding_used": bool(project_grounding.get("fallback_used")),
+        "evidence": evidence_by_root.get(owner_root, []),
+        "alternates": [
+            {"owner_root": root, "owner_name": owner_name_from_root(root), "score": item_score}
+            for root, item_score in ranked[1:6]
+        ],
+    }
 
 
 def project_grounding_for_session(
@@ -3790,6 +4208,7 @@ def first_wave_session_profile(
     raw_path = Path(str(raw.get("path") or "")) if raw.get("path") else None
     raw_exists = bool(raw_path and raw_path.exists())
     project_grounding = project_grounding_for_session(manifest, record, policy, fallback_workspace_root=workspace_root)
+    owner_resolution = owner_resolution_for_session(manifest, record, project_grounding)
 
     if archive_status != "indexed":
         diagnostics.append(f"archive_status:{archive_status or 'missing'}")
@@ -3927,6 +4346,7 @@ def first_wave_session_profile(
         "mechanics_signal_counts": dict(sorted(mechanics_signal_counts.items())),
         "tag_counts": dict(sorted(tag_counts.items())),
         "project_grounding": project_grounding,
+        "owner_resolution": owner_resolution,
         "raw_exists": raw_exists,
         "missing_index_count": len(missing_indexes),
         "missing_indexes_sample": missing_indexes[:12],
@@ -4105,6 +4525,7 @@ def batch_distillation_markdown(payload: dict[str, Any]) -> str:
             "",
             "Each session profile keeps the originating `cwd` and nearest project guidance files when available.",
             "Later review agents should use those files before promoting project-specific claims.",
+            "Owner resolution is a separate evidence pass: it may recover the real project root from cwd, grounding files, or indexed path mentions when workspace fallback was used.",
             "",
         ]
     )
@@ -4126,23 +4547,558 @@ def batch_distillation_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Session Queue",
             "",
-            "| action | lanes | date | session | segments | candidates | manual reasons | mechanics reasons |",
-            "| --- | --- | --- | --- | ---: | ---: | --- | --- |",
+            "| action | lanes | date | session | owner | segments | candidates | manual reasons | mechanics reasons |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |",
         ]
     )
     for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
         if not isinstance(result, dict):
             continue
+        owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
         lines.append(
-            "| {action} | {lanes} | {date} | `{session}` | {segments} | {candidates} | {manual} | {mechanics} |".format(
+            "| {action} | {lanes} | {date} | `{session}` | `{owner}` | {segments} | {candidates} | {manual} | {mechanics} |".format(
                 action=str(result.get("action_status") or ""),
                 lanes=", ".join(str(item) for item in result.get("lanes", [])),
                 date=str(result.get("session_date") or ""),
                 session=str(result.get("session_label") or result.get("session_id") or ""),
+                owner=str(owner.get("owner_root") or owner.get("status") or ""),
                 segments=str(result.get("segment_count") or 0),
                 candidates=str(result.get("candidate_event_count") or 0),
                 manual=", ".join(str(item) for item in result.get("manual_review_reasons", [])) or "",
                 mechanics=", ".join(str(item) for item in result.get("mechanics_reasons", [])) or "",
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def collect_review_events(
+    manifest: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    route_map: dict[str, list[str]],
+    max_per_type: int = 20,
+) -> dict[str, Any]:
+    manual_types = {str(item) for item in policy.get("manual_review_event_types", []) if str(item)}
+    mechanics_types = {str(item) for item in policy.get("mechanics_signal_event_types", []) if str(item)}
+    selected_types = manual_types | mechanics_types | FIRST_PASS_CANDIDATE_EVENT_TYPES | FIRST_PASS_SUPPORTING_EVENT_TYPES
+    event_counts: Counter[str] = Counter()
+    route_counts: Counter[str] = Counter()
+    selected_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    source_segments: list[dict[str, Any]] = []
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict) or not segment.get("index"):
+            continue
+        segment_index_path = Path(str(segment["index"]))
+        segment_index = read_json(segment_index_path, {})
+        if not isinstance(segment_index, dict):
+            continue
+        source_segments.append(
+            {
+                "segment_id": segment.get("segment_id"),
+                "role": segment.get("role"),
+                "index": str(segment_index_path),
+                "markdown": segment.get("markdown"),
+            }
+        )
+        events = segment_index.get("events", [])
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "RAW_EVENT")
+            event_counts[event_type] += 1
+            routes = [str(route) for route in route_map.get(event_type, [])]
+            for route in routes:
+                route_counts[route] += 1
+            if event_type not in selected_types and not is_first_pass_candidate_event_record(event):
+                continue
+            if len(selected_by_type[event_type]) >= max_per_type:
+                continue
+            selected_by_type[event_type].append(
+                {
+                    "event_id": event.get("event_id"),
+                    "type": event_type,
+                    "family": event.get("family"),
+                    "phase": event.get("phase"),
+                    "actor": event.get("actor"),
+                    "action": event.get("action"),
+                    "outcome": event.get("outcome"),
+                    "title": event.get("title"),
+                    "importance": event.get("importance"),
+                    "tags": event.get("tags", []) if isinstance(event.get("tags"), list) else [],
+                    "routes": routes,
+                    "md_anchor": event.get("md_anchor"),
+                    "raw_ref": event.get("raw_ref"),
+                    "source_segment": segment.get("segment_id"),
+                }
+            )
+    return {
+        "event_counts": dict(sorted(event_counts.items())),
+        "route_counts": dict(sorted(route_counts.items())),
+        "source_segments": source_segments,
+        "selected_by_type": dict(sorted(selected_by_type.items())),
+        "selected_count": sum(len(items) for items in selected_by_type.values()),
+    }
+
+
+def promotion_action_for_event(event_type: str, routes: list[str]) -> str:
+    if routes:
+        if "skill_amendment" in routes:
+            return "skill_or_playbook_review"
+        if "automation_seed" in routes or "automation_macro" in routes:
+            return "automation_review"
+        if "root_cause" in routes:
+            return "root_cause_review"
+        if "adr" in routes or "principle" in routes:
+            return "decision_review"
+        return f"route_review:{routes[0]}"
+    return {
+        "DECISION": "decision_review",
+        "PROCESS_LESSON": "skill_or_playbook_review",
+        "ERROR": "root_cause_review",
+        "SECURITY_OR_SECRET_RISK": "risk_gate_review",
+        "OPEN_THREAD": "handoff_review",
+        "FINAL_STATE": "closeout_review",
+    }.get(event_type, "evidence_review")
+
+
+def promotion_candidates_from_review_events(review_events: dict[str, Any], *, max_candidates: int = 200) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    by_type = review_events.get("selected_by_type") if isinstance(review_events.get("selected_by_type"), dict) else {}
+    for event_type, events in by_type.items():
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            routes = [str(route) for route in event.get("routes", [])] if isinstance(event.get("routes"), list) else []
+            candidate_id = f"{event_type}:{event.get('event_id')}"
+            candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "status": "needs_review",
+                    "promoted": False,
+                    "event_type": event_type,
+                    "action": promotion_action_for_event(str(event_type), routes),
+                    "title": event.get("title"),
+                    "routes": routes,
+                    "evidence": {
+                        "md_anchor": event.get("md_anchor"),
+                        "raw_ref": event.get("raw_ref"),
+                        "source_segment": event.get("source_segment"),
+                    },
+                }
+            )
+            if len(candidates) >= max_candidates:
+                return candidates
+    return candidates
+
+
+def manual_review_packet_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Manual Review Packet",
+        "",
+        "This packet is agent-assisted review material, not reviewed truth.",
+        "",
+        f"- session: `{payload.get('session_label')}`",
+        f"- created_at: `{payload.get('created_at')}`",
+        f"- wave: `{payload.get('wave_id')}`",
+        f"- priority: `{payload.get('manual_review_priority')}`",
+        f"- review_truth_status: `{payload.get('review_truth_status')}`",
+        f"- promotion_candidate_count: `{payload.get('promotion_candidate_count')}`",
+        "",
+        "## Owner Resolution",
+        "",
+    ]
+    owner = payload.get("owner_resolution") if isinstance(payload.get("owner_resolution"), dict) else {}
+    lines.extend(
+        [
+            f"- status: `{owner.get('status')}`",
+            f"- owner_root: `{owner.get('owner_root')}`",
+            f"- confidence: `{owner.get('confidence')}`",
+            "",
+            "## Review Reasons",
+            "",
+        ]
+    )
+    reasons = payload.get("manual_review_reasons", [])
+    if reasons:
+        for reason in reasons if isinstance(reasons, list) else []:
+            lines.append(f"- `{reason}`")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Evidence Sample", ""])
+    review_events = payload.get("review_events") if isinstance(payload.get("review_events"), dict) else {}
+    by_type = review_events.get("selected_by_type") if isinstance(review_events.get("selected_by_type"), dict) else {}
+    for event_type, events in by_type.items():
+        lines.extend(["", f"### {event_type}", ""])
+        for event in events[:12] if isinstance(events, list) else []:
+            if isinstance(event, dict):
+                lines.append(
+                    f"- `{event.get('event_id')}` {event.get('title')} "
+                    f"routes={event.get('routes', [])} evidence=`{event.get('md_anchor')}` raw=`{event.get('raw_ref')}`"
+                )
+    lines.extend(
+        [
+            "",
+            "## Promotion Gate",
+            "",
+            "All candidates remain `needs_review`. This packet does not promote claims into skills, doctrine, or automation.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def promotion_index_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Promotion Review Index",
+        "",
+        "Candidates listed here are not promoted. They are queued for reviewed distillation.",
+        "",
+        f"- session: `{payload.get('session_label')}`",
+        f"- created_at: `{payload.get('created_at')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- candidate_count: `{payload.get('candidate_count')}`",
+        f"- promoted_claim_count: `{payload.get('promoted_claim_count')}`",
+        "",
+        "| status | action | event | evidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for candidate in payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        lines.append(
+            "| {status} | {action} | `{event}` | `{evidence}` |".format(
+                status=str(candidate.get("status") or ""),
+                action=str(candidate.get("action") or ""),
+                event=str(candidate.get("candidate_id") or ""),
+                evidence=str(evidence.get("md_anchor") or evidence.get("raw_ref") or ""),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_manual_review_packet(
+    aoa_root: Path,
+    profile: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    route_map: dict[str, list[str]],
+    wave_id: str,
+    max_events_per_type: int = 20,
+) -> dict[str, Any]:
+    now = utc_now()
+    session_dir = Path(str(profile.get("session_dir") or ""))
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {**profile, "status": "diagnostic", "diagnostics": ["missing_session_manifest"]}
+    review_events = collect_review_events(manifest, policy=policy, route_map=route_map, max_per_type=max_events_per_type)
+    candidates = promotion_candidates_from_review_events(review_events)
+    review_dir = session_dir / "distillation" / "manual-review"
+    promotion_dir = session_dir / "distillation" / "promotion"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    promotion_dir.mkdir(parents=True, exist_ok=True)
+
+    packet = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "manual_review_packet",
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "created_at": now,
+        "wave_id": wave_id,
+        "status": "agent_assisted_review_packet",
+        "review_truth_status": "not_reviewed_truth",
+        "operator_review_required": True,
+        "manual_review_priority": profile.get("manual_review_priority"),
+        "manual_review_score": profile.get("manual_review_score"),
+        "manual_review_reasons": profile.get("manual_review_reasons", []),
+        "project_grounding": profile.get("project_grounding"),
+        "owner_resolution": profile.get("owner_resolution"),
+        "review_events": review_events,
+        "promotion_candidate_count": len(candidates),
+    }
+    packet_json = review_dir / f"001__{wave_id}__manual-review-packet.json"
+    packet_md = review_dir / f"001__{wave_id}__manual-review-packet.md"
+    write_json(packet_json, packet)
+    write_markdown(packet_md, manual_review_packet_markdown(packet))
+
+    promotion_index = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "promotion_review_index",
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "created_at": now,
+        "wave_id": wave_id,
+        "status": "promotion_candidates_unreviewed",
+        "review_truth_status": "not_reviewed_truth",
+        "candidate_count": len(candidates),
+        "promoted_claim_count": 0,
+        "candidates": candidates,
+        "source_manual_review_packet": str(packet_json),
+    }
+    promotion_json = promotion_dir / "promotion.index.json"
+    promotion_md = promotion_dir / "promotion.index.md"
+    write_json(promotion_json, promotion_index)
+    write_markdown(promotion_md, promotion_index_markdown(promotion_index))
+
+    manifest["review_status"] = "manual_review_wave1_packet_ready"
+    manifest["manual_review"] = {
+        "latest_packet": str(packet_json),
+        "latest_markdown": str(packet_md),
+        "wave_id": wave_id,
+        "review_truth_status": "not_reviewed_truth",
+        "promotion_candidate_count": len(candidates),
+    }
+    manifest["promotion"] = {
+        "latest_index": str(promotion_json),
+        "latest_markdown": str(promotion_md),
+        "status": "promotion_candidates_unreviewed",
+        "promoted_claim_count": 0,
+        "candidate_count": len(candidates),
+    }
+    manifest["updated_at"] = now
+    update_session_status_files(session_dir, manifest)
+    return {
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "status": "packet_written",
+        "manual_review_priority": profile.get("manual_review_priority"),
+        "manual_review_score": profile.get("manual_review_score"),
+        "manual_review_reasons": profile.get("manual_review_reasons", []),
+        "owner_resolution": profile.get("owner_resolution"),
+        "manual_review_packet": str(packet_json),
+        "manual_review_markdown": str(packet_md),
+        "promotion_index": str(promotion_json),
+        "promotion_markdown": str(promotion_md),
+        "promotion_candidate_count": len(candidates),
+    }
+
+
+def manual_review_priority_rank(value: str | None) -> int:
+    return {"none": 0, "sample": 1, "standard": 2, "deep": 3}.get(str(value or "none"), 0)
+
+
+def manual_review_wave(
+    *,
+    aoa_root: Path,
+    workspace_root: Path | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    priority: str = "deep",
+    apply: bool = False,
+    write_report: bool = False,
+    max_events_per_type: int = 20,
+) -> dict[str, Any]:
+    now = utc_now()
+    wave_id = "manual-review-wave1"
+    policy = batch_distillation_policy(aoa_root)
+    route_map = route_map_for_distillation(aoa_root)
+    records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    selected: list[dict[str, Any]] = []
+    min_rank = manual_review_priority_rank(priority)
+    for record in records:
+        profile = first_wave_session_profile(aoa_root, record, policy=policy, route_map=route_map, workspace_root=workspace_root)
+        if "manual_review" not in profile.get("lanes", []):
+            continue
+        if manual_review_priority_rank(str(profile.get("manual_review_priority") or "none")) < min_rank:
+            continue
+        selected.append(profile)
+
+    results: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    for profile in selected:
+        if profile.get("diagnostics"):
+            result = {
+                "session_id": profile.get("session_id"),
+                "session_label": profile.get("session_label"),
+                "session_dir": profile.get("session_dir"),
+                "status": "diagnostic",
+                "diagnostics": profile.get("diagnostics", []),
+            }
+        elif apply:
+            result = write_manual_review_packet(
+                aoa_root,
+                profile,
+                policy=policy,
+                route_map=route_map,
+                wave_id=wave_id,
+                max_events_per_type=max_events_per_type,
+            )
+        else:
+            result = {
+                "session_id": profile.get("session_id"),
+                "session_label": profile.get("session_label"),
+                "session_dir": profile.get("session_dir"),
+                "status": "planned",
+                "manual_review_priority": profile.get("manual_review_priority"),
+                "manual_review_score": profile.get("manual_review_score"),
+                "manual_review_reasons": profile.get("manual_review_reasons", []),
+                "owner_resolution": profile.get("owner_resolution"),
+            }
+        counts[str(result.get("status") or "unknown")] += 1
+        results.append(result)
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "manual_review_wave",
+        "generated_at": now,
+        "ok": counts.get("diagnostic", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "workspace_root": str(workspace_root) if workspace_root else None,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "priority": priority,
+        "apply": apply,
+        "selected_count": len(selected),
+        "counts": dict(counts),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__manual-review-wave1"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, manual_review_wave_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def manual_review_wave_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Manual Review Wave 1",
+        "",
+        "This is a review packet queue. It does not promote reviewed truth.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- priority: `{payload.get('priority')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
+        "",
+        "| status | session | priority | packet | promotion |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| {status} | `{session}` | `{priority}` | `{packet}` | `{promotion}` |".format(
+                status=str(result.get("status") or ""),
+                session=str(result.get("session_label") or result.get("session_id") or ""),
+                priority=str(result.get("manual_review_priority") or ""),
+                packet=str(result.get("manual_review_packet") or ""),
+                promotion=str(result.get("promotion_index") or ""),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_promotion_review_layer(
+    *,
+    aoa_root: Path,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    results: list[dict[str, Any]] = []
+    status_counts: Counter[str] = Counter()
+    candidate_total = 0
+    promoted_total = 0
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        if not isinstance(manifest, dict):
+            continue
+        promotion = manifest.get("promotion") if isinstance(manifest.get("promotion"), dict) else {}
+        index_path_value = promotion.get("latest_index")
+        if not index_path_value:
+            continue
+        index_path = Path(str(index_path_value))
+        index = read_json(index_path, {})
+        if not isinstance(index, dict) or not index:
+            status_counts["missing_index"] += 1
+            continue
+        candidate_count = int(index.get("candidate_count", 0) or 0)
+        promoted_count = int(index.get("promoted_claim_count", 0) or 0)
+        candidate_total += candidate_count
+        promoted_total += promoted_count
+        status = str(index.get("status") or "unknown")
+        status_counts[status] += 1
+        results.append(
+            {
+                "session_id": manifest.get("session_id"),
+                "session_label": manifest.get("session_label"),
+                "session_dir": str(session_dir),
+                "promotion_index": str(index_path),
+                "status": status,
+                "candidate_count": candidate_count,
+                "promoted_claim_count": promoted_count,
+            }
+        )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "promotion_review_layer",
+        "generated_at": now,
+        "ok": True,
+        "aoa_root": str(aoa_root),
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(results),
+        "candidate_count": candidate_total,
+        "promoted_claim_count": promoted_total,
+        "status_counts": dict(status_counts),
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__promotion-review-layer"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, promotion_review_layer_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def promotion_review_layer_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Promotion Review Layer",
+        "",
+        "This aggregates unreviewed promotion candidates. It does not promote them.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- candidate_count: `{payload.get('candidate_count')}`",
+        f"- promoted_claim_count: `{payload.get('promoted_claim_count')}`",
+        f"- status_counts: `{json.dumps(payload.get('status_counts', {}), ensure_ascii=False)}`",
+        "",
+        "| status | session | candidates | promoted | index |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| {status} | `{session}` | {candidates} | {promoted} | `{index}` |".format(
+                status=str(result.get("status") or ""),
+                session=str(result.get("session_label") or result.get("session_id") or ""),
+                candidates=str(result.get("candidate_count") or 0),
+                promoted=str(result.get("promoted_claim_count") or 0),
+                index=str(result.get("promotion_index") or ""),
             )
         )
     lines.append("")
@@ -4762,6 +5718,7 @@ def reindex_print_payload(payload: dict[str, Any], *, full: bool = False, sample
 
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
     grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
+    owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
     family_counts = result.get("family_counts") if isinstance(result.get("family_counts"), dict) else {}
     outcome_counts = result.get("outcome_counts") if isinstance(result.get("outcome_counts"), dict) else {}
     return {
@@ -4776,6 +5733,12 @@ def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
             "cwd": grounding.get("cwd"),
             "status": grounding.get("status"),
             "files": grounding.get("files", [])[:3] if isinstance(grounding.get("files"), list) else [],
+        },
+        "owner_resolution": {
+            "status": owner.get("status"),
+            "owner_root": owner.get("owner_root"),
+            "confidence": owner.get("confidence"),
+            "score": owner.get("score"),
         },
         "manual_review_reasons": result.get("manual_review_reasons", [])[:8],
         "mechanics_reasons": result.get("mechanics_reasons", [])[:8],
@@ -4805,6 +5768,93 @@ def batch_distill_print_payload(payload: dict[str, Any], *, full: bool = False, 
         "full": False,
         "note": "results are bounded on stdout; pass --full or read the written report for the complete queue",
     }
+    return compact
+
+
+def compact_title_repair_result(result: dict[str, Any]) -> dict[str, Any]:
+    current = result.get("current") if isinstance(result.get("current"), dict) else {}
+    proposed = result.get("proposed") if isinstance(result.get("proposed"), dict) else {}
+    return {
+        "session_label": result.get("session_label"),
+        "status": result.get("status"),
+        "reasons": result.get("reasons", [])[:8],
+        "current": {
+            "title": current.get("title"),
+            "title_source": current.get("title_source"),
+            "label": current.get("label"),
+        },
+        "proposed": {
+            "title": proposed.get("title"),
+            "title_source": proposed.get("title_source"),
+            "label": proposed.get("label"),
+        },
+        "diagnostics": result.get("diagnostics", [])[:8],
+    }
+
+
+def title_repair_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20) -> dict[str, Any]:
+    if full:
+        return payload
+    results = payload.get("results", [])
+    result_count = len(results) if isinstance(results, list) else 0
+    sample: list[Any] = []
+    if isinstance(results, list) and results:
+        if result_count <= sample_results:
+            sample = results
+        else:
+            head_count = max(1, sample_results // 2)
+            tail_count = max(1, sample_results - head_count)
+            sample = results[:head_count] + results[-tail_count:]
+    compact = {key: value for key, value in payload.items() if key != "results"}
+    compact["result_count"] = result_count
+    compact["results_sample"] = [compact_title_repair_result(item) for item in sample if isinstance(item, dict)]
+    compact["results_omitted"] = max(0, result_count - len(sample))
+    compact["print"] = {
+        "full": False,
+        "note": "results are bounded on stdout; pass --full or read the written report for the complete title repair queue",
+    }
+    return compact
+
+
+def compact_manual_review_result(result: dict[str, Any]) -> dict[str, Any]:
+    owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
+    return {
+        "session_label": result.get("session_label"),
+        "status": result.get("status"),
+        "manual_review_priority": result.get("manual_review_priority"),
+        "manual_review_score": result.get("manual_review_score"),
+        "manual_review_reasons": result.get("manual_review_reasons", [])[:8],
+        "owner_resolution": {
+            "status": owner.get("status"),
+            "owner_root": owner.get("owner_root"),
+            "confidence": owner.get("confidence"),
+        },
+        "manual_review_packet": result.get("manual_review_packet"),
+        "promotion_index": result.get("promotion_index"),
+        "promotion_candidate_count": result.get("promotion_candidate_count"),
+        "diagnostics": result.get("diagnostics", [])[:8],
+    }
+
+
+def bounded_results_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20, compact_func=None, note: str = "") -> dict[str, Any]:
+    if full:
+        return payload
+    results = payload.get("results", [])
+    result_count = len(results) if isinstance(results, list) else 0
+    sample: list[Any] = []
+    if isinstance(results, list) and results:
+        if result_count <= sample_results:
+            sample = results
+        else:
+            head_count = max(1, sample_results // 2)
+            tail_count = max(1, sample_results - head_count)
+            sample = results[:head_count] + results[-tail_count:]
+    compact = {key: value for key, value in payload.items() if key != "results"}
+    renderer = compact_func or (lambda item: item)
+    compact["result_count"] = result_count
+    compact["results_sample"] = [renderer(item) for item in sample if isinstance(item, dict)]
+    compact["results_omitted"] = max(0, result_count - len(sample))
+    compact["print"] = {"full": False, "note": note or "results are bounded on stdout; pass --full or read the written report for complete results"}
     return compact
 
 
@@ -4900,6 +5950,79 @@ def command_batch_distill(args: argparse.Namespace) -> int:
         max_events_per_type=args.max_events_per_type,
     )
     print(json.dumps(batch_distill_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_repair_session_titles(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = repair_session_titles(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        apply=args.apply,
+        write_report=args.write_report,
+    )
+    print(json.dumps(title_repair_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_manual_review(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace_root = workspace_root_for(explicit_workspace, root)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = manual_review_wave(
+        aoa_root=root,
+        workspace_root=workspace_root,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        priority=args.priority,
+        apply=args.apply,
+        write_report=args.write_report,
+        max_events_per_type=args.max_events_per_type,
+    )
+    print(
+        json.dumps(
+            bounded_results_print_payload(
+                payload,
+                full=args.full,
+                compact_func=compact_manual_review_result,
+                note="results are bounded on stdout; pass --full or read the written report for the complete manual review queue",
+            ),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0 if payload.get("ok") else 1
+
+
+def command_promotion_review(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = build_promotion_review_layer(
+        aoa_root=root,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        write_report=args.write_report,
+    )
+    print(
+        json.dumps(
+            bounded_results_print_payload(
+                payload,
+                full=args.full,
+                note="results are bounded on stdout; pass --full or read the written report for the complete promotion layer",
+            ),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     return 0 if payload.get("ok") else 1
 
 
@@ -5679,6 +6802,44 @@ def build_parser() -> argparse.ArgumentParser:
     batch_distill.add_argument("--max-events-per-type", type=int, default=30)
     batch_distill.add_argument("--full", action="store_true", help="Print complete queue results to stdout.")
     batch_distill.set_defaults(func=command_batch_distill)
+
+    repair_titles = sub.add_parser("repair-session-titles", help="Find and optionally repair weak generated session titles.")
+    repair_titles.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    repair_titles.add_argument("--workspace-root")
+    repair_titles.add_argument("--aoa-root")
+    repair_titles.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    repair_titles.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    repair_titles.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    repair_titles.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    repair_titles.add_argument("--apply", action="store_true", help="Move archives and rewrite generated identity surfaces. Default only plans.")
+    repair_titles.add_argument("--write-report", action="store_true", help="Write JSON and Markdown repair reports under .aoa/diagnostics.")
+    repair_titles.add_argument("--full", action="store_true", help="Print complete repair results to stdout.")
+    repair_titles.set_defaults(func=command_repair_session_titles)
+
+    manual_review = sub.add_parser("manual-review", help="Build manual review packets for first-wave review lanes.")
+    manual_review.add_argument("--workspace-root")
+    manual_review.add_argument("--aoa-root")
+    manual_review.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD.")
+    manual_review.add_argument("--since-days", type=int, help="Rolling window when --since is not provided.")
+    manual_review.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD.")
+    manual_review.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering.")
+    manual_review.add_argument("--priority", choices=["sample", "standard", "deep"], default="deep", help="Minimum manual review priority to packetize.")
+    manual_review.add_argument("--apply", action="store_true", help="Write manual review packets and promotion indexes. Default only plans.")
+    manual_review.add_argument("--write-report", action="store_true", help="Write JSON and Markdown wave reports under .aoa/diagnostics.")
+    manual_review.add_argument("--max-events-per-type", type=int, default=20)
+    manual_review.add_argument("--full", action="store_true", help="Print complete manual-review results to stdout.")
+    manual_review.set_defaults(func=command_manual_review)
+
+    promotion_review = sub.add_parser("promotion-review", help="Aggregate unreviewed promotion candidates from manual review packets.")
+    promotion_review.add_argument("--workspace-root")
+    promotion_review.add_argument("--aoa-root")
+    promotion_review.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD.")
+    promotion_review.add_argument("--since-days", type=int, help="Rolling window when --since is not provided.")
+    promotion_review.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD.")
+    promotion_review.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering.")
+    promotion_review.add_argument("--write-report", action="store_true", help="Write JSON and Markdown promotion reports under .aoa/diagnostics.")
+    promotion_review.add_argument("--full", action="store_true", help="Print complete promotion-review results to stdout.")
+    promotion_review.set_defaults(func=command_promotion_review)
 
     stress_pass = sub.add_parser("stress-pass", help="Audit the first N compaction-closing intervals for a session.")
     stress_pass.add_argument("session", nargs="?", default="latest")

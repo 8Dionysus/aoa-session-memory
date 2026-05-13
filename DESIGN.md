@@ -166,6 +166,20 @@ the next act is a narrow improvement to the kernel followed by tests and audit.
 The conveyor improves while it works, but every improvement remains
 inspectable.
 
+When the originating `cwd` is missing or too broad, the conveyor must not hide
+that uncertainty behind workspace fallback. Project grounding and owner
+resolution are separate signals. Project grounding records the best available
+guidance files. Owner resolution infers the likely owning root from `cwd`,
+grounding files, and indexed path evidence, and it must stay explicitly
+`unresolved`, `ambiguous`, or low-confidence when the evidence is weak.
+
+Manual-review packets are the first durable responsibility surface after the
+machine index. They collect event refs, reasons, grounding, owner resolution,
+and promotion candidates into a bounded artifact. They are not reviewed truth.
+The promotion layer may queue candidates for skills, playbooks, root-cause
+notes, decisions, or automation, but every candidate remains unpromoted until a
+reviewed distillation path accepts it.
+
 The conveyor should not inflate responsibility signals. Stream copies of agent
 messages are evidence, but final response items carry the semantic promotion
 weight. A security policy mention is not a leak. A successful command that
