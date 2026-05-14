@@ -53,6 +53,7 @@ python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
+python3 scripts/aoa_session_memory.py naming-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --refresh-indexes --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --trust-hooks
 python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
@@ -62,7 +63,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `40 passed`
+- `.aoa` tests: `42 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -93,6 +94,31 @@ Last observed result:
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
   `diagnostics/20260512T183224Z__batch-distill__first-wave.json` and `.md`
+- `naming-readiness all --refresh-indexes --write-report`: `ok=true`,
+  selected `147` sessions; status counts: `diagnostic_only=4`,
+  `low_signal=9`, `named=2`, `needs_phase_discovery=5`,
+  `needs_reindex=1`, `phase_discovery_ready=1`, `readable_label=119`,
+  `ready_for_semantic_name=6`; report:
+  `diagnostics/20260513T222601Z__naming-readiness.json` and `.md`
+- `phase-discovery`: `ok=true`; wrote unreviewed candidate layers for
+  `2026-04-23__068__коммить-пуш-мердж` (`100` candidates) and
+  `2026-05-12__001__aoa-session-dist-exp-идея` (`21` candidates after
+  reindex); reports:
+  `diagnostics/20260514T000124Z__phase-discovery__2026-04-23__068.json`
+  and `diagnostics/20260513T235954Z__phase-discovery__2026-05-12__001__aoa-session-dist-exp.json`.
+  Candidates now carry `name_basis`, `quality_flags`, `linked_signals`, and
+  `review`; the idea session currently has `5` candidates in `review_queue`
+  for semantic synthesis before application.
+- `review-phase-name`: guarded route added for one phase-discovery candidate at
+  a time. It previews raw samples and rejects `--use-candidate` for
+  `needs_semantic_synthesis`; successful application refreshes
+  `SESSION_NAMES.md`, `session-name-index.json`, `sessions/INDEX.md`, and
+  `sessions/index.json`.
+- `name-session`: applied `aoa session-memory archive design and naming
+  pipeline` as the active session name for
+  `2026-05-12__001__aoa-session-dist-exp-идея`, plus `16` reviewed phase
+  names with raw-line coverage; then `reindex-sessions` refreshed that archive
+  to `indexed`, `16158` events, `21` segments.
 - `validate`: `ok=true`
 - `codex-compact-probe --trust-hooks`: `ok=true`, live `PreCompact` and
   `PostCompact` completed and archived; latest probe raised live counts to
@@ -162,6 +188,8 @@ Stress-pass evidence:
 | Session names are readable date/sequence/title labels | naming policy, relabel test |
 | Later semantic names can route agents without renaming archives or weakening raw provenance | `name-session`, scoped `semantic_names`, raw anchor regression tests |
 | Session/phase names are comparable through a lightweight root name index | `session-name-index.json`, `SESSION_NAMES.md`, scoped name index regression tests |
+| Broad naming starts from route readiness instead of cosmetic relabeling | `naming-readiness`, `SESSION_NAMES.md`, `sessions/INDEX.md`, naming-readiness regression test |
+| Large-session names can be prepared by an open candidate layer before promotion | `phase-discovery`, `review-phase-name`, `naming/phase-discovery.json`, phase-discovery/review regression tests |
 | Session archives have a local route card and table of contents before agents open individual sessions | `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`, doctor checks, semantic-name and registry recovery regression tests |
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |

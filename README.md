@@ -86,8 +86,8 @@ migration.
 `sessions/AGENTS.md` is the archive-district route card.
 `sessions/INDEX.md` and `sessions/index.json` are generated archive-local
 tables of contents. They group sessions by date, list named sessions, surface
-the largest archives, and point agents to the right `SESSION.md` before they
-open heavy generated or raw material.
+the largest archives, show naming-readiness queues, and point agents to the
+right `SESSION.md` before they open heavy generated or raw material.
 
 Naming rules live in `NAMING.md` and `config/naming-policy.json`.
 
@@ -196,6 +196,49 @@ python3 scripts/aoa_session_memory.py repair-session-titles all \
 Add `--apply` after reviewing the planned changes. This moves archive
 directories and rewrites generated identity surfaces, but does not alter raw
 session evidence.
+
+Before broad semantic naming or physical relabeling, refresh the readiness
+queue:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-readiness all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --refresh-indexes \
+  --write-report
+```
+
+Use the resulting `blocked`, `diagnostic_only`, `needs_reindex`,
+`needs_phase_discovery`, `phase_discovery_ready`, `ready_for_semantic_name`,
+`readable_label`, `low_signal`, and `named` routes
+to decide the next pass. Readiness is navigation, not reviewed truth.
+
+For long sessions routed to phase discovery:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --write-report
+```
+
+This writes unreviewed `naming/phase-discovery.json` and `.md` candidates inside
+the session archive. Use `review_queue` for candidates that need semantic
+synthesis before they can be applied.
+
+Review and apply one phase candidate through the guarded route:
+
+```bash
+python3 scripts/aoa_session_memory.py review-phase-name <session-label-or-id> \
+  --segment <segment-id> \
+  --reviewed-name "<reviewed phase name>" \
+  --apply \
+  --write-report
+```
+
+`review-phase-name` refreshes the name indexes after a successful apply. It
+rejects `--use-candidate` when a candidate still needs semantic synthesis.
 
 Create first-wave manual review packets for deep review lanes:
 

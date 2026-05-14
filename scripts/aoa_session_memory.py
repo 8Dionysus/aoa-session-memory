@@ -3546,8 +3546,1050 @@ def semantic_name_index_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def title_is_generic_for_naming(title: str, source: str | None) -> bool:
+    compact = re.sub(r"\s+", " ", title.strip())
+    lowered = compact.lower()
+    if weak_title_text(compact):
+        return True
+    if str(source or "") in {"cwd", "transcript", "fallback"}:
+        return True
+    if lowered.startswith("codex in "):
+        return True
+    if lowered.startswith("reply exactly:"):
+        return True
+    return False
+
+
+def segment_index_missing_paths(segments: list[Any]) -> list[str]:
+    missing: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            missing.append("invalid-segment-record")
+            continue
+        index_path = segment.get("index")
+        if not index_path:
+            missing.append(f"{segment.get('segment_id') or 'segment'}:missing-index-field")
+            continue
+        if not Path(str(index_path)).exists():
+            missing.append(str(index_path))
+    return missing
+
+
+def session_naming_readiness(
+    aoa_root: Path,
+    session_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    record: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = policy if isinstance(policy, dict) else batch_distillation_policy(aoa_root)
+    large_threshold = int_value(policy.get("large_session_segment_threshold"), 24)
+    huge_threshold = int_value(policy.get("huge_session_segment_threshold"), 100)
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+    semantic = semantic_names_payload(manifest)
+    active_session = active_semantic_name(manifest, scope="session")
+    phase_or_topic_count = sum(
+        1
+        for item in semantic.get("names", [])
+        if isinstance(item, dict) and semantic_name_scope(item) in {"phase", "topic"}
+    )
+
+    event_count = int_value(
+        manifest.get("latest_event_count"),
+        int_value(record.get("event_count") if isinstance(record, dict) else None),
+    )
+    segment_count = len(segments)
+    archive_status = str(manifest.get("archive_status") or (record or {}).get("archive_status") or "")
+    distillation_status = str(manifest.get("distillation_status") or (record or {}).get("distillation_status") or "")
+    label = str(display.get("label") or manifest.get("session_label") or session_dir.name)
+    title = str(display.get("title") or manifest.get("session_title") or "")
+    title_source = str(display.get("title_source") or "")
+    raw_path = Path(str(raw.get("path") or session_dir / "raw" / "session.raw.jsonl"))
+    raw_present = raw_path.exists()
+    raw_sha_present = bool(raw.get("sha256"))
+    raw_line_count = raw.get("line_count")
+    missing_segment_indexes = segment_index_missing_paths(segments)
+    weak_title = title_is_generic_for_naming(title, title_source)
+    weak_label = weak_label_text(label)
+    phase_discovery_present = session_phase_discovery_path(session_dir).is_file()
+
+    reasons: list[str] = []
+    reindex_reasons: list[str] = []
+    blockers: list[str] = []
+    warnings: list[str] = []
+    route = "optional_semantic_name"
+    status = "readable_label"
+    priority = 10
+
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    source_transcript_path = source.get("transcript_path")
+    has_recovery_hint = bool(source_transcript_path)
+    if archive_status == "raw_unavailable":
+        if has_recovery_hint:
+            blockers.append("raw_unavailable")
+            route = "recover_raw_before_naming"
+        else:
+            status = "diagnostic_only"
+            route = "leave_raw_unavailable_diagnostic"
+            priority = 0
+            reasons.append("raw_unavailable_without_transcript_path")
+    elif archive_status == "raw_mirrored_index_deferred":
+        if raw_present:
+            reindex_reasons.append("raw_mirrored_index_deferred")
+            route = "reindex_before_naming"
+        else:
+            blockers.append("raw_mirrored_index_deferred_without_raw")
+            route = "recover_raw_before_naming"
+    elif archive_status != "indexed":
+        blockers.append(f"archive_status_not_indexed:{archive_status or 'missing'}")
+        route = "reindex_before_naming"
+    if archive_status != "raw_unavailable" and not raw_present:
+        blockers.append("raw_archive_missing")
+        route = "recover_raw_before_naming"
+    if archive_status == "indexed" and not segments:
+        reindex_reasons.append("indexed_session_has_no_segments")
+        route = "reindex_before_naming"
+    if archive_status == "indexed" and missing_segment_indexes:
+        reindex_reasons.append("segment_index_missing")
+        route = "reindex_before_naming"
+
+    if status == "diagnostic_only":
+        pass
+    elif blockers:
+        status = "blocked"
+        priority = 95 if event_count >= 1000 or segment_count >= large_threshold else 70
+        reasons.extend(blockers)
+    elif reindex_reasons:
+        status = "needs_reindex"
+        priority = 90 if event_count >= 1000 or segment_count >= large_threshold else 55
+        reasons.extend(reindex_reasons)
+    elif active_session:
+        status = "named"
+        route = "verify_or_refine_existing_name"
+        priority = 0
+        reasons.append("active_session_name_present")
+        if phase_or_topic_count:
+            reasons.append("phase_or_topic_names_present")
+    elif event_count <= 20 and segment_count <= 2:
+        status = "low_signal"
+        route = "skip_or_wait_for_more_evidence"
+        priority = 5
+        reasons.append("small_or_probe_session")
+    elif phase_or_topic_count:
+        status = "ready_for_semantic_name"
+        route = "semantic_name_from_existing_phase_topic_names"
+        priority = 65
+        reasons.append("phase_or_topic_names_present")
+    elif phase_discovery_present:
+        status = "phase_discovery_ready"
+        route = "review_phase_discovery_before_session_name"
+        priority = 70
+        reasons.append("phase_discovery_present")
+    elif segment_count >= huge_threshold:
+        status = "needs_phase_discovery"
+        route = "phase_topic_discovery_before_session_name"
+        priority = 95
+        reasons.append("huge_session")
+    elif segment_count >= large_threshold:
+        status = "needs_phase_discovery"
+        route = "phase_topic_discovery_before_session_name"
+        priority = 80
+        reasons.append("large_session")
+    elif weak_title or weak_label:
+        status = "ready_for_semantic_name"
+        route = "direct_semantic_name_from_index_and_raw_refs"
+        priority = 60
+        if weak_title:
+            reasons.append("weak_or_generic_title")
+        if weak_label:
+            reasons.append("weak_or_generic_label")
+    else:
+        reasons.append("canonical_label_readable")
+
+    if distillation_status != "first_pass_distilled":
+        warnings.append(f"distillation_not_first_pass:{distillation_status or 'missing'}")
+    if raw_present and not raw_sha_present and archive_status == "indexed":
+        warnings.append("raw_sha256_missing")
+    if raw_line_count is None and raw_present and archive_status == "indexed":
+        warnings.append("raw_line_count_missing")
+
+    suggested_next = {
+        "blocked": "repair raw/index state before naming",
+        "diagnostic_only": "keep the raw-unavailable diagnostic visible unless a raw candidate appears",
+        "needs_reindex": "refresh generated segment indexes from preserved raw before naming",
+        "phase_discovery_ready": "review phase-discovery candidates before applying the whole-session name",
+        "named": "verify existing active session name against review needs",
+        "low_signal": "leave canonical label unless this probe becomes operationally important",
+        "needs_phase_discovery": "discover phase/topic candidates before assigning a whole-session name",
+        "ready_for_semantic_name": "apply a semantic session name with raw evidence refs",
+        "readable_label": "semantic name is optional; prioritize weaker or larger sessions first",
+    }.get(status, "inspect naming route")
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "route": route,
+        "priority": priority,
+        "reasons": reasons,
+        "blockers": blockers,
+        "warnings": warnings,
+        "suggested_next": suggested_next,
+        "evidence": {
+            "session_label": label,
+            "title": title,
+            "title_source": title_source,
+            "archive_status": archive_status,
+            "distillation_status": distillation_status,
+            "event_count": event_count,
+            "segment_count": segment_count,
+            "large_segment_threshold": large_threshold,
+            "huge_segment_threshold": huge_threshold,
+            "raw_present": raw_present,
+            "source_transcript_path_present": has_recovery_hint,
+            "raw_sha256_present": raw_sha_present,
+            "raw_line_count": raw_line_count,
+            "weak_title": weak_title,
+            "weak_label": weak_label,
+            "active_session_name": active_session.get("slug") if isinstance(active_session, dict) else None,
+            "phase_or_topic_name_count": phase_or_topic_count,
+            "phase_discovery_present": phase_discovery_present,
+            "missing_segment_index_count": len(missing_segment_indexes),
+            "missing_segment_indexes_sample": missing_segment_indexes[:8],
+        },
+    }
+
+
+def naming_readiness_counts(records: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    by_status: Counter[str] = Counter()
+    by_route: Counter[str] = Counter()
+    for record in records:
+        readiness = record.get("naming_readiness") if isinstance(record.get("naming_readiness"), dict) else {}
+        by_status[str(readiness.get("status") or "missing")] += 1
+        by_route[str(readiness.get("route") or "missing")] += 1
+    return {
+        "by_status": dict(sorted(by_status.items())),
+        "by_route": dict(sorted(by_route.items())),
+    }
+
+
+def naming_work_queue(records: list[dict[str, Any]], *, limit: int = 50) -> list[dict[str, Any]]:
+    queue = [
+        {
+            "session_id": record.get("session_id"),
+            "session_label": record.get("session_label"),
+            "session_title": record.get("session_title") or record.get("title"),
+            "path": record.get("path"),
+            "event_count": record.get("event_count", 0),
+            "segment_count": record.get("segment_count", 0),
+            "naming_readiness": record.get("naming_readiness"),
+        }
+        for record in records
+        if isinstance(record.get("naming_readiness"), dict)
+        and int_value(record["naming_readiness"].get("priority")) > 0
+        and record["naming_readiness"].get("status") not in {"low_signal", "readable_label"}
+    ]
+    queue.sort(
+        key=lambda item: (
+            int_value((item.get("naming_readiness") or {}).get("priority")),
+            int_value(item.get("segment_count")),
+            int_value(item.get("event_count")),
+            str(item.get("session_label") or ""),
+        ),
+        reverse=True,
+    )
+    return queue[:limit]
+
+
+def session_phase_discovery_path(session_dir: Path) -> Path:
+    return session_dir / "naming" / "phase-discovery.json"
+
+
+def event_semantic_text(event: RawEvent) -> str:
+    if not isinstance(event.parsed, dict):
+        return ""
+    return semantic_text_for_classification(event.source_type, event.parsed.get("payload"))
+
+
+def extract_path_terms(texts: list[str], *, limit: int = 12) -> list[str]:
+    counts: Counter[str] = Counter()
+    pattern = re.compile(r"(?<![\w.-])(?:/[^\s`'\"<>|)]+|(?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.-]+)")
+    for text in texts:
+        for match in pattern.findall(text):
+            value = match.rstrip(".,:;)]}")
+            if len(value) < 3 or value in {"/", "./", "../", "/dev/null", "/srv", "/tmp", "/home", "/var", "/etc"}:
+                continue
+            counts[value] += 1
+    return [path for path, _count in counts.most_common(limit)]
+
+
+def generic_phase_intent_text(text: str) -> bool:
+    lowered = clean_phase_candidate_text(text).lower().strip(" .!?…")
+    if not lowered:
+        return True
+    generic_values = {
+        "давай",
+        "давай действуй",
+        "действуй",
+        "разложи план",
+        "что еще у нас есть",
+        "ну что ж готов",
+        "готов",
+        "продолжаем",
+        "окей",
+        "добро двигай",
+    }
+    if lowered in generic_values:
+        return True
+    generic_prefixes = (
+        "давай, действуй",
+        "давай действуй",
+        "давай тогда",
+        "ну хорошо",
+        "окей,",
+        "так, что",
+        "что еще",
+        "и как бы ты это делал",
+    )
+    if len(lowered) > 80 and any(lowered.startswith(prefix) for prefix in generic_prefixes):
+        return False
+    return any(lowered.startswith(prefix) for prefix in generic_prefixes)
+
+
+def phase_action_word(event_counts: Counter[str]) -> str:
+    if event_counts.get("VERIFICATION"):
+        return "validation"
+    if event_counts.get("DIFF") or event_counts.get("FILE_WRITE"):
+        return "implementation"
+    if event_counts.get("ERROR"):
+        return "failure diagnosis"
+    if event_counts.get("FILE_READ") or event_counts.get("COMMAND"):
+        return "investigation"
+    return "session phase"
+
+
+def path_based_phase_name(top_paths: list[str], event_counts: Counter[str]) -> str:
+    action = phase_action_word(event_counts)
+    if top_paths:
+        path_name = Path(top_paths[0]).name or top_paths[0].strip("/").split("/")[-1]
+        if path_name:
+            return f"{path_name} {action}"
+    return f"Segment phase {action}"
+
+
+def phase_candidate_name(
+    segment_id: str,
+    user_texts: list[str],
+    top_paths: list[str],
+    event_counts: Counter[str],
+) -> dict[str, Any]:
+    quality_flags: list[str] = []
+    specific_user_texts = [text for text in user_texts if not generic_phase_intent_text(text)]
+    if len(specific_user_texts) < len(user_texts):
+        quality_flags.append("generic_user_intent_present")
+    if not specific_user_texts:
+        quality_flags.append("no_specific_user_intent")
+    for text in user_texts:
+        candidate = short_text(clean_phase_candidate_text(text), max_chars=96)
+        if text in specific_user_texts and candidate and usable_title_text(candidate):
+            return {
+                "name": candidate,
+                "basis": "specific_user_intent",
+                "quality_flags": quality_flags,
+            }
+    quality_flags.append("path_or_event_based_name")
+    return {
+        "name": path_based_phase_name(top_paths, event_counts),
+        "basis": "linked_path_event_signals",
+        "quality_flags": quality_flags,
+    }
+
+
+def clean_phase_candidate_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"^/[^\s`]+(?:\s+|$)", "", cleaned).strip()
+    cleaned = re.sub(r"^`/[^\s`]+`(?:\s+|$)", "", cleaned).strip()
+    return cleaned
+
+
+def usable_phase_intent_text(text: str) -> bool:
+    return usable_title_text(short_text(clean_phase_candidate_text(text), max_chars=200))
+
+
+def phase_candidate_review(
+    *,
+    session_label: str,
+    segment_id: str,
+    candidate_name: str,
+    confidence: str,
+    name_basis: str,
+    quality_flags: list[str],
+    coverage: dict[str, Any],
+    evidence_refs: list[str],
+    linked_signals: dict[str, Any],
+) -> dict[str, Any]:
+    hard_flags = {"no_specific_user_intent", "path_or_event_based_name"}
+    weak = bool(hard_flags & set(quality_flags)) or confidence == "low" or name_basis != "specific_user_intent"
+    if weak:
+        status = "needs_semantic_synthesis"
+        action = "synthesize_reviewed_name_from_linked_signals"
+        suggested_next = (
+            "Run review-phase-name for this segment, inspect raw samples, then pass --reviewed-name before applying."
+        )
+        name_arg = "--reviewed-name '<reviewed phase name>'"
+    else:
+        status = "ready_for_raw_check"
+        action = "verify_raw_refs_then_apply"
+        suggested_next = "Run review-phase-name for this segment; apply with --use-candidate only after checking raw samples."
+        name_arg = "--use-candidate"
+    apply_template = (
+        "python3 scripts/aoa_session_memory.py review-phase-name "
+        f"{shlex.quote(session_label)} --segment {shlex.quote(str(segment_id))} "
+        f"{name_arg} --apply --write-report"
+    )
+    return {
+        "status": status,
+        "action": action,
+        "suggested_next": suggested_next,
+        "apply_template": apply_template,
+        "review_inputs": {
+            "segment_id": segment_id,
+            "candidate_name": candidate_name,
+            "confidence": confidence,
+            "name_basis": name_basis,
+            "quality_flags": quality_flags,
+            "coverage": coverage,
+            "evidence": evidence_refs,
+            "primary_user_intent": linked_signals.get("primary_user_intent"),
+            "support_paths": linked_signals.get("support_paths", []),
+            "support_event_types": linked_signals.get("support_event_types", {}),
+        },
+    }
+
+
+def phase_candidate_from_segment(segment: dict[str, Any], events: list[RawEvent], *, session_label: str = "") -> dict[str, Any]:
+    segment_id = str(segment.get("segment_id") or "")
+    source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
+    event_counts: Counter[str] = Counter(event.event_type for event in events)
+    family_counts: Counter[str] = Counter(event.family for event in events)
+    outcome_counts: Counter[str] = Counter(event.outcome for event in events)
+    user_events = [event for event in events if event.event_type == "USER_INTENT"]
+    user_texts_all = [event_semantic_text(event) for event in user_events]
+    user_texts = [text for text in user_texts_all if text.strip() and usable_phase_intent_text(text)]
+    high_signal_events = [
+        event
+        for event in events
+        if event.event_type in {"USER_INTENT", "DECISION", "CHECKPOINT", "OPEN_THREAD", "PROCESS_LESSON", "FINAL_STATE", "VERIFICATION", "ERROR"}
+        and (event.event_type != "USER_INTENT" or usable_phase_intent_text(event_semantic_text(event)))
+    ]
+    signal_texts = [event_semantic_text(event) for event in high_signal_events]
+    signal_texts = [text for text in signal_texts if text.strip()]
+    path_events = [
+        event
+        for event in events
+        if event.event_type in {"COMMAND", "COMMAND_OUTPUT", "FILE_READ", "FILE_WRITE", "DIFF", "VERIFICATION"}
+        or (event.event_type == "USER_INTENT" and usable_phase_intent_text(event_semantic_text(event)))
+    ]
+    path_texts = [event_semantic_text(event) for event in path_events]
+    path_texts = [text for text in path_texts if text.strip()]
+    top_paths = extract_path_terms(path_texts)
+    name_payload = phase_candidate_name(segment_id, user_texts, top_paths, event_counts)
+    name = str(name_payload.get("name") or "")
+    evidence_events = high_signal_events[:8] or events[:3]
+    evidence_refs = [f"raw:line:{event.line_no}" for event in evidence_events]
+    confidence = "medium"
+    quality_flags = [str(flag) for flag in name_payload.get("quality_flags", []) if str(flag)]
+    if "no_specific_user_intent" in quality_flags:
+        confidence = "low"
+    elif user_texts and (event_counts.get("DIFF") or event_counts.get("VERIFICATION") or event_counts.get("FINAL_STATE")):
+        confidence = "high"
+    elif not user_texts:
+        confidence = "low"
+    linked_signal_summary = {
+        "basis": name_payload.get("basis"),
+        "quality_flags": quality_flags,
+        "primary_user_intent": short_text(clean_phase_candidate_text(user_texts[0]), max_chars=180) if user_texts else "",
+        "specific_user_intent_count": len([text for text in user_texts if not generic_phase_intent_text(text)]),
+        "support_paths": top_paths[:5],
+        "support_event_types": {
+            key: event_counts.get(key, 0)
+            for key in ["USER_INTENT", "COMMAND", "COMMAND_OUTPUT", "FILE_READ", "DIFF", "ERROR", "VERIFICATION", "FINAL_STATE"]
+            if event_counts.get(key, 0)
+        },
+    }
+    coverage = {
+        "raw_ranges": [
+            {
+                "from_line": int_value(source_range.get("from_line")),
+                "to_line": int_value(source_range.get("to_line")),
+            }
+        ],
+        "note": f"Generated from segment {segment_id}; review before applying.",
+    }
+    review = phase_candidate_review(
+        session_label=session_label,
+        segment_id=segment_id,
+        candidate_name=name,
+        confidence=confidence,
+        name_basis=str(name_payload.get("basis") or ""),
+        quality_flags=quality_flags,
+        coverage=coverage,
+        evidence_refs=evidence_refs,
+        linked_signals=linked_signal_summary,
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "segment_id": segment_id,
+        "segment_role": segment.get("role"),
+        "scope": "phase",
+        "kind": "dominant_topic",
+        "status": "candidate_unreviewed",
+        "name": name,
+        "slug": semantic_name_slug(name),
+        "confidence": confidence,
+        "coverage": coverage,
+        "evidence": evidence_refs,
+        "name_basis": name_payload.get("basis"),
+        "quality_flags": quality_flags,
+        "linked_signals": linked_signal_summary,
+        "review": review,
+        "signals": {
+            "event_count": len(events),
+            "event_counts": dict(sorted(event_counts.items())),
+            "family_counts": dict(sorted(family_counts.items())),
+            "outcome_counts": dict(sorted(outcome_counts.items())),
+            "user_intent_count": len(user_texts),
+            "raw_user_intent_count": len(user_events),
+            "command_count": event_counts.get("COMMAND", 0),
+            "mutation_count": event_counts.get("DIFF", 0) + event_counts.get("FILE_WRITE", 0),
+            "error_count": event_counts.get("ERROR", 0),
+            "verification_count": event_counts.get("VERIFICATION", 0),
+            "top_paths": top_paths,
+            "user_intent_samples": [short_text(clean_phase_candidate_text(text), max_chars=160) for text in user_texts[:4]],
+            "high_signal_samples": [short_text(text, max_chars=160) for text in signal_texts[:6]],
+        },
+    }
+
+
+def phase_candidate_quality_counts(candidates: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    by_confidence: Counter[str] = Counter()
+    by_basis: Counter[str] = Counter()
+    by_review_status: Counter[str] = Counter()
+    by_quality_flag: Counter[str] = Counter()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        by_confidence[str(candidate.get("confidence") or "missing")] += 1
+        by_basis[str(candidate.get("name_basis") or "missing")] += 1
+        review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+        by_review_status[str(review.get("status") or "missing")] += 1
+        for flag in candidate.get("quality_flags", []) if isinstance(candidate.get("quality_flags"), list) else []:
+            by_quality_flag[str(flag)] += 1
+    return {
+        "by_confidence": dict(sorted(by_confidence.items())),
+        "by_basis": dict(sorted(by_basis.items())),
+        "by_review_status": dict(sorted(by_review_status.items())),
+        "by_quality_flag": dict(sorted(by_quality_flag.items())),
+    }
+
+
+def phase_review_queue(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+        if review.get("status") == "ready_for_raw_check":
+            continue
+        coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
+        queue.append(
+            {
+                "segment_id": candidate.get("segment_id"),
+                "candidate_name": candidate.get("name"),
+                "confidence": candidate.get("confidence"),
+                "name_basis": candidate.get("name_basis"),
+                "quality_flags": candidate.get("quality_flags", []),
+                "coverage": coverage,
+                "evidence": candidate.get("evidence", []),
+                "review": review,
+            }
+        )
+    queue.sort(
+        key=lambda item: (
+            0 if item.get("confidence") == "low" else 1,
+            str(item.get("segment_id") or ""),
+        )
+    )
+    return queue
+
+
+def discover_session_phases(
+    aoa_root: Path,
+    target: str,
+    *,
+    write: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    record = resolve_session_record(aoa_root, target)
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError(f"missing session manifest: {session_dir}")
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path") or session_dir / "raw" / "session.raw.jsonl"))
+    if not raw_path.is_file():
+        raise ValueError(f"missing raw archive: {raw_path}")
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+    if not segments:
+        raise ValueError(f"missing generated segments: {session_dir}")
+    events = parse_raw_events(raw_path)
+    candidates: list[dict[str, Any]] = []
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    session_label = str(display.get("label") or manifest.get("session_label") or record.get("session_label") or target)
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
+        start = int_value(source_range.get("from_line"))
+        end = int_value(source_range.get("to_line"))
+        if start <= 0 or end <= 0:
+            continue
+        segment_events = [event for event in events if start <= event.line_no <= end]
+        if not segment_events:
+            continue
+        candidates.append(phase_candidate_from_segment(segment, segment_events, session_label=session_label))
+    review_queue = phase_review_queue(candidates)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_phase_discovery",
+        "generated_at": now,
+        "ok": True,
+        "status": "candidate_unreviewed",
+        "aoa_root": str(aoa_root),
+        "session_id": manifest.get("session_id"),
+        "session_label": session_label,
+        "session_title": display.get("title") or manifest.get("session_title"),
+        "session_dir": str(session_dir),
+        "raw_path": str(raw_path),
+        "archive_status": manifest.get("archive_status"),
+        "event_count": len(events),
+        "segment_count": len(segments),
+        "candidate_count": len(candidates),
+        "candidate_quality_counts": phase_candidate_quality_counts(candidates),
+        "review_queue_count": len(review_queue),
+        "review_queue": review_queue,
+        "candidates": candidates,
+        "next_actions": [
+            "review candidate names against raw evidence",
+            "apply accepted phase/topic names with name-session --scope phase or --scope topic",
+            "choose the whole-session name only after phase coverage is understood",
+        ],
+    }
+    if write:
+        artifact_json = session_phase_discovery_path(session_dir)
+        artifact_md = artifact_json.with_suffix(".md")
+        write_json(artifact_json, payload)
+        write_markdown(artifact_md, phase_discovery_markdown(payload))
+        payload["artifact_json"] = str(artifact_json)
+        payload["artifact_markdown"] = str(artifact_md)
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__phase-discovery__{safe_slug(str(payload.get('session_label') or target))}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, phase_discovery_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def phase_discovery_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Phase Discovery",
+        "",
+        "Generated candidate phase/topic names. This is open evidence for review, not applied naming truth.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- session: `{payload.get('session_label') or payload.get('session_id')}`",
+        f"- archive_status: `{payload.get('archive_status')}`",
+        f"- events: `{payload.get('event_count')}`",
+        f"- segments: `{payload.get('segment_count')}`",
+        f"- candidates: `{payload.get('candidate_count')}`",
+        f"- review_queue: `{payload.get('review_queue_count', 0)}`",
+        f"- raw_path: `{payload.get('raw_path')}`",
+        "",
+        "## Quality Counts",
+        "",
+    ]
+    quality_counts = payload.get("candidate_quality_counts") if isinstance(payload.get("candidate_quality_counts"), dict) else {}
+    for key, value in quality_counts.items():
+        lines.append(f"- `{key}`: `{json.dumps(value, ensure_ascii=False)}`")
+    lines.extend(
+        [
+            "",
+            "## Review Queue",
+            "",
+        ]
+    )
+    review_queue = payload.get("review_queue") if isinstance(payload.get("review_queue"), list) else []
+    if review_queue:
+        lines.extend(["| segment | action | candidate | quality | next |", "| --- | --- | --- | --- | --- |"])
+        for item in review_queue[:25]:
+            if not isinstance(item, dict):
+                continue
+            review = item.get("review") if isinstance(item.get("review"), dict) else {}
+            lines.append(
+                "| `{segment}` | `{action}` | {candidate} | {quality} | {next} |".format(
+                    segment=item.get("segment_id"),
+                    action=markdown_cell(review.get("action")),
+                    candidate=markdown_cell(item.get("candidate_name")),
+                    quality=markdown_cell(", ".join(str(flag) for flag in item.get("quality_flags", []) if flag)),
+                    next=markdown_cell(review.get("suggested_next")),
+                )
+            )
+        lines.extend(["", "## Review Apply Templates", ""])
+        for item in review_queue[:25]:
+            if not isinstance(item, dict):
+                continue
+            review = item.get("review") if isinstance(item.get("review"), dict) else {}
+            template = str(review.get("apply_template") or "").strip()
+            if not template:
+                continue
+            lines.extend([f"### Segment `{item.get('segment_id')}`", "", "```bash", template, "```", ""])
+    else:
+        lines.append("- No candidates require semantic synthesis before raw-check review.")
+    lines.extend(
+        [
+            "",
+        "## Candidates",
+        "",
+        "| segment | confidence | basis | candidate | coverage | evidence | signals | quality |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for candidate in payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
+        raw_ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+        range_text = ""
+        if raw_ranges and isinstance(raw_ranges[0], dict):
+            range_text = f"{raw_ranges[0].get('from_line')}..{raw_ranges[0].get('to_line')}"
+        signals = candidate.get("signals") if isinstance(candidate.get("signals"), dict) else {}
+        signal_text = "users:{users} commands:{commands} mutations:{mutations} errors:{errors} checks:{checks}".format(
+            users=signals.get("user_intent_count", 0),
+            commands=signals.get("command_count", 0),
+            mutations=signals.get("mutation_count", 0),
+            errors=signals.get("error_count", 0),
+            checks=signals.get("verification_count", 0),
+        )
+        lines.append(
+            "| `{segment}` | `{confidence}` | `{basis}` | {name} | `{coverage}` | `{evidence}` | {signals} | {quality} |".format(
+                segment=candidate.get("segment_id"),
+                confidence=candidate.get("confidence"),
+                basis=markdown_cell(candidate.get("name_basis")),
+                name=markdown_cell(candidate.get("name")),
+                coverage=range_text,
+                evidence=", ".join(str(ref) for ref in candidate.get("evidence", [])[:4]),
+                signals=markdown_cell(signal_text),
+                quality=markdown_cell(", ".join(str(flag) for flag in candidate.get("quality_flags", []) if flag)),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Review Rule",
+            "",
+            "Apply phase/topic names through `review-phase-name`; use `name-session` only as the lower-level writer.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def normalize_segment_id(value: str) -> str:
+    text = str(value or "").strip()
+    if text.isdigit():
+        return f"{int(text):03d}"
+    return text
+
+
+def phase_discovery_payload_for_review(aoa_root: Path, target: str, *, refresh: bool = False) -> dict[str, Any]:
+    record = resolve_session_record(aoa_root, target)
+    session_dir = session_dir_from_record(record)
+    artifact_json = session_phase_discovery_path(session_dir)
+    if refresh or not artifact_json.is_file():
+        return discover_session_phases(aoa_root, target, write=True)
+    payload = read_json(artifact_json, {})
+    if not isinstance(payload, dict) or payload.get("artifact_type") != "session_phase_discovery":
+        return discover_session_phases(aoa_root, target, write=True)
+    return payload
+
+
+def phase_candidate_by_segment(payload: dict[str, Any], segment_id: str) -> dict[str, Any]:
+    normalized = normalize_segment_id(segment_id)
+    for candidate in payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []:
+        if isinstance(candidate, dict) and normalize_segment_id(str(candidate.get("segment_id") or "")) == normalized:
+            return candidate
+    raise ValueError(f"phase candidate not found for segment: {segment_id}")
+
+
+def phase_candidate_range(candidate: dict[str, Any]) -> tuple[int | None, int | None]:
+    coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
+    ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+    first = ranges[0] if ranges and isinstance(ranges[0], dict) else {}
+    start = int_value(first.get("from_line")) or None
+    end = int_value(first.get("to_line")) or None
+    return start, end
+
+
+def raw_event_sample(event: RawEvent) -> dict[str, Any]:
+    return {
+        "raw_ref": f"raw:line:{event.line_no}",
+        "event_type": event.event_type,
+        "source_type": event.source_type,
+        "title": event.title,
+        "text": short_text(event_semantic_text(event), max_chars=260),
+    }
+
+
+def phase_candidate_raw_samples(payload: dict[str, Any], candidate: dict[str, Any], *, max_samples: int = 12) -> list[dict[str, Any]]:
+    raw_path_value = str(payload.get("raw_path") or "")
+    raw_path = Path(raw_path_value) if raw_path_value else Path()
+    if not raw_path.is_file():
+        return []
+    events = parse_raw_events(raw_path)
+    by_line = {event.line_no: event for event in events}
+    start, end = phase_candidate_range(candidate)
+    selected_lines: list[int] = []
+    for ref in candidate.get("evidence", []) if isinstance(candidate.get("evidence"), list) else []:
+        line = line_from_raw_ref(ref)
+        if line is not None:
+            selected_lines.append(line)
+    if start is not None:
+        selected_lines.append(start)
+    if end is not None:
+        selected_lines.append(end)
+    if start is not None and end is not None:
+        high_signal_types = {"USER_INTENT", "DECISION", "CHECKPOINT", "PROCESS_LESSON", "FINAL_STATE", "VERIFICATION", "ERROR"}
+        for event in events:
+            if len(selected_lines) >= max_samples:
+                break
+            if start <= event.line_no <= end and event.event_type in high_signal_types:
+                selected_lines.append(event.line_no)
+    seen: set[int] = set()
+    samples: list[dict[str, Any]] = []
+    for line in selected_lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        event = by_line.get(line)
+        if event is None:
+            continue
+        samples.append(raw_event_sample(event))
+        if len(samples) >= max_samples:
+            break
+    return samples
+
+
+def phase_name_review_markdown(payload: dict[str, Any]) -> str:
+    candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
+    review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+    lines = [
+        "# Phase Name Review",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- session: `{payload.get('session_label') or payload.get('session_id')}`",
+        f"- segment: `{payload.get('segment_id')}`",
+        f"- candidate: {candidate.get('name')}",
+        f"- candidate_status: `{review.get('status')}`",
+        f"- chosen_name: {payload.get('chosen_name') or ''}",
+        f"- route: `{payload.get('route')}`",
+        "",
+        "## Diagnostics",
+        "",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend([f"- `{item}`" for item in diagnostics] or ["- none"])
+    lines.extend(["", "## Raw Samples", ""])
+    samples = payload.get("raw_samples") if isinstance(payload.get("raw_samples"), list) else []
+    if samples:
+        lines.extend(["| ref | type | text |", "| --- | --- | --- |"])
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            lines.append(
+                "| `{ref}` | `{event_type}` | {text} |".format(
+                    ref=sample.get("raw_ref"),
+                    event_type=sample.get("event_type"),
+                    text=markdown_cell(sample.get("text")),
+                )
+            )
+    else:
+        lines.append("- No raw samples available.")
+    if payload.get("next_command"):
+        lines.extend(["", "## Next Command", "", "```bash", str(payload.get("next_command")), "```"])
+    if isinstance(payload.get("semantic_name_result"), dict):
+        proposed = payload["semantic_name_result"].get("proposed") if isinstance(payload["semantic_name_result"].get("proposed"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "## Applied Name",
+                "",
+                f"- name: {proposed.get('name')}",
+                f"- slug: `{proposed.get('slug')}`",
+                f"- scope: `{proposed.get('scope')}`",
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def review_phase_name_candidate(
+    aoa_root: Path,
+    target: str,
+    segment_id: str,
+    *,
+    reviewed_name: str | None = None,
+    use_candidate: bool = False,
+    apply: bool = False,
+    replace: bool = False,
+    refresh: bool = False,
+    write_report: bool = False,
+    verify_raw_hash: bool = False,
+    coverage_note: str | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    discovery = phase_discovery_payload_for_review(aoa_root, target, refresh=refresh)
+    candidate = phase_candidate_by_segment(discovery, segment_id)
+    review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+    review_status = str(review.get("status") or "")
+    candidate_name = str(candidate.get("name") or "").strip()
+    chosen_name = str(reviewed_name or "").strip()
+    diagnostics: list[str] = []
+    if use_candidate:
+        if review_status == "needs_semantic_synthesis":
+            diagnostics.append("weak_candidate_requires_reviewed_name")
+        elif chosen_name:
+            diagnostics.append("choose_either_reviewed_name_or_use_candidate")
+        else:
+            chosen_name = candidate_name
+    if apply and not chosen_name and not use_candidate:
+        diagnostics.append("apply_requires_reviewed_name_or_use_candidate")
+    if review_status == "needs_semantic_synthesis" and chosen_name and semantic_name_slug(chosen_name) == semantic_name_slug(candidate_name):
+        diagnostics.append("reviewed_name_matches_weak_machine_candidate")
+    start, end = phase_candidate_range(candidate)
+    evidence_refs = [str(ref) for ref in candidate.get("evidence", []) if str(ref).strip()] if isinstance(candidate.get("evidence"), list) else []
+    if not evidence_refs and start:
+        evidence_refs = [f"raw:line:{start}"]
+    route = "apply_reviewed_phase_name" if apply else "review_phase_candidate"
+    if review_status == "needs_semantic_synthesis" and not chosen_name:
+        route = "synthesize_reviewed_name_before_apply"
+    next_command = ""
+    session_label = str(discovery.get("session_label") or target)
+    if not apply:
+        if review_status == "needs_semantic_synthesis":
+            next_command = (
+                "python3 scripts/aoa_session_memory.py review-phase-name "
+                f"{shlex.quote(session_label)} --segment {shlex.quote(normalize_segment_id(segment_id))} "
+                "--reviewed-name '<reviewed phase name>' --apply --write-report"
+            )
+        else:
+            next_command = (
+                "python3 scripts/aoa_session_memory.py review-phase-name "
+                f"{shlex.quote(session_label)} --segment {shlex.quote(normalize_segment_id(segment_id))} "
+                "--use-candidate --apply --write-report"
+            )
+    semantic_result: dict[str, Any] | None = None
+    refreshed_indexes: list[str] = []
+    status = "diagnostic" if diagnostics else str(review_status or "preview")
+    if apply and not diagnostics:
+        semantic_result = set_session_semantic_name(
+            aoa_root=aoa_root,
+            target=session_label,
+            name=chosen_name,
+            kind="dominant_topic",
+            scope="phase",
+            evidence_refs=evidence_refs,
+            from_line=start,
+            to_line=end,
+            coverage_note=coverage_note
+            or f"Reviewed phase name for segment {normalize_segment_id(segment_id)} from phase-discovery.",
+            source="phase_discovery_review",
+            note=f"candidate={candidate_name}; review_status={review_status}",
+            apply=True,
+            replace=replace,
+            verify_raw_hash=verify_raw_hash,
+            write_report=write_report,
+        )
+        if semantic_result.get("ok"):
+            sessions = registry_sessions(aoa_root)
+            write_session_name_index(aoa_root, sessions)
+            write_sessions_directory_index(aoa_root, sessions)
+            refreshed_indexes = [
+                str(aoa_root / SESSION_NAME_INDEX_JSON),
+                str(aoa_root / SESSION_NAME_INDEX_MARKDOWN),
+                str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON),
+                str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN),
+            ]
+            status = "applied"
+        else:
+            diagnostics.extend(str(item) for item in semantic_result.get("diagnostics", []) if item)
+            status = "diagnostic"
+    out = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "phase_name_review",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "status": status,
+        "apply": apply,
+        "aoa_root": str(aoa_root),
+        "session_id": discovery.get("session_id"),
+        "session_label": session_label,
+        "segment_id": normalize_segment_id(segment_id),
+        "route": route,
+        "chosen_name": chosen_name,
+        "candidate": candidate,
+        "raw_samples": phase_candidate_raw_samples(discovery, candidate),
+        "diagnostics": diagnostics,
+        "next_command": next_command,
+        "refreshed_indexes": refreshed_indexes,
+    }
+    if semantic_result is not None:
+        out["semantic_name_result"] = semantic_result
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = (
+            f"{compact_stamp()}__phase-name-review__"
+            f"{safe_slug(session_label)}__{safe_slug(normalize_segment_id(segment_id))}"
+        )
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, out)
+        write_markdown(report_md, phase_name_review_markdown(out))
+        out["report_json"] = str(report_json)
+        out["report_markdown"] = str(report_md)
+    return out
+
+
 def build_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     sessions = sessions if sessions is not None else registry_sessions(aoa_root)
+    policy = batch_distillation_policy(aoa_root)
     records: list[dict[str, Any]] = []
     slug_index: dict[str, list[dict[str, str]]] = defaultdict(list)
     for record in sessions:
@@ -3560,6 +4602,7 @@ def build_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | No
         display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
         semantic_names = semantic_names_payload(manifest)
         names = [semantic_name_index_item(item) for item in semantic_names.get("names", []) if isinstance(item, dict)]
+        readiness = session_naming_readiness(aoa_root, session_dir, manifest, record=record, policy=policy)
         for name_item in names:
             slug = str(name_item.get("slug") or "")
             if slug:
@@ -3578,6 +4621,7 @@ def build_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | No
                 "path": str(session_dir),
                 "event_count": manifest.get("latest_event_count", 0),
                 "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+                "naming_readiness": readiness,
                 "semantic_names": {
                     "active": semantic_names.get("active"),
                     "active_session": semantic_names.get("active_session"),
@@ -3591,6 +4635,8 @@ def build_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | No
         "generated_at": utc_now(),
         "session_count": len(records),
         "named_session_count": sum(1 for item in records if item["semantic_names"]["names"]),
+        "naming_readiness_counts": naming_readiness_counts(records),
+        "naming_work_queue": naming_work_queue(records),
         "sessions": records,
         "slug_index": dict(sorted(slug_index.items())),
     }
@@ -3603,6 +4649,9 @@ def write_session_name_index(aoa_root: Path, sessions: list[dict[str, Any]] | No
 
 
 def session_name_index_markdown(payload: dict[str, Any]) -> str:
+    readiness_counts = payload.get("naming_readiness_counts") if isinstance(payload.get("naming_readiness_counts"), dict) else {}
+    by_status = readiness_counts.get("by_status") if isinstance(readiness_counts.get("by_status"), dict) else {}
+    by_route = readiness_counts.get("by_route") if isinstance(readiness_counts.get("by_route"), dict) else {}
     lines = [
         "# Session Name Index",
         "",
@@ -3612,13 +4661,53 @@ def session_name_index_markdown(payload: dict[str, Any]) -> str:
         f"- session_count: `{payload.get('session_count')}`",
         f"- named_session_count: `{payload.get('named_session_count')}`",
         "",
-        "| session | active session name | phase/topic names |",
-        "| --- | --- | --- |",
+        "## Naming Readiness",
+        "",
+        "This is a routing layer, not a naming verdict. It tells the next agent whether a session can be named directly, needs phase discovery, or must be repaired first.",
+        "",
+        "### By Status",
+        "",
     ]
+    for status, count in by_status.items():
+        lines.append(f"- `{status}`: {count}")
+    lines.extend(["", "### By Route", ""])
+    for route, count in by_route.items():
+        lines.append(f"- `{route}`: {count}")
+    queue = payload.get("naming_work_queue") if isinstance(payload.get("naming_work_queue"), list) else []
+    lines.extend(["", "## Naming Work Queue", ""])
+    if queue:
+        lines.extend(["| priority | status | route | session | size | reasons |", "| --- | --- | --- | --- | --- | --- |"])
+        for item in queue[:25]:
+            if not isinstance(item, dict):
+                continue
+            readiness = item.get("naming_readiness") if isinstance(item.get("naming_readiness"), dict) else {}
+            lines.append(
+                "| `{priority}` | `{status}` | `{route}` | `{session}` | `{events}` / `{segments}` | {reasons} |".format(
+                    priority=readiness.get("priority", 0),
+                    status=markdown_cell(readiness.get("status")),
+                    route=markdown_cell(readiness.get("route")),
+                    session=markdown_cell(item.get("session_label")),
+                    events=item.get("event_count", 0),
+                    segments=item.get("segment_count", 0),
+                    reasons=markdown_cell(", ".join(str(reason) for reason in readiness.get("reasons", []) if reason)),
+                )
+            )
+    else:
+        lines.append("- No naming work is currently queued.")
+    lines.extend(
+        [
+            "",
+            "## All Session Names",
+            "",
+            "| session | readiness | active session name | phase/topic names |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
     for record in payload.get("sessions", []) if isinstance(payload.get("sessions"), list) else []:
         if not isinstance(record, dict):
             continue
         semantic = record.get("semantic_names") if isinstance(record.get("semantic_names"), dict) else {}
+        readiness = record.get("naming_readiness") if isinstance(record.get("naming_readiness"), dict) else {}
         active_session = str(semantic.get("active_session") or "")
         names = semantic.get("names", []) if isinstance(semantic.get("names"), list) else []
         phase_names = [
@@ -3633,8 +4722,9 @@ def session_name_index_markdown(payload: dict[str, Any]) -> str:
                 active_label = f"`{item.get('slug')}` - {active_name_text}"
                 break
         lines.append(
-            "| `{session}` | {active} | {phases} |".format(
+            "| `{session}` | `{readiness}` | {active} | {phases} |".format(
                 session=str(record.get("session_label") or record.get("session_id") or ""),
+                readiness=str(readiness.get("status") or ""),
                 active=active_label or "",
                 phases=", ".join(phase_names),
             )
@@ -3648,10 +4738,18 @@ def markdown_cell(value: Any) -> str:
 
 
 def session_directory_record(item: dict[str, Any]) -> dict[str, Any]:
+    session_dir = session_dir_from_record(item)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict):
+        manifest = {}
     semantic = item.get("semantic_names") if isinstance(item.get("semantic_names"), dict) else {}
+    if isinstance(manifest.get("semantic_names"), dict):
+        semantic = semantic_names_payload(manifest)
     names = semantic.get("names", []) if isinstance(semantic.get("names"), list) else []
     active_session = str(semantic.get("active_session") or "")
     active_name = item.get("active_session_name") if isinstance(item.get("active_session_name"), dict) else {}
+    if manifest:
+        active_name = semantic_name_summary(manifest, scope="session") or active_name
     phase_names = [
         {
             "slug": name.get("slug"),
@@ -3663,18 +4761,23 @@ def session_directory_record(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(name, dict) and name.get("slug") != active_session
     ]
     label = str(item.get("session_label") or "")
+    if manifest:
+        display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+        label = str(display.get("label") or manifest.get("session_label") or label)
     date = label[:10] if re.match(r"^20\d{2}-[01]\d-[0-3]\d__", label) else ""
+    readiness = session_naming_readiness(item.get("aoa_root", Path(".")) if isinstance(item.get("aoa_root"), Path) else session_dir.parents[1], session_dir, manifest, record=item) if manifest else {}
     return {
         "session_id": item.get("session_id"),
         "session_label": label,
         "date": date,
-        "title": item.get("session_title"),
+        "title": (manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("title") if manifest else item.get("session_title"),
         "active_session_name": active_name,
         "phase_names": phase_names,
+        "naming_readiness": readiness,
         "archive_status": item.get("archive_status"),
         "distillation_status": item.get("distillation_status"),
-        "event_count": item.get("event_count", 0),
-        "segment_count": item.get("segment_count", 0),
+        "event_count": manifest.get("latest_event_count", item.get("event_count", 0)) if manifest else item.get("event_count", 0),
+        "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []) if manifest else item.get("segment_count", 0),
         "cwd": item.get("cwd"),
         "updated_at": item.get("updated_at"),
         "path": item.get("path"),
@@ -3684,7 +4787,7 @@ def session_directory_record(item: dict[str, Any]) -> dict[str, Any]:
 
 def build_sessions_directory_index(aoa_root: Path, sessions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     sessions = sessions if sessions is not None else registry_sessions(aoa_root)
-    records = [session_directory_record(item) for item in sessions if isinstance(item, dict)]
+    records = [session_directory_record({**item, "aoa_root": aoa_root}) for item in sessions if isinstance(item, dict)]
     records.sort(key=lambda item: (str(item.get("date") or ""), str(item.get("session_label") or "")), reverse=True)
     by_date: dict[str, list[str]] = defaultdict(list)
     for record in records:
@@ -3702,6 +4805,8 @@ def build_sessions_directory_index(aoa_root: Path, sessions: list[dict[str, Any]
         "generated_at": utc_now(),
         "session_count": len(records),
         "named_session_count": len(named),
+        "naming_readiness_counts": naming_readiness_counts(records),
+        "naming_work_queue": naming_work_queue(records),
         "sessions_root": str(aoa_root / SESSION_ROOT),
         "read_order": [
             SESSIONS_AGENTS_MARKDOWN,
@@ -3785,6 +4890,9 @@ def write_sessions_directory_agents(session_root: Path) -> None:
 
 
 def sessions_directory_index_markdown(payload: dict[str, Any]) -> str:
+    readiness_counts = payload.get("naming_readiness_counts") if isinstance(payload.get("naming_readiness_counts"), dict) else {}
+    by_status = readiness_counts.get("by_status") if isinstance(readiness_counts.get("by_status"), dict) else {}
+    queue = payload.get("naming_work_queue") if isinstance(payload.get("naming_work_queue"), list) else []
     lines = [
         "# Sessions Directory Index",
         "",
@@ -3801,6 +4909,34 @@ def sessions_directory_index_markdown(payload: dict[str, Any]) -> str:
     ]
     for index, item in enumerate(payload.get("read_order", []), start=1):
         lines.append(f"{index}. `{item}`")
+    lines.extend(["", "## Naming Readiness", ""])
+    if by_status:
+        for status, count in by_status.items():
+            lines.append(f"- `{status}`: {count}")
+    else:
+        lines.append("- No readiness data generated.")
+    lines.extend(["", "## Naming Work Queue", ""])
+    if queue:
+        lines.extend(["| priority | status | route | session | size | reasons |", "| --- | --- | --- | --- | --- | --- |"])
+        for item in queue[:25]:
+            if not isinstance(item, dict):
+                continue
+            readiness = item.get("naming_readiness") if isinstance(item.get("naming_readiness"), dict) else {}
+            entry = f"{item.get('session_label')}/{SESSION_INDEX_MARKDOWN}" if item.get("session_label") else ""
+            lines.append(
+                "| `{priority}` | `{status}` | `{route}` | [{label}](./{entry}) | `{events}` / `{segments}` | {reasons} |".format(
+                    priority=readiness.get("priority", 0),
+                    status=markdown_cell(readiness.get("status")),
+                    route=markdown_cell(readiness.get("route")),
+                    label=markdown_cell(item.get("session_label")),
+                    entry=markdown_cell(entry),
+                    events=item.get("event_count", 0),
+                    segments=item.get("segment_count", 0),
+                    reasons=markdown_cell(", ".join(str(reason) for reason in readiness.get("reasons", []) if reason)),
+                )
+            )
+    else:
+        lines.append("- No naming work is currently queued.")
     lines.extend(["", "## Named Sessions", ""])
     named = payload.get("named_sessions", []) if isinstance(payload.get("named_sessions"), list) else []
     if named:
@@ -3849,22 +4985,166 @@ def sessions_directory_index_markdown(payload: dict[str, Any]) -> str:
     }
     for date, labels in by_date.items():
         lines.extend([f"### {date}", ""])
-        lines.extend(["| session | name/title | size | cwd |", "| --- | --- | --- | --- |"])
+        lines.extend(["| session | name/title | readiness | size | cwd |", "| --- | --- | --- | --- | --- |"])
         for label in labels if isinstance(labels, list) else []:
             record = records_by_label.get(str(label), {})
             active = record.get("active_session_name") if isinstance(record.get("active_session_name"), dict) else {}
+            readiness = record.get("naming_readiness") if isinstance(record.get("naming_readiness"), dict) else {}
             name_text = active.get("name") or record.get("title") or ""
             lines.append(
-                "| [{label}](./{entry}) | {name} | `{events}` / `{segments}` | `{cwd}` |".format(
+                "| [{label}](./{entry}) | {name} | `{readiness}` | `{events}` / `{segments}` | `{cwd}` |".format(
                     label=markdown_cell(record.get("session_label")),
                     entry=markdown_cell(record.get("entry") or ""),
                     name=markdown_cell(name_text),
+                    readiness=markdown_cell(readiness.get("status")),
                     events=record.get("event_count", 0),
                     segments=record.get("segment_count", 0),
                     cwd=markdown_cell(record.get("cwd")),
                 )
             )
         lines.append("")
+    return "\n".join(lines)
+
+
+def build_naming_readiness_report(
+    aoa_root: Path,
+    *,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    refresh_indexes: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    if target == "all":
+        records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    else:
+        records = [resolve_session_record(aoa_root, target)]
+    policy = batch_distillation_policy(aoa_root)
+    results: list[dict[str, Any]] = []
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        if not isinstance(manifest, dict) or not manifest:
+            results.append(
+                {
+                    "session_id": record.get("session_id"),
+                    "session_label": record.get("session_label"),
+                    "path": str(session_dir),
+                    "naming_readiness": {
+                        "schema_version": SCHEMA_VERSION,
+                        "status": "blocked",
+                        "route": "repair_manifest_before_naming",
+                        "priority": 100,
+                        "reasons": ["missing_manifest"],
+                        "blockers": ["missing_manifest"],
+                        "warnings": [],
+                        "suggested_next": "repair manifest before naming",
+                        "evidence": {},
+                    },
+                }
+            )
+            continue
+        readiness = session_naming_readiness(aoa_root, session_dir, manifest, record=record, policy=policy)
+        display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+        results.append(
+            {
+                "session_id": manifest.get("session_id") or record.get("session_id"),
+                "session_label": display.get("label") or manifest.get("session_label") or record.get("session_label"),
+                "session_title": display.get("title") or manifest.get("session_title") or record.get("session_title"),
+                "path": str(session_dir),
+                "event_count": manifest.get("latest_event_count", record.get("event_count", 0)),
+                "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+                "cwd": (manifest.get("source") if isinstance(manifest.get("source"), dict) else {}).get("cwd")
+                or record.get("cwd"),
+                "naming_readiness": readiness,
+            }
+        )
+    results.sort(
+        key=lambda item: (
+            int_value((item.get("naming_readiness") or {}).get("priority")),
+            int_value(item.get("segment_count")),
+            int_value(item.get("event_count")),
+            str(item.get("session_label") or ""),
+        ),
+        reverse=True,
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "naming_readiness_report",
+        "generated_at": utc_now(),
+        "ok": True,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "selected_count": len(results),
+        "naming_readiness_counts": naming_readiness_counts(results),
+        "naming_work_queue": naming_work_queue(results, limit=100),
+        "results": results,
+    }
+    if refresh_indexes:
+        sessions = registry_sessions(aoa_root)
+        write_session_name_index(aoa_root, sessions)
+        write_sessions_directory_index(aoa_root, sessions)
+        payload["refreshed_indexes"] = [
+            str(aoa_root / SESSION_NAME_INDEX_JSON),
+            str(aoa_root / SESSION_NAME_INDEX_MARKDOWN),
+            str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON),
+            str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN),
+        ]
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__naming-readiness"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, naming_readiness_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def naming_readiness_markdown(payload: dict[str, Any]) -> str:
+    counts = payload.get("naming_readiness_counts") if isinstance(payload.get("naming_readiness_counts"), dict) else {}
+    by_status = counts.get("by_status") if isinstance(counts.get("by_status"), dict) else {}
+    by_route = counts.get("by_route") if isinstance(counts.get("by_route"), dict) else {}
+    lines = [
+        "# Naming Readiness Report",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        "",
+        "## Status Counts",
+        "",
+    ]
+    for status, count in by_status.items():
+        lines.append(f"- `{status}`: {count}")
+    lines.extend(["", "## Route Counts", ""])
+    for route, count in by_route.items():
+        lines.append(f"- `{route}`: {count}")
+    queue = payload.get("naming_work_queue") if isinstance(payload.get("naming_work_queue"), list) else []
+    lines.extend(["", "## Queue", ""])
+    if queue:
+        lines.extend(["| priority | status | route | session | size | reasons |", "| --- | --- | --- | --- | --- | --- |"])
+        for item in queue:
+            if not isinstance(item, dict):
+                continue
+            readiness = item.get("naming_readiness") if isinstance(item.get("naming_readiness"), dict) else {}
+            lines.append(
+                "| `{priority}` | `{status}` | `{route}` | `{session}` | `{events}` / `{segments}` | {reasons} |".format(
+                    priority=readiness.get("priority", 0),
+                    status=markdown_cell(readiness.get("status")),
+                    route=markdown_cell(readiness.get("route")),
+                    session=markdown_cell(item.get("session_label")),
+                    events=item.get("event_count", 0),
+                    segments=item.get("segment_count", 0),
+                    reasons=markdown_cell(", ".join(str(reason) for reason in readiness.get("reasons", []) if reason)),
+                )
+            )
+    else:
+        lines.append("- No naming work queued.")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -6773,6 +8053,37 @@ def command_name_session(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_phase_discovery(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = discover_session_phases(
+        root,
+        args.session,
+        write=args.write,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_review_phase_name(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = review_phase_name_candidate(
+        root,
+        args.session,
+        args.segment,
+        reviewed_name=args.reviewed_name,
+        use_candidate=args.use_candidate,
+        apply=args.apply,
+        replace=args.replace,
+        refresh=args.refresh,
+        write_report=args.write_report,
+        verify_raw_hash=not args.skip_raw_hash_check,
+        coverage_note=args.coverage_note,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_distill(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     payload = distill_session_first_pass(root, args.session, max_events_per_type=args.max_events_per_type)
@@ -7164,6 +8475,34 @@ def title_repair_print_payload(payload: dict[str, Any], *, full: bool = False, s
     return compact
 
 
+def compact_naming_readiness_result(result: dict[str, Any]) -> dict[str, Any]:
+    readiness = result.get("naming_readiness") if isinstance(result.get("naming_readiness"), dict) else {}
+    evidence = readiness.get("evidence") if isinstance(readiness.get("evidence"), dict) else {}
+    return {
+        "session_label": result.get("session_label"),
+        "session_title": result.get("session_title"),
+        "event_count": result.get("event_count"),
+        "segment_count": result.get("segment_count"),
+        "status": readiness.get("status"),
+        "route": readiness.get("route"),
+        "priority": readiness.get("priority"),
+        "reasons": readiness.get("reasons", [])[:8] if isinstance(readiness.get("reasons"), list) else [],
+        "blockers": readiness.get("blockers", [])[:8] if isinstance(readiness.get("blockers"), list) else [],
+        "warnings": readiness.get("warnings", [])[:8] if isinstance(readiness.get("warnings"), list) else [],
+        "active_session_name": evidence.get("active_session_name"),
+    }
+
+
+def naming_readiness_print_payload(payload: dict[str, Any], *, full: bool = False, sample_results: int = 20) -> dict[str, Any]:
+    return bounded_results_print_payload(
+        payload,
+        full=full,
+        sample_results=sample_results,
+        compact_func=compact_naming_readiness_result,
+        note="results are bounded on stdout; pass --full or read the written report for the complete naming-readiness queue",
+    )
+
+
 def compact_manual_review_result(result: dict[str, Any]) -> dict[str, Any]:
     owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
     return {
@@ -7320,6 +8659,23 @@ def command_repair_session_titles(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     print(json.dumps(title_repair_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_naming_readiness(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = build_naming_readiness_report(
+        root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        refresh_indexes=args.refresh_indexes,
+        write_report=args.write_report,
+    )
+    print(json.dumps(naming_readiness_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -8002,10 +9358,12 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-batch-distill/SKILL.md",
     "skills/aoa-session-first-pass-distill/SKILL.md",
     "skills/aoa-session-history-import/SKILL.md",
+    "skills/aoa-session-manual-review/SKILL.md",
     "skills/aoa-session-memory-audit/SKILL.md",
     "skills/aoa-session-memory-doctor/SKILL.md",
     "skills/aoa-session-memory-global-route/SKILL.md",
     "skills/aoa-session-memory-stress-pass/SKILL.md",
+    "skills/aoa-session-naming-readiness/SKILL.md",
     "skills/aoa-session-raw-diagnostic/SKILL.md",
     "skills/aoa-session-reindex/SKILL.md",
     "skills/aoa-session-rehydrate/SKILL.md",
@@ -8090,6 +9448,8 @@ def command_doctor(args: argparse.Namespace) -> int:
             problems.append(f"missing or invalid session name index: {root / SESSION_NAME_INDEX_JSON}")
         elif int(name_index.get("session_count", -1)) != len(sessions):
             problems.append(f"session name index count {name_index.get('session_count')} does not match registry count {len(sessions)}")
+        elif not isinstance(name_index.get("naming_readiness_counts"), dict):
+            problems.append(f"session name index missing naming readiness counts: {root / SESSION_NAME_INDEX_JSON}")
         if not (root / SESSION_NAME_INDEX_MARKDOWN).exists():
             problems.append(f"missing session name index markdown: {root / SESSION_NAME_INDEX_MARKDOWN}")
     if session_root.exists():
@@ -8100,6 +9460,8 @@ def command_doctor(args: argparse.Namespace) -> int:
             problems.append(f"missing or invalid sessions directory index: {session_root / SESSIONS_INDEX_JSON}")
         elif int(sessions_index.get("session_count", -1)) != len(sessions):
             problems.append(f"sessions directory index count {sessions_index.get('session_count')} does not match registry count {len(sessions)}")
+        elif not isinstance(sessions_index.get("naming_readiness_counts"), dict):
+            problems.append(f"sessions directory index missing naming readiness counts: {session_root / SESSIONS_INDEX_JSON}")
         if not (session_root / SESSIONS_INDEX_MARKDOWN).exists():
             problems.append(f"missing sessions directory index markdown: {session_root / SESSIONS_INDEX_MARKDOWN}")
     for item in sessions if isinstance(sessions, list) else []:
@@ -8277,6 +9639,36 @@ def build_parser() -> argparse.ArgumentParser:
     name_session.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
     name_session.set_defaults(func=command_name_session)
 
+    phase_discovery = sub.add_parser("phase-discovery", help="Build unreviewed phase/topic candidates from generated segment indexes and raw refs.")
+    phase_discovery.add_argument("session", help="Session label/id/title/name fragment.")
+    phase_discovery.add_argument("--workspace-root")
+    phase_discovery.add_argument("--aoa-root")
+    phase_discovery.add_argument("--write", action="store_true", help="Write naming/phase-discovery.json and .md inside the session archive.")
+    phase_discovery.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
+    phase_discovery.set_defaults(func=command_phase_discovery)
+
+    review_phase_name = sub.add_parser(
+        "review-phase-name",
+        help="Review one phase-discovery candidate and optionally apply a reviewed phase name.",
+    )
+    review_phase_name.add_argument("session", help="Session label/id/title/name fragment.")
+    review_phase_name.add_argument("--workspace-root")
+    review_phase_name.add_argument("--aoa-root")
+    review_phase_name.add_argument("--segment", required=True, help="Phase-discovery segment id, for example 003.")
+    review_phase_name.add_argument("--reviewed-name", help="Reviewed semantic phase name to apply.")
+    review_phase_name.add_argument(
+        "--use-candidate",
+        action="store_true",
+        help="Use the generated candidate name. Rejected for candidates that need semantic synthesis.",
+    )
+    review_phase_name.add_argument("--coverage-note", default="", help="Optional reviewed coverage note.")
+    review_phase_name.add_argument("--apply", action="store_true", help="Apply the reviewed phase name and refresh name indexes.")
+    review_phase_name.add_argument("--replace", action="store_true", help="Replace an existing semantic name with the same slug.")
+    review_phase_name.add_argument("--refresh", action="store_true", help="Rebuild phase-discovery before reviewing the candidate.")
+    review_phase_name.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing.")
+    review_phase_name.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
+    review_phase_name.set_defaults(func=command_review_phase_name)
+
     distill = sub.add_parser("distill", help="Write a provisional first-pass distillation route map for a session.")
     distill.add_argument("session", nargs="?", default="latest")
     distill.add_argument("--workspace-root")
@@ -8311,6 +9703,19 @@ def build_parser() -> argparse.ArgumentParser:
     repair_titles.add_argument("--write-report", action="store_true", help="Write JSON and Markdown repair reports under .aoa/diagnostics.")
     repair_titles.add_argument("--full", action="store_true", help="Print complete repair results to stdout.")
     repair_titles.set_defaults(func=command_repair_session_titles)
+
+    naming_readiness = sub.add_parser("naming-readiness", help="Assess whether sessions are ready for semantic naming or need lower-layer repair first.")
+    naming_readiness.add_argument("session", nargs="?", default="all", help="Session label/id/title/name fragment or all.")
+    naming_readiness.add_argument("--workspace-root")
+    naming_readiness.add_argument("--aoa-root")
+    naming_readiness.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    naming_readiness.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    naming_readiness.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    naming_readiness.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    naming_readiness.add_argument("--refresh-indexes", action="store_true", help="Regenerate SESSION_NAMES.md and sessions/INDEX.md with readiness data.")
+    naming_readiness.add_argument("--write-report", action="store_true", help="Write JSON and Markdown readiness reports under .aoa/diagnostics.")
+    naming_readiness.add_argument("--full", action="store_true", help="Print complete readiness results to stdout.")
+    naming_readiness.set_defaults(func=command_naming_readiness)
 
     manual_review = sub.add_parser("manual-review", help="Build manual review packets for first-wave review lanes.")
     manual_review.add_argument("--workspace-root")

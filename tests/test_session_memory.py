@@ -41,6 +41,79 @@ def test_readable_slug_removes_banned_topology_terms() -> None:
     assert "tmp" not in slug.split("-")
     assert slug == "task-in-aoa-wave4-review-fixes"
     assert module.weak_title_text("# Files mentioned by the user: ## seed.zip")
+    assert module.phase_candidate_name(
+        "000",
+        ["# AGENTS.md instructions for /srv\n<INSTRUCTIONS>policy</INSTRUCTIONS>", "Continue real naming work"],
+        [],
+        module.Counter(),
+    )["name"] == "Continue real naming work"
+    assert module.phase_candidate_name(
+        "000",
+        ["/home/dionysus/Загрузки/aoa-session-dist-exp(идея).md Вот тут лежит диалог с важной идеей"],
+        [],
+        module.Counter(),
+    )["name"] == "Вот тут лежит диалог с важной идеей"
+    generic_payload = module.phase_candidate_name(
+        "000",
+        ["Давай, действуй!"],
+        ["scripts/aoa_session_memory.py"],
+        module.Counter({"VERIFICATION": 1}),
+    )
+    assert generic_payload["name"] == "aoa_session_memory.py validation"
+    assert generic_payload["basis"] == "linked_path_event_signals"
+    assert "generic_user_intent_present" in generic_payload["quality_flags"]
+
+
+def test_phase_candidate_review_turns_weak_names_into_actionable_queue_items() -> None:
+    coverage = {"raw_ranges": [{"from_line": 10, "to_line": 30}], "note": "fixture"}
+    review = module.phase_candidate_review(
+        session_label="2026-05-20__001__large-session",
+        segment_id="003",
+        candidate_name=".aoa validation",
+        confidence="low",
+        name_basis="linked_path_event_signals",
+        quality_flags=["no_specific_user_intent", "path_or_event_based_name"],
+        coverage=coverage,
+        evidence_refs=["raw:line:12"],
+        linked_signals={
+            "primary_user_intent": "",
+            "support_paths": ["/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py"],
+            "support_event_types": {"COMMAND": 4, "VERIFICATION": 2},
+        },
+    )
+    candidate = {
+        "segment_id": "003",
+        "name": ".aoa validation",
+        "confidence": "low",
+        "name_basis": "linked_path_event_signals",
+        "quality_flags": ["no_specific_user_intent", "path_or_event_based_name"],
+        "coverage": coverage,
+        "evidence": ["raw:line:12"],
+        "review": review,
+    }
+    payload = {
+        "generated_at": "2026-05-20T00:00:00Z",
+        "session_label": "2026-05-20__001__large-session",
+        "archive_status": "indexed",
+        "event_count": 20,
+        "segment_count": 1,
+        "candidate_count": 1,
+        "review_queue_count": 1,
+        "raw_path": "/tmp/session.raw.jsonl",
+        "candidate_quality_counts": module.phase_candidate_quality_counts([candidate]),
+        "review_queue": module.phase_review_queue([candidate]),
+        "candidates": [candidate],
+    }
+    markdown = module.phase_discovery_markdown(payload)
+
+    assert review["status"] == "needs_semantic_synthesis"
+    assert review["action"] == "synthesize_reviewed_name_from_linked_signals"
+    assert "review-phase-name" in review["apply_template"]
+    assert "--segment 003" in review["apply_template"]
+    assert "--reviewed-name '<reviewed phase name>'" in review["apply_template"]
+    assert payload["review_queue"][0]["review"]["review_inputs"]["support_paths"]
+    assert "## Review Apply Templates" in markdown
+    assert "python3 scripts/aoa_session_memory.py review-phase-name" in markdown
 
 
 def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
@@ -1572,6 +1645,267 @@ def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Pa
     assert "aoa-techniques-continuation" in sessions_index_md
     assert "aoa-techniques-final-residual-promotion-pass" in sessions_index_md
     assert "2026-05-18__001__continue-the-work/SESSION.md" in sessions_index_md
+
+
+def test_naming_readiness_routes_before_bulk_renaming(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def add_manifest(
+        label: str,
+        title: str,
+        *,
+        session_id: str,
+        status: str,
+        segment_count: int,
+        event_count: int,
+        title_source: str = "first_user_message",
+        with_transcript_hint: bool | None = None,
+    ) -> None:
+        session_dir = aoa_root / "sessions" / label
+        raw_path = session_dir / "raw" / "session.raw.jsonl"
+        segment_dir = session_dir / "segments"
+        if with_transcript_hint is None:
+            with_transcript_hint = status != "raw_unavailable"
+        source_transcript_path = str(tmp_path / f"{session_id}.jsonl") if with_transcript_hint else None
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        segment_dir.mkdir(parents=True, exist_ok=True)
+        if status != "raw_unavailable":
+            raw_path.write_text("\n".join("{}" for _ in range(max(event_count, 1))) + "\n", encoding="utf-8")
+        segments = []
+        for index in range(segment_count):
+            stem = f"{index:03}__initial-to-latest"
+            md_path = segment_dir / f"{stem}.md"
+            index_path = segment_dir / f"{stem}.index.json"
+            md_path.write_text("# segment\n", encoding="utf-8")
+            index_path.write_text('{"events":[]}\n', encoding="utf-8")
+            segments.append(
+                {
+                    "segment_id": f"{index:03}",
+                    "role": "initial-to-latest",
+                    "markdown": str(md_path),
+                    "index": str(index_path),
+                    "event_count": 1,
+                    "source_range": {"from_line": index + 1, "to_line": index + 1},
+                }
+            )
+        manifest = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "display": {
+                "date": label[:10],
+                "sequence": 1,
+                "title": title,
+                "title_source": title_source,
+                "label": label,
+                "path": str(session_dir),
+                "archive_path": str(session_dir),
+                "navigation_path": str(session_dir),
+            },
+            "session_label": label,
+            "session_title": title,
+            "created_at": "2026-05-20T00:00:00Z",
+            "updated_at": "2026-05-20T00:00:00Z",
+            "source": {"cwd": str(tmp_path), "transcript_path": source_transcript_path},
+            "archive_status": status,
+            "distillation_status": "first_pass_distilled",
+            "raw": {
+                "path": str(raw_path),
+                "bytes": raw_path.stat().st_size if raw_path.exists() else 0,
+                "sha256": "sha256-fixture" if raw_path.exists() else None,
+                "line_count": event_count if raw_path.exists() else None,
+            },
+            "segments": segments,
+            "latest_event_count": event_count,
+        }
+        (session_dir / "session.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+        module.update_registry(aoa_root, manifest, session_dir)
+
+    add_manifest(
+        "2026-05-20__001__large-real-work",
+        "Large real work",
+        session_id="large-real-work",
+        status="indexed",
+        segment_count=25,
+        event_count=2500,
+    )
+    add_manifest(
+        "2026-05-20__002__codex-in-abyssos",
+        "Codex in AbyssOS",
+        session_id="weak-cwd-title",
+        status="indexed",
+        segment_count=3,
+        event_count=300,
+        title_source="cwd",
+    )
+    add_manifest(
+        "2026-05-20__003__missing-raw",
+        "Codex in memories",
+        session_id="missing-raw",
+        status="raw_unavailable",
+        segment_count=0,
+        event_count=0,
+        title_source="cwd",
+    )
+    add_manifest(
+        "2026-05-20__004__missing-raw-with-path",
+        "Codex in memories",
+        session_id="missing-raw-with-path",
+        status="raw_unavailable",
+        segment_count=0,
+        event_count=0,
+        title_source="cwd",
+        with_transcript_hint=True,
+    )
+    add_manifest(
+        "2026-05-20__005__deferred-index",
+        "Deferred index",
+        session_id="deferred-index",
+        status="raw_mirrored_index_deferred",
+        segment_count=2,
+        event_count=200,
+    )
+
+    payload = module.build_naming_readiness_report(aoa_root, refresh_indexes=True)
+    by_label = {item["session_label"]: item["naming_readiness"] for item in payload["results"]}
+    name_index = json.loads((aoa_root / module.SESSION_NAME_INDEX_JSON).read_text(encoding="utf-8"))
+    sessions_index_md = (aoa_root / "sessions" / module.SESSIONS_INDEX_MARKDOWN).read_text(encoding="utf-8")
+
+    assert by_label["2026-05-20__001__large-real-work"]["status"] == "needs_phase_discovery"
+    assert by_label["2026-05-20__001__large-real-work"]["route"] == "phase_topic_discovery_before_session_name"
+    assert by_label["2026-05-20__002__codex-in-abyssos"]["status"] == "ready_for_semantic_name"
+    assert by_label["2026-05-20__002__codex-in-abyssos"]["route"] == "direct_semantic_name_from_index_and_raw_refs"
+    assert by_label["2026-05-20__003__missing-raw"]["status"] == "diagnostic_only"
+    assert by_label["2026-05-20__003__missing-raw"]["route"] == "leave_raw_unavailable_diagnostic"
+    assert by_label["2026-05-20__004__missing-raw-with-path"]["status"] == "blocked"
+    assert by_label["2026-05-20__004__missing-raw-with-path"]["route"] == "recover_raw_before_naming"
+    assert by_label["2026-05-20__005__deferred-index"]["status"] == "needs_reindex"
+    assert by_label["2026-05-20__005__deferred-index"]["route"] == "reindex_before_naming"
+    assert name_index["naming_readiness_counts"]["by_status"]["needs_phase_discovery"] == 1
+    assert name_index["naming_readiness_counts"]["by_status"]["ready_for_semantic_name"] == 1
+    assert name_index["naming_readiness_counts"]["by_status"]["diagnostic_only"] == 1
+    assert name_index["naming_readiness_counts"]["by_status"]["blocked"] == 1
+    assert name_index["naming_readiness_counts"]["by_status"]["needs_reindex"] == 1
+    assert "Naming Work Queue" in sessions_index_md
+    assert "phase_topic_discovery_before_session_name" in sessions_index_md
+
+
+def test_phase_discovery_writes_open_candidates_and_updates_readiness(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-21T00-00-00-phase-discovery.jsonl"
+    rows: list[dict[str, object]] = [
+        {"timestamp": "2026-05-21T00:00:00Z", "type": "session_meta", "payload": {"id": "phase-discovery", "cwd": str(workspace)}},
+        {
+            "timestamp": "2026-05-21T00:00:01Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Repair session naming layers in .aoa"}]},
+        },
+        {
+            "timestamp": "2026-05-21T00:00:02Z",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-rg", "arguments": json.dumps({"cmd": "rg -n naming .aoa/NAMING.md"})},
+        },
+        {
+            "timestamp": "2026-05-21T00:00:03Z",
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "call-rg", "output": "NAMING.md:1:naming\nProcess exited with code 0"},
+        },
+    ]
+    for index in range(4, 23):
+        rows.append(
+            {
+                "timestamp": f"2026-05-21T00:00:{index:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Checkpoint {index}"}]},
+            }
+        )
+    rows.extend(
+        [
+            {"timestamp": "2026-05-21T00:00:23Z", "type": "turn_context", "payload": {"summary": "context compacted after naming layer work"}},
+            {
+                "timestamp": "2026-05-21T00:00:24Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Continue phase naming from raw anchors"}]},
+            },
+            {
+                "timestamp": "2026-05-21T00:00:25Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "apply_patch", "call_id": "call-patch"},
+            },
+            {
+                "timestamp": "2026-05-21T00:00:26Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-patch", "output": "Success. Updated the following files:\nM .aoa/NAMING.md"},
+            },
+        ]
+    )
+    write_jsonl(transcript, rows)
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "phase-discovery",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    payload = module.discover_session_phases(aoa_root, "phase-discovery", write=True)
+    assert payload["candidate_count"] == 2
+    assert payload["candidates"][0]["status"] == "candidate_unreviewed"
+    assert payload["candidates"][0]["evidence"][0].startswith("raw:line:")
+    assert payload["candidates"][0]["name_basis"] == "specific_user_intent"
+    assert payload["candidates"][0]["linked_signals"]["support_event_types"]["USER_INTENT"] == 1
+    assert payload["candidates"][0]["review"]["status"] == "ready_for_raw_check"
+    assert payload["review_queue_count"] == 0
+    assert payload["candidate_quality_counts"]["by_review_status"]["ready_for_raw_check"] == 2
+    assert (Path(payload["artifact_json"])).exists()
+    assert (Path(payload["artifact_markdown"])).exists()
+
+    readiness = module.build_naming_readiness_report(aoa_root, target="phase-discovery")
+    item = readiness["results"][0]["naming_readiness"]
+    assert item["status"] == "phase_discovery_ready"
+    assert item["route"] == "review_phase_discovery_before_session_name"
+
+    preview = module.review_phase_name_candidate(aoa_root, "phase-discovery", "000")
+    assert preview["ok"]
+    assert preview["status"] == "ready_for_raw_check"
+    assert preview["raw_samples"]
+    assert "--use-candidate --apply --write-report" in preview["next_command"]
+
+    applied = module.review_phase_name_candidate(
+        aoa_root,
+        "phase-discovery",
+        "000",
+        reviewed_name="Naming layer repair",
+        apply=True,
+        write_report=True,
+    )
+    manifest = json.loads(next((aoa_root / "sessions").glob("*/session.manifest.json")).read_text(encoding="utf-8"))
+    phase_names = [
+        item
+        for item in manifest["semantic_names"]["names"]
+        if item["scope"] == "phase" and item["name"] == "Naming layer repair"
+    ]
+    assert applied["status"] == "applied"
+    assert applied["semantic_name_result"]["status"] == "applied"
+    assert phase_names
+    assert (aoa_root / module.SESSION_NAME_INDEX_JSON).exists()
+    assert (aoa_root / "sessions" / module.SESSIONS_INDEX_JSON).exists()
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+
+    phase_artifact = Path(payload["artifact_json"])
+    weak_payload = json.loads(phase_artifact.read_text(encoding="utf-8"))
+    weak_payload["candidates"][0]["name"] = ".aoa validation"
+    weak_payload["candidates"][0]["review"]["status"] = "needs_semantic_synthesis"
+    phase_artifact.write_text(json.dumps(weak_payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    rejected = module.review_phase_name_candidate(aoa_root, "phase-discovery", "000", use_candidate=True, apply=True)
+    assert not rejected["ok"]
+    assert "weak_candidate_requires_reviewed_name" in rejected["diagnostics"]
 
 
 def test_semantic_session_name_rejects_unanchored_out_of_range_evidence(tmp_path: Path) -> None:
