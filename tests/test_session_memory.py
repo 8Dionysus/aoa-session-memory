@@ -1647,6 +1647,164 @@ def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Pa
     assert "2026-05-18__001__continue-the-work/SESSION.md" in sessions_index_md
 
 
+def test_deferred_mirror_preserves_semantic_name_verified_anchor(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-18T00-00-00-anchor-preserve.jsonl"
+    rows = [
+        {"timestamp": "2026-05-18T00:00:00Z", "type": "session_meta", "payload": {"id": "anchor-preserve", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Preserve the semantic naming bridge"}]}},
+        {"timestamp": "2026-05-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Use verified raw anchors."}]}},
+    ]
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "anchor-preserve",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-18__001__preserve-the-semantic-naming-bridge"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    raw_sha = manifest["raw"]["sha256"]
+    raw_line_count = manifest["raw"]["line_count"]
+    module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="anchor-preserve",
+        name="semantic naming bridge preservation",
+        scope="session",
+        evidence_refs=["raw:line:2"],
+        from_line=1,
+        to_line=raw_line_count,
+        coverage_note="Initial named raw snapshot.",
+        apply=True,
+        verify_raw_hash=True,
+    )
+
+    write_jsonl(
+        transcript,
+        rows
+        + [
+            {
+                "timestamp": "2026-05-18T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "The session continued after naming."}]},
+            }
+        ],
+    )
+    module.mirror_transcript_without_indexing(
+        aoa_root=aoa_root,
+        event={"session_id": "anchor-preserve", "transcript_path": str(transcript), "cwd": str(workspace)},
+        transcript_path=transcript,
+        hook_event_name="PreCompact",
+        now="2026-05-18T00:01:00Z",
+    )
+
+    deferred_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    semantic = deferred_manifest["semantic_names"]["names"][0]
+    anchor = semantic["anchor"]
+    readiness = module.session_naming_readiness(aoa_root, session_dir, deferred_manifest)
+
+    assert deferred_manifest["archive_status"] == "raw_mirrored_index_deferred"
+    assert deferred_manifest["raw"]["sha256"] is None
+    assert deferred_manifest["raw"]["line_count"] is None
+    assert anchor["raw_sha256"] == raw_sha
+    assert anchor["raw_line_count"] == raw_line_count
+    assert anchor["raw_anchor_status"] == "deferred_refresh_preserved_verified_anchor"
+    assert readiness["status"] == "needs_reindex"
+    assert readiness["evidence"]["observed_raw_line_count"] == raw_line_count + 1
+    assert readiness["evidence"]["raw_line_count_source"] == "raw_probe_deferred"
+    assert f"active_session_name_coverage_stale:{raw_line_count}<{raw_line_count + 1}" in readiness["warnings"]
+
+    write_jsonl(
+        transcript,
+        rows
+        + [
+            {
+                "timestamp": "2026-05-18T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "The session continued after naming."}]},
+            },
+            {
+                "timestamp": "2026-05-18T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Source is now ahead of the archive."}]},
+            },
+        ],
+    )
+    source_ahead_readiness = module.session_naming_readiness(aoa_root, session_dir, deferred_manifest)
+
+    assert source_ahead_readiness["status"] == "needs_sync"
+    assert source_ahead_readiness["route"] == "sync_source_transcript_before_naming"
+    assert "source_transcript_newer_than_raw_archive" in source_ahead_readiness["reasons"]
+    assert source_ahead_readiness["evidence"]["source_transcript_newer_than_raw_archive"] is True
+
+
+def test_replacing_active_session_name_does_not_create_implicit_alias(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-18T00-00-00-no-alias.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-18T00:00:00Z", "type": "session_meta", "payload": {"id": "no-implicit-alias", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Name the whole session correctly"}]}},
+            {"timestamp": "2026-05-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "First name is too narrow."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "no-implicit-alias",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    first = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="no-implicit-alias",
+        name="narrow session name",
+        scope="session",
+        evidence_refs=["raw:line:2"],
+        from_line=1,
+        to_line=2,
+        apply=True,
+        verify_raw_hash=True,
+    )
+    second = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="no-implicit-alias",
+        name="correct session name",
+        scope="session",
+        evidence_refs=["raw:line:2", "raw:line:3"],
+        from_line=1,
+        to_line=3,
+        apply=True,
+        verify_raw_hash=True,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-18__001__name-the-whole-session-correctly"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    names = manifest["semantic_names"]["names"]
+    name_index = json.loads((aoa_root / module.SESSION_NAME_INDEX_JSON).read_text(encoding="utf-8"))
+
+    assert first["status"] == "applied"
+    assert second["status"] == "applied"
+    assert manifest["semantic_names"]["active_session"] == "correct-session-name"
+    assert [item["slug"] for item in names if item["scope"] == "session"] == ["correct-session-name"]
+    assert not any(item.get("status") == "alias" for item in names)
+    assert "narrow-session-name" not in name_index["slug_index"]
+
+
 def test_naming_readiness_routes_before_bulk_renaming(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
 
@@ -1764,6 +1922,90 @@ def test_naming_readiness_routes_before_bulk_renaming(tmp_path: Path) -> None:
         segment_count=2,
         event_count=200,
     )
+    add_manifest(
+        "2026-05-20__006__named-with-open-phase-queue",
+        "Named with open phase queue",
+        session_id="named-open-phase-queue",
+        status="indexed",
+        segment_count=25,
+        event_count=2500,
+    )
+    named_session_dir = aoa_root / "sessions" / "2026-05-20__006__named-with-open-phase-queue"
+    named_manifest_path = named_session_dir / "session.manifest.json"
+    named_manifest = json.loads(named_manifest_path.read_text(encoding="utf-8"))
+    named_manifest["semantic_names"] = {
+        "schema_version": 1,
+        "active": "named-open-phase-queue",
+        "active_session": "named-open-phase-queue",
+        "names": [
+            {
+                "schema_version": 1,
+                "name": "Named open phase queue",
+                "slug": "named-open-phase-queue",
+                "scope": "session",
+                "kind": "session_essence",
+                "status": "active",
+                "coverage": {"raw_ranges": [{"from_line": 1, "to_line": 2500}]},
+            }
+        ],
+    }
+    named_manifest_path.write_text(json.dumps(named_manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+    module.update_registry(aoa_root, named_manifest, named_session_dir)
+    named_phase_dir = named_session_dir / "naming"
+    named_phase_dir.mkdir(parents=True, exist_ok=True)
+    (named_phase_dir / "phase-discovery.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "session_phase_discovery",
+                "session_dir": str(named_session_dir),
+                "raw_path": str(named_session_dir / "raw" / "session.raw.jsonl"),
+                "candidate_count": 3,
+                "review_queue_count": 2,
+                "candidates": [
+                    {
+                        "segment_id": "000",
+                        "name": "raw validation",
+                        "slug": "raw-validation",
+                        "confidence": "low",
+                        "name_basis": "linked_path_event_signals",
+                        "quality_flags": ["no_specific_user_intent"],
+                        "coverage": {"raw_ranges": [{"from_line": 1, "to_line": 10}]},
+                        "evidence": ["raw:line:1"],
+                        "review": {"status": "needs_semantic_synthesis"},
+                    },
+                    {
+                        "segment_id": "001",
+                        "name": "docs implementation",
+                        "slug": "docs-implementation",
+                        "confidence": "low",
+                        "name_basis": "linked_path_event_signals",
+                        "quality_flags": ["no_specific_user_intent"],
+                        "coverage": {"raw_ranges": [{"from_line": 11, "to_line": 20}]},
+                        "evidence": ["raw:line:11"],
+                        "review": {"status": "needs_semantic_synthesis"},
+                    },
+                    {
+                        "segment_id": "002",
+                        "name": "ready phase",
+                        "slug": "ready-phase",
+                        "confidence": "high",
+                        "name_basis": "specific_user_intent",
+                        "quality_flags": [],
+                        "coverage": {"raw_ranges": [{"from_line": 21, "to_line": 30}]},
+                        "evidence": ["raw:line:21"],
+                        "review": {"status": "ready_for_raw_check"},
+                    },
+                ],
+                "review_queue": [
+                    {"segment_id": "000", "name": "raw validation", "review": {"status": "needs_semantic_synthesis"}},
+                    {"segment_id": "001", "name": "docs implementation", "review": {"status": "needs_semantic_synthesis"}},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     payload = module.build_naming_readiness_report(aoa_root, refresh_indexes=True)
     by_label = {item["session_label"]: item["naming_readiness"] for item in payload["results"]}
@@ -1780,13 +2022,36 @@ def test_naming_readiness_routes_before_bulk_renaming(tmp_path: Path) -> None:
     assert by_label["2026-05-20__004__missing-raw-with-path"]["route"] == "recover_raw_before_naming"
     assert by_label["2026-05-20__005__deferred-index"]["status"] == "needs_reindex"
     assert by_label["2026-05-20__005__deferred-index"]["route"] == "reindex_before_naming"
+    assert by_label["2026-05-20__006__named-with-open-phase-queue"]["status"] == "named"
+    assert by_label["2026-05-20__006__named-with-open-phase-queue"]["route"] == "review_open_phase_discovery_for_named_session"
+    assert by_label["2026-05-20__006__named-with-open-phase-queue"]["priority"] > 0
+    assert "phase_discovery_review_queue_open" in by_label["2026-05-20__006__named-with-open-phase-queue"]["reasons"]
+    assert "phase_discovery_review_queue_open:2" in by_label["2026-05-20__006__named-with-open-phase-queue"]["warnings"]
+    assert by_label["2026-05-20__006__named-with-open-phase-queue"]["evidence"]["phase_discovery_review_queue_count"] == 2
+    assert by_label["2026-05-20__006__named-with-open-phase-queue"]["evidence"]["phase_discovery_review_queue_sample"][0]["name"] == "raw validation"
     assert name_index["naming_readiness_counts"]["by_status"]["needs_phase_discovery"] == 1
     assert name_index["naming_readiness_counts"]["by_status"]["ready_for_semantic_name"] == 1
     assert name_index["naming_readiness_counts"]["by_status"]["diagnostic_only"] == 1
     assert name_index["naming_readiness_counts"]["by_status"]["blocked"] == 1
     assert name_index["naming_readiness_counts"]["by_status"]["needs_reindex"] == 1
+    assert name_index["naming_readiness_counts"]["by_status"]["named"] == 1
     assert "Naming Work Queue" in sessions_index_md
     assert "phase_topic_discovery_before_session_name" in sessions_index_md
+    assert "review_open_phase_discovery_for_named_session" in sessions_index_md
+
+    applied = module.review_phase_name_candidate(
+        aoa_root,
+        "2026-05-20__006__named-with-open-phase-queue",
+        "000",
+        reviewed_name="Raw route review",
+        apply=True,
+    )
+    assert applied["status"] == "applied"
+    updated_phase_discovery = json.loads((named_phase_dir / "phase-discovery.json").read_text(encoding="utf-8"))
+    assert updated_phase_discovery["candidates"][0]["review"]["status"] == "applied_reviewed_name"
+    assert updated_phase_discovery["candidates"][0]["review"]["applied_name"] == "Raw route review"
+    assert updated_phase_discovery["review_queue_count"] == 1
+    assert updated_phase_discovery["review_queue"][0]["segment_id"] == "001"
 
 
 def test_phase_discovery_writes_open_candidates_and_updates_readiness(tmp_path: Path) -> None:
@@ -1906,6 +2171,63 @@ def test_phase_discovery_writes_open_candidates_and_updates_readiness(tmp_path: 
     rejected = module.review_phase_name_candidate(aoa_root, "phase-discovery", "000", use_candidate=True, apply=True)
     assert not rejected["ok"]
     assert "weak_candidate_requires_reviewed_name" in rejected["diagnostics"]
+
+    assist = module.build_phase_review_assist(
+        aoa_root,
+        "phase-discovery",
+        limit=2,
+        from_segment="000",
+        write=True,
+        write_report=True,
+    )
+    assert assist["ok"]
+    assert assist["selected_count"] == 2
+    assert assist["packets"][0]["segment_id"] == "000"
+    assert assist["packets"][0]["existing_phase_name"] == "Naming layer repair"
+    assert assist["packets"][0]["read_first"]
+    assert (
+        assist["packets"][0]["synthesis_inputs"]["progress_markers"]
+        or assist["packets"][0]["synthesis_inputs"]["decisions_and_closeout"]
+        or assist["packets"][0]["synthesis_inputs"]["commands"]
+    )
+    assert assist["plan_template"]["items"][0]["segment_id"] == "000"
+    assert Path(assist["artifact_json"]).exists()
+    assert Path(assist["artifact_markdown"]).exists()
+    assert Path(assist["plan_template_path"]).exists()
+    assist_markdown = Path(assist["artifact_markdown"]).read_text(encoding="utf-8")
+    assert "## Fast Queue" in assist_markdown
+    assert "#### Commands" in assist_markdown or "#### Decisions And Closeout" in assist_markdown
+
+    plan = assist["plan_template"]
+    plan["items"][0]["reviewed_name"] = ""
+    plan["items"][1]["reviewed_name"] = "Plan applied phase name"
+    plan_path = Path(assist["plan_template_path"]).with_name("phase-review-plan.json")
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    preview_plan = module.apply_phase_review_plan(aoa_root, "phase-discovery", plan_path=plan_path)
+    assert preview_plan["ok"]
+    assert preview_plan["status"] == "preview_ready"
+    assert preview_plan["preview_count"] == 1
+    assert preview_plan["skipped_count"] == 1
+
+    applied_plan = module.apply_phase_review_plan(
+        aoa_root,
+        "phase-discovery",
+        plan_path=plan_path,
+        apply=True,
+        write_report=True,
+    )
+    assert applied_plan["ok"]
+    assert applied_plan["status"] == "applied"
+    assert applied_plan["applied_count"] == 1
+    assert applied_plan["skipped_count"] == 1
+    assert Path(applied_plan["report_json"]).exists()
+    assert Path(applied_plan["report_markdown"]).exists()
+    manifest = json.loads(next((aoa_root / "sessions").glob("*/session.manifest.json")).read_text(encoding="utf-8"))
+    assert any(
+        item["scope"] == "phase" and item["name"] == "Plan applied phase name"
+        for item in manifest["semantic_names"]["names"]
+    )
 
 
 def test_semantic_session_name_rejects_unanchored_out_of_range_evidence(tmp_path: Path) -> None:

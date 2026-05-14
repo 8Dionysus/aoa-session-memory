@@ -335,6 +335,39 @@ python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
   --write-report
 ```
 
+For high-volume naming passes, generate batch review packets before applying
+names:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-review-assist <session-label-or-id> \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --from-segment <segment-id> \
+  --limit 8 \
+  --write \
+  --write-report
+```
+
+The assist packet is a speed layer, not a truth layer. It pre-collects the raw
+refs and synthesis inputs an agent would otherwise fetch manually for every
+segment.
+
+After a reviewer fills the generated plan with reviewed names, preview or apply
+the non-empty items in one guarded batch:
+
+```bash
+python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-id> \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --plan sessions/<session>/naming/phase-review-plan.json \
+  --apply \
+  --write-report
+```
+
+This batch command still routes each item through the reviewed phase-name
+writer, skips empty `reviewed_name` entries, and does not auto-accept machine
+candidates.
+
 Review one candidate through the guarded route before applying:
 
 ```bash

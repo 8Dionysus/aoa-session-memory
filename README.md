@@ -227,6 +227,34 @@ This writes unreviewed `naming/phase-discovery.json` and `.md` candidates inside
 the session archive. Use `review_queue` for candidates that need semantic
 synthesis before they can be applied.
 
+For large sessions, generate a batch assist packet before naming by hand:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-review-assist <session-label-or-id> \
+  --from-segment <segment-id> \
+  --limit 8 \
+  --write \
+  --write-report
+```
+
+`phase-review-assist` writes `naming/phase-review-assist.md` and a
+`phase-review-plan.template.json` with source raw refs, progress markers,
+decisions, checks, errors, mutations, commands, and top paths for several
+segments at once. It accelerates review, but does not apply names.
+
+After reviewed names are filled into a plan JSON, preview or apply the batch
+without hand-running one command per segment:
+
+```bash
+python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-id> \
+  --plan sessions/<session>/naming/phase-review-plan.json \
+  --apply \
+  --write-report
+```
+
+The plan route skips empty `reviewed_name` entries and applies each non-empty
+item through the same guarded phase-name writer.
+
 Review and apply one phase candidate through the guarded route:
 
 ```bash
