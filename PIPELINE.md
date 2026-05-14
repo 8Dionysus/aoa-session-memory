@@ -184,6 +184,8 @@ The archive directory must have:
 - `sessions/AGENTS.md`
 - `sessions/INDEX.md`
 - `sessions/index.json`
+- `SESSION_NAMES.md`
+- `session-name-index.json`
 
 Segment indexes must keep both the legacy event map and the universal event
 facets:
@@ -194,6 +196,9 @@ facets:
 - per-event `relationships` for sequence and call/output refs
 
 The agent should use indexes before opening large Markdown or raw JSONL.
+Naming-readiness data in `SESSION_NAMES.md`, `session-name-index.json`,
+`sessions/INDEX.md`, and `sessions/index.json` should be checked before broad
+semantic naming or physical relabeling.
 
 ## Navigation Commands
 
@@ -302,6 +307,45 @@ python3 scripts/aoa_session_memory.py repair-session-titles all \
 
 Add `--apply` only after the plan is coherent. This repairs names and generated
 identity surfaces; it does not change raw evidence.
+
+Classify naming readiness before applying semantic names or relabels:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-readiness all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 21 \
+  --refresh-indexes \
+  --write-report
+```
+
+Treat `blocked` as lower-layer recovery, `needs_reindex` as a generated-index
+refresh route, `needs_phase_discovery` as a segment review route, and
+`ready_for_semantic_name` as the only direct semantic-name queue.
+
+For a `needs_phase_discovery` session, write the unreviewed phase candidate
+layer before naming. Then use its `review_queue` for candidates that need
+semantic synthesis instead of applying path/event names directly:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --write-report
+```
+
+Review one candidate through the guarded route before applying:
+
+```bash
+python3 scripts/aoa_session_memory.py review-phase-name <session-label-or-id> \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --segment <segment-id> \
+  --reviewed-name "<reviewed phase name>" \
+  --apply \
+  --write-report
+```
 
 Write manual-review packets for the deep lane:
 

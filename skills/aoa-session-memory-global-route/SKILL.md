@@ -39,6 +39,10 @@ Use this skill in any Codex session when the task touches:
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
 - event taxonomy, classifier, generated segment indexes, or `reindex-sessions`
+- naming readiness, `SESSION_NAMES.md`, `sessions/INDEX.md`, or
+  `naming-readiness`
+- phase discovery, `phase-discovery`, `review-phase-name`, or session naming
+  candidate layers
 - historical Codex session import from `~/.codex/sessions`
 - first-wave batch distillation or historical session review queues
 - preparing or validating the portable `aoa-session-memory` bundle
@@ -71,6 +75,10 @@ Use this skill in any Codex session when the task touches:
   `aoa-session-manual-review`
 - Regenerate generated indexes after taxonomy/classifier changes:
   `aoa-session-reindex`
+- Naming queue, phase-discovery routing, and pre-rename checks:
+  `aoa-session-naming-readiness`
+- Long-session phase/topic candidate extraction and guarded candidate apply:
+  `aoa-session-phase-discovery`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`
 - Completion readiness: `aoa-session-memory-audit`
 - Filesystem and live hook health: `aoa-session-memory-doctor`

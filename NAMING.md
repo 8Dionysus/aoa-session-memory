@@ -46,12 +46,23 @@ name instead of renaming the archive blindly. Use `session` for the mutable
 umbrella name and `phase` for late-process names:
 
 ```text
-aoa-session-memory.py name-session <session> \
+python3 scripts/aoa_session_memory.py name-session <session> \
   --name "aoa-techniques repo ordering and canonization" \
   --scope session \
   --kind session_essence \
   --evidence raw:line:123 \
   --apply
+```
+
+For phase-discovery candidates, use the guarded review route instead of
+copying low-level `name-session` arguments by hand:
+
+```text
+python3 scripts/aoa_session_memory.py review-phase-name <session> \
+  --segment 003 \
+  --reviewed-name "reviewed phase name" \
+  --apply \
+  --write-report
 ```
 
 Semantic names live in `session.manifest.json` under `semantic_names`, mirror
@@ -87,6 +98,77 @@ table of contents. It should be the first stop after root design and naming
 surfaces when an agent needs to choose a historical session. It groups archives
 by date, highlights named sessions, and lists the largest sessions without
 making the root directory carry every navigation concern.
+
+## Naming Readiness
+
+Before a broad naming pass, run the readiness layer:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-readiness all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --refresh-indexes \
+  --write-report
+```
+
+Readiness is a routing index, not a judgment. It classifies each session into
+the next honest action:
+
+- `blocked`: repair missing or unrecoverable raw/index state before naming.
+- `diagnostic_only`: keep raw-unavailable hook-only diagnostics visible without
+  putting them ahead of recoverable naming work.
+- `needs_reindex`: refresh generated segments/indexes from preserved raw before
+  choosing a semantic name.
+- `needs_phase_discovery`: inspect segment indexes and create phase/topic
+  candidates before assigning a whole-session name.
+- `phase_discovery_ready`: review generated phase/topic candidates before
+  applying a whole-session name.
+- `ready_for_semantic_name`: apply a semantic session name with raw evidence
+  refs and bridge anchors.
+- `readable_label`: the canonical label is good enough unless a later review
+  finds a better semantic name.
+- `low_signal`: tiny probes can stay as canonical labels unless they become
+  operationally important.
+- `named`: verify or refine the existing semantic name instead of starting
+  over.
+
+The readiness queue is mirrored into `SESSION_NAMES.md`,
+`session-name-index.json`, `sessions/INDEX.md`, and `sessions/index.json`.
+Use it to choose the next pass. Do not use it to close review or promote a name
+as truth.
+
+For `needs_phase_discovery`, generate the open candidate layer:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write \
+  --write-report
+```
+
+The generated `naming/phase-discovery.json` and `.md` files contain unreviewed
+phase candidates with raw-line coverage. They make the next naming pass faster,
+but they do not apply or close any semantic name.
+
+Each phase candidate should be read as a signal bundle, not a title string:
+
+- `name_basis=specific_user_intent` means a usable user request anchored the
+  candidate.
+- `name_basis=linked_path_event_signals` means the user text was missing or too
+  generic, so the candidate is synthesized from touched paths, event counts,
+  commands, checks, errors, and mutations.
+- `quality_flags` expose weak naming inputs instead of hiding them behind a
+  confident-looking phrase.
+
+This linked-signal layer is expected everywhere, including strong candidates.
+It lets weak candidates diagnose the process and lets strong candidates show
+why their names are deserved.
+
+Diagnostics are only half of the pass. The other half is `review_queue`: weak
+or path/event-based candidates must route to semantic synthesis with an
+explicit next action and an apply template. A candidate is not ready to become a
+semantic name merely because it was detected.
 
 ## Fallback Words
 

@@ -190,6 +190,50 @@ If any answer is weak, record the blocker and route to recovery, reindex,
 manual review, or a narrower candidate queue. Do not hide the weakness behind a
 confident-looking semantic name.
 
+The operational entry for this layer is:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-readiness all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --refresh-indexes \
+  --write-report
+```
+
+This command refreshes the lightweight naming route in `SESSION_NAMES.md` and
+`sessions/INDEX.md`. It does not apply names and does not close review.
+
+For long sessions, the next layer is phase discovery:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write \
+  --write-report
+```
+
+This writes `naming/phase-discovery.json` and `.md` as open candidates. A later
+agent may apply accepted `phase` or `topic` names, but the candidate file itself
+is not reviewed truth.
+
+Every candidate should expose its linked signal bundle. A phase name is stronger
+when the user intent, touched paths, command/check/error/mutation counts,
+coverage range, and raw refs all point in the same direction. Generic prompts
+should become low-confidence path/event candidates, not durable names.
+
+Showing weakness is not enough. The phase-discovery artifact must also create a
+review queue: each weak candidate needs an action, synthesis inputs, and an
+apply template so the next agent can turn diagnosis into a reviewed semantic
+name without guessing the route.
+
+The apply route should be procedural, not a copied low-level command. A weak
+candidate must pass through `review-phase-name --reviewed-name ... --apply`;
+`--use-candidate` is only valid for candidates already marked
+`ready_for_raw_check`. Successful application refreshes the name index and the
+sessions table of contents, so the route does not depend on the agent holding
+the whole chain in active context.
+
 ## Post-Change Route Review
 
 Any change to a route surface should end by checking the adjacent surfaces it
@@ -297,8 +341,9 @@ repair, review, naming, and promotion belong to deliberate commands and skills.
 
 ### 6. Review remains open until reviewed
 
-A candidate found by batch, manual-review, naming-readiness, or promotion
-review remains open. Only a later reviewed path may close or promote it.
+A candidate found by batch, manual-review, naming-readiness, phase-discovery,
+or promotion review remains open. Only a later reviewed path may close or
+promote it.
 
 ### 7. Portability comes from shape, not local doctrine
 
