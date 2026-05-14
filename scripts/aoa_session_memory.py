@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 
 
 SCHEMA_VERSION = 1
+SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 LEGACY_SESSION_ROOT = Path("codex-sessions")
@@ -1163,11 +1164,18 @@ def write_markdown(path: Path, content: str) -> None:
 
 
 def sha256_file(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    cached = SHA256_FILE_CACHE.get(key)
+    if cached:
+        return cached
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    SHA256_FILE_CACHE[key] = value
+    return value
 
 
 def short_text(value: Any, *, max_chars: int = 120) -> str:
@@ -2255,6 +2263,31 @@ def semantic_name_identity_lines(manifest: dict[str, Any]) -> list[str]:
     return lines
 
 
+def merge_semantic_anchor(prior: dict[str, Any], anchor: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    merged = {**prior, **anchor}
+    preserved: list[str] = []
+    for key in ("raw_sha256", "raw_line_count", "raw_bytes"):
+        if anchor.get(key) is None and prior.get(key) is not None:
+            merged[key] = prior.get(key)
+            preserved.append(key)
+    if preserved:
+        existing = prior.get("preserved_verified_fields")
+        prior_preserved = [str(item) for item in existing] if isinstance(existing, list) else []
+        merged["preserved_verified_fields"] = sorted(set(prior_preserved + preserved))
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        if manifest.get("archive_status") == "raw_mirrored_index_deferred" or raw.get("indexing_status") == "deferred_from_hook":
+            merged["raw_anchor_status"] = "deferred_refresh_preserved_verified_anchor"
+        else:
+            merged["raw_anchor_status"] = "preserved_verified_anchor_metadata"
+    else:
+        merged.pop("preserved_verified_fields", None)
+        if merged.get("raw_sha256") and merged.get("raw_line_count") is not None:
+            merged["raw_anchor_status"] = "current_raw_identity"
+        else:
+            merged["raw_anchor_status"] = "raw_identity_unverified"
+    return merged
+
+
 def refresh_semantic_name_anchors(
     session_dir: Path,
     manifest: dict[str, Any],
@@ -2269,9 +2302,9 @@ def refresh_semantic_name_anchors(
     refreshed_at = utc_now()
     for item in names:
         prior = item.get("anchor") if isinstance(item.get("anchor"), dict) else {}
+        merged_anchor = merge_semantic_anchor(prior, anchor, manifest)
         item["anchor"] = {
-            **prior,
-            **anchor,
+            **merged_anchor,
             "anchored_at": prior.get("anchored_at") or item.get("created_at") or refreshed_at,
             "refreshed_at": refreshed_at,
         }
@@ -3582,6 +3615,107 @@ def segment_index_missing_paths(segments: list[Any]) -> list[str]:
     return missing
 
 
+def meaningful_naming_tail_signal(event: RawEvent) -> bool:
+    parsed = event.parsed if isinstance(event.parsed, dict) else {}
+    payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+    text = semantic_text_for_classification(event.source_type, payload)
+    if not text.strip():
+        return False
+    if text.strip().startswith("<turn_aborted>"):
+        return False
+    if event.source_type == "response_item":
+        item_type = str(payload.get("type") or "")
+        role = str(payload.get("role") or "")
+        return item_type == "message" and role in {"user", "assistant"}
+    if event.source_type == "event_msg":
+        msg_type = str(payload.get("type") or "")
+        return msg_type in {"agent_message", "user_message"}
+    return event.source_type in {"turn_context", "compacted"} and event.compaction_boundary
+
+
+def naming_tail_probe(raw_path: Path, start_line: int, end_line: int, *, max_scan: int = 1000) -> dict[str, Any]:
+    if start_line <= 0 or end_line < start_line or not raw_path.is_file():
+        return {"has_meaningful_content": False, "sample": [], "scanned_count": 0, "truncated": False}
+    sample: list[dict[str, Any]] = []
+    scanned_count = 0
+    truncated = False
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            if line_no < start_line:
+                continue
+            if line_no > end_line:
+                break
+            if scanned_count >= max_scan:
+                truncated = True
+                break
+            scanned_count += 1
+            raw_line = line.rstrip("\n")
+            parsed: dict[str, Any] | None = None
+            try:
+                loaded = json.loads(raw_line)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except json.JSONDecodeError:
+                parsed = None
+            event = classify_raw_event(raw_line, parsed, line_no)
+            if meaningful_naming_tail_signal(event):
+                payload = parsed.get("payload") if isinstance(parsed, dict) and isinstance(parsed.get("payload"), dict) else {}
+                text = semantic_text_for_classification(event.source_type, payload)
+                sample.append(
+                    {
+                        "line": line_no,
+                        "event_type": event.event_type,
+                        "source_type": event.source_type,
+                        "title": event.title,
+                        "text": short_text(text, max_chars=220),
+                    }
+                )
+                if len(sample) >= 5:
+                    break
+    return {
+        "has_meaningful_content": bool(sample) or truncated,
+        "sample": sample,
+        "scanned_count": scanned_count,
+        "truncated": truncated,
+    }
+
+
+def phase_discovery_review_state(session_dir: Path) -> dict[str, Any]:
+    artifact = session_phase_discovery_path(session_dir)
+    state: dict[str, Any] = {
+        "present": artifact.is_file(),
+        "path": str(artifact),
+        "candidate_count": 0,
+        "review_queue_count": 0,
+        "review_queue_sample": [],
+        "read_error": None,
+    }
+    if not artifact.is_file():
+        return state
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        state["read_error"] = str(exc)
+        return state
+    if not isinstance(payload, dict):
+        state["read_error"] = "invalid_phase_discovery_payload"
+        return state
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    review_queue = payload.get("review_queue") if isinstance(payload.get("review_queue"), list) else []
+    state["candidate_count"] = int_value(payload.get("candidate_count"), len(candidates))
+    state["review_queue_count"] = int_value(payload.get("review_queue_count"), len(review_queue))
+    state["review_queue_sample"] = [
+        {
+            "segment_id": item.get("segment_id"),
+            "name": item.get("name") or item.get("candidate_name"),
+            "status": (item.get("review") or {}).get("status") if isinstance(item.get("review"), dict) else item.get("status"),
+        }
+        for item in review_queue[:5]
+        if isinstance(item, dict)
+    ]
+    return state
+
+
 def session_naming_readiness(
     aoa_root: Path,
     session_dir: Path,
@@ -3618,12 +3752,27 @@ def session_naming_readiness(
     raw_present = raw_path.exists()
     raw_sha_present = bool(raw.get("sha256"))
     raw_line_count = raw.get("line_count")
+    observed_raw_line_count = raw_line_count
+    raw_line_count_source = "manifest" if raw_line_count is not None else None
     missing_segment_indexes = segment_index_missing_paths(segments)
     weak_title = title_is_generic_for_naming(title, title_source)
     weak_label = weak_label_text(label)
-    phase_discovery_present = session_phase_discovery_path(session_dir).is_file()
+    phase_discovery_state = phase_discovery_review_state(session_dir)
+    phase_discovery_present = bool(phase_discovery_state.get("present"))
+    phase_discovery_review_queue_count = int_value(phase_discovery_state.get("review_queue_count"))
+    active_session_coverage_end = None
+    if isinstance(active_session, dict):
+        coverage = active_session.get("coverage") if isinstance(active_session.get("coverage"), dict) else {}
+        raw_ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+        coverage_ends = [
+            int_value(raw_range.get("to_line"))
+            for raw_range in raw_ranges
+            if isinstance(raw_range, dict) and int_value(raw_range.get("to_line")) > 0
+        ]
+        active_session_coverage_end = max(coverage_ends) if coverage_ends else None
 
     reasons: list[str] = []
+    sync_reasons: list[str] = []
     reindex_reasons: list[str] = []
     blockers: list[str] = []
     warnings: list[str] = []
@@ -3634,6 +3783,30 @@ def session_naming_readiness(
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
     source_transcript_path = source.get("transcript_path")
     has_recovery_hint = bool(source_transcript_path)
+    source_path = Path(str(source_transcript_path)).expanduser() if source_transcript_path else None
+    source_transcript_present = bool(source_path and source_path.is_file())
+    source_transcript_size = None
+    raw_archive_size = raw_path.stat().st_size if raw_present else None
+    source_transcript_newer_than_raw_archive = False
+    if source_path and source_path.is_file() and raw_present:
+        try:
+            source_stat = source_path.stat()
+            raw_stat = raw_path.stat()
+            source_transcript_size = source_stat.st_size
+            source_transcript_newer_than_raw_archive = (
+                source_stat.st_size != raw_stat.st_size or source_stat.st_mtime_ns > raw_stat.st_mtime_ns
+            )
+            if source_transcript_newer_than_raw_archive:
+                sync_reasons.append("source_transcript_newer_than_raw_archive")
+                route = "sync_source_transcript_before_naming"
+        except OSError:
+            warnings.append("source_transcript_freshness_probe_failed")
+    if observed_raw_line_count is None and raw_present and archive_status == "raw_mirrored_index_deferred":
+        try:
+            observed_raw_line_count = count_file_lines(raw_path)
+            raw_line_count_source = "raw_probe_deferred"
+        except OSError:
+            warnings.append("raw_line_count_probe_failed")
     if archive_status == "raw_unavailable":
         if has_recovery_hint:
             blockers.append("raw_unavailable")
@@ -3662,6 +3835,17 @@ def session_naming_readiness(
     if archive_status == "indexed" and missing_segment_indexes:
         reindex_reasons.append("segment_index_missing")
         route = "reindex_before_naming"
+    active_session_coverage_line_gap = (
+        active_session_coverage_end is not None
+        and observed_raw_line_count is not None
+        and active_session_coverage_end < int_value(observed_raw_line_count)
+    )
+    active_session_coverage_tail = (
+        naming_tail_probe(raw_path, active_session_coverage_end + 1, int_value(observed_raw_line_count))
+        if active_session_coverage_line_gap and active_session_coverage_end is not None and observed_raw_line_count is not None
+        else {"has_meaningful_content": False, "sample": [], "scanned_count": 0, "truncated": False}
+    )
+    active_session_coverage_stale = bool(active_session_coverage_tail.get("has_meaningful_content"))
 
     if status == "diagnostic_only":
         pass
@@ -3669,6 +3853,11 @@ def session_naming_readiness(
         status = "blocked"
         priority = 95 if event_count >= 1000 or segment_count >= large_threshold else 70
         reasons.extend(blockers)
+    elif sync_reasons:
+        status = "needs_sync"
+        route = "sync_source_transcript_before_naming"
+        priority = 92 if event_count >= 1000 or segment_count >= large_threshold else 58
+        reasons.extend(sync_reasons)
     elif reindex_reasons:
         status = "needs_reindex"
         priority = 90 if event_count >= 1000 or segment_count >= large_threshold else 55
@@ -3676,8 +3865,14 @@ def session_naming_readiness(
     elif active_session:
         status = "named"
         route = "verify_or_refine_existing_name"
-        priority = 0
+        priority = 50 if active_session_coverage_stale else 0
         reasons.append("active_session_name_present")
+        if active_session_coverage_stale:
+            reasons.append("active_session_name_coverage_stale")
+        if phase_discovery_review_queue_count:
+            route = "review_open_phase_discovery_for_named_session"
+            priority = max(priority, 45 if segment_count >= large_threshold else 25)
+            reasons.append("phase_discovery_review_queue_open")
         if phase_or_topic_count:
             reasons.append("phase_or_topic_names_present")
     elif event_count <= 20 and segment_count <= 2:
@@ -3722,10 +3917,17 @@ def session_naming_readiness(
         warnings.append("raw_sha256_missing")
     if raw_line_count is None and raw_present and archive_status == "indexed":
         warnings.append("raw_line_count_missing")
+    if active_session_coverage_stale:
+        warnings.append(f"active_session_name_coverage_stale:{active_session_coverage_end}<{observed_raw_line_count}")
+    if phase_discovery_state.get("read_error"):
+        warnings.append("phase_discovery_unreadable")
+    if phase_discovery_review_queue_count:
+        warnings.append(f"phase_discovery_review_queue_open:{phase_discovery_review_queue_count}")
 
     suggested_next = {
         "blocked": "repair raw/index state before naming",
         "diagnostic_only": "keep the raw-unavailable diagnostic visible unless a raw candidate appears",
+        "needs_sync": "sync the newer source transcript into the raw archive before naming or reindexing",
         "needs_reindex": "refresh generated segment indexes from preserved raw before naming",
         "phase_discovery_ready": "review phase-discovery candidates before applying the whole-session name",
         "named": "verify existing active session name against review needs",
@@ -3734,6 +3936,8 @@ def session_naming_readiness(
         "ready_for_semantic_name": "apply a semantic session name with raw evidence refs",
         "readable_label": "semantic name is optional; prioritize weaker or larger sessions first",
     }.get(status, "inspect naming route")
+    if status == "named" and phase_discovery_review_queue_count:
+        suggested_next = "review open phase-discovery candidates before treating the active session name as settled"
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -3756,13 +3960,26 @@ def session_naming_readiness(
             "huge_segment_threshold": huge_threshold,
             "raw_present": raw_present,
             "source_transcript_path_present": has_recovery_hint,
+            "source_transcript_present": source_transcript_present,
+            "source_transcript_size": source_transcript_size,
+            "raw_archive_size": raw_archive_size,
+            "source_transcript_newer_than_raw_archive": source_transcript_newer_than_raw_archive,
             "raw_sha256_present": raw_sha_present,
             "raw_line_count": raw_line_count,
+            "observed_raw_line_count": observed_raw_line_count,
+            "raw_line_count_source": raw_line_count_source,
             "weak_title": weak_title,
             "weak_label": weak_label,
             "active_session_name": active_session.get("slug") if isinstance(active_session, dict) else None,
+            "active_session_coverage_end": active_session_coverage_end,
+            "active_session_coverage_line_gap": active_session_coverage_line_gap,
+            "active_session_coverage_stale": active_session_coverage_stale,
+            "active_session_coverage_tail": active_session_coverage_tail,
             "phase_or_topic_name_count": phase_or_topic_count,
             "phase_discovery_present": phase_discovery_present,
+            "phase_discovery_candidate_count": int_value(phase_discovery_state.get("candidate_count")),
+            "phase_discovery_review_queue_count": phase_discovery_review_queue_count,
+            "phase_discovery_review_queue_sample": phase_discovery_state.get("review_queue_sample") or [],
             "missing_segment_index_count": len(missing_segment_indexes),
             "missing_segment_indexes_sample": missing_segment_indexes[:8],
         },
@@ -4108,7 +4325,7 @@ def phase_review_queue(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
         if not isinstance(candidate, dict):
             continue
         review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
-        if review.get("status") == "ready_for_raw_check":
+        if review.get("status") in {"ready_for_raw_check", "applied_reviewed_name"}:
             continue
         coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
         queue.append(
@@ -4130,6 +4347,17 @@ def phase_review_queue(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
         )
     )
     return queue
+
+
+def refresh_phase_discovery_review_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    candidates = [candidate for candidate in candidates if isinstance(candidate, dict)]
+    review_queue = phase_review_queue(candidates)
+    payload["candidate_count"] = len(candidates)
+    payload["candidate_quality_counts"] = phase_candidate_quality_counts(candidates)
+    payload["review_queue_count"] = len(review_queue)
+    payload["review_queue"] = review_queue
+    return payload
 
 
 def discover_session_phases(
@@ -4168,7 +4396,6 @@ def discover_session_phases(
         if not segment_events:
             continue
         candidates.append(phase_candidate_from_segment(segment, segment_events, session_label=session_label))
-    review_queue = phase_review_queue(candidates)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_phase_discovery",
@@ -4184,10 +4411,6 @@ def discover_session_phases(
         "archive_status": manifest.get("archive_status"),
         "event_count": len(events),
         "segment_count": len(segments),
-        "candidate_count": len(candidates),
-        "candidate_quality_counts": phase_candidate_quality_counts(candidates),
-        "review_queue_count": len(review_queue),
-        "review_queue": review_queue,
         "candidates": candidates,
         "next_actions": [
             "review candidate names against raw evidence",
@@ -4195,6 +4418,7 @@ def discover_session_phases(
             "choose the whole-session name only after phase coverage is understood",
         ],
     }
+    payload = refresh_phase_discovery_review_fields(payload)
     if write:
         artifact_json = session_phase_discovery_path(session_dir)
         artifact_md = artifact_json.with_suffix(".md")
@@ -4404,6 +4628,515 @@ def phase_candidate_raw_samples(payload: dict[str, Any], candidate: dict[str, An
     return samples
 
 
+def semantic_phase_names_by_range(manifest: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
+    phases: dict[tuple[int, int], dict[str, Any]] = {}
+    semantic = semantic_names_payload(manifest)
+    for item in semantic.get("names", []) if isinstance(semantic.get("names"), list) else []:
+        if not isinstance(item, dict) or semantic_name_scope(item) != "phase":
+            continue
+        coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+        ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+        first = ranges[0] if ranges and isinstance(ranges[0], dict) else {}
+        start = int_value(first.get("from_line"))
+        end = int_value(first.get("to_line"))
+        if start > 0 and end > 0:
+            phases[(start, end)] = item
+    return phases
+
+
+def phase_assist_sample(event: RawEvent, *, max_chars: int = 360) -> dict[str, Any]:
+    return {
+        "raw_ref": f"raw:line:{event.line_no}",
+        "event_type": event.event_type,
+        "source_type": event.source_type,
+        "title": event.title,
+        "text": short_text(event_semantic_text(event), max_chars=max_chars),
+    }
+
+
+def bounded_event_samples(events: list[RawEvent], *, limit: int, max_chars: int = 360) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    if len(events) <= limit:
+        selected = events
+    else:
+        head_count = max(1, limit // 2)
+        tail_count = max(1, limit - head_count)
+        selected = events[:head_count] + events[-tail_count:]
+    seen: set[int] = set()
+    samples: list[dict[str, Any]] = []
+    for event in selected:
+        if event.line_no in seen:
+            continue
+        seen.add(event.line_no)
+        samples.append(phase_assist_sample(event, max_chars=max_chars))
+    return samples
+
+
+def phase_review_assist_packet(
+    candidate: dict[str, Any],
+    segment_events: list[RawEvent],
+    *,
+    existing_phase: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    start, end = phase_candidate_range(candidate)
+    review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+    signals = candidate.get("signals") if isinstance(candidate.get("signals"), dict) else {}
+    event_counts = Counter(event.event_type for event in segment_events)
+    text_for = lambda event: event_semantic_text(event).strip()
+    user_requests = [
+        event
+        for event in segment_events
+        if event.event_type == "USER_INTENT" and text_for(event) and usable_phase_intent_text(text_for(event))
+    ]
+    progress_markers = [
+        event
+        for event in segment_events
+        if event.event_type == "ASSISTANT_MESSAGE"
+        and text_for(event)
+        and event_msg_type(event) not in {"token_count", "exec_command_end", "patch_apply_end"}
+    ]
+    decision_events = [event for event in segment_events if event.event_type in {"DECISION", "PROCESS_LESSON", "CHECKPOINT", "FINAL_STATE"}]
+    verification_events = [event for event in segment_events if event.event_type == "VERIFICATION"]
+    error_events = [event for event in segment_events if event.event_type == "ERROR"]
+    mutation_events = [event for event in segment_events if event.event_type in {"FILE_WRITE", "DIFF"}]
+    command_events = [event for event in segment_events if event.event_type == "COMMAND"]
+
+    read_first: list[str] = []
+    for group in (user_requests, decision_events, progress_markers, verification_events, error_events):
+        for event in group[:4]:
+            ref = f"raw:line:{event.line_no}"
+            if ref not in read_first:
+                read_first.append(ref)
+            if len(read_first) >= 10:
+                break
+        if len(read_first) >= 10:
+            break
+
+    candidate_name = str(candidate.get("name") or "")
+    segment_id = str(candidate.get("segment_id") or "")
+    coverage_note_seed = (
+        f"Reviewed with phase-review-assist for segment {normalize_segment_id(segment_id)} "
+        f"covering raw {start}..{end}; preserve raw refs and replace this seed with the accepted semantic synthesis."
+    )
+    return {
+        "segment_id": normalize_segment_id(segment_id),
+        "coverage": {"from_line": start, "to_line": end},
+        "machine_candidate": candidate_name,
+        "candidate_confidence": candidate.get("confidence"),
+        "candidate_basis": candidate.get("name_basis"),
+        "quality_flags": candidate.get("quality_flags", []),
+        "review_status": review.get("status"),
+        "existing_phase_name": existing_phase.get("name") if isinstance(existing_phase, dict) else "",
+        "existing_phase_slug": existing_phase.get("slug") if isinstance(existing_phase, dict) else "",
+        "event_counts": {
+            key: event_counts.get(key, 0)
+            for key in [
+                "USER_INTENT",
+                "ASSISTANT_MESSAGE",
+                "COMMAND",
+                "COMMAND_OUTPUT",
+                "FILE_READ",
+                "FILE_WRITE",
+                "DIFF",
+                "ERROR",
+                "VERIFICATION",
+                "DECISION",
+                "CHECKPOINT",
+                "FINAL_STATE",
+            ]
+            if event_counts.get(key, 0)
+        },
+        "top_paths": signals.get("top_paths", [])[:12] if isinstance(signals.get("top_paths"), list) else [],
+        "read_first": read_first,
+        "synthesis_inputs": {
+            "user_requests": bounded_event_samples(user_requests, limit=4, max_chars=420),
+            "progress_markers": bounded_event_samples(progress_markers, limit=8, max_chars=420),
+            "decisions_and_closeout": bounded_event_samples(decision_events, limit=6, max_chars=420),
+            "validations": bounded_event_samples(verification_events, limit=4, max_chars=360),
+            "errors": bounded_event_samples(error_events, limit=4, max_chars=360),
+            "mutations": bounded_event_samples(mutation_events, limit=5, max_chars=300),
+            "commands": bounded_event_samples(command_events, limit=5, max_chars=260),
+        },
+        "plan_template": {
+            "segment_id": normalize_segment_id(segment_id),
+            "reviewed_name": "",
+            "coverage_note": coverage_note_seed,
+        },
+    }
+
+
+def phase_review_assist_markdown(payload: dict[str, Any]) -> str:
+    packets = payload.get("packets") if isinstance(payload.get("packets"), list) else []
+    lines = [
+        "# Phase Review Assist",
+        "",
+        "Batch synthesis packets for phase naming. This is review acceleration, not reviewed truth.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- session: `{payload.get('session_label') or payload.get('session_id')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- remaining_review_queue: `{payload.get('remaining_review_queue_count')}`",
+        f"- raw_path: `{payload.get('raw_path')}`",
+        "",
+        "## Fast Queue",
+        "",
+        "| segment | machine candidate | status | range | read first | top paths |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        coverage = packet.get("coverage") if isinstance(packet.get("coverage"), dict) else {}
+        read_first = ", ".join(str(ref) for ref in packet.get("read_first", [])[:6])
+        top_paths = ", ".join(str(path) for path in packet.get("top_paths", [])[:4])
+        lines.append(
+            "| `{segment}` | {candidate} | `{status}` | `{start}..{end}` | `{read_first}` | {paths} |".format(
+                segment=packet.get("segment_id"),
+                candidate=markdown_cell(packet.get("machine_candidate")),
+                status=packet.get("review_status"),
+                start=coverage.get("from_line"),
+                end=coverage.get("to_line"),
+                read_first=read_first,
+                paths=markdown_cell(top_paths),
+            )
+        )
+    lines.extend(["", "## Packets", ""])
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        coverage = packet.get("coverage") if isinstance(packet.get("coverage"), dict) else {}
+        lines.extend(
+            [
+                f"### Segment `{packet.get('segment_id')}`",
+                "",
+                f"- range: `{coverage.get('from_line')}..{coverage.get('to_line')}`",
+                f"- machine_candidate: {packet.get('machine_candidate')}",
+                f"- review_status: `{packet.get('review_status')}`",
+                f"- candidate_basis: `{packet.get('candidate_basis')}`",
+                f"- quality_flags: `{', '.join(str(flag) for flag in packet.get('quality_flags', []) if flag)}`",
+            ]
+        )
+        if packet.get("existing_phase_name"):
+            lines.append(f"- existing_phase_name: {packet.get('existing_phase_name')}")
+        lines.extend(
+            [
+                f"- top_paths: `{', '.join(str(path) for path in packet.get('top_paths', [])[:8])}`",
+                f"- read_first: `{', '.join(str(ref) for ref in packet.get('read_first', []))}`",
+                "",
+            ]
+        )
+        synthesis = packet.get("synthesis_inputs") if isinstance(packet.get("synthesis_inputs"), dict) else {}
+        for title, key in [
+            ("User Requests", "user_requests"),
+            ("Progress Markers", "progress_markers"),
+            ("Decisions And Closeout", "decisions_and_closeout"),
+            ("Validations", "validations"),
+            ("Errors", "errors"),
+            ("Mutations", "mutations"),
+            ("Commands", "commands"),
+        ]:
+            samples = synthesis.get(key) if isinstance(synthesis.get(key), list) else []
+            if not samples:
+                continue
+            lines.extend([f"#### {title}", "", "| ref | type | text |", "| --- | --- | --- |"])
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    continue
+                lines.append(
+                    "| `{ref}` | `{event_type}` | {text} |".format(
+                        ref=sample.get("raw_ref"),
+                        event_type=sample.get("event_type"),
+                        text=markdown_cell(sample.get("text")),
+                    )
+                )
+            lines.append("")
+        plan = packet.get("plan_template") if isinstance(packet.get("plan_template"), dict) else {}
+        lines.extend(["#### Plan Template", "", "```json", json.dumps(plan, indent=2, ensure_ascii=False), "```", ""])
+    lines.extend(
+        [
+            "## Rule",
+            "",
+            "Use these packets to synthesize stronger reviewed names, then apply through `review-phase-name`.",
+            "For reviewed batches, fill `reviewed_name` entries in the plan JSON and run `apply-phase-review-plan`.",
+            "Do not apply `machine_candidate` for weak/path-based candidates just because it appears in this report.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_phase_review_assist(
+    aoa_root: Path,
+    target: str,
+    *,
+    limit: int = 8,
+    from_segment: str | None = None,
+    segments: list[str] | None = None,
+    include_reviewed: bool = False,
+    refresh: bool = False,
+    write: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    discovery = phase_discovery_payload_for_review(aoa_root, target, refresh=refresh)
+    session_dir_value = str(discovery.get("session_dir") or "")
+    session_dir = Path(session_dir_value) if session_dir_value else None
+    raw_path = Path(str(discovery.get("raw_path") or ""))
+    if not raw_path.is_file():
+        raise ValueError(f"missing raw archive: {raw_path}")
+    manifest = read_json(session_dir / "session.manifest.json", {}) if session_dir is not None else {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    existing_phases = semantic_phase_names_by_range(manifest)
+    events = parse_raw_events(raw_path)
+    by_range: dict[tuple[int, int], list[RawEvent]] = {}
+    requested_segments = {normalize_segment_id(item) for item in segments or [] if str(item).strip()}
+    from_segment_norm = normalize_segment_id(from_segment) if from_segment else ""
+    selected_candidates: list[dict[str, Any]] = []
+    for candidate in discovery.get("candidates", []) if isinstance(discovery.get("candidates"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        segment_id = normalize_segment_id(str(candidate.get("segment_id") or ""))
+        if requested_segments and segment_id not in requested_segments:
+            continue
+        if from_segment_norm and segment_id < from_segment_norm:
+            continue
+        review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
+        if not include_reviewed and review.get("status") == "applied_reviewed_name":
+            continue
+        selected_candidates.append(candidate)
+        if limit > 0 and len(selected_candidates) >= limit and not requested_segments:
+            break
+    packets: list[dict[str, Any]] = []
+    for candidate in selected_candidates:
+        start, end = phase_candidate_range(candidate)
+        if start is None or end is None:
+            segment_events: list[RawEvent] = []
+        else:
+            key = (start, end)
+            if key not in by_range:
+                by_range[key] = [event for event in events if start <= event.line_no <= end]
+            segment_events = by_range[key]
+        existing_phase = existing_phases.get((start or 0, end or 0))
+        packets.append(phase_review_assist_packet(candidate, segment_events, existing_phase=existing_phase))
+
+    remaining_queue = phase_review_queue(discovery.get("candidates", []) if isinstance(discovery.get("candidates"), list) else [])
+    plan_template = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "phase_review_plan",
+        "session_label": discovery.get("session_label"),
+        "created_from": "phase-review-assist",
+        "items": [packet.get("plan_template") for packet in packets if isinstance(packet.get("plan_template"), dict)],
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "phase_review_assist",
+        "generated_at": now,
+        "ok": True,
+        "status": "review_assist_ready",
+        "aoa_root": str(aoa_root),
+        "session_id": discovery.get("session_id"),
+        "session_label": discovery.get("session_label") or target,
+        "session_dir": str(session_dir) if session_dir is not None else "",
+        "raw_path": str(raw_path),
+        "selected_count": len(packets),
+        "remaining_review_queue_count": len(remaining_queue),
+        "selection": {
+            "limit": limit,
+            "from_segment": from_segment_norm,
+            "segments": sorted(requested_segments),
+            "include_reviewed": include_reviewed,
+        },
+        "packets": packets,
+        "plan_template": plan_template,
+    }
+    if write and session_dir is not None:
+        naming_dir = session_dir / "naming"
+        naming_dir.mkdir(parents=True, exist_ok=True)
+        artifact_json = naming_dir / "phase-review-assist.json"
+        artifact_md = naming_dir / "phase-review-assist.md"
+        plan_path = naming_dir / "phase-review-plan.template.json"
+        write_json(artifact_json, payload)
+        write_markdown(artifact_md, phase_review_assist_markdown(payload))
+        write_json(plan_path, plan_template)
+        payload["artifact_json"] = str(artifact_json)
+        payload["artifact_markdown"] = str(artifact_md)
+        payload["plan_template_path"] = str(plan_path)
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__phase-review-assist__{safe_slug(str(payload.get('session_label') or target))}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, phase_review_assist_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def phase_review_plan_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Phase Review Plan Apply",
+        "",
+        "Batch application report for reviewed phase names.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- session: `{payload.get('session_label') or payload.get('session_id')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- plan_path: `{payload.get('plan_path')}`",
+        f"- item_count: `{payload.get('item_count')}`",
+        f"- applied_count: `{payload.get('applied_count')}`",
+        f"- preview_count: `{payload.get('preview_count')}`",
+        f"- skipped_count: `{payload.get('skipped_count')}`",
+        "",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend(["## Diagnostics", ""])
+    lines.extend([f"- `{item}`" for item in diagnostics] or ["- none"])
+    lines.extend(["", "## Results", "", "| segment | status | name | diagnostics |", "| --- | --- | --- | --- |"])
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| `{segment}` | `{status}` | {name} | {diagnostics} |".format(
+                segment=result.get("segment_id"),
+                status=result.get("status"),
+                name=markdown_cell(result.get("reviewed_name") or result.get("chosen_name") or ""),
+                diagnostics=markdown_cell(", ".join(str(item) for item in result.get("diagnostics", []) if item)),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def default_phase_review_plan_path(aoa_root: Path, target: str) -> Path:
+    record = resolve_session_record(aoa_root, target)
+    session_dir = session_dir_from_record(record)
+    return session_dir / "naming" / "phase-review-plan.template.json"
+
+
+def apply_phase_review_plan(
+    aoa_root: Path,
+    target: str,
+    *,
+    plan_path: Path | None = None,
+    apply: bool = False,
+    replace: bool = False,
+    write_report: bool = False,
+    verify_raw_hash: bool = True,
+    stop_on_error: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    path = plan_path.expanduser() if plan_path is not None else default_phase_review_plan_path(aoa_root, target)
+    plan = read_json(path, {})
+    diagnostics: list[str] = []
+    if not isinstance(plan, dict):
+        diagnostics.append("invalid_phase_review_plan_payload")
+        plan = {}
+    items = plan.get("items") if isinstance(plan.get("items"), list) else []
+    if not items:
+        diagnostics.append("phase_review_plan_has_no_items")
+    results: list[dict[str, Any]] = []
+    applied_count = 0
+    preview_count = 0
+    skipped_count = 0
+    session_label = str(plan.get("session_label") or target)
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            diagnostics.append(f"item_{index}_invalid")
+            if stop_on_error:
+                break
+            continue
+        segment_id = normalize_segment_id(str(item.get("segment_id") or ""))
+        reviewed_name = str(item.get("reviewed_name") or "").strip()
+        coverage_note = str(item.get("coverage_note") or "").strip()
+        if not segment_id:
+            diagnostics.append(f"item_{index}_missing_segment_id")
+            if stop_on_error:
+                break
+            continue
+        if not reviewed_name:
+            skipped_count += 1
+            results.append(
+                {
+                    "segment_id": segment_id,
+                    "status": "skipped",
+                    "reviewed_name": "",
+                    "diagnostics": ["reviewed_name_empty"],
+                }
+            )
+            continue
+        result = review_phase_name_candidate(
+            aoa_root,
+            target,
+            segment_id,
+            reviewed_name=reviewed_name,
+            apply=apply,
+            replace=replace,
+            write_report=write_report,
+            verify_raw_hash=verify_raw_hash,
+            coverage_note=coverage_note,
+        )
+        compact_result = {
+            "segment_id": result.get("segment_id"),
+            "status": result.get("status"),
+            "ok": result.get("ok"),
+            "reviewed_name": reviewed_name,
+            "chosen_name": result.get("chosen_name"),
+            "route": result.get("route"),
+            "diagnostics": result.get("diagnostics", []),
+            "report_json": result.get("report_json"),
+            "report_markdown": result.get("report_markdown"),
+        }
+        semantic = result.get("semantic_name_result") if isinstance(result.get("semantic_name_result"), dict) else {}
+        proposed = semantic.get("proposed") if isinstance(semantic.get("proposed"), dict) else {}
+        if proposed:
+            compact_result["slug"] = proposed.get("slug")
+        results.append(compact_result)
+        if result.get("ok") and result.get("status") == "applied":
+            applied_count += 1
+        elif result.get("ok") and not apply:
+            preview_count += 1
+        else:
+            diagnostics.append(f"segment_{segment_id}_failed")
+            diagnostics.extend(f"segment_{segment_id}:{item}" for item in result.get("diagnostics", []) if item)
+            if stop_on_error:
+                break
+    status = "diagnostic" if diagnostics else ("applied" if apply and applied_count else "preview_ready" if preview_count else "empty_plan")
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "phase_review_plan_apply",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "status": status,
+        "apply": apply,
+        "aoa_root": str(aoa_root),
+        "session_label": session_label,
+        "plan_path": str(path),
+        "item_count": len(items),
+        "applied_count": applied_count,
+        "preview_count": preview_count,
+        "skipped_count": skipped_count,
+        "diagnostics": diagnostics,
+        "results": results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__phase-review-plan-apply__{safe_slug(session_label)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, phase_review_plan_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def phase_name_review_markdown(payload: dict[str, Any]) -> str:
     candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
     review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
@@ -4537,6 +5270,27 @@ def review_phase_name_candidate(
             write_report=write_report,
         )
         if semantic_result.get("ok"):
+            candidate["status"] = "reviewed_applied"
+            candidate["review"] = {
+                **review,
+                "status": "applied_reviewed_name",
+                "action": "reviewed_phase_name_applied",
+                "applied_name": chosen_name,
+                "applied_slug": semantic_name_slug(chosen_name),
+                "applied_at": now,
+                "semantic_name_scope": "phase",
+                "semantic_name_status": "phase",
+            }
+            discovery = refresh_phase_discovery_review_fields(discovery)
+            discovery["updated_at"] = now
+            discovery["status"] = "candidate_review_in_progress" if discovery.get("review_queue_count") else "candidate_reviewed"
+            discovery_session_dir_value = str(discovery.get("session_dir") or "")
+            discovery_session_dir = Path(discovery_session_dir_value) if discovery_session_dir_value else None
+            if discovery_session_dir is not None:
+                artifact_json = session_phase_discovery_path(discovery_session_dir)
+                artifact_md = artifact_json.with_suffix(".md")
+                write_json(artifact_json, discovery)
+                write_markdown(artifact_md, phase_discovery_markdown(discovery))
             sessions = registry_sessions(aoa_root)
             write_session_name_index(aoa_root, sessions)
             write_sessions_directory_index(aoa_root, sessions)
@@ -4546,6 +5300,8 @@ def review_phase_name_candidate(
                 str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON),
                 str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN),
             ]
+            if discovery_session_dir is not None:
+                refreshed_indexes.extend([str(artifact_json), str(artifact_md)])
             status = "applied"
         else:
             diagnostics.extend(str(item) for item in semantic_result.get("diagnostics", []) if item)
@@ -6042,7 +6798,7 @@ def set_session_semantic_name(
                 replaced = True
             elif isinstance(item, dict):
                 if scope == "session" and semantic_name_scope(item) == "session" and item.get("status") == "active":
-                    item = {**item, "status": "alias", "updated_at": now}
+                    continue
                 updated_names.append(item)
         if not replaced:
             updated_names.append(proposed)
@@ -8084,6 +8840,82 @@ def command_review_phase_name(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_phase_review_assist(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = build_phase_review_assist(
+        root,
+        args.session,
+        limit=args.limit,
+        from_segment=args.from_segment,
+        segments=args.segment or [],
+        include_reviewed=args.include_reviewed,
+        refresh=args.refresh,
+        write=args.write,
+        write_report=args.write_report,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"packets", "plan_template"}
+        }
+        stdout_payload["packet_overview"] = [
+            {
+                "segment_id": packet.get("segment_id"),
+                "range": packet.get("coverage"),
+                "machine_candidate": packet.get("machine_candidate"),
+                "review_status": packet.get("review_status"),
+                "read_first": packet.get("read_first", [])[:6],
+                "top_paths": packet.get("top_paths", [])[:5],
+            }
+            for packet in payload.get("packets", [])
+            if isinstance(packet, dict)
+        ]
+        stdout_payload["plan_item_count"] = len(
+            payload.get("plan_template", {}).get("items", [])
+            if isinstance(payload.get("plan_template"), dict)
+            else []
+        )
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_apply_phase_review_plan(args: argparse.Namespace) -> int:
+    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    payload = apply_phase_review_plan(
+        root,
+        args.session,
+        plan_path=Path(args.plan) if args.plan else None,
+        apply=args.apply,
+        replace=args.replace,
+        write_report=args.write_report,
+        verify_raw_hash=not args.skip_raw_hash_check,
+        stop_on_error=args.stop_on_error,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key != "results"
+        }
+        stdout_payload["result_overview"] = [
+            {
+                "segment_id": result.get("segment_id"),
+                "status": result.get("status"),
+                "reviewed_name": result.get("reviewed_name"),
+                "diagnostics": result.get("diagnostics", [])[:4],
+            }
+            for result in payload.get("results", [])
+            if isinstance(result, dict)
+        ]
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_distill(args: argparse.Namespace) -> int:
     root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
     payload = distill_session_first_pass(root, args.session, max_events_per_type=args.max_events_per_type)
@@ -9668,6 +10500,42 @@ def build_parser() -> argparse.ArgumentParser:
     review_phase_name.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing.")
     review_phase_name.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
     review_phase_name.set_defaults(func=command_review_phase_name)
+
+    phase_review_assist = sub.add_parser(
+        "phase-review-assist",
+        help="Build batch synthesis packets for faster reviewed phase naming without applying names.",
+    )
+    phase_review_assist.add_argument("session", help="Session label/id/title/name fragment.")
+    phase_review_assist.add_argument("--workspace-root")
+    phase_review_assist.add_argument("--aoa-root")
+    phase_review_assist.add_argument("--limit", type=int, default=8, help="Maximum candidates to packetize when --segment is not used.")
+    phase_review_assist.add_argument("--from-segment", help="Start packetizing at this segment id, for example 022.")
+    phase_review_assist.add_argument("--segment", action="append", help="Packetize a specific segment id. May be repeated.")
+    phase_review_assist.add_argument("--include-reviewed", action="store_true", help="Include already applied phase names in the packets.")
+    phase_review_assist.add_argument("--refresh", action="store_true", help="Rebuild phase-discovery before building assist packets.")
+    phase_review_assist.add_argument("--write", action="store_true", help="Write naming/phase-review-assist.json/.md and a plan template.")
+    phase_review_assist.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
+    phase_review_assist.add_argument("--full", action="store_true", help="Print complete packets to stdout. Default prints a compact overview.")
+    phase_review_assist.set_defaults(func=command_phase_review_assist)
+
+    apply_phase_review_plan_parser = sub.add_parser(
+        "apply-phase-review-plan",
+        help="Preview or apply reviewed phase names from a phase-review-plan JSON file.",
+    )
+    apply_phase_review_plan_parser.add_argument("session", help="Session label/id/title/name fragment.")
+    apply_phase_review_plan_parser.add_argument("--workspace-root")
+    apply_phase_review_plan_parser.add_argument("--aoa-root")
+    apply_phase_review_plan_parser.add_argument(
+        "--plan",
+        help="Path to a filled phase-review-plan JSON file. Defaults to naming/phase-review-plan.template.json for preview.",
+    )
+    apply_phase_review_plan_parser.add_argument("--apply", action="store_true", help="Apply non-empty reviewed_name entries. Default previews only.")
+    apply_phase_review_plan_parser.add_argument("--replace", action="store_true", help="Replace existing semantic names with the same slug.")
+    apply_phase_review_plan_parser.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing.")
+    apply_phase_review_plan_parser.add_argument("--stop-on-error", action="store_true", help="Stop processing after the first invalid item or failed segment.")
+    apply_phase_review_plan_parser.add_argument("--write-report", action="store_true", help="Write batch and per-segment JSON/Markdown reports under .aoa/diagnostics.")
+    apply_phase_review_plan_parser.add_argument("--full", action="store_true", help="Print complete per-segment results. Default prints a compact overview.")
+    apply_phase_review_plan_parser.set_defaults(func=command_apply_phase_review_plan)
 
     distill = sub.add_parser("distill", help="Write a provisional first-pass distillation route map for a session.")
     distill.add_argument("session", nargs="?", default="latest")

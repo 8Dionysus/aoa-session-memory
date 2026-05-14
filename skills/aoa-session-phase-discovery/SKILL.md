@@ -69,6 +69,39 @@ apply it with the provided command template.
 
 ## Applying Names
 
+For faster long-session work, build batch review packets before synthesizing
+names in chat:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-review-assist <session-label-or-id> \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --from-segment <segment-id> \
+  --limit 8 \
+  --write \
+  --write-report
+```
+
+This writes `naming/phase-review-assist.json`, `.md`, and a
+`phase-review-plan.template.json`. It does not apply names. Use the packets to
+review several segments at once: user requests, progress markers, decisions,
+checks, errors, mutations, commands, top paths, and raw refs are already
+collected from source raw.
+
+After reviewed names are filled into a plan JSON, preview or apply the batch
+through the guarded plan route:
+
+```bash
+python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-id> \
+  --plan sessions/<session>/naming/phase-review-plan.json \
+  --apply \
+  --write-report
+```
+
+This still calls `review-phase-name` per segment under the hood. Empty
+`reviewed_name` entries are skipped, and machine candidates are not accepted as
+reviewed truth by the plan route.
+
 Preview one candidate before applying it:
 
 ```bash

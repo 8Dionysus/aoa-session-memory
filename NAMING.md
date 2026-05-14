@@ -73,6 +73,11 @@ The active `session` name is the preferred working title. `phase` and `topic`
 names remain linked and searchable, but they must not replace the whole-session
 name unless their scope is deliberately promoted after review.
 
+Replacing the active `session` name removes the prior active session name from
+navigation by default. Do not keep superseded wording as an alias unless it is
+a deliberately useful operator route. Create aliases explicitly with
+`--scope alias`; do not let old incomplete names accumulate as routing noise.
+
 Every applied semantic name must carry a bridge anchor:
 
 - `session_id`
@@ -87,6 +92,12 @@ This lets a custom name speak clearly while the raw transcript remains the
 source of truth. If a later relabel moves the physical archive, the anchor is
 refreshed to the current path while preserving the session id and raw hash
 identity.
+
+When a lightweight hook mirrors a growing transcript without reindexing it,
+the semantic name must keep its last verified raw identity instead of replacing
+`raw_sha256` or `raw_line_count` with empty deferred metadata. Treat
+`raw_anchor_status: deferred_refresh_preserved_verified_anchor` as a signal to
+reindex before final review, not as a broken name.
 
 The root `session-name-index.json` and `SESSION_NAMES.md` are lightweight name
 maps. They are not source truth. They exist so an agent can compare current
@@ -117,6 +128,8 @@ the next honest action:
 - `blocked`: repair missing or unrecoverable raw/index state before naming.
 - `diagnostic_only`: keep raw-unavailable hook-only diagnostics visible without
   putting them ahead of recoverable naming work.
+- `needs_sync`: source transcript is newer than the archived raw copy; sync the
+  source before reindexing or naming.
 - `needs_reindex`: refresh generated segments/indexes from preserved raw before
   choosing a semantic name.
 - `needs_phase_discovery`: inspect segment indexes and create phase/topic
@@ -131,6 +144,25 @@ the next honest action:
   operationally important.
 - `named`: verify or refine the existing semantic name instead of starting
   over.
+
+`named` is not a closed state. If meaningful raw content appears beyond the
+active session-name coverage range, readiness should keep the session in the
+queue with `active_session_name_coverage_stale` so a later pass can either
+widen the coverage or revise the umbrella name. Pure technical tails such as
+`token_count` or `task_complete` are not enough to make a name stale.
+
+A named session may still have unfinished inner naming work. If
+`phase-discovery.json` contains a non-empty `review_queue`, readiness keeps the
+named session visible with `phase_discovery_review_queue_open` and routes it to
+`review_open_phase_discovery_for_named_session`. The active session name can be
+usable while phase/topic synthesis remains open; do not treat that as final
+settlement.
+
+When `review-phase-name --apply` accepts a reviewed name for a weak phase
+candidate, it must also mark the phase-discovery candidate as
+`applied_reviewed_name` and refresh the artifact's `review_queue`. Otherwise
+the archive will carry a correct semantic phase name while still routing future
+agents to the old machine-generated weak title.
 
 The readiness queue is mirrored into `SESSION_NAMES.md`,
 `session-name-index.json`, `sessions/INDEX.md`, and `sessions/index.json`.
@@ -150,6 +182,37 @@ python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
 The generated `naming/phase-discovery.json` and `.md` files contain unreviewed
 phase candidates with raw-line coverage. They make the next naming pass faster,
 but they do not apply or close any semantic name.
+
+For long sessions, use the assist layer before manually opening raw again:
+
+```bash
+python3 scripts/aoa_session_memory.py phase-review-assist <session-label-or-id> \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --from-segment <segment-id> \
+  --limit 8 \
+  --write \
+  --write-report
+```
+
+`phase-review-assist` creates a batch packet from preserved raw: user requests,
+progress markers, decisions, closeout notes, validations, errors, mutations,
+commands, and top paths. This is an acceleration layer for semantic synthesis,
+not permission to apply weak machine candidates.
+
+After a reviewer fills `reviewed_name` values into a plan JSON, apply the
+reviewed batch through the plan route:
+
+```bash
+python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-id> \
+  --plan sessions/<session>/naming/phase-review-plan.json \
+  --apply \
+  --write-report
+```
+
+The plan route skips empty `reviewed_name` entries and applies each non-empty
+item through the same guarded phase-name writer used by `review-phase-name`.
+It does not treat machine candidates or `--use-candidate` as reviewed truth.
 
 Each phase candidate should be read as a signal bundle, not a title string:
 
