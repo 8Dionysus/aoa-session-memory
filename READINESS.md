@@ -72,6 +72,7 @@ python3 scripts/aoa_session_memory.py codex-compact-probe --workspace-root /path
 python3 scripts/aoa_session_memory.py stress-pass latest --aoa-root /path/to/workspace/.aoa --compactions 100 --write
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --check-live-hooks --check-user-skill --check-codex-grounding
 python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace --aoa-root /path/to/aoa-session-memory --portable-bundle
 ```
 
 Last observed result:

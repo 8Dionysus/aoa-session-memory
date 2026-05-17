@@ -29,6 +29,18 @@ python3 scripts/aoa_session_memory.py audit \
   --aoa-root /srv/AbyssOS/.aoa
 ```
 
+For the clean standalone bundle, use portable-bundle mode. It checks source,
+install, hook-example, search-provider config, and GitHub readiness without
+requiring live raw sessions, hook receipts, or a generated SQLite cache inside
+the repo:
+
+```bash
+python3 scripts/aoa_session_memory.py audit \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/bundles/aoa-session-memory \
+  --portable-bundle
+```
+
 If Codex grounding is temporarily unavailable and the user only needs a
 filesystem audit, use `--skip-codex-grounding` and say that live Codex proof was
 skipped.
@@ -40,6 +52,7 @@ skipped.
 - user-level router skill is installed for the current Codex user
 - standalone repo points at `/srv/AbyssOS/bundles/aoa-session-memory`
 - origin is `git@github.com:8Dionysus/aoa-session-memory.git` on this host
+- clean standalone bundle audit uses `audit_mode=portable_bundle`
 
 ## Stop Line
 
