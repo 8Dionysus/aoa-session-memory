@@ -383,6 +383,32 @@ def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> 
     assert audit["diagnostics"] == ["session registry is empty"]
 
 
+def test_reindex_and_title_repair_empty_registry_keep_own_payload_schema(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    reindex = module.reindex_sessions(aoa_root=aoa_root, target="latest", dry_run=True)
+    repair = module.repair_session_titles(aoa_root=aoa_root, target="latest")
+
+    assert reindex["artifact_type"] == "session_reindex"
+    assert reindex["ok"] is False
+    assert reindex["dry_run"] is True
+    assert reindex["selected_count"] == 0
+    assert reindex["counts"] == {"selection_error": 1}
+    assert reindex["results"] == []
+    assert "eligible_event_count" not in reindex
+    assert reindex["diagnostics"] == ["session registry is empty"]
+
+    assert repair["artifact_type"] == "session_title_repair"
+    assert repair["ok"] is False
+    assert repair["apply"] is False
+    assert repair["selected_count"] == 0
+    assert repair["counts"] == {"selection_error": 1}
+    assert repair["results"] == []
+    assert "eligible_event_count" not in repair
+    assert repair["diagnostics"] == ["session registry is empty"]
+
+
 def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -452,6 +478,10 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert Path(indexed["db_path"]).exists()
     assert Path(indexed["report_json"]).exists()
 
+    incremental = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=False)
+    assert incremental["ok"] is True
+    assert incremental["document_count"] == indexed["document_count"]
+
     hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert hook_results["ok"] is True
     assert hook_results["result_count"] >= 1
@@ -486,6 +516,15 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
+
+    stale_filtered = module.search_sessions(
+        aoa_root=aoa_root,
+        query="hook timed out",
+        freshness_status="stale",
+        explain=True,
+    )
+    assert stale_filtered["result_count"] >= 1
+    assert stale_filtered["results"][0]["freshness"]["status"] == "stale"
 
 
 def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> None:
@@ -1577,6 +1616,26 @@ def test_real_codex_compacted_events_define_segments(tmp_path: Path) -> None:
     assert first_index["by_type"]["COMPACTION_EVENT"] == ["000003", "000004"]
 
 
+def test_standalone_context_compacted_event_counts_as_compaction_boundary(tmp_path: Path) -> None:
+    raw_path = tmp_path / "standalone-context-compacted.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {"timestamp": "2026-05-14T02:00:00Z", "type": "session_meta", "payload": {"id": "standalone-context"}},
+            {"timestamp": "2026-05-14T02:00:01Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-14T02:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant"}},
+        ],
+    )
+
+    stats = module.raw_compaction_stats(raw_path)
+
+    assert stats["source_compacted_count"] == 0
+    assert stats["context_compacted_event_count"] == 1
+    assert stats["compaction_boundary_count"] == 1
+    assert stats["compaction_marker_count"] == 1
+    assert stats["expected_segment_count"] == 2
+
+
 def test_stress_pass_audits_first_compaction_intervals(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -1749,6 +1808,64 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+
+
+def test_completion_audit_portable_bundle_rejects_bundled_runtime_archives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    bundle_root = tmp_path / "aoa-session-memory"
+    transcript = tmp_path / "rollout-2026-05-17T00-00-00-portable-runtime.jsonl"
+    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
+    (bundle_root / ".git").mkdir()
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-17T00:00:00Z", "type": "session_meta", "payload": {"id": "portable-runtime-session"}},
+            {"timestamp": "2026-05-17T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Portable bundle must stay clean"}]}},
+            {"timestamp": "2026-05-17T00:00:02Z", "type": "compacted", "payload": {"replacement_history": []}},
+            {"timestamp": "2026-05-17T00:00:03Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-17T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: runtime archives are not portable proof."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "portable-runtime-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+    )
+
+    def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
+        if repo_root == bundle_root:
+            return "git@github.com:8Dionysus/aoa-session-memory.git"
+        return None
+
+    monkeypatch.setattr(module, "git_remote_url", fake_remote)
+
+    payload = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        check_codex=False,
+        portable_bundle=True,
+    )
+
+    statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
+    raw_evidence = [
+        item["evidence"]
+        for item in payload["checklist"]
+        if item["requirement"] == "Portable bundle intentionally excludes local raw session archives"
+    ][0]
+    assert payload["ok"] is False
+    assert raw_evidence["portable_clean_runtime"] is False
+    assert statuses["Portable bundle intentionally excludes local raw session archives"] == "missing"
+    assert statuses["Portable bundle carries compaction logic without bundled live raw proof"] == "missing"
+    assert statuses["Portable bundle has clean runtime topology without bundled segment drift"] == "missing"
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
@@ -3096,6 +3213,11 @@ def test_deferred_mirror_preserves_semantic_name_verified_anchor(tmp_path: Path)
     assert deferred_manifest["archive_status"] == "raw_mirrored_index_deferred"
     assert deferred_manifest["raw"]["sha256"] is None
     assert deferred_manifest["raw"]["line_count"] is None
+    assert deferred_manifest["segments"] == []
+    assert deferred_manifest["latest_event_count"] == 0
+    assert deferred_manifest["deferred_indexing"]["status"] == "stale_generated_metadata_cleared"
+    assert deferred_manifest["deferred_indexing"]["previous_segment_count"] == 1
+    assert deferred_manifest["deferred_indexing"]["previous_event_count"] == raw_line_count
     assert anchor["raw_sha256"] == raw_sha
     assert anchor["raw_line_count"] == raw_line_count
     assert anchor["raw_anchor_status"] == "deferred_refresh_preserved_verified_anchor"

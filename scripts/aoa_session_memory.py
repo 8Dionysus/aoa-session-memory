@@ -3795,7 +3795,8 @@ def mirror_transcript_without_indexing(
         legacy_raw_source.unlink()
 
     hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
-    segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
+    previous_segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
+    previous_event_count = int_value(existing.get("latest_event_count"))
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -3819,8 +3820,15 @@ def mirror_transcript_without_indexing(
             "copied_at": now,
             "indexing_status": "deferred_from_hook",
         },
-        "segments": segments,
-        "latest_event_count": existing.get("latest_event_count", 0),
+        "segments": [],
+        "latest_event_count": 0,
+        "deferred_indexing": {
+            "status": "stale_generated_metadata_cleared",
+            "reason": "raw_mirrored_index_deferred",
+            "deferred_at": now,
+            "previous_segment_count": len(previous_segments),
+            "previous_event_count": previous_event_count,
+        },
     }
     if isinstance(existing.get("semantic_names"), dict):
         manifest["semantic_names"] = existing["semantic_names"]
@@ -9215,7 +9223,7 @@ def reindex_sessions(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "conversation_act_audit",
+            "artifact_type": "session_reindex",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -9223,14 +9231,10 @@ def reindex_sessions(
             "since": since,
             "until": until,
             "limit": limit,
+            "dry_run": dry_run,
             "selected_count": 0,
-            "segment_count": 0,
-            "event_count": 0,
-            "eligible_event_count": 0,
-            "missing_eligible_conversation_act": 0,
-            "missing_samples": [],
-            "counts": {},
-            "samples": {},
+            "counts": {"selection_error": 1},
+            "results": [],
             "diagnostics": [str(exc)],
         }
     counts: Counter[str] = Counter()
@@ -9444,7 +9448,7 @@ def repair_session_titles(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "conversation_act_audit",
+            "artifact_type": "session_title_repair",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -9452,14 +9456,10 @@ def repair_session_titles(
             "since": since,
             "until": until,
             "limit": limit,
+            "apply": apply,
             "selected_count": 0,
-            "segment_count": 0,
-            "event_count": 0,
-            "eligible_event_count": 0,
-            "missing_eligible_conversation_act": 0,
-            "missing_samples": [],
-            "counts": {},
-            "samples": {},
+            "counts": {"selection_error": 1},
+            "results": [],
             "diagnostics": [str(exc)],
         }
     results: list[dict[str, Any]] = []
@@ -12977,67 +12977,113 @@ def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
 
 def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> None:
     payload = search_doc_payload(doc)
-    cursor = conn.execute(
-        """
-        INSERT INTO documents (
-            id, doc_type, session_id, session_label, session_title, session_date,
-            cwd, archive_status, distillation_status, review_status, segment_id,
-            event_id, event_type, family, phase, actor, action, object, outcome,
-            conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
-            manifest_path, raw_path, segment_index_path, raw_sha256,
-            segment_index_sha256, freshness_status, stale_reason, title, body,
-            payload_json
+    params = {
+        **{key: doc.get(key) for key in [
+            "id",
+            "doc_type",
+            "session_id",
+            "session_label",
+            "session_title",
+            "session_date",
+            "cwd",
+            "archive_status",
+            "distillation_status",
+            "review_status",
+            "segment_id",
+            "event_id",
+            "event_type",
+            "family",
+            "phase",
+            "actor",
+            "action",
+            "object",
+            "outcome",
+            "conversation_act",
+            "tags",
+            "raw_ref",
+            "raw_block_ref",
+            "segment_ref",
+            "manifest_path",
+            "raw_path",
+            "segment_index_path",
+            "raw_sha256",
+            "segment_index_sha256",
+            "freshness_status",
+            "stale_reason",
+            "title",
+            "body",
+        ]},
+        "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    }
+    existing = conn.execute("SELECT rowid FROM documents WHERE id = ?", (doc.get("id"),)).fetchone()
+    if existing:
+        rowid = int(existing["rowid"])
+        conn.execute(
+            """
+            UPDATE documents SET
+                doc_type = :doc_type,
+                session_id = :session_id,
+                session_label = :session_label,
+                session_title = :session_title,
+                session_date = :session_date,
+                cwd = :cwd,
+                archive_status = :archive_status,
+                distillation_status = :distillation_status,
+                review_status = :review_status,
+                segment_id = :segment_id,
+                event_id = :event_id,
+                event_type = :event_type,
+                family = :family,
+                phase = :phase,
+                actor = :actor,
+                action = :action,
+                object = :object,
+                outcome = :outcome,
+                conversation_act = :conversation_act,
+                tags = :tags,
+                raw_ref = :raw_ref,
+                raw_block_ref = :raw_block_ref,
+                segment_ref = :segment_ref,
+                manifest_path = :manifest_path,
+                raw_path = :raw_path,
+                segment_index_path = :segment_index_path,
+                raw_sha256 = :raw_sha256,
+                segment_index_sha256 = :segment_index_sha256,
+                freshness_status = :freshness_status,
+                stale_reason = :stale_reason,
+                title = :title,
+                body = :body,
+                payload_json = :payload_json
+            WHERE id = :id
+            """,
+            params,
         )
-        VALUES (
-            :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
-            :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
-            :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
-            :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
-            :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
-            :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
-            :payload_json
+        conn.execute("DELETE FROM documents_fts WHERE rowid = ?", (rowid,))
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO documents (
+                id, doc_type, session_id, session_label, session_title, session_date,
+                cwd, archive_status, distillation_status, review_status, segment_id,
+                event_id, event_type, family, phase, actor, action, object, outcome,
+                conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
+                manifest_path, raw_path, segment_index_path, raw_sha256,
+                segment_index_sha256, freshness_status, stale_reason, title, body,
+                payload_json
+            )
+            VALUES (
+                :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
+                :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
+                :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
+                :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+                :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
+                :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
+                :payload_json
+            )
+            """,
+            params,
         )
-        """,
-        {
-            **{key: doc.get(key) for key in [
-                "id",
-                "doc_type",
-                "session_id",
-                "session_label",
-                "session_title",
-                "session_date",
-                "cwd",
-                "archive_status",
-                "distillation_status",
-                "review_status",
-                "segment_id",
-                "event_id",
-                "event_type",
-                "family",
-                "phase",
-                "actor",
-                "action",
-                "object",
-                "outcome",
-                "conversation_act",
-                "tags",
-                "raw_ref",
-                "raw_block_ref",
-                "segment_ref",
-                "manifest_path",
-                "raw_path",
-                "segment_index_path",
-                "raw_sha256",
-                "segment_index_sha256",
-                "freshness_status",
-                "stale_reason",
-                "title",
-                "body",
-            ]},
-            "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        },
-    )
-    rowid = cursor.lastrowid
+        rowid = int(cursor.lastrowid)
     conn.execute(
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
         (rowid, doc.get("title") or "", doc.get("body") or "", doc.get("session_label") or "", doc.get("session_title") or ""),
@@ -13529,7 +13575,6 @@ def search_sessions(
         ("documents.outcome", outcome),
         ("documents.conversation_act", conversation_act),
         ("documents.archive_status", archive_status),
-        ("documents.freshness_status", freshness_status),
     ]:
         if value:
             filters.append(f"{column} = ?")
@@ -13553,16 +13598,20 @@ def search_sessions(
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
-            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
-            query_params.append(limit)
+            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC"
+            if not freshness_status:
+                sql += " LIMIT ?"
+                query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = "SELECT documents.*, 0.0 AS rank FROM documents"
             query_params = list(params)
             if where:
                 sql += " WHERE " + where
-            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
-            query_params.append(limit)
+            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC"
+            if not freshness_status:
+                sql += " LIMIT ?"
+                query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         metadata = search_index_metadata(conn)
     except sqlite3.Error as exc:
@@ -13582,6 +13631,12 @@ def search_sessions(
     finally:
         conn.close()
     results = [compact_search_result(row, explain=explain, query=query) for row in rows]
+    if freshness_status:
+        results = [
+            result
+            for result in results
+            if isinstance(result.get("freshness"), dict) and result["freshness"].get("status") == freshness_status
+        ][:limit]
     provider_payload = search_provider_status(
         aoa_root=aoa_root,
         provider_name=provider,
@@ -14866,7 +14921,11 @@ def raw_compaction_stats(raw_path: Path) -> dict[str, Any]:
                     payload = loaded.get("payload")
                     if isinstance(payload, dict):
                         payload_type = str(payload.get("type") or "")
-                    boundary = source_type == "compacted" or payload_has_compaction_boundary(payload)
+                    boundary = (
+                        source_type == "compacted"
+                        or payload_has_compaction_boundary(payload)
+                        or (source_type == "event_msg" and payload_type == "context_compacted")
+                    )
             except json.JSONDecodeError:
                 pass
             if source_type == "compacted":
@@ -15066,11 +15125,14 @@ def completion_audit(
         if not portable_bundle
         else "Portable bundle has clean runtime topology without bundled segment drift"
     )
-    raw_status = "covered" if raw_preserved or (portable_bundle and portable_clean_runtime) else "missing"
-    real_compaction_status = (
-        "covered" if real_compaction_archives or (portable_bundle and portable_clean_runtime) else "missing"
-    )
-    segment_status = "covered" if segments_match or (portable_bundle and portable_clean_runtime) else "missing"
+    if portable_bundle:
+        raw_status = "covered" if portable_clean_runtime else "missing"
+        real_compaction_status = "covered" if portable_clean_runtime else "missing"
+        segment_status = "covered" if portable_clean_runtime else "missing"
+    else:
+        raw_status = "covered" if raw_preserved else "missing"
+        real_compaction_status = "covered" if real_compaction_archives else "missing"
+        segment_status = "covered" if segments_match else "missing"
     provider_status_ok = (
         bool(provider_config_exists and provider_status.get("ok"))
         if not portable_bundle
