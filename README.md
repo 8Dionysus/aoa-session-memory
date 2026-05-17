@@ -348,6 +348,29 @@ python3 scripts/aoa_session_memory.py reindex-sessions all \
   --write-report
 ```
 
+Build the portable SQLite search index from the generated archive layers:
+
+```bash
+python3 scripts/aoa_session_memory.py search-index all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+Query it without losing evidence routing:
+
+```bash
+python3 scripts/aoa_session_memory.py search \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --query "hook timed out" \
+  --explain
+```
+
+Search results are route hints. They include session, segment, raw, raw-block,
+and freshness fields so the next agent can open the stronger evidence instead
+of treating a retrieval hit as reviewed truth.
+
 Export a clean portable bundle without session archives:
 
 ```bash
@@ -377,8 +400,8 @@ The top-level router is `aoa-session-memory-global-route`. Install it into
 `.aoa` session-memory guidance in every Codex session. The remaining skills stay
 inside the bundle as the narrow routes for archive init, raw archiving,
 historical import, diagnostics, rehydration, first-pass distillation, stress
-checks, batch distillation, reindexing, audit, doctor, hook trust, and compact
-probe work.
+checks, batch distillation, reindexing, portable search, audit, doctor, hook
+trust, and compact probe work.
 
 ## Core Rule
 

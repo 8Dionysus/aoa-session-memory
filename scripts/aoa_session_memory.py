@@ -10,6 +10,7 @@ import queue
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,8 @@ SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
+SEARCH_ROOT = Path("search")
+SEARCH_DB_NAME = "aoa-search.sqlite3"
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
@@ -60,6 +63,7 @@ RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
+SEARCH_SCHEMA_VERSION = 1
 EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
@@ -12348,6 +12352,832 @@ def conversation_act_audit(
     return payload
 
 
+def search_db_path(aoa_root: Path) -> Path:
+    return aoa_root / SEARCH_ROOT / SEARCH_DB_NAME
+
+
+def search_report_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Search Index Report",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- db_path: `{payload.get('db_path')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- document_count: `{payload.get('document_count')}`",
+        f"- session_documents: `{payload.get('session_document_count')}`",
+        f"- segment_documents: `{payload.get('segment_document_count')}`",
+        f"- event_documents: `{payload.get('event_document_count')}`",
+        f"- incident_documents: `{payload.get('incident_document_count')}`",
+        "",
+        "## Diagnostics",
+        "",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Sessions", "", "| session | documents | status |", "| --- | ---: | --- |"])
+    for item in payload.get("sessions", []) if isinstance(payload.get("sessions"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"| `{item.get('session_label')}` | {item.get('document_count', 0)} | `{item.get('status')}` |")
+    return "\n".join(lines)
+
+
+def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if rebuild and db_path.exists():
+        db_path.unlink()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=FILE")
+    conn.execute("PRAGMA cache_size=-64000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS documents (
+            rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            doc_type TEXT NOT NULL,
+            session_id TEXT,
+            session_label TEXT,
+            session_title TEXT,
+            session_date TEXT,
+            cwd TEXT,
+            archive_status TEXT,
+            distillation_status TEXT,
+            review_status TEXT,
+            segment_id TEXT,
+            event_id TEXT,
+            event_type TEXT,
+            family TEXT,
+            phase TEXT,
+            actor TEXT,
+            action TEXT,
+            object TEXT,
+            outcome TEXT,
+            conversation_act TEXT,
+            tags TEXT,
+            raw_ref TEXT,
+            raw_block_ref TEXT,
+            segment_ref TEXT,
+            manifest_path TEXT,
+            raw_path TEXT,
+            segment_index_path TEXT,
+            raw_sha256 TEXT,
+            segment_index_sha256 TEXT,
+            freshness_status TEXT,
+            stale_reason TEXT,
+            title TEXT,
+            body TEXT,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts
+        USING fts5(title, body, session_label, session_title, content='documents', content_rowid='rowid')
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
+    conn.commit()
+    return conn
+
+
+def reset_search_db(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM documents_fts")
+    conn.execute("DELETE FROM documents")
+    conn.execute("DELETE FROM meta")
+
+
+def search_tokenize(query: str) -> list[str]:
+    return [token for token in re.findall(r"[\w.-]+", str(query or ""), flags=re.UNICODE) if token.strip(".-_")]
+
+
+def fts_query_from_user(query: str) -> str:
+    tokens = search_tokenize(query)
+    if not tokens:
+        return ""
+    return " AND ".join(f'"{token.replace("\"", "\"\"")}"' for token in tokens[:16])
+
+
+def search_json_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def search_doc_text(parts: list[Any], *, max_chars: int = 4000) -> str:
+    text = " ".join(part.strip() for part in (search_json_text(part) for part in parts) if part.strip())
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def event_search_text_limit(event_type: str) -> int:
+    if event_type in {"USER_INTENT", "ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "CHECKPOINT", "FINAL_STATE", "PROCESS_LESSON", "OPEN_THREAD"}:
+        return 1400
+    if event_type in {"COMMAND", "FILE_READ", "FILE_WRITE", "DIFF", "TOOL_CALL"}:
+        return 1000
+    if event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "ERROR", "VERIFICATION"}:
+        return 700
+    return 500
+
+
+def event_type_gets_raw_search_text(event_type: str, outcome: str) -> bool:
+    if event_type in {
+        "USER_INTENT",
+        "ASSISTANT_PLAN",
+        "ASSISTANT_MESSAGE",
+        "DECISION",
+        "ASSUMPTION",
+        "CHECKPOINT",
+        "FINAL_STATE",
+        "PROCESS_LESSON",
+        "OPEN_THREAD",
+        "COMMAND",
+        "FILE_READ",
+        "FILE_WRITE",
+        "DIFF",
+        "TOOL_CALL",
+        "ERROR",
+        "VERIFICATION",
+    }:
+        return True
+    return event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT"} and outcome == "failed"
+
+
+def search_manifest_freshness(manifest: dict[str, Any], raw_path: Path | None) -> dict[str, Any]:
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    expected_sha = str(raw.get("sha256") or "")
+    if not raw_path or not raw_path.exists():
+        return {"status": "unverifiable", "reasons": ["raw_path_missing"]}
+    if not expected_sha:
+        return {"status": "unverifiable", "reasons": ["raw_sha_missing"]}
+    current_sha = sha256_file(raw_path)
+    if current_sha != expected_sha:
+        return {"status": "stale", "reasons": ["raw_sha_mismatch"], "current_raw_sha256": current_sha}
+    return {"status": "fresh", "reasons": []}
+
+
+def segment_index_freshness(index_path: Path | None, expected_sha: str | None) -> dict[str, Any]:
+    if not index_path or not index_path.exists():
+        return {"status": "unverifiable", "reasons": ["segment_index_missing"]}
+    if not expected_sha:
+        return {"status": "unverifiable", "reasons": ["segment_index_sha_missing"]}
+    current_sha = sha256_file(index_path)
+    if current_sha != expected_sha:
+        return {"status": "stale", "reasons": ["segment_index_sha_mismatch"], "current_segment_index_sha256": current_sha}
+    return {"status": "fresh", "reasons": []}
+
+
+def combine_freshness(*items: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    status = "fresh"
+    combined: dict[str, Any] = {}
+    for item in items:
+        item_status = str(item.get("status") or "")
+        if item_status == "stale":
+            status = "stale"
+        elif item_status == "unverifiable" and status != "stale":
+            status = "unverifiable"
+        for reason in item.get("reasons", []) if isinstance(item.get("reasons"), list) else []:
+            if reason not in reasons:
+                reasons.append(str(reason))
+        for key, value in item.items():
+            if key not in {"status", "reasons"}:
+                combined[key] = value
+    return {"status": status, "reasons": reasons, **combined}
+
+
+def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(doc)
+    payload.pop("body", None)
+    payload.pop("payload_json", None)
+    return payload
+
+
+def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> None:
+    payload = search_doc_payload(doc)
+    cursor = conn.execute(
+        """
+        INSERT INTO documents (
+            id, doc_type, session_id, session_label, session_title, session_date,
+            cwd, archive_status, distillation_status, review_status, segment_id,
+            event_id, event_type, family, phase, actor, action, object, outcome,
+            conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
+            manifest_path, raw_path, segment_index_path, raw_sha256,
+            segment_index_sha256, freshness_status, stale_reason, title, body,
+            payload_json
+        )
+        VALUES (
+            :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
+            :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
+            :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
+            :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+            :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
+            :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
+            :payload_json
+        )
+        """,
+        {
+            **{key: doc.get(key) for key in [
+                "id",
+                "doc_type",
+                "session_id",
+                "session_label",
+                "session_title",
+                "session_date",
+                "cwd",
+                "archive_status",
+                "distillation_status",
+                "review_status",
+                "segment_id",
+                "event_id",
+                "event_type",
+                "family",
+                "phase",
+                "actor",
+                "action",
+                "object",
+                "outcome",
+                "conversation_act",
+                "tags",
+                "raw_ref",
+                "raw_block_ref",
+                "segment_ref",
+                "manifest_path",
+                "raw_path",
+                "segment_index_path",
+                "raw_sha256",
+                "segment_index_sha256",
+                "freshness_status",
+                "stale_reason",
+                "title",
+                "body",
+            ]},
+            "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        },
+    )
+    rowid = cursor.lastrowid
+    conn.execute(
+        "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
+        (rowid, doc.get("title") or "", doc.get("body") or "", doc.get("session_label") or "", doc.get("session_title") or ""),
+    )
+
+
+def session_semantic_names_text(manifest: dict[str, Any]) -> str:
+    semantic = semantic_names_payload(manifest)
+    parts = [
+        semantic.get("active"),
+        semantic.get("active_session"),
+    ]
+    for item in semantic.get("names", []) if isinstance(semantic.get("names"), list) else []:
+        if isinstance(item, dict):
+            parts.extend([item.get("name"), item.get("slug"), item.get("scope"), item.get("coverage_note")])
+    return search_doc_text(parts, max_chars=1600)
+
+
+def raw_event_search_text_by_line(raw_path: Path | None) -> dict[int, str]:
+    if not raw_path or not raw_path.exists():
+        return {}
+    texts: dict[int, str] = {}
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            raw = line.rstrip("\n")
+            parsed: dict[str, Any] | None = None
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except json.JSONDecodeError:
+                parsed = None
+            event = classify_raw_event(raw, parsed, line_no)
+            if not event_type_gets_raw_search_text(event.event_type, event.outcome):
+                continue
+            semantic = event_semantic_text(event)
+            if semantic:
+                texts[line_no] = short_text(semantic, max_chars=event_search_text_limit(event.event_type))
+    return texts
+
+
+def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return [], {"status": "diagnostic", "session_label": record.get("session_label"), "diagnostics": ["manifest_missing"], "document_count": 0}
+
+    session_id = str(manifest.get("session_id") or record.get("session_id") or session_dir.name)
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(str(raw.get("path"))) if raw.get("path") else None
+    raw_sha = str(raw.get("sha256") or "")
+    session_label = str(display.get("label") or manifest.get("session_label") or record.get("session_label") or session_dir.name)
+    session_title = str(display.get("title") or manifest.get("session_title") or record.get("session_title") or "")
+    session_date = str(display.get("date") or session_record_date(record))
+    archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "")
+    distillation_status = str(manifest.get("distillation_status") or record.get("distillation_status") or "")
+    review_status = str(manifest.get("review_status") or record.get("review_status") or "")
+    cwd = str(source.get("cwd") or record.get("cwd") or "")
+    raw_freshness = search_manifest_freshness(manifest, raw_path)
+    documents: list[dict[str, Any]] = []
+
+    base = {
+        "session_id": session_id,
+        "session_label": session_label,
+        "session_title": session_title,
+        "session_date": session_date,
+        "cwd": cwd,
+        "archive_status": archive_status,
+        "distillation_status": distillation_status,
+        "review_status": review_status,
+        "manifest_path": str(manifest_path),
+        "raw_path": str(raw_path) if raw_path else "",
+        "raw_sha256": raw_sha,
+        "freshness_status": raw_freshness["status"],
+        "stale_reason": ",".join(raw_freshness.get("reasons", [])),
+    }
+    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+    session_body = search_doc_text(
+        [
+            session_label,
+            session_title,
+            session_semantic_names_text(manifest),
+            archive_status,
+            distillation_status,
+            review_status,
+            cwd,
+            source.get("transcript_path") if isinstance(source, dict) else "",
+            raw.get("source_path"),
+            raw.get("indexing_status"),
+            raw_blocks.get("index"),
+        ],
+        max_chars=3000,
+    )
+    documents.append(
+        {
+            **base,
+            "id": f"session:{session_id}",
+            "doc_type": "session",
+            "title": session_title or session_label,
+            "body": session_body,
+            "raw_ref": "",
+            "raw_block_ref": "",
+            "segment_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+            "tags": "",
+        }
+    )
+
+    for incident_path in sorted((session_dir / "incidents").glob("*")):
+        if not incident_path.is_file() or incident_path.suffix not in {".md", ".json"}:
+            continue
+        text = short_text(incident_path.read_text(encoding="utf-8", errors="replace"), max_chars=3000)
+        documents.append(
+            {
+                **base,
+                "id": f"incident:{session_id}:{incident_path.name}",
+                "doc_type": "incident",
+                "title": incident_path.name,
+                "body": search_doc_text([session_label, session_title, archive_status, text], max_chars=3600),
+                "raw_ref": "",
+                "raw_block_ref": "",
+                "segment_ref": str(incident_path),
+                "tags": "incident",
+            }
+        )
+
+    raw_text_by_line = raw_event_search_text_by_line(raw_path)
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        segment_id = str(segment.get("segment_id") or "")
+        index_path = Path(str(segment.get("index") or ""))
+        segment_index = read_json(index_path, {}) if index_path.exists() else {}
+        segment_sha = sha256_file(index_path) if index_path.exists() else ""
+        segment_freshness = segment_index_freshness(index_path if index_path.exists() else None, segment_sha)
+        freshness = combine_freshness(raw_freshness, segment_freshness)
+        source_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
+        source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
+        segment_body = search_doc_text(
+            [
+                session_label,
+                session_title,
+                segment.get("role"),
+                source_range,
+                source_block.get("rel"),
+                " ".join((segment_index.get("by_type") or {}).keys()) if isinstance(segment_index.get("by_type"), dict) else "",
+                " ".join((segment_index.get("by_conversation_act") or {}).keys()) if isinstance(segment_index.get("by_conversation_act"), dict) else "",
+            ],
+            max_chars=2600,
+        )
+        documents.append(
+            {
+                **base,
+                "id": f"segment:{session_id}:{segment_id}",
+                "doc_type": "segment",
+                "segment_id": segment_id,
+                "raw_block_ref": source_block.get("rel") or "",
+                "segment_ref": str(segment.get("markdown") or ""),
+                "segment_index_path": str(index_path),
+                "segment_index_sha256": segment_sha,
+                "freshness_status": freshness["status"],
+                "stale_reason": ",".join(freshness.get("reasons", [])),
+                "title": f"{session_label} segment {segment_id} {segment.get('role') or ''}".strip(),
+                "body": segment_body,
+                "raw_ref": "",
+                "tags": "segment",
+            }
+        )
+
+        for event in segment_index.get("events", []) if isinstance(segment_index.get("events"), list) else []:
+            if not isinstance(event, dict):
+                continue
+            facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+            conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+            event_type = str(event.get("type") or "")
+            line_no = int_value(event.get("line"))
+            raw_text = raw_text_by_line.get(line_no, "")
+            tags = " ".join(str(tag) for tag in event.get("tags", []) if tag) if isinstance(event.get("tags"), list) else ""
+            command = facets.get("command") or facets.get("tool_name") or facets.get("payload_type")
+            event_body = search_doc_text(
+                [
+                    event.get("title"),
+                    raw_text,
+                    tags,
+                    event_type,
+                    event.get("family"),
+                    event.get("phase"),
+                    event.get("actor"),
+                    event.get("action"),
+                    event.get("object"),
+                    event.get("outcome"),
+                    conversation_act.get("kind"),
+                    conversation_act.get("intent"),
+                    command,
+                    event.get("raw_ref"),
+                    event.get("md_anchor"),
+                ],
+                max_chars=3600,
+            )
+            documents.append(
+                {
+                    **base,
+                    "id": f"event:{session_id}:{segment_id}:{event.get('event_id')}",
+                    "doc_type": "event",
+                    "segment_id": segment_id,
+                    "event_id": str(event.get("event_id") or ""),
+                    "event_type": event_type,
+                    "family": str(event.get("family") or ""),
+                    "phase": str(event.get("phase") or ""),
+                    "actor": str(event.get("actor") or ""),
+                    "action": str(event.get("action") or ""),
+                    "object": str(event.get("object") or ""),
+                    "outcome": str(event.get("outcome") or ""),
+                    "conversation_act": str(conversation_act.get("kind") or ""),
+                    "tags": tags,
+                    "raw_ref": str(event.get("raw_ref") or ""),
+                    "raw_block_ref": source_block.get("rel") or "",
+                    "segment_ref": str(event.get("md_anchor") or segment.get("markdown") or ""),
+                    "segment_index_path": str(index_path),
+                    "segment_index_sha256": segment_sha,
+                    "freshness_status": freshness["status"],
+                    "stale_reason": ",".join(freshness.get("reasons", [])),
+                    "title": str(event.get("title") or event_type or "event"),
+                    "body": event_body,
+                }
+            )
+    return documents, {"status": "indexed", "session_label": session_label, "document_count": len(documents), "diagnostics": []}
+
+
+def search_index_sessions(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    rebuild: bool = True,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    db_path = search_db_path(aoa_root)
+    try:
+        if target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "document_count": 0,
+            "db_path": str(db_path),
+            "diagnostics": [str(exc)],
+            "sessions": [],
+        }
+    if not records:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "document_count": 0,
+            "db_path": str(db_path),
+            "diagnostics": ["no sessions selected"],
+            "sessions": [],
+        }
+    conn = init_search_db(db_path, rebuild=rebuild)
+    if rebuild:
+        reset_search_db(conn)
+        conn.commit()
+    counts: Counter[str] = Counter()
+    diagnostics: list[str] = []
+    session_results: list[dict[str, Any]] = []
+    try:
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
+        conn.commit()
+        for record_index, record in enumerate(records, start=1):
+            conn.execute("BEGIN")
+            documents, result = search_documents_for_record(aoa_root, record)
+            session_results.append(result)
+            if result.get("diagnostics"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+            for doc in documents:
+                insert_search_document(conn, doc)
+                counts[str(doc.get("doc_type") or "unknown")] += 1
+            conn.commit()
+            if record_index % 10 == 0:
+                conn.execute("PRAGMA optimize")
+    except sqlite3.Error as exc:
+        conn.rollback()
+        conn.close()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": len(records),
+            "document_count": 0,
+            "db_path": str(db_path),
+            "diagnostics": [f"sqlite_error:{exc}"],
+            "sessions": session_results,
+        }
+    finally:
+        conn.close()
+    document_count = sum(counts.values())
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_index",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": document_count > 0 and not diagnostics,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(records),
+        "document_count": document_count,
+        "session_document_count": counts.get("session", 0),
+        "segment_document_count": counts.get("segment", 0),
+        "event_document_count": counts.get("event", 0),
+        "incident_document_count": counts.get("incident", 0),
+        "db_path": str(db_path),
+        "diagnostics": diagnostics,
+        "sessions": session_results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__search-index"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, search_report_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
+    raw_path_value = row["raw_path"] if "raw_path" in row.keys() else ""
+    segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
+    checks: list[dict[str, Any]] = []
+    if raw_path_value:
+        raw_path = Path(str(raw_path_value))
+        if raw_path.exists() and row["raw_sha256"]:
+            checks.append(search_manifest_freshness({"raw": {"sha256": row["raw_sha256"]}}, raw_path))
+        else:
+            checks.append({"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]})
+    if segment_path_value:
+        checks.append(segment_index_freshness(Path(str(segment_path_value)), row["segment_index_sha256"]))
+    if checks:
+        return combine_freshness(*checks)
+    status = str(row["freshness_status"] or "unverifiable")
+    reasons = [reason for reason in str(row["stale_reason"] or "").split(",") if reason]
+    return {"status": status, "reasons": reasons}
+
+
+def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "") -> dict[str, Any]:
+    freshness = search_result_freshness(row)
+    refs = {
+        "session": row["manifest_path"],
+        "segment": row["segment_ref"],
+        "segment_index": row["segment_index_path"],
+        "raw": row["raw_ref"],
+        "raw_block": row["raw_block_ref"],
+    }
+    result = {
+        "rank": row["rank"] if "rank" in row.keys() else 0,
+        "doc_id": row["id"],
+        "doc_type": row["doc_type"],
+        "session_id": row["session_id"],
+        "session_label": row["session_label"],
+        "session_title": row["session_title"],
+        "session_date": row["session_date"],
+        "archive_status": row["archive_status"],
+        "segment_id": row["segment_id"],
+        "event_id": row["event_id"],
+        "event_type": row["event_type"],
+        "family": row["family"],
+        "phase": row["phase"],
+        "actor": row["actor"],
+        "action": row["action"],
+        "outcome": row["outcome"],
+        "conversation_act": row["conversation_act"],
+        "title": row["title"],
+        "snippet": short_text(row["body"], max_chars=420),
+        "refs": refs,
+        "freshness": freshness,
+    }
+    if explain:
+        result["explain"] = {
+            "query": query,
+            "matched_document_layer": row["doc_type"],
+            "routing_fields": {
+                "event_type": row["event_type"],
+                "family": row["family"],
+                "conversation_act": row["conversation_act"],
+                "archive_status": row["archive_status"],
+            },
+            "why_this_is_not_authority": "Search result routes to raw/segment refs; raw transcript and segment indexes remain stronger evidence.",
+        }
+    return result
+
+
+def search_index_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute("SELECT key, value FROM meta").fetchall()
+    return {str(row["key"]): row["value"] for row in rows}
+
+
+def search_sessions(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    limit: int = 20,
+    session: str | None = None,
+    doc_type: str | None = None,
+    event_type: str | None = None,
+    family: str | None = None,
+    outcome: str | None = None,
+    conversation_act: str | None = None,
+    archive_status: str | None = None,
+    freshness_status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    explain: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "diagnostics": ["search index missing; run search-index"],
+        }
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    filters: list[str] = []
+    params: list[Any] = []
+    if session:
+        filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
+        like = f"%{session}%"
+        params.extend([session, like, like])
+    for column, value in [
+        ("documents.doc_type", doc_type),
+        ("documents.event_type", event_type),
+        ("documents.family", family),
+        ("documents.outcome", outcome),
+        ("documents.conversation_act", conversation_act),
+        ("documents.archive_status", archive_status),
+        ("documents.freshness_status", freshness_status),
+    ]:
+        if value:
+            filters.append(f"{column} = ?")
+            params.append(value)
+    if date_from:
+        filters.append("documents.session_date >= ?")
+        params.append(parse_date_arg(date_from))
+    if date_to:
+        filters.append("documents.session_date <= ?")
+        params.append(parse_date_arg(date_to))
+    where = " AND ".join(filters)
+    fts_query = fts_query_from_user(query)
+    try:
+        if fts_query:
+            sql = (
+                "SELECT documents.*, bm25(documents_fts) AS rank "
+                "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid "
+                "WHERE documents_fts MATCH ?"
+            )
+            query_params: list[Any] = [fts_query]
+            if where:
+                sql += " AND " + where
+                query_params.extend(params)
+            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
+            rows = conn.execute(sql, query_params).fetchall()
+        else:
+            sql = "SELECT documents.*, 0.0 AS rank FROM documents"
+            query_params = list(params)
+            if where:
+                sql += " WHERE " + where
+            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
+            rows = conn.execute(sql, query_params).fetchall()
+        metadata = search_index_metadata(conn)
+    except sqlite3.Error as exc:
+        conn.close()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [f"sqlite_error:{exc}"],
+        }
+    finally:
+        conn.close()
+    results = [compact_search_result(row, explain=explain, query=query) for row in rows]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": True,
+        "query": query,
+        "normalized_query": fts_query,
+        "db_path": str(db_path),
+        "index_generated_at": metadata.get("generated_at"),
+        "aoa_root": str(aoa_root),
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": [],
+    }
+
+
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
     grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
     owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
@@ -12629,6 +13459,47 @@ def command_conversation_act_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         sample_limit=args.sample_limit,
         write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_search_index(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = search_index_sessions(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        rebuild=not args.no_rebuild,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_search(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    query = args.query or args.query_text or ""
+    payload = search_sessions(
+        aoa_root=root,
+        query=query,
+        limit=args.limit,
+        session=args.session_filter,
+        doc_type=args.doc_type,
+        event_type=args.event_type,
+        family=args.family,
+        outcome=args.outcome,
+        conversation_act=args.conversation_act,
+        archive_status=args.archive_status,
+        freshness_status=args.freshness_status,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        explain=args.explain,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -13210,25 +14081,66 @@ def count_live_hook_events(aoa_root: Path) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def stable_archive_snapshot(
+    session_dir: Path,
+    manifest_path: Path,
+    *,
+    max_attempts: int = 3,
+) -> tuple[dict[str, Any], list[Any], bool, list[RawEvent], list[str]]:
+    diagnostics: list[str] = []
+    last_manifest: dict[str, Any] = {}
+    last_segments: list[Any] = []
+    last_raw_exists = False
+    last_events: list[RawEvent] = []
+    for attempt in range(max_attempts):
+        manifest_sig_before = file_signature(manifest_path)
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict):
+            return {}, [], False, [], ["manifest_unreadable"]
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        raw_value = raw.get("path")
+        raw_path = Path(str(raw_value)) if raw_value else Path()
+        raw_sig_before = file_signature(raw_path) if raw_value else None
+        raw_exists = bool(raw_value and raw_sig_before is not None)
+        segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
+        events = parse_raw_events(raw_path) if raw_exists else []
+        raw_sig_after = file_signature(raw_path) if raw_value else None
+        manifest_sig_after = file_signature(manifest_path)
+        last_manifest = manifest
+        last_segments = segments
+        last_raw_exists = raw_exists
+        last_events = events
+        if manifest_sig_before == manifest_sig_after and raw_sig_before == raw_sig_after:
+            if attempt:
+                diagnostics.append(f"archive_snapshot_stabilized_after_retry:{attempt}")
+            return manifest, segments, raw_exists, events, diagnostics
+        diagnostics.append("archive_changed_during_audit_retry")
+        time.sleep(0.05)
+    diagnostics.append("archive_unstable_during_audit")
+    return last_manifest, last_segments, last_raw_exists, last_events, diagnostics
+
+
 def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
     audits: list[dict[str, Any]] = []
     for manifest_path in sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json")):
         session_dir = manifest_path.parent
-        manifest = read_json(manifest_path, {})
-        if not isinstance(manifest, dict):
+        manifest, segments, raw_exists, events, snapshot_diagnostics = stable_archive_snapshot(session_dir, manifest_path)
+        if not manifest:
             continue
-        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
-        raw_value = raw.get("path")
-        raw_path = Path(str(raw_value)) if raw_value else Path()
-        raw_exists = bool(raw_value and raw_path.is_file())
-        segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
         boundary_count = 0
         compaction_marker_count = 0
         source_compacted_count = 0
         context_compacted_event_count = 0
         expected_segment_count = 0
         if raw_exists:
-            events = parse_raw_events(raw_path)
             boundary_count = len(compaction_boundary_groups(events))
             compaction_marker_count = sum(1 for event in events if event.compaction_boundary)
             source_compacted_count = sum(1 for event in events if event.source_type == "compacted")
@@ -13256,6 +14168,7 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
                 "actual_segment_count": actual_segment_count,
                 "matches_expected_segments": actual_segment_count == expected_segment_count,
                 "roles": dict(Counter(str(segment.get("role")) for segment in segments if isinstance(segment, dict))),
+                "diagnostics": snapshot_diagnostics,
             }
         )
     return audits
@@ -14026,6 +14939,45 @@ def build_parser() -> argparse.ArgumentParser:
     conversation_audit.add_argument("--sample-limit", type=int, default=3, help="Maximum evidence samples per conversation-act kind.")
     conversation_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown conversation-act audit reports under .aoa/diagnostics.")
     conversation_audit.set_defaults(func=command_conversation_act_audit)
+
+    search_index = sub.add_parser(
+        "search-index",
+        aliases=["aoa-search-index"],
+        help="Build the portable SQLite FTS search index from generated session indexes and raw refs.",
+    )
+    search_index.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    search_index.add_argument("--workspace-root")
+    search_index.add_argument("--aoa-root")
+    search_index.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    search_index.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    search_index.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    search_index.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    search_index.add_argument("--no-rebuild", action="store_true", help="Append/update into the existing search DB instead of rebuilding it.")
+    search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")
+    search_index.set_defaults(func=command_search_index)
+
+    search = sub.add_parser(
+        "search",
+        aliases=["aoa-search"],
+        help="Query the portable SQLite FTS search index with evidence refs and freshness checks.",
+    )
+    search.add_argument("query_text", nargs="?", default="", help="Search text. Use --query when the text begins with a dash.")
+    search.add_argument("--query", help="Search text.")
+    search.add_argument("--workspace-root")
+    search.add_argument("--aoa-root")
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    search.add_argument("--doc-type", choices=["session", "segment", "event", "incident"])
+    search.add_argument("--event-type")
+    search.add_argument("--family")
+    search.add_argument("--outcome")
+    search.add_argument("--conversation-act")
+    search.add_argument("--archive-status")
+    search.add_argument("--freshness-status")
+    search.add_argument("--date-from", help="Filter sessions on or after YYYY-MM-DD.")
+    search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
+    search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
+    search.set_defaults(func=command_search)
 
     relabel = sub.add_parser("relabel", help="Rebuild readable date/sequence session archive names.")
     relabel.add_argument("--workspace-root")
