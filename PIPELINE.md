@@ -62,6 +62,7 @@ Codex hook event
   -> session.manifest.json
   -> session-registry.json
   -> optional search-index runtime cache
+  -> optional provider capability status for host overlays
   -> rehydrate packet
   -> later reviewed distillation
   -> pattern / skill / automation candidate
@@ -242,6 +243,20 @@ Create a rehydration packet:
 ```bash
 python3 scripts/aoa_session_memory.py rehydrate latest --aoa-root .
 ```
+
+Inspect retrieval provider status:
+
+```bash
+python3 scripts/aoa_session_memory.py search-provider-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --include-host
+```
+
+`portable_sqlite` remains the authoritative `.aoa` search route. Optional host
+providers such as `abyss_machine_nervous` are capability-gated overlays; their
+context can accelerate orientation, but it cannot replace raw/segment refs or
+reviewed promotion.
 
 Run a focused stress pass over the first 100 compaction-closing intervals:
 

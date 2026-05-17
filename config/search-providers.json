@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "artifact_type": "search_provider_config",
+  "default_provider": "portable_sqlite",
+  "authority_law": ".aoa owns schemas, raw refs, segment refs, and freshness. Host providers are optional accelerators and cannot replace archive evidence.",
+  "providers": {
+    "portable_sqlite": {
+      "enabled": true,
+      "portable": true,
+      "role": "authoritative_aoa_retrieval",
+      "truth_level": "route_cache_over_aoa_raw_and_segments",
+      "index_command": ["search-index"],
+      "search_command": ["search"],
+      "writes": ["search/aoa-search.sqlite3", "diagnostics/*__search-index.*"]
+    },
+    "abyss_machine_nervous": {
+      "enabled": false,
+      "portable": false,
+      "role": "optional_host_context_overlay",
+      "truth_level": "host_read_model_evidence_not_aoa_truth",
+      "capability_gate": ["abyss-machine", "stack-bridge", "validate", "--json"],
+      "quality_gate": ["abyss-machine", "nervous", "quality-audit", "--json"],
+      "refresh_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--json"],
+      "refresh_index_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--refresh-index", "--json"],
+      "recall_command": ["abyss-machine", "nervous", "recall", "--mode", "lexical", "--query", "{query}", "--limit", "{limit}", "--json"],
+      "write_policy": "read_only_status_by_default",
+      "host_write_requires_operator_enablement": true
+    },
+    "abyss_stack_rag": {
+      "enabled": false,
+      "portable": false,
+      "role": "future_optional_runtime_service",
+      "truth_level": "runtime_accelerator_not_archive_authority",
+      "capability_gate": ["abyss-machine", "stack-bridge", "validate", "--json"],
+      "write_policy": "not_implemented_in_portable_bundle",
+      "host_write_requires_operator_enablement": true
+    }
+  }
+}

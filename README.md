@@ -371,6 +371,20 @@ Search results are route hints. They include session, segment, raw, raw-block,
 and freshness fields so the next agent can open the stronger evidence instead
 of treating a retrieval hit as reviewed truth.
 
+Check retrieval provider capability without moving archive authority out of
+`.aoa`:
+
+```bash
+python3 scripts/aoa_session_memory.py search-provider-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --include-host
+```
+
+`portable_sqlite` is the default provider. Optional host providers such as
+`abyss_machine_nervous` are status-gated overlays; their evidence is context,
+not reviewed `.aoa` truth.
+
 Export a clean portable bundle without session archives:
 
 ```bash

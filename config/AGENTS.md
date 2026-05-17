@@ -17,6 +17,8 @@ review lanes. They are machine-readable route law, not generated reports.
 - `batch-distillation-policy.json` controls first-wave batch review routing.
 - `naming-golden-set.json` defines portable naming-quality examples for
   mass naming wave regression checks.
+- `search-providers.json` defines the portable SQLite default and optional
+  host provider gates. Host providers are accelerators, not archive authority.
 
 ## Rules
 

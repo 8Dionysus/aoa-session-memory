@@ -488,6 +488,117 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
 
 
+def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-provider.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find hook timeout evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    status = module.search_provider_status(aoa_root=aoa_root)
+
+    assert status["ok"] is True
+    assert status["default_provider"] == "portable_sqlite"
+    assert status["providers"]["portable_sqlite"]["status"] == "ready"
+    assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
+    assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    (aoa_root / "config").mkdir(parents=True, exist_ok=True)
+    config = module.default_search_provider_config()
+    config["providers"]["abyss_machine_nervous"]["enabled"] = True
+    (aoa_root / module.SEARCH_PROVIDER_CONFIG_PATH).write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-host-provider.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "host-provider-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Stop hook failed because hook timed out"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "host-provider-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    def fake_run_json_command(command: list[str], **_kwargs: object) -> dict[str, object]:
+        if command[:3] == ["abyss-machine", "stack-bridge", "validate"]:
+            return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "stack", "generated_at": "now", "summary": {"fails": 0, "warnings": 0, "checks": 1}}}
+        if command[:3] == ["abyss-machine", "nervous", "quality-audit"]:
+            return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "quality", "generated_at": "now", "summary": {"fails": 0, "warnings": 1, "checks": 1}}}
+        if command[:3] == ["abyss-machine", "nervous", "recall"]:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "abyss_machine_nervous_retrieval_pack_v1",
+                    "generated_at": "now",
+                    "mode": "lexical",
+                    "query": "hook timed out",
+                    "summary": {"evidence_items": 1},
+                    "evidence": [{"id": "host-context"}],
+                },
+            }
+        raise AssertionError(command)
+
+    monkeypatch.setattr(module, "run_json_command", fake_run_json_command)
+
+    guarded = module.search_sessions(
+        aoa_root=aoa_root,
+        query="hook timed out",
+        provider="abyss_machine_nervous",
+        doc_type="event",
+        explain=True,
+    )
+    assert guarded["ok"] is True
+    assert guarded["provider"]["authoritative_result_provider"] == "portable_sqlite"
+    assert guarded["provider"]["status"]["providers"]["abyss_machine_nervous"]["status"] == "ready_with_warnings"
+    assert guarded["provider"]["overlay"] is None
+    assert guarded["results"][0]["refs"]["raw"] == "raw:line:2"
+    assert "host provider has warnings" in guarded["diagnostics"][0]
+
+    with_overlay = module.search_sessions(
+        aoa_root=aoa_root,
+        query="hook timed out",
+        provider="abyss_machine_nervous",
+        doc_type="event",
+        include_host_context=True,
+        allow_host_warnings=True,
+    )
+    assert with_overlay["provider"]["overlay"]["truth_level"] == "host_context_only_not_aoa_authority"
+    assert with_overlay["provider"]["overlay"]["evidence_count"] == 1
+    assert with_overlay["results"][0]["refs"]["raw"] == "raw:line:2"
+
+
 def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -1505,6 +1616,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "INSTALL.md").exists()
     assert (aoa_root / "DESIGN.AGENTS.md").exists()
     assert (aoa_root / "config" / "AGENTS.md").exists()
+    assert (aoa_root / "config" / "search-providers.json").exists()
     assert (aoa_root / "hooks" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
