@@ -1005,8 +1005,7 @@ def file_contains_all_any(path: Path, markers_by_name: dict[str, list[bytes]]) -
     return found
 
 
-def load_codex_project_config(workspace_root: Path) -> dict[str, Any]:
-    config_path = workspace_root / ".codex" / "config.toml"
+def load_codex_config_file(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return {}
     if tomllib is not None:
@@ -1045,6 +1044,32 @@ def load_codex_project_config(workspace_root: Path) -> dict[str, Any]:
     return payload
 
 
+def load_codex_project_config(workspace_root: Path) -> dict[str, Any]:
+    return load_codex_config_file(workspace_root / ".codex" / "config.toml")
+
+
+def codex_user_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    return Path(codex_home).expanduser() / "config.toml" if codex_home else Path.home() / ".codex" / "config.toml"
+
+
+def config_feature_enabled(config: dict[str, Any], *names: str) -> bool:
+    features = config.get("features") if isinstance(config.get("features"), dict) else {}
+    return any(features.get(name) is True for name in names)
+
+
+def first_int_config_value(configs: list[tuple[str, dict[str, Any]]], key: str) -> tuple[int, str | None]:
+    for source, config in configs:
+        value = config.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value), source
+        except (TypeError, ValueError):
+            continue
+    return 0, None
+
+
 def codex_grounding(
     *,
     workspace_root: Path,
@@ -1066,14 +1091,45 @@ def codex_grounding(
         codex_version_output, version_error = run_codex_version(codex_bin)
     add_check("codex_version_available", bool(codex_version_output), version_error)
 
-    config = load_codex_project_config(workspace_root)
-    features = config.get("features") if isinstance(config.get("features"), dict) else {}
-    hooks_enabled = features.get("hooks") is True
-    context_window = int(config.get("model_context_window") or 0)
-    compact_limit = int(config.get("model_auto_compact_token_limit") or 0)
+    project_config_path = workspace_root / ".codex" / "config.toml"
+    user_config_path = codex_user_config_path()
+    project_config = load_codex_config_file(project_config_path)
+    user_config = load_codex_config_file(user_config_path)
+    config_sources = [
+        ("project", project_config, project_config_path),
+        ("user", user_config, user_config_path),
+    ]
+    ordered_configs = [(name, config) for name, config, _path in config_sources]
+    hooks_sources = [
+        name
+        for name, config, _path in config_sources
+        if config_feature_enabled(config, "hooks", "codex_hooks")
+    ]
+    hooks_enabled = bool(hooks_sources)
+    context_window, context_window_source = first_int_config_value(ordered_configs, "model_context_window")
+    compact_limit, compact_limit_source = first_int_config_value(ordered_configs, "model_auto_compact_token_limit")
     compact_ratio = compact_limit / context_window if context_window > 0 else None
-    add_check("project_hooks_enabled", hooks_enabled)
-    add_check("compact_window_configured", context_window > 0 and compact_limit > 0 and compact_limit < context_window, {"context_window": context_window, "compact_limit": compact_limit, "ratio": compact_ratio})
+    add_check(
+        "project_hooks_enabled",
+        hooks_enabled,
+        {
+            "enabled_sources": hooks_sources,
+            "accepted_feature_keys": ["hooks", "codex_hooks"],
+            "project_config": str(project_config_path),
+            "user_config": str(user_config_path),
+        },
+    )
+    add_check(
+        "compact_window_configured",
+        context_window > 0 and compact_limit > 0 and compact_limit < context_window,
+        {
+            "context_window": context_window,
+            "compact_limit": compact_limit,
+            "ratio": compact_ratio,
+            "context_window_source": context_window_source,
+            "compact_limit_source": compact_limit_source,
+        },
+    )
 
     native_binary = codex_native_bin or resolve_codex_native_binary(codex_bin)
     add_check("codex_native_binary_found", native_binary is not None, str(native_binary) if native_binary else None)
@@ -1097,6 +1153,13 @@ def codex_grounding(
         "model_context_window": context_window,
         "model_auto_compact_token_limit": compact_limit,
         "compact_ratio": compact_ratio,
+        "codex_config_sources": {
+            name: {"path": str(path), "exists": path.exists(), "loaded": bool(config)}
+            for name, config, path in config_sources
+        },
+        "hooks_enabled_sources": hooks_sources,
+        "model_context_window_source": context_window_source,
+        "model_auto_compact_token_limit_source": compact_limit_source,
         "schema_markers": marker_results,
         "checks": checks,
     }

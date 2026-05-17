@@ -1455,6 +1455,56 @@ def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> 
     assert all(payload["schema_markers"].values())
 
 
+def test_codex_grounding_uses_user_compact_config_and_project_codex_hooks(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "Workspace"
+    aoa_root = workspace / ".aoa"
+    codex_home = tmp_path / "codex-home"
+    (workspace / ".codex").mkdir(parents=True)
+    codex_home.mkdir()
+    (workspace / ".codex" / "config.toml").write_text(
+        "\n".join(
+            [
+                "[features]",
+                "codex_hooks = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                "model_context_window = 400000",
+                "model_auto_compact_token_limit = 320000",
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    native = tmp_path / "codex-native"
+    native.write_bytes(
+        b"SessionStart user-prompt-submit.command.input PreCompact pre-compact.command "
+        b"PostCompact post-compact.command stopReason"
+    )
+    native.chmod(0o755)
+
+    payload = module.codex_grounding(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        codex_native_bin=native,
+        codex_version_output="codex-cli 0.130.0",
+    )
+
+    assert payload["ok"] is True
+    assert payload["hooks_enabled_sources"] == ["project", "user"]
+    assert payload["model_context_window_source"] == "user"
+    assert payload["model_auto_compact_token_limit_source"] == "user"
+
+
 def test_completion_audit_reports_covered_segments_and_remaining_live_hooks(tmp_path: Path) -> None:
     workspace = tmp_path / "Workspace"
     aoa_root = workspace / ".aoa"
