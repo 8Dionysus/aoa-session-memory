@@ -695,7 +695,7 @@ def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
-    original_parse = module.parse_raw_events
+    original_stats = module.raw_compaction_stats
     mutated = {"done": False}
 
     def mutate_once(raw_path: Path):
@@ -710,12 +710,12 @@ def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path
                             "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after mutation"}]},
                         },
                         ensure_ascii=False,
-                    )
+                )
                     + "\n"
                 )
-        return original_parse(raw_path)
+        return original_stats(raw_path)
 
-    monkeypatch.setattr(module, "parse_raw_events", mutate_once)
+    monkeypatch.setattr(module, "raw_compaction_stats", mutate_once)
 
     audits = module.archive_compaction_audit(aoa_root)
 

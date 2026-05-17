@@ -14850,17 +14850,85 @@ def file_signature(path: Path) -> tuple[int, int] | None:
     return (stat.st_size, stat.st_mtime_ns)
 
 
+def raw_compaction_stats(raw_path: Path) -> dict[str, Any]:
+    events: list[tuple[str, str, bool]] = []
+    source_compacted_count = 0
+    context_compacted_event_count = 0
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            source_type = "unparsed"
+            payload_type = ""
+            boundary = False
+            try:
+                loaded = json.loads(line)
+                if isinstance(loaded, dict):
+                    source_type = str(loaded.get("type") or "unresolved-source")
+                    payload = loaded.get("payload")
+                    if isinstance(payload, dict):
+                        payload_type = str(payload.get("type") or "")
+                    boundary = source_type == "compacted" or payload_has_compaction_boundary(payload)
+            except json.JSONDecodeError:
+                pass
+            if source_type == "compacted":
+                source_compacted_count += 1
+            if source_type == "event_msg" and payload_type == "context_compacted":
+                context_compacted_event_count += 1
+            events.append((source_type, payload_type, boundary))
+
+    groups: list[tuple[int, int]] = []
+    idx = 0
+    while idx < len(events):
+        source_type, _payload_type, boundary = events[idx]
+        if not boundary:
+            idx += 1
+            continue
+        end_index = idx
+        if source_type == "compacted":
+            search_limit = min(len(events), idx + 12)
+            probe = idx + 1
+            while probe < search_limit:
+                candidate_source, candidate_payload, _candidate_boundary = events[probe]
+                if candidate_source == "turn_context":
+                    end_index = probe
+                    probe += 1
+                    continue
+                if candidate_source == "event_msg" and candidate_payload == "token_count":
+                    end_index = probe
+                    probe += 1
+                    continue
+                if candidate_source == "event_msg" and candidate_payload == "context_compacted":
+                    end_index = probe
+                    break
+                break
+        groups.append((idx, end_index))
+        idx = end_index + 1
+
+    expected_segment_count = 0
+    if events:
+        expected_segment_count = len(groups)
+        if not groups or groups[-1][1] < len(events) - 1:
+            expected_segment_count += 1
+    return {
+        "line_count": len(events),
+        "compaction_boundary_count": len(groups),
+        "compaction_marker_count": sum(1 for _source, _payload, boundary in events if boundary),
+        "source_compacted_count": source_compacted_count,
+        "context_compacted_event_count": context_compacted_event_count,
+        "expected_segment_count": expected_segment_count,
+    }
+
+
 def stable_archive_snapshot(
     session_dir: Path,
     manifest_path: Path,
     *,
     max_attempts: int = 3,
-) -> tuple[dict[str, Any], list[Any], bool, list[RawEvent], list[str]]:
+) -> tuple[dict[str, Any], list[Any], bool, dict[str, Any], list[str]]:
     diagnostics: list[str] = []
     last_manifest: dict[str, Any] = {}
     last_segments: list[Any] = []
     last_raw_exists = False
-    last_events: list[RawEvent] = []
+    last_stats: dict[str, Any] = {}
     for attempt in range(max_attempts):
         manifest_sig_before = file_signature(manifest_path)
         manifest = read_json(manifest_path, {})
@@ -14872,28 +14940,28 @@ def stable_archive_snapshot(
         raw_sig_before = file_signature(raw_path) if raw_value else None
         raw_exists = bool(raw_value and raw_sig_before is not None)
         segments = manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []
-        events = parse_raw_events(raw_path) if raw_exists else []
+        stats = raw_compaction_stats(raw_path) if raw_exists else {}
         raw_sig_after = file_signature(raw_path) if raw_value else None
         manifest_sig_after = file_signature(manifest_path)
         last_manifest = manifest
         last_segments = segments
         last_raw_exists = raw_exists
-        last_events = events
+        last_stats = stats
         if manifest_sig_before == manifest_sig_after and raw_sig_before == raw_sig_after:
             if attempt:
                 diagnostics.append(f"archive_snapshot_stabilized_after_retry:{attempt}")
-            return manifest, segments, raw_exists, events, diagnostics
+            return manifest, segments, raw_exists, stats, diagnostics
         diagnostics.append("archive_changed_during_audit_retry")
         time.sleep(0.05)
     diagnostics.append("archive_unstable_during_audit")
-    return last_manifest, last_segments, last_raw_exists, last_events, diagnostics
+    return last_manifest, last_segments, last_raw_exists, last_stats, diagnostics
 
 
 def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
     audits: list[dict[str, Any]] = []
     for manifest_path in sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json")):
         session_dir = manifest_path.parent
-        manifest, segments, raw_exists, events, snapshot_diagnostics = stable_archive_snapshot(session_dir, manifest_path)
+        manifest, segments, raw_exists, stats, snapshot_diagnostics = stable_archive_snapshot(session_dir, manifest_path)
         if not manifest:
             continue
         boundary_count = 0
@@ -14902,18 +14970,11 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
         context_compacted_event_count = 0
         expected_segment_count = 0
         if raw_exists:
-            boundary_count = len(compaction_boundary_groups(events))
-            compaction_marker_count = sum(1 for event in events if event.compaction_boundary)
-            source_compacted_count = sum(1 for event in events if event.source_type == "compacted")
-            context_compacted_event_count = sum(
-                1
-                for event in events
-                if event.source_type == "event_msg"
-                and isinstance(event.parsed, dict)
-                and isinstance(event.parsed.get("payload"), dict)
-                and event.parsed["payload"].get("type") == "context_compacted"
-            )
-            expected_segment_count = len(segment_ranges(events))
+            boundary_count = int_value(stats.get("compaction_boundary_count"))
+            compaction_marker_count = int_value(stats.get("compaction_marker_count"))
+            source_compacted_count = int_value(stats.get("source_compacted_count"))
+            context_compacted_event_count = int_value(stats.get("context_compacted_event_count"))
+            expected_segment_count = int_value(stats.get("expected_segment_count"))
         actual_segment_count = len(segments)
         audits.append(
             {
