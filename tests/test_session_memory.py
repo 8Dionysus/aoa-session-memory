@@ -705,6 +705,46 @@ def test_hook_worker_processes_deferred_sync_job(tmp_path: Path, monkeypatch) ->
     assert list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))
 
 
+def test_hook_worker_drains_all_pending_jobs_in_batches(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    for index in range(7):
+        session_id = f"session-worker-drain-{index}"
+        transcript = tmp_path / f"rollout-2026-05-12T00-00-0{index}-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": session_id}},
+                {
+                    "timestamp": "2026-05-12T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"Worker drain {index}"}],
+                    },
+                },
+            ],
+        )
+        job_path = module.enqueue_hook_sync_job(
+            aoa_root,
+            event_name="SessionStart",
+            event={"session_id": session_id, "transcript_path": str(transcript), "cwd": str(workspace)},
+            session_id=session_id,
+            transcript_path=transcript,
+            reason="test_worker_drain",
+        )
+        assert job_path is not None
+
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=2)
+
+    assert payload["ok"] is True
+    assert payload["processed"] == 7
+    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 7
+
+
 def test_hook_registry_lock_contention_defers_registry_update(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -738,6 +778,42 @@ def test_hook_registry_lock_contention_defers_registry_update(tmp_path: Path) ->
     assert "registry_update_deferred" in receipt["actions"]
     assert (session_dir / "session.manifest.json").exists()
     assert not (aoa_root / "session-registry.json").exists()
+
+
+def test_raw_unavailable_registry_deferral_queues_retry_job(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    missing = tmp_path / "missing.jsonl"
+    lock_path = aoa_root / ".session-registry.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        module.fcntl.flock(lock_handle, module.fcntl.LOCK_EX)
+        receipt = module.handle_hook_event(
+            "SessionStart",
+            {
+                "session_id": "missing-registry-retry",
+                "transcript_path": str(missing),
+                "cwd": str(workspace),
+                "hook_event_name": "SessionStart",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    assert receipt["ok"] is True
+    assert "registry_update_deferred" in receipt["actions"]
+    assert "registry_update_retry_queued" in receipt["actions"]
+    assert receipt["registry_update_job"].endswith("__registry-update.json")
+    assert not (aoa_root / "session-registry.json").exists()
+
+    worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
+
+    assert worker["ok"] is True
+    assert worker["processed"] == 1
+    assert worker["results"][0]["status"] == "registry_updated"
+    assert registry["sessions"][0]["session_id"] == "missing-registry-retry"
 
 
 def test_codex_hook_output_uses_only_protocol_fields() -> None:

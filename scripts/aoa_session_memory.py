@@ -3718,6 +3718,35 @@ def enqueue_hook_sync_job(
     return job_path
 
 
+def enqueue_registry_update_job(
+    aoa_root: Path,
+    *,
+    event_name: str,
+    event: dict[str, Any],
+    session_id: str,
+    session_dir: Path,
+    reason: str,
+) -> Path | None:
+    if not hook_sync_queue_enabled():
+        return None
+    pending_root = aoa_root / HOOK_JOBS_ROOT / "pending"
+    pending_root.mkdir(parents=True, exist_ok=True)
+    job_path = pending_root / f"{hook_job_id(event_name, session_id)}__registry-update.json"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "job_type": "registry_update",
+        "queued_at": utc_now(),
+        "event_name": event_name,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "cwd": event.get("cwd"),
+        "reason": reason,
+        "event": event,
+    }
+    write_json(job_path, payload)
+    return job_path
+
+
 def attach_hook_sync_job(
     receipt: dict[str, Any],
     aoa_root: Path,
@@ -3742,6 +3771,35 @@ def attach_hook_sync_job(
     if isinstance(actions, list):
         actions.append("background_sync_queued")
     receipt["background_job"] = str(job_path)
+    return receipt
+
+
+def attach_registry_update_job(
+    receipt: dict[str, Any],
+    aoa_root: Path,
+    *,
+    event_name: str,
+    event: dict[str, Any],
+    session_id: str,
+    session_dir: Path,
+    reason: str,
+) -> dict[str, Any]:
+    job_path = enqueue_registry_update_job(
+        aoa_root,
+        event_name=event_name,
+        event=event,
+        session_id=session_id,
+        session_dir=session_dir,
+        reason=reason,
+    )
+    if job_path is None:
+        return receipt
+    actions = receipt.setdefault("actions", [])
+    if isinstance(actions, list):
+        actions.append("registry_update_retry_queued")
+        actions.append("background_sync_queued")
+    receipt["background_job"] = str(job_path)
+    receipt["registry_update_job"] = str(job_path)
     return receipt
 
 
@@ -3773,54 +3831,75 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                 "processed": 0,
                 "results": [],
             }
-        pending_jobs = sorted(dirs["pending"].glob("*.json"))[: max(0, limit)]
-        for job_path in pending_jobs:
-            running_path = dirs["running"] / job_path.name
-            try:
-                job_path.replace(running_path)
-                job = read_json(running_path, {})
-                transcript_value = job.get("transcript_path")
-                transcript_path = Path(str(transcript_value)).expanduser() if transcript_value else None
-                event = job.get("event") if isinstance(job.get("event"), dict) else {}
-                if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
-                    raise FileNotFoundError(str(transcript_path) if transcript_path else "missing transcript_path")
-                synced = sync_session_from_transcript(
-                    aoa_root=aoa_root,
-                    event={
-                        **event,
-                        "session_id": job.get("session_id") or event.get("session_id"),
-                        "transcript_path": str(transcript_path),
-                        "cwd": job.get("cwd") or event.get("cwd"),
-                        "hook_event_name": f"HookWorker:{job.get('event_name') or 'Unknown'}",
-                    },
-                    transcript_path=transcript_path,
-                    hook_event_name=f"HookWorker:{job.get('event_name') or 'Unknown'}",
-                )
-                result = {
-                    "job": str(running_path),
-                    "status": "synced",
-                    "session_id": synced.get("session_id"),
-                    "session_dir": synced.get("session_dir"),
-                    "event_count": synced.get("event_count"),
-                    "segment_count": synced.get("segment_count"),
-                }
-                done_path = dirs["done"] / running_path.name
-                write_json(done_path, {**job, "completed_at": utc_now(), "result": result})
-                running_path.unlink(missing_ok=True)
-                results.append(result)
-            except Exception as exc:
-                failed_path = dirs["failed"] / running_path.name
-                failed_payload = read_json(running_path, {})
-                write_json(
-                    failed_path,
-                    {
-                        **(failed_payload if isinstance(failed_payload, dict) else {}),
-                        "failed_at": utc_now(),
-                        "error": f"{exc.__class__.__name__}: {exc}",
-                    },
-                )
-                running_path.unlink(missing_ok=True)
-                results.append({"job": str(job_path), "status": "failed", "error": f"{exc.__class__.__name__}: {exc}"})
+        batch_limit = max(0, limit)
+        while batch_limit > 0:
+            pending_jobs = sorted(dirs["pending"].glob("*.json"))[:batch_limit]
+            if not pending_jobs:
+                break
+            for job_path in pending_jobs:
+                running_path = dirs["running"] / job_path.name
+                try:
+                    job_path.replace(running_path)
+                    job = read_json(running_path, {})
+                    event = job.get("event") if isinstance(job.get("event"), dict) else {}
+                    job_type = job.get("job_type") or "hook_sync_transcript"
+                    if job_type == "registry_update":
+                        session_dir_value = job.get("session_dir")
+                        if not session_dir_value:
+                            raise ValueError("missing session_dir")
+                        session_dir = Path(str(session_dir_value)).expanduser()
+                        manifest = read_json(session_dir / "session.manifest.json", {})
+                        if not isinstance(manifest, dict) or not manifest.get("session_id"):
+                            raise ValueError("missing session manifest")
+                        update_registry(aoa_root, manifest, session_dir)
+                        result = {
+                            "job": str(running_path),
+                            "status": "registry_updated",
+                            "session_id": manifest.get("session_id"),
+                            "session_dir": str(session_dir),
+                        }
+                    else:
+                        transcript_value = job.get("transcript_path")
+                        transcript_path = Path(str(transcript_value)).expanduser() if transcript_value else None
+                        if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
+                            raise FileNotFoundError(str(transcript_path) if transcript_path else "missing transcript_path")
+                        synced = sync_session_from_transcript(
+                            aoa_root=aoa_root,
+                            event={
+                                **event,
+                                "session_id": job.get("session_id") or event.get("session_id"),
+                                "transcript_path": str(transcript_path),
+                                "cwd": job.get("cwd") or event.get("cwd"),
+                                "hook_event_name": f"HookWorker:{job.get('event_name') or 'Unknown'}",
+                            },
+                            transcript_path=transcript_path,
+                            hook_event_name=f"HookWorker:{job.get('event_name') or 'Unknown'}",
+                        )
+                        result = {
+                            "job": str(running_path),
+                            "status": "synced",
+                            "session_id": synced.get("session_id"),
+                            "session_dir": synced.get("session_dir"),
+                            "event_count": synced.get("event_count"),
+                            "segment_count": synced.get("segment_count"),
+                        }
+                    done_path = dirs["done"] / running_path.name
+                    write_json(done_path, {**job, "completed_at": utc_now(), "result": result})
+                    running_path.unlink(missing_ok=True)
+                    results.append(result)
+                except Exception as exc:
+                    failed_path = dirs["failed"] / running_path.name
+                    failed_payload = read_json(running_path, {})
+                    write_json(
+                        failed_path,
+                        {
+                            **(failed_payload if isinstance(failed_payload, dict) else {}),
+                            "failed_at": utc_now(),
+                            "error": f"{exc.__class__.__name__}: {exc}",
+                        },
+                    )
+                    running_path.unlink(missing_ok=True)
+                    results.append({"job": str(job_path), "status": "failed", "error": f"{exc.__class__.__name__}: {exc}"})
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": all(result.get("status") != "failed" for result in results),
@@ -11183,7 +11262,7 @@ def handle_hook_event(
             actions.append("raw_unavailable_incident_written")
             if not incident.get("registry_updated"):
                 actions.append("registry_update_deferred")
-            return {
+            receipt = {
                 "schema_version": SCHEMA_VERSION,
                 "ok": True,
                 "hook_event_name": event_name,
@@ -11196,6 +11275,17 @@ def handle_hook_event(
                 "incident": incident,
                 "errors": errors,
             }
+            if not incident.get("registry_updated"):
+                return attach_registry_update_job(
+                    receipt,
+                    root,
+                    event_name=event_name,
+                    event=event,
+                    session_id=session_id,
+                    session_dir=Path(str(incident["session_dir"])),
+                    reason="raw_unavailable_registry_update_deferred",
+                )
+            return receipt
         synced = sync_session_from_transcript(
             aoa_root=root,
             event=event,
@@ -11233,6 +11323,7 @@ def handle_hook_event(
         return receipt
     except Exception as exc:  # Hooks must fail open.
         errors.append(f"{exc.__class__.__name__}: {exc}")
+        incident_session_dir: Path | None = None
         try:
             incident = write_raw_unavailable_incident(
                 aoa_root=root,
@@ -11244,9 +11335,11 @@ def handle_hook_event(
             actions.append("hook_exception_diagnostic_written")
             if not incident.get("registry_updated"):
                 actions.append("registry_update_deferred")
+                incident_session_dir = Path(str(incident["session_dir"]))
         except Exception:
             incident = None
-        return {
+            incident_session_dir = None
+        receipt = {
             "schema_version": SCHEMA_VERSION,
             "ok": False,
             "hook_event_name": event_name,
@@ -11256,6 +11349,19 @@ def handle_hook_event(
             "actions": actions,
             "incident": incident,
             "errors": errors,
+        }
+        if incident and incident_session_dir is not None and not incident.get("registry_updated"):
+            return attach_registry_update_job(
+                receipt,
+                root,
+                event_name=event_name,
+                event={**event, "hook_exception": errors[-1]},
+                session_id=session_id,
+                session_dir=incident_session_dir,
+                reason="hook_exception_registry_update_deferred",
+            )
+        return {
+            **receipt,
         }
 
 
