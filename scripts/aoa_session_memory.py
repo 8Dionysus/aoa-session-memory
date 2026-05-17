@@ -31,6 +31,7 @@ SCHEMA_VERSION = 1
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
+HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
@@ -44,6 +45,7 @@ GENERIC_TITLE_PREFIXES = (
     "<workspace_context>",
 )
 BATCH_DISTILLATION_POLICY_PATH = Path("config/batch-distillation-policy.json")
+NAMING_GOLDEN_SET_PATH = Path("config/naming-golden-set.json")
 DEFAULT_PROJECT_GROUNDING_FILE_NAMES = ["AGENTS.md", "DESIGN.md", "README.md"]
 SESSION_INDEX_MARKDOWN = "SESSION.md"
 SESSION_INDEX_JSON = "session.index.json"
@@ -54,6 +56,9 @@ LEGACY_SESSION_INDEX_MARKDOWN = "00_SESSION_INDEX.md"
 LEGACY_SESSION_INDEX_JSON = "00_SESSION_INDEX.json"
 RAW_SOURCE_JSON = "source.json"
 LEGACY_RAW_SOURCE_JSON = "raw-source.json"
+RAW_BLOCKS_DIR = "blocks"
+RAW_BLOCK_INDEX_JSON = "blocks.index.json"
+RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
@@ -142,6 +147,8 @@ HOOK_TIMEOUTS = {
     "Stop": 20,
 }
 DEFAULT_STOP_SYNC_MAX_BYTES = 4 * 1024 * 1024
+DEFAULT_HOOK_MIRROR_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC = 0.25
 HOOK_STATUS_MESSAGES = {
     "SessionStart": "AoA session memory start",
     "UserPromptSubmit": "AoA session memory prompt",
@@ -226,7 +233,10 @@ def readable_slug(value: str, *, fallback: str = "untitled-session", max_chars: 
     slug_parts = [part for part in re.split(r"[-_.]+", slug) if part and part not in DEFAULT_BANNED_DURABLE_NAME_TERMS]
     slug = "-".join(slug_parts)
     if len(slug) > max_chars:
-        slug = slug[:max_chars].rstrip("-._")
+        trimmed = slug[:max_chars].rstrip("-._")
+        if "-" in trimmed:
+            trimmed = trimmed.rsplit("-", 1)[0] or trimmed
+        slug = trimmed
     return slug or fallback
 
 
@@ -2108,7 +2118,7 @@ def display_quality(source: str | None) -> int:
 
 
 def semantic_name_slug(value: str) -> str:
-    return readable_slug(value, fallback="semantic-session-name", max_chars=80)
+    return readable_slug(value, fallback="semantic-session-name", max_chars=96)
 
 
 def semantic_name_scope(item: dict[str, Any]) -> str:
@@ -2692,9 +2702,27 @@ def update_artifact_paths_after_move(session_dir: Path, manifest: dict[str, Any]
     raw = manifest.get("raw")
     if isinstance(raw, dict) and raw.get("path"):
         raw["path"] = str(session_dir / "raw" / Path(str(raw["path"])).name)
+        if raw.get("blocks_index"):
+            raw["blocks_index"] = str(session_dir / "raw" / RAW_BLOCK_INDEX_JSON)
+        if raw.get("compaction_events"):
+            raw["compaction_events"] = str(session_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL)
+    raw_blocks = manifest.get("raw_blocks")
+    if isinstance(raw_blocks, dict):
+        if raw_blocks.get("index"):
+            raw_blocks["index"] = str(session_dir / "raw" / RAW_BLOCK_INDEX_JSON)
+        if raw_blocks.get("compaction_events"):
+            raw_blocks["compaction_events"] = str(session_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL)
+        for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("path"):
+                block["path"] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(block["path"])).name)
     for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
         if not isinstance(segment, dict):
             continue
+        raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
+        if raw_block.get("path"):
+            raw_block["path"] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(raw_block["path"])).name)
         if segment.get("markdown"):
             segment["markdown"] = str(session_dir / "segments" / Path(str(segment["markdown"])).name)
         if segment.get("index"):
@@ -2895,7 +2923,100 @@ def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[s
     return record
 
 
-def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, events: list[RawEvent]) -> dict[str, Any]:
+def raw_block_status_for_role(role: str) -> str:
+    return "sealed" if role in {"initial-to-compaction", "compaction-to-compaction"} else "open"
+
+
+def clear_generated_raw_blocks(session_dir: Path) -> None:
+    raw_dir = session_dir / "raw"
+    blocks_dir = raw_dir / RAW_BLOCKS_DIR
+    if blocks_dir.exists():
+        for path in blocks_dir.iterdir():
+            if path.name.endswith(".raw.jsonl") or path.name == RAW_BLOCK_INDEX_JSON:
+                path.unlink()
+    compaction_events_path = raw_dir / RAW_COMPACTION_EVENTS_JSONL
+    if compaction_events_path.exists():
+        compaction_events_path.unlink()
+
+
+def write_raw_block_artifacts(
+    session_dir: Path,
+    raw_rel: str,
+    ranges: list[tuple[int, int, str]],
+    events: list[RawEvent],
+) -> dict[str, Any]:
+    raw_dir = session_dir / "raw"
+    blocks_dir = raw_dir / RAW_BLOCKS_DIR
+    blocks_dir.mkdir(parents=True, exist_ok=True)
+    block_records: list[dict[str, Any]] = []
+    compaction_records: list[dict[str, Any]] = []
+    for segment_no, (start, end, role) in enumerate(ranges):
+        segment_id = f"{segment_no:03d}"
+        block_name = f"{segment_id}__{role}.raw.jsonl"
+        block_path = blocks_dir / block_name
+        block_events = events[start:end]
+        block_text = "\n".join(event.raw for event in block_events)
+        if block_text:
+            block_text += "\n"
+        block_path.write_text(block_text, encoding="utf-8")
+        first_line = block_events[0].line_no if block_events else None
+        last_line = block_events[-1].line_no if block_events else None
+        boundary_events = [event for event in block_events if event.compaction_boundary]
+        record = {
+            "block_id": segment_id,
+            "segment_id": segment_id,
+            "role": role,
+            "status": raw_block_status_for_role(role),
+            "path": str(block_path),
+            "rel": f"raw/{RAW_BLOCKS_DIR}/{block_name}",
+            "source_raw": raw_rel,
+            "source_range": {"from_line": first_line, "to_line": last_line},
+            "line_count": len(block_events),
+            "bytes": block_path.stat().st_size,
+            "sha256": sha256_file(block_path),
+            "closed_by_compaction": bool(boundary_events),
+            "boundary_event_ids": [event.event_id for event in boundary_events],
+        }
+        block_records.append(record)
+        for event in boundary_events:
+            compaction_records.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "segment_id": segment_id,
+                    "block_id": segment_id,
+                    "event_id": event.event_id,
+                    "line": event.line_no,
+                    "timestamp": event.timestamp,
+                    "title": event.title,
+                    "source_type": event.source_type,
+                    "raw_ref": f"raw:line:{event.line_no}",
+                }
+            )
+
+    write_json(raw_dir / RAW_BLOCK_INDEX_JSON, {"schema_version": SCHEMA_VERSION, "source_raw": raw_rel, "blocks": block_records})
+    compaction_path = raw_dir / RAW_COMPACTION_EVENTS_JSONL
+    if compaction_records:
+        compaction_path.write_text(
+            "\n".join(json.dumps(record, ensure_ascii=False) for record in compaction_records) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        compaction_path.write_text("", encoding="utf-8")
+    return {
+        "index": str(raw_dir / RAW_BLOCK_INDEX_JSON),
+        "compaction_events": str(compaction_path),
+        "blocks": block_records,
+    }
+
+
+def write_segment(
+    session_dir: Path,
+    raw_rel: str,
+    segment_no: int,
+    role: str,
+    events: list[RawEvent],
+    raw_block: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
     index_name = f"{segment_id}__{role}.index.json"
@@ -2912,6 +3033,7 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
         f"segment_id: {segment_id}",
         f"segment_role: {role}",
         f"source_raw: {raw_rel}",
+        f"source_block: {raw_block.get('rel') if isinstance(raw_block, dict) else ''}",
         f"source_from_line: {first_line}",
         f"source_to_line: {last_line}",
         f"status: raw_preserved",
@@ -2991,6 +3113,7 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
         "segment_id": segment_id,
         "segment_role": role,
         "source_raw": raw_rel,
+        "source_block": raw_block if isinstance(raw_block, dict) else None,
         "source_range": {"from_line": first_line, "to_line": last_line},
         "markdown": str(md_path),
         "events": records,
@@ -3012,6 +3135,7 @@ def write_segment(session_dir: Path, raw_rel: str, segment_no: int, role: str, e
         "index": str(index_path),
         "event_count": len(events),
         "source_range": {"from_line": first_line, "to_line": last_line},
+        "raw_block": raw_block if isinstance(raw_block, dict) else None,
     }
 
 
@@ -3048,6 +3172,7 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "actor_counts": actor_counts,
         "outcome_counts": outcome_counts,
         "segments": manifest.get("segments", []),
+        "raw_blocks": manifest.get("raw_blocks", {}),
         "read_order": [
             "session.manifest.json",
             SESSION_INDEX_JSON,
@@ -3102,10 +3227,12 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "",
     ]
     for segment in manifest.get("segments", []):
+        raw_block = segment.get("raw_block") if isinstance(segment, dict) and isinstance(segment.get("raw_block"), dict) else {}
         lines.append(
             f"- `{Path(segment['markdown']).name}`: {segment['role']}, "
             f"{segment['event_count']} events, lines "
-            f"{segment['source_range'].get('from_line')}..{segment['source_range'].get('to_line')}"
+            f"{segment['source_range'].get('from_line')}..{segment['source_range'].get('to_line')}, "
+            f"raw block `{raw_block.get('rel', '')}`"
         )
     lines.extend(["", "## Event Counts", ""])
     for event_type, count in by_type.items():
@@ -3265,6 +3392,7 @@ def sync_session_from_transcript(
     event: dict[str, Any],
     transcript_path: Path,
     hook_event_name: str,
+    registry_lock_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     session_id = session_id_from(event, transcript_path)
@@ -3305,13 +3433,23 @@ def sync_session_from_transcript(
     raw_rel = "raw/session.raw.jsonl"
 
     clear_generated_segments(session_dir)
+    clear_generated_raw_blocks(session_dir)
+    ranges = segment_ranges(events)
+    raw_blocks = write_raw_block_artifacts(session_dir, raw_rel, ranges, events)
+    raw_blocks_by_segment = {
+        str(block.get("segment_id")): block
+        for block in raw_blocks.get("blocks", [])
+        if isinstance(block, dict)
+    }
     segment_payloads: list[dict[str, Any]] = []
-    for segment_no, (start, end, role) in enumerate(segment_ranges(events)):
-        segment_payloads.append(write_segment(session_dir, raw_rel, segment_no, role, events[start:end]))
+    for segment_no, (start, end, role) in enumerate(ranges):
+        segment_id = f"{segment_no:03d}"
+        segment_payloads.append(write_segment(session_dir, raw_rel, segment_no, role, events[start:end], raw_blocks_by_segment.get(segment_id)))
 
     manifest_path = session_dir / "session.manifest.json"
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "archive_format_version": 2,
         "session_id": session_id,
         "display": display,
         "session_label": display["label"],
@@ -3331,7 +3469,10 @@ def sync_session_from_transcript(
             "sha256": raw_hash,
             "line_count": len(events),
             "copied_at": now,
+            "blocks_index": raw_blocks.get("index"),
+            "compaction_events": raw_blocks.get("compaction_events"),
         },
+        "raw_blocks": raw_blocks,
         "segments": segment_payloads,
         "latest_event_count": len(events),
     }
@@ -3354,7 +3495,7 @@ def sync_session_from_transcript(
     if legacy_raw_source.exists():
         legacy_raw_source.unlink()
     write_session_index(session_dir, manifest, events)
-    update_registry(aoa_root, manifest, session_dir)
+    registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
     return {
         "session_id": session_id,
         "display_name": display["label"],
@@ -3364,6 +3505,7 @@ def sync_session_from_transcript(
         "segment_count": len(segment_payloads),
         "raw_path": str(raw_path),
         "manifest_path": str(manifest_path),
+        "registry_updated": registry_updated,
     }
 
 
@@ -3403,6 +3545,7 @@ def mirror_transcript_without_indexing(
     transcript_path: Path,
     hook_event_name: str,
     now: str,
+    registry_lock_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     session_id = session_id_from(event, transcript_path)
     initial_session_dir = session_dir_for_id(aoa_root, session_id)
@@ -3482,7 +3625,7 @@ def mirror_transcript_without_indexing(
     write_json(session_dir / "session.manifest.json", manifest)
     if (session_dir / SESSION_INDEX_JSON).exists():
         update_session_index_identity(session_dir, manifest)
-    update_registry(aoa_root, manifest, session_dir)
+    registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
     return {
         "session_id": session_id,
         "display_name": display["label"],
@@ -3492,6 +3635,7 @@ def mirror_transcript_without_indexing(
         "raw_bytes": raw_path.stat().st_size,
         "raw_rel": raw_rel,
         "indexing_status": "deferred_from_hook",
+        "registry_updated": registry_updated,
     }
 
 
@@ -3508,12 +3652,236 @@ def stop_hook_should_defer_indexing(transcript_path: Path | None) -> bool:
     return transcript_path.stat().st_size > threshold
 
 
-def update_registry(aoa_root: Path, manifest: dict[str, Any], session_dir: Path) -> None:
+def hook_mirror_max_bytes() -> int:
+    value = os.environ.get("AOA_SESSION_MEMORY_HOOK_MIRROR_MAX_BYTES")
+    if value is None:
+        return DEFAULT_HOOK_MIRROR_MAX_BYTES
+    try:
+        return int(value)
+    except ValueError:
+        return DEFAULT_HOOK_MIRROR_MAX_BYTES
+
+
+def hook_should_defer_raw_mirror(transcript_path: Path | None) -> bool:
+    if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
+        return False
+    limit = hook_mirror_max_bytes()
+    if limit < 0:
+        return False
+    return transcript_path.stat().st_size > limit
+
+
+def hook_background_sync_enabled() -> bool:
+    return os.environ.get("AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC", "1") != "0"
+
+
+def hook_sync_queue_enabled() -> bool:
+    return os.environ.get("AOA_SESSION_MEMORY_HOOK_SYNC_QUEUE", "1") != "0"
+
+
+def hook_job_id(event_name: str, session_id: str) -> str:
+    safe_event = readable_slug(event_name, fallback="hook", max_chars=40)
+    safe_session = readable_slug(session_id, fallback="session", max_chars=48)
+    return f"{compact_stamp()}__{os.getpid()}__{time.time_ns()}__{safe_event}__{safe_session}"
+
+
+def enqueue_hook_sync_job(
+    aoa_root: Path,
+    *,
+    event_name: str,
+    event: dict[str, Any],
+    session_id: str,
+    transcript_path: Path | None,
+    reason: str,
+) -> Path | None:
+    if not hook_sync_queue_enabled():
+        return None
+    if event_name not in {"SessionStart", "PreCompact", "PostCompact", "Stop"}:
+        return None
+    if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
+        return None
+    pending_root = aoa_root / HOOK_JOBS_ROOT / "pending"
+    pending_root.mkdir(parents=True, exist_ok=True)
+    job_path = pending_root / f"{hook_job_id(event_name, session_id)}.json"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "job_type": "hook_sync_transcript",
+        "queued_at": utc_now(),
+        "event_name": event_name,
+        "session_id": session_id,
+        "transcript_path": str(transcript_path),
+        "cwd": event.get("cwd"),
+        "reason": reason,
+        "event": event,
+    }
+    write_json(job_path, payload)
+    return job_path
+
+
+def attach_hook_sync_job(
+    receipt: dict[str, Any],
+    aoa_root: Path,
+    *,
+    event_name: str,
+    event: dict[str, Any],
+    session_id: str,
+    transcript_path: Path | None,
+    reason: str,
+) -> dict[str, Any]:
+    job_path = enqueue_hook_sync_job(
+        aoa_root,
+        event_name=event_name,
+        event=event,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        reason=reason,
+    )
+    if job_path is None:
+        return receipt
+    actions = receipt.setdefault("actions", [])
+    if isinstance(actions, list):
+        actions.append("background_sync_queued")
+    receipt["background_job"] = str(job_path)
+    return receipt
+
+
+def hook_worker_dirs(aoa_root: Path) -> dict[str, Path]:
+    root = aoa_root / HOOK_JOBS_ROOT
+    return {
+        "root": root,
+        "pending": root / "pending",
+        "running": root / "running",
+        "done": root / "done",
+        "failed": root / "failed",
+    }
+
+
+def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int = 5) -> dict[str, Any]:
+    dirs = hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    lock_path = dirs["root"] / "worker.lock"
+    results: list[dict[str, Any]] = []
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "status": "worker_already_running",
+                "processed": 0,
+                "results": [],
+            }
+        pending_jobs = sorted(dirs["pending"].glob("*.json"))[: max(0, limit)]
+        for job_path in pending_jobs:
+            running_path = dirs["running"] / job_path.name
+            try:
+                job_path.replace(running_path)
+                job = read_json(running_path, {})
+                transcript_value = job.get("transcript_path")
+                transcript_path = Path(str(transcript_value)).expanduser() if transcript_value else None
+                event = job.get("event") if isinstance(job.get("event"), dict) else {}
+                if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
+                    raise FileNotFoundError(str(transcript_path) if transcript_path else "missing transcript_path")
+                synced = sync_session_from_transcript(
+                    aoa_root=aoa_root,
+                    event={
+                        **event,
+                        "session_id": job.get("session_id") or event.get("session_id"),
+                        "transcript_path": str(transcript_path),
+                        "cwd": job.get("cwd") or event.get("cwd"),
+                        "hook_event_name": f"HookWorker:{job.get('event_name') or 'Unknown'}",
+                    },
+                    transcript_path=transcript_path,
+                    hook_event_name=f"HookWorker:{job.get('event_name') or 'Unknown'}",
+                )
+                result = {
+                    "job": str(running_path),
+                    "status": "synced",
+                    "session_id": synced.get("session_id"),
+                    "session_dir": synced.get("session_dir"),
+                    "event_count": synced.get("event_count"),
+                    "segment_count": synced.get("segment_count"),
+                }
+                done_path = dirs["done"] / running_path.name
+                write_json(done_path, {**job, "completed_at": utc_now(), "result": result})
+                running_path.unlink(missing_ok=True)
+                results.append(result)
+            except Exception as exc:
+                failed_path = dirs["failed"] / running_path.name
+                failed_payload = read_json(running_path, {})
+                write_json(
+                    failed_path,
+                    {
+                        **(failed_payload if isinstance(failed_payload, dict) else {}),
+                        "failed_at": utc_now(),
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    },
+                )
+                running_path.unlink(missing_ok=True)
+                results.append({"job": str(job_path), "status": "failed", "error": f"{exc.__class__.__name__}: {exc}"})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": all(result.get("status") != "failed" for result in results),
+        "status": "processed",
+        "processed": len(results),
+        "results": results,
+    }
+
+
+def launch_hook_worker(*, workspace_root: Path | None, aoa_root: Path) -> bool:
+    if not hook_background_sync_enabled():
+        return False
+    command = [
+        sys.executable or "python3",
+        str(Path(__file__).resolve()),
+        "hook-worker",
+        "--aoa-root",
+        str(aoa_root),
+        "--limit",
+        "5",
+    ]
+    if workspace_root is not None:
+        command.extend(["--workspace-root", str(workspace_root)])
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def update_registry(
+    aoa_root: Path,
+    manifest: dict[str, Any],
+    session_dir: Path,
+    *,
+    lock_timeout_sec: float | None = None,
+) -> bool:
     lock_path = aoa_root / ".session-registry.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        if lock_timeout_sec is None:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + max(0.0, lock_timeout_sec)
+            while True:
+                try:
+                    fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return False
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         update_registry_locked(aoa_root, manifest, session_dir)
+    return True
 
 
 def update_registry_locked(aoa_root: Path, manifest: dict[str, Any], session_dir: Path) -> None:
@@ -3596,6 +3964,12 @@ def title_is_generic_for_naming(title: str, source: str | None) -> bool:
     if lowered.startswith("codex in "):
         return True
     if lowered.startswith("reply exactly:"):
+        return True
+    if lowered.startswith(("you are ", "role:", "role ", "ты ", "ты —", "ты -")):
+        return True
+    if lowered.startswith(("context: user approved", "context user approved", "user approved", "repo:", "do not edit files", "не редактируй")):
+        return True
+    if lowered in {"сначала", "first"} or lowered.startswith(("сначала прочитай", "first read", "start by reading")):
         return True
     return False
 
@@ -4057,13 +4431,28 @@ def generic_phase_intent_text(text: str) -> bool:
         "давай",
         "давай действуй",
         "действуй",
+        "делай",
+        "делай дальше",
         "разложи план",
         "что еще у нас есть",
+        "что дальше",
+        "что теперь",
         "ну что ж готов",
         "готов",
+        "я готов",
         "продолжаем",
         "окей",
+        "добро",
         "добро двигай",
+        "коммить пуш мердж",
+        "commit push merge",
+        "это не все",
+        "это не всё",
+        "это еще не все",
+        "это еще не всё",
+        "это ещё не все",
+        "это ещё не всё",
+        "ну давай",
     }
     if lowered in generic_values:
         return True
@@ -4071,12 +4460,37 @@ def generic_phase_intent_text(text: str) -> bool:
         "давай, действуй",
         "давай действуй",
         "давай тогда",
+        "добро,",
+        "добро.",
         "ну хорошо",
+        "ну давай",
         "окей,",
         "так, что",
         "что еще",
+        "что теперь",
+        "в этой сессии",
+        "мы будем",
+        "я готов",
+        "это не все",
+        "это не всё",
+        "это еще не все",
+        "это еще не всё",
+        "это ещё не все",
+        "это ещё не всё",
+        "коммить",
+        "commit",
+        "это всё готово разве",
         "и как бы ты это делал",
     )
+    always_generic_prefixes = (
+        "в этой сессии",
+        "мы будем",
+        "давай следующий",
+        "коммить",
+        "commit",
+    )
+    if any(lowered.startswith(prefix) for prefix in always_generic_prefixes):
+        return True
     if len(lowered) > 80 and any(lowered.startswith(prefix) for prefix in generic_prefixes):
         return False
     return any(lowered.startswith(prefix) for prefix in generic_prefixes)
@@ -5860,6 +6274,2048 @@ def build_naming_readiness_report(
     return payload
 
 
+KNOWN_SESSION_NAME_DOMAINS = [
+    ("aoa-session-memory", (".aoa", "aoa-session-memory", "session-memory", "session memory", "codex session")),
+    ("aoa-techniques", ("aoa-techniques", "technique_index", "technique index")),
+    ("agents-of-abyss", ("agents-of-abyss", "agents of abyss", "aoa-experience")),
+    ("tree-of-sophia", ("tree-of-sophia", "tree of sophia")),
+    ("abyss-machine", ("abyss-machine", "nervous", "zram", "gnome shell")),
+    ("abyss-stack", ("abyss-stack", "mechanics", "validate_stack")),
+    ("rios-de-color", ("rios-de-color", "rios", "operator-review")),
+]
+
+SESSION_ACTION_HINTS = [
+    ("naming", ("name", "naming", "rename", "имен", "нейм", "назван")),
+    ("hook-hardening", ("hook", "precompact", "postcompact", "compact", "хук")),
+    ("skill-routing", ("skill", "skills", "скилл")),
+    ("repo-ordering", ("repo", "repository", "репо", "canon", "канон")),
+    ("validation", ("validate", "validation", "audit", "test", "pytest", "проверк")),
+    ("refactor", ("refactor", "рефактор")),
+    ("repair", ("repair", "fix", "исправ", "почин")),
+    ("release-landing", ("commit", "push", "merge", "pr ", "pull request", "релиз")),
+    ("runtime-hardening", ("runtime", "service", "systemd", "container", "machine")),
+    ("design", ("design", "architecture", "дизайн", "архитект")),
+]
+
+GENERIC_SESSION_NAME_WORDS = {
+    "codex",
+    "session",
+    "continue",
+    "work",
+    "task",
+    "current",
+    "latest",
+    "start",
+    "finish",
+    "review",
+    "check",
+    "thing",
+    "stuff",
+    "files",
+    "mentioned",
+    "user",
+    "you",
+    "are",
+    "role",
+    "read",
+    "only",
+    "context",
+    "workspace",
+    "сессии",
+    "сессия",
+    "продолжать",
+    "заниматься",
+    "делать",
+    "давай",
+    "окей",
+    "хорошо",
+    "aoa",
+    "agents",
+    "abyss",
+    "of",
+    "srv",
+    "home",
+    "dionysus",
+    "techniques",
+    "machine",
+    "stack",
+    "memory",
+    "не",
+    "редактируй",
+}
+
+
+def naming_evidence_text_is_runtime_envelope(text: str) -> bool:
+    stripped = re.sub(r"\s+", " ", str(text or "")).strip()
+    lowered = stripped.lower()
+    if not stripped:
+        return True
+    envelope_prefixes = (
+        "# agents.md instructions",
+        "<permissions instructions>",
+        "<environment_context>",
+        "<workspace_context>",
+    )
+    if any(lowered.startswith(prefix) for prefix in envelope_prefixes):
+        return True
+    if lowered.startswith("# context from my ide setup") and "my request for codex" not in lowered:
+        return True
+    if lowered.startswith("# files mentioned by the user") and "my request for codex" not in lowered:
+        return True
+    return False
+
+
+def event_is_naming_evidence_user_request(event: RawEvent) -> bool:
+    if event.event_type != "USER_INTENT":
+        return False
+    text = event_semantic_text(event)
+    return not naming_evidence_text_is_runtime_envelope(text)
+
+
+def first_raw_event_for_event_type(raw_path: Path, event_type: str = "USER_INTENT", *, max_lines: int = 2000) -> tuple[str, str] | None:
+    if not raw_path.is_file():
+        return None
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            if line_no > max_lines:
+                break
+            raw_line = line.rstrip("\n")
+            parsed: dict[str, Any] | None = None
+            try:
+                loaded = json.loads(raw_line)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except json.JSONDecodeError:
+                parsed = None
+            event = classify_raw_event(raw_line, parsed, line_no)
+            if event_type == "USER_INTENT" and event_is_naming_evidence_user_request(event):
+                return f"raw:line:{line_no}", event_semantic_text(event)
+            if event_type != "USER_INTENT" and event.event_type == event_type:
+                return f"raw:line:{line_no}", event_semantic_text(event)
+    return None
+
+
+def first_raw_ref_for_event_type(raw_path: Path, event_type: str = "USER_INTENT", *, max_lines: int = 2000) -> str | None:
+    found = first_raw_event_for_event_type(raw_path, event_type=event_type, max_lines=max_lines)
+    return found[0] if found else None
+
+
+def text_terms_for_session_name(value: str) -> list[str]:
+    slug = semantic_name_slug(value)
+    return [part for part in slug.split("-") if part]
+
+
+def generic_session_name_text(value: str) -> bool:
+    terms = text_terms_for_session_name(value)
+    if len(terms) < 3:
+        return True
+    meaningful = [term for term in terms if term not in GENERIC_SESSION_NAME_WORDS]
+    if len(meaningful) < 2:
+        return True
+    compact = " ".join(terms)
+    return compact in {"codex in abyssos", "codex in memories", "continue work"}
+
+
+def naming_policy_domain_hints(policy: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
+    configured = policy.get("session_name_domain_hints") if isinstance(policy, dict) else None
+    if isinstance(configured, list):
+        hints: list[tuple[str, tuple[str, ...]]] = []
+        for item in configured:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            markers = item.get("markers") if isinstance(item.get("markers"), list) else []
+            marker_values = tuple(str(marker) for marker in markers if str(marker).strip())
+            if name and marker_values:
+                hints.append((name, marker_values))
+        if hints:
+            return hints
+    return KNOWN_SESSION_NAME_DOMAINS
+
+
+def naming_policy_action_hints(policy: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
+    configured = policy.get("session_name_action_hints") if isinstance(policy, dict) else None
+    if isinstance(configured, list):
+        hints: list[tuple[str, tuple[str, ...]]] = []
+        for item in configured:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            markers = item.get("markers") if isinstance(item.get("markers"), list) else []
+            marker_values = tuple(str(marker) for marker in markers if str(marker).strip())
+            if name and marker_values:
+                hints.append((name, marker_values))
+        if hints:
+            return hints
+    return SESSION_ACTION_HINTS
+
+
+def detect_session_domain(texts: list[str], *, hints: list[tuple[str, tuple[str, ...]]] | None = None) -> str:
+    haystack = "\n".join(str(text or "").lower() for text in texts)
+    for domain, markers in hints or KNOWN_SESSION_NAME_DOMAINS:
+        if any(marker.lower() in haystack for marker in markers):
+            return domain
+    cwd_paths = [text for text in texts if "/" in str(text)]
+    for value in cwd_paths:
+        match = re.search(r"(?<![\w.-])/[^\s`]+", str(value))
+        if not match:
+            continue
+        path_value = match.group(0)
+        path = Path(path_value)
+        parts = [part for part in path.parts if part not in {"/", "srv", "home", "dionysus", "work", "src", "github-owner"}]
+        if parts:
+            leaf = Path(parts[-1]).stem if Path(parts[-1]).suffix else parts[-1]
+            return semantic_name_slug(leaf)
+    return ""
+
+
+def detect_session_action(texts: list[str], *, hints: list[tuple[str, tuple[str, ...]]] | None = None) -> str:
+    haystack = "\n".join(str(text or "").lower() for text in texts)
+    for action, markers in hints or SESSION_ACTION_HINTS:
+        if any(marker.lower() in haystack for marker in markers):
+            return action
+    return "continuation"
+
+
+def strip_session_meta_instruction_prefixes(value: str) -> str:
+    text = str(value or "").strip()
+    patterns = (
+        r"(?is)^\s*(?:работай|work)\s+(?:в|in)\s+`?/[^\s`.]+`?\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*рабочий\s+контекст\s*:?\s*`?/[^\s`.]+`?\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*github\s+owner\s+\S+\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*task\s+in\s+`?/[^\s`.]+`?\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*(?:отвечай|ответь|пиши)\s+только\s+на\s+(?:русском|английском)\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*только\s+на\s+(?:русском|английском)\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*(?:answer|reply|respond|write)\s+only\s+in\s+(?:russian|english)\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*you\s+are\b.*?\btask\s*:?\s*",
+        r"(?is)^\s*you\s+are\b[^.?!]{0,220}[.?!]\s*",
+        r"(?is)^\s*you\s+are\s+not\s+alone\b.*?(?=\b(?:context|task|scope)\b)",
+        r"(?is)^\s*you\s+are\s+working\b.*?(?=\b(?:address|task|scope|focus|inspect|review)\b)",
+        r"(?is)^\s*ты\s*(?:—|-)?\s*.*?\bзадача\b\s*:?\s*",
+        r"(?is)^\s*ты\s*(?:—|-)?\s*[^.?!]{0,220}[.?!]\s*",
+        r"(?is)^\s*role\s*:?\s*[^.?!]{0,220}[.?!]\s*",
+        r"(?is)^\s*read[- ]only\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*read[- ]only\s+audit\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*read[- ]only\s+(?:review\s+)?task\s+for\s+",
+        r"(?is)^\s*не\s+редактируй(?:\s+файлы)?\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*do\s+not\s+edit\s+files\s*[.!?:;,-]*\s*",
+        r"(?is)^\s*context\s*:\s*user approved[^.?!]*[.?!]\s*",
+        r"(?is)^\s*context\s*:\s*user approved(?:\s+\S+){0,8}\s*",
+        r"(?is)^\s*context\s*:\s*.*?(?=\b(?:task|scope|focus)\b)",
+        r"(?is)^\s*repo\s*:\s*.*?(?=\btask\b)",
+        r"(?is)^\s*(?:task|задача)\s*:?\s*",
+        r"(?is)^\s*for\s+(?=wave\s+\d+\b)",
+        r"(?is)^\s*focus\s+only\s+on\s+",
+        r"(?is)^\s*(?:scope|focus)\s*:?\s*",
+        r"(?is)^\s*сначала\s+прочитай\s*:?.*?(?=\b(?:проверь|проведи|найди|исправь|разберись|сделай|собери|оцени|задача)\b)",
+        r"(?is)^\s*(?:first|start by)\s+read\s*:?.*?(?=\b(?:task|then|check|inspect|fix|build|implement|review)\b)",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for pattern in patterns:
+            updated = re.sub(pattern, "", text).strip()
+            if updated != text:
+                text = updated
+                changed = True
+    return text
+
+
+def attachment_file_title_seed(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.match(r"^\s*[`'\"]?(?P<path>/[^\s`'\"]+\.[A-Za-z0-9_]+)[`'\"]?", text)
+    if not match:
+        return ""
+    tail = text[match.end() :].lower()
+    if any(marker in tail for marker in ("вот задача", "в этом файле", "task", "задание")):
+        return Path(match.group("path")).stem
+    return ""
+
+
+def session_review_owner_repo_words(value: str) -> str:
+    text = str(value or "")
+    match = re.search(
+        r"(?is)\b(?:your\s+)?write\s+ownership\s+is\s+only\s+(?P<owners>.+?)(?:\.\s|$)",
+        text,
+    )
+    if not match:
+        return ""
+    owners: list[str] = []
+    for owner_match in re.finditer(r"/(?:srv|home/dionysus/src)/(?P<repo>[A-Za-z0-9_.-]+)", match.group("owners")):
+        repo = semantic_name_slug(owner_match.group("repo"))
+        if repo and repo not in owners:
+            owners.append(repo)
+        if len(owners) >= 4:
+            break
+    return " ".join(owners)
+
+
+def repo_marker_words(value: str, *, limit: int = 4) -> str:
+    repos: list[str] = []
+    for match in re.finditer(r"(?:`|/)(?P<repo>(?:aoa|abyss|Agents|Tree|8Dionysus)[A-Za-z0-9_.-]*(?:-of-[A-Za-z0-9_.-]+)?)`?", str(value)):
+        repo = semantic_name_slug(match.group("repo"))
+        if repo.startswith("aoa-experience-"):
+            continue
+        if repo and repo not in {"srv", "home", "tmp"} and repo not in repos:
+            repos.append(repo)
+        if len(repos) >= limit:
+            break
+    return " ".join(repos)
+
+
+def experience_scout_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if "scout" not in text.lower():
+        return ""
+    wave = re.search(r"\bExperience\s+Wave\s*(?P<wave>\d+)\b", text, flags=re.IGNORECASE)
+    if not wave:
+        return ""
+    lane_match = re.search(r"(?is)^\s*(?:ты\s*(?:—|-)?\s*|you\s+are\s+)?(?P<lane>[^.]{1,80}?)\s+scout\b", text)
+    lane = semantic_name_slug(lane_match.group("lane")) if lane_match else ""
+    lane_words = " ".join(word for word in lane.split("-") if word and word not in {"read", "only", "ты", "you", "are"})
+    repos = repo_marker_words(text)
+    lane_terms = set(lane_words.split())
+    if {"roles", "playbooks", "kag", "practice"} <= lane_terms:
+        return concise_title_text(f"AoA Experience Wave {wave.group('wave')} roles playbooks KAG practice landing map", max_words=10)
+    if {"center", "law"} <= lane_terms and "agents-of-abyss" in repos:
+        return concise_title_text(f"Agents-of-Abyss Wave {wave.group('wave')} center law landing map", max_words=9)
+    if repos:
+        return concise_title_text(f"Wave {wave.group('wave')} {repos} {lane_words} landing map", max_words=11)
+    if lane_words:
+        return concise_title_text(f"Wave {wave.group('wave')} {lane_words} landing map", max_words=10)
+    return ""
+
+
+def wave_sidecar_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    wave = re.search(r"\bWave\s*(?P<wave>\d+)\b", text, flags=re.IGNORECASE)
+    if not wave:
+        return ""
+    if "federation harvest" in lowered and "adoption forge" in lowered:
+        return concise_title_text(f"Wave {wave.group('wave')} federation harvest adoption forge sidecar review", max_words=10)
+    if "runtime/adoption boundaries" in lowered or ("runtime" in lowered and "adoption" in lowered and "sidecar" in lowered):
+        return concise_title_text(f"Wave {wave.group('wave')} runtime adoption boundaries sidecar review", max_words=10)
+    return ""
+
+
+def next_wave_scout_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "scout" not in lowered or "aoa-experience-" not in lowered:
+        return ""
+    topic = experience_wave_slug_words(text)
+    if not topic:
+        return ""
+    repos = repo_marker_words(text)
+    role_match = re.search(r"(?is)^\s*role\s*:?\s*(?P<role>[^.]{1,80}?)\s+scout\b", text)
+    role_words = semantic_name_slug(role_match.group("role")) if role_match else ""
+    role_tail = " ".join(word for word in role_words.split("-") if word and word not in {"role", "read", "only"})
+    if repos:
+        return concise_title_text(f"{repos} {topic} scout map", max_words=10)
+    if role_tail:
+        return concise_title_text(f"{topic} {role_tail} scout map", max_words=9)
+    return concise_title_text(f"{topic} scout map", max_words=7)
+
+
+def pr_gate_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "pr" not in lowered or "gate watcher" not in lowered:
+        return ""
+    wave = re.search(r"\bwave\s*(?P<wave>\d+)\b", text, flags=re.IGNORECASE)
+    wave_text = f"Wave {wave.group('wave')}" if wave else ""
+    if "оставшиеся" in lowered:
+        return concise_title_text(f"AoA Experience {wave_text} remaining PR review thread gate", max_words=10)
+    return concise_title_text(f"AoA Experience {wave_text} cross repo PR merge gate status", max_words=10)
+
+
+def experience_seed_review_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "experience" not in lowered and "aoa-experience" not in lowered:
+        return ""
+    if "sidecar for experience wave" in lowered and "federation" in lowered and "adoption" in lowered:
+        return ""
+    if ("next experience wave" in lowered or "next wave" in lowered) and (
+        "v0_4" in lowered
+        or "v0.4" in lowered
+        or "certification forge" in lowered
+        or "certification-forge" in lowered
+    ) and (
+        "v0_5" in lowered
+        or "v0.5" in lowered
+        or "deployment watchtower" in lowered
+        or "deployment-watchtower" in lowered
+    ):
+        if "seed cartographer" in lowered or "seed inspection" in lowered or "inspect seed" in lowered:
+            return "AoA Experience Wave 2 certification forge deployment watchtower seed inspection"
+        return "AoA Experience Wave 2 seed scope authority review"
+    if ("three seed zips" in lowered or "v0.1-v0.3" in lowered or "v0.1" in lowered and "v0.3" in lowered) and (
+        "authority-risk" in lowered or "authority risk" in lowered or "review gate" in lowered
+    ):
+        return "AoA Experience Wave 1 seed authority risk review"
+    if (
+        "seed cartographer" in lowered
+        or "изучи два архива" in lowered
+        or "compact seed cartography" in lowered
+        or "seed cartography" in lowered
+    ) and ("polis-governance" in lowered or "polis governance" in lowered) and (
+        "constitution-runtime" in lowered or "constitution runtime" in lowered
+    ):
+        return "AoA Experience Wave 4 polis governance constitution runtime seed cartography"
+    return ""
+
+
+def experience_lineage_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "dionysus wave 0" in lowered and "wave 1" in lowered and "provenance" in lowered and "memory humility" in lowered:
+        return "Agents-of-Abyss Wave 1 Dionysus Wave 0 provenance bridge review"
+    if (
+        ("aoa-experience" in lowered or "experience" in lowered)
+        and ("v1.2-v2.0" in lowered or "v1.2->v2.0" in lowered or "v1-2-to-v2-0" in lowered)
+        and "wave 0" in lowered
+        and ("lineage" in lowered or "provenance" in lowered)
+    ):
+        return "AoA Experience v1.2 to v2.0 Wave 0 lineage provenance framing"
+    return ""
+
+
+def cross_repo_review_gate_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "review gate" not in lowered:
+        return ""
+    repos = repo_marker_words(text, limit=5)
+    if "agents-of-abyss" in repos and "aoa-memo" in repos and (
+        "review comments" in lowered or "wave5" in lowered or "wave 5" in lowered
+    ):
+        return "Agents-of-Abyss aoa-memo Wave 5 review comment fixes gate"
+    return ""
+
+
+def titan_wave_risk_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "titan bearer" not in lowered and "risk review" not in lowered:
+        return ""
+    version_span = any(marker in lowered for marker in ("v1.2-v2.0", "v1.2->v2.0", "v1-2-to-v2-0"))
+    if "dionysus wave 0" in lowered and version_span and ("judgment gate" in lowered or "bounded verdict" in lowered):
+        return "Dionysus Wave 0 v1.2 to v2.0 seed intake final judgment"
+    if "dionysus wave 0" in lowered and version_span and "structural framing" in lowered:
+        return "Dionysus Wave 0 v1.2 to v2.0 seed intake structural framing"
+    if "dionysus wave 0" in lowered and version_span:
+        return "Dionysus Wave 0 v1.2 to v2.0 seed intake risk review"
+    if "wave 1 center bridge" in lowered and "risk review" in lowered:
+        return "Agents-of-Abyss Wave 1 center bridge risk review"
+    return ""
+
+
+def center_bridge_surface_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "wave 1" in lowered and "center bridge surface shape" in lowered:
+        return "Agents-of-Abyss Wave 1 center bridge surface map"
+    return ""
+
+
+def dionysus_closeout_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "dionysus" not in lowered:
+        return ""
+    if "closeout diff" in lowered and ("final bounded judgment" in lowered or "final judgment" in lowered):
+        return "Dionysus v1.2 to v2.0 closeout final judgment"
+    if "narrow lineage audit" in lowered and "truthful dionysus closeout" in lowered:
+        return "Dionysus v1.2 to v2.0 closeout lineage audit"
+    if "final closeout map" in lowered and ("v1.2->v2.0" in lowered or "v1.2-v2.0" in lowered):
+        return "Dionysus v1.2 to v2.0 final closeout map"
+    if "dionysus final closeout diff" in lowered and "seed_surface_map" in lowered:
+        return "Dionysus v1.2 to v2.0 closeout diff review"
+    if "ultra-narrow review" in lowered and "seed_surface_map" in lowered and "seed_aoa_experience_wave0" in lowered:
+        return "Dionysus Wave 0 seed surface final review"
+    return ""
+
+
+def compact_hook_probe_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    if "aoa-compact-tool-probe" in text:
+        return "aoa-session-memory compact hook probe"
+    return ""
+
+
+def socraticode_runbook_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if "socraticode" not in text.lower() or "runbook" not in text.lower():
+        return ""
+    domain = detect_session_domain([text])
+    lowered = text.lower()
+    if "repair candidate" in lowered or "controlled repair" in lowered:
+        return concise_title_text(f"{domain} SocratiCode runbook repair candidate routing", max_words=9)
+    return concise_title_text(f"{domain} SocratiCode runbook check", max_words=7)
+
+
+def post_w10_gap_audit_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "post-w10 hardening gap audit" not in lowered:
+        return ""
+    if "living workspace continuity runtime" in lowered:
+        return "Agents-of-Abyss post-W10 runtime continuity owner hardening audit"
+    return "Agents-of-Abyss post-W10 center contract owner gap audit"
+
+
+def mirror_drift_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "8dionysus" in lowered and "/srv" in lowered and ("расхожд" in lowered or "отстает" in lowered):
+        return "8Dionysus mirror drift audit"
+    return ""
+
+
+def multi_repo_fix_map_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if not lowered.startswith("map the requested multi-repo fixes"):
+        return ""
+    repos = repo_marker_words(text, limit=5)
+    if repos:
+        return concise_title_text(f"{repos} multi repo fix map", max_words=12)
+    return "multi repo fix map"
+
+
+def rfc3339_lineage_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if "rfc3339 date-time checker bugs" not in lowered:
+        return ""
+    repos = repo_marker_words(text, limit=4)
+    return concise_title_text(f"{repos} RFC3339 date time semantics review", max_words=10)
+
+
+def russian_seed_meaning_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    if text.startswith("изучи эти семена") and "посад" in text and "смысл" in text:
+        return "seed planting meaning review"
+    return ""
+
+
+def artifact_topic_slug_words(value: str) -> str:
+    text = str(value or "")
+    patterns = (
+        r"\bEXPERIENCE_V\d+(?:_\d+)+(?:_TO_V\d+(?:_\d+)*)?_(?P<slug>[A-Z0-9_]+)\.(?:md|json)\b",
+        r"\bexperience-v\d+(?:-\d+)+(?:-v\d+(?:-\d+)*)?-(?P<slug>[a-z0-9-]+)\.schema\.json\b",
+        r"\bexamples?/experience_v\d+(?:_\d+)+(?:_to_v\d+(?:_\d+)*)?_(?P<slug>[a-z0-9_]+)\.example\.json\b",
+        r"\bdocs/(?P<slug>[A-Z][A-Z0-9_]{4,})\.md\b",
+        r"\bschemas/(?P<slug>[a-z0-9-]{4,})\.schema\.json\b",
+        r"\bexamples?/(?P<slug>[a-z0-9_]{4,})\.example\.json\b",
+    )
+    banned = {
+        "agents",
+        "readme",
+        "start-here",
+        "roadmap",
+        "index",
+        "validate-repo",
+        "test-validate-repo",
+    }
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            slug = match.group("slug").replace("_", "-").lower()
+            slug = re.sub(r"^(?:experience|docs?|schemas?|examples?)-", "", slug)
+            words = [word for word in slug.split("-") if word and word not in banned and not re.fullmatch(r"(?:v|wave)?\d+", word)]
+            if "landing" in words and len(words) > 2:
+                continue
+            if len(words) >= 2:
+                return " ".join(words[:8])
+    return ""
+
+
+def experience_wave_slug_words(value: str) -> str:
+    text = str(value or "")
+    patterns = (
+        r"\bEXPERIENCE_V\d+_\d+_(?P<slug>[A-Z0-9_]+)",
+        r"\baoa-experience-(?P<slug>[a-z0-9-]+)-seed-v\d+_\d+(?:\.zip)?\b",
+        r"\bexperience-v\d+-\d+(?:-v\d+-\d+)?-(?P<slug>[a-z0-9-]+)\.schema\.json\b",
+        r"\bcodex/wave\d+-v\d+_\d+-(?P<slug>[a-z0-9-]+?)-20\d{6}\b",
+        r"\bv\d+[._]\d+\s+(?P<slug>[a-z][a-z -]+?)(?=\s+(?:after|planting|archive|review|on|in)\b|[.])",
+        r"\bv\d+[._]\d+\s+(?P<slug>[a-z][a-z -]+?)\s+archive\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        slug = match.group("slug")
+        slug = slug.replace("_", "-").lower()
+        words = [word for word in slug.split("-") if word and word not in {"seed"}]
+        if words == ["context", "memory", "weaving", "continuity", "loom"]:
+            words = ["context", "memory", "continuity", "loom"]
+        if words:
+            return " ".join(words)
+    return artifact_topic_slug_words(text)
+
+
+def experience_wave_action_words(value: str) -> str:
+    text = str(value or "").lower()
+    if "after exact operations_flow authority_note hardening" in text or "authority_note hardening" in text:
+        return "authority note hardening final judgment"
+    if "after fixing owner_split" in text or "owner_split exactness" in text:
+        return "owner split final judgment"
+    if "second-pass verdict" in text or "second pass verdict" in text:
+        return "second pass judgment"
+    if "judgment payload gate" in text:
+        return "merge judgment"
+    if "after one fix round" in text:
+        return "fix round final verdict"
+    if "fast narrow review verdict" in text:
+        return "fast verdict review"
+    if "narrow uncommitted diff" in text:
+        return "diff review"
+    if text.startswith("re-review wave "):
+        return "recheck"
+    if "code-review posture" in text or text.startswith("review wave "):
+        return "review"
+    if "lawful semantic core" in text:
+        return "semantic core plan"
+    if "owner-first landing shape" in text:
+        return "owner landing plan"
+    if "exact five-file landing names" in text:
+        return "five file architecture review"
+    if any(marker in text for marker in ("judge merge readiness", "judgment only", "ready to merge", "final verdict", "final judgment")):
+        return "merge judgment"
+    if any(marker in text for marker in ("review exactly", "review stance", "find merge-blocking", "find merge blocking")):
+        return "bounded review"
+    if any(marker in text for marker in ("narrow review", "review only these", "only review", "bounded review")):
+        return "bounded review"
+    if any(marker in text for marker in ("final bounded judgment", "verdict pass", "verdict review")):
+        return "final judgment"
+    if "planning only" in text or "landing plan" in text:
+        return "landing plan"
+    if "architecture pass" in text or "architecture task" in text:
+        return "architecture review"
+    if "memory-keeper pass" in text or "memory keeper pass" in text:
+        return "memory review"
+    if "seed cartography" in text:
+        return "seed cartography"
+    if "lineage" in text or "provenance" in text:
+        return "lineage review"
+    if "reconnaissance" in text:
+        return "reconnaissance"
+    if "plant minimal owner-local" in text or "plant thin" in text:
+        return "contract planting"
+    if "landing plan" in text:
+        return "landing plan"
+    if "semantic invariants" in text:
+        return "invariant extraction"
+    if "inspect" in text:
+        return "seed inspection"
+    return "review"
+
+
+def experience_wave_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    wave = re.search(r"\bwave\s*(?P<wave>\d+)\b", text, flags=re.IGNORECASE)
+    if not wave:
+        return ""
+    slug_words = experience_wave_slug_words(text)
+    if not slug_words:
+        return ""
+    action_words = experience_wave_action_words(text)
+    owner_words = session_review_owner_repo_words(text)
+    if owner_words:
+        return concise_title_text(f"Wave {wave.group('wave')} {owner_words} {action_words}", max_words=10)
+    return concise_title_text(f"Wave {wave.group('wave')} {slug_words} {action_words}", max_words=10)
+
+
+def repo_review_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    if not any(marker in lowered for marker in ("review", "judgment", "verdict", "pass", "diff", "working-tree")):
+        return ""
+    domain = detect_session_domain([text])
+    if not domain:
+        return ""
+    topic = experience_wave_slug_words(text) or artifact_topic_slug_words(text)
+    if not topic:
+        return ""
+    wave_match = re.search(r"\bwave\s*(?P<wave>\d+)\b|(?:^|[_-])wave(?P<wave2>\d+)(?=$|[^A-Za-z0-9])", text, flags=re.IGNORECASE)
+    wave_text = f"Wave {wave_match.group('wave') or wave_match.group('wave2')}" if wave_match else ""
+    action = experience_wave_action_words(text)
+    return concise_title_text(f"{domain} {wave_text} {topic} {action}", max_words=11)
+
+
+def repo_topology_refactor_session_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.lower()
+    domain = detect_session_domain([text])
+    if not domain:
+        return ""
+    if not any(
+        marker in lowered
+        for marker in (
+            "refactor",
+            "рефактор",
+            "topology",
+            "тополог",
+            "ordering",
+            "упорядоч",
+            "mechanics",
+            "механик",
+        )
+    ):
+        return ""
+    focus: list[str] = []
+    if any(marker in lowered for marker in ("topology", "тополог", "ordering", "упорядоч")):
+        focus.extend(["topology", "ordering"])
+    if any(marker in lowered for marker in ("refactor", "рефактор")):
+        focus.append("refactor")
+    if any(marker in lowered for marker in ("mechanics", "механик")):
+        focus.extend(["mechanics", "routing"])
+    if not focus:
+        return ""
+    return concise_title_text(f"{domain} {' '.join(focus)}", max_words=10)
+
+
+def special_session_name_seed(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    sidecar_seed = wave_sidecar_session_seed(text)
+    if sidecar_seed:
+        return sidecar_seed
+    experience_seed_review_seed = experience_seed_review_session_seed(text)
+    if experience_seed_review_seed:
+        return experience_seed_review_seed
+    experience_lineage_seed = experience_lineage_session_seed(text)
+    if experience_lineage_seed:
+        return experience_lineage_seed
+    cross_repo_review_gate_seed = cross_repo_review_gate_session_seed(text)
+    if cross_repo_review_gate_seed:
+        return cross_repo_review_gate_seed
+    next_wave_scout_seed = next_wave_scout_session_seed(text)
+    if next_wave_scout_seed:
+        return next_wave_scout_seed
+    titan_wave_risk_seed = titan_wave_risk_session_seed(text)
+    if titan_wave_risk_seed:
+        return titan_wave_risk_seed
+    center_bridge_surface_seed = center_bridge_surface_session_seed(text)
+    if center_bridge_surface_seed:
+        return center_bridge_surface_seed
+    dionysus_closeout_seed = dionysus_closeout_session_seed(text)
+    if dionysus_closeout_seed:
+        return dionysus_closeout_seed
+    compact_hook_probe_seed = compact_hook_probe_session_seed(text)
+    if compact_hook_probe_seed:
+        return compact_hook_probe_seed
+    post_w10_gap_audit_seed = post_w10_gap_audit_session_seed(text)
+    if post_w10_gap_audit_seed:
+        return post_w10_gap_audit_seed
+    mirror_drift_seed = mirror_drift_session_seed(text)
+    if mirror_drift_seed:
+        return mirror_drift_seed
+    multi_repo_fix_map_seed = multi_repo_fix_map_session_seed(text)
+    if multi_repo_fix_map_seed:
+        return multi_repo_fix_map_seed
+    rfc3339_lineage_seed = rfc3339_lineage_session_seed(text)
+    if rfc3339_lineage_seed:
+        return rfc3339_lineage_seed
+    pr_gate_seed = pr_gate_session_seed(text)
+    if pr_gate_seed:
+        return pr_gate_seed
+    socraticode_seed = socraticode_runbook_session_seed(text)
+    if socraticode_seed:
+        return socraticode_seed
+    seed_meaning_seed = russian_seed_meaning_session_seed(text)
+    if seed_meaning_seed:
+        return seed_meaning_seed
+    scout_seed = experience_scout_session_seed(text)
+    if scout_seed:
+        return scout_seed
+    wave_seed = experience_wave_session_seed(text)
+    if wave_seed:
+        return wave_seed
+    repo_review_seed = repo_review_session_seed(text)
+    if repo_review_seed:
+        return repo_review_seed
+    repo_topology_refactor_seed = repo_topology_refactor_session_seed(text)
+    if repo_topology_refactor_seed:
+        return repo_topology_refactor_seed
+    pr_review = re.match(
+        r"(?is)^(?:read[- ]only\s+)?audit\.\s*context:\s*user provided(?:\s+a\s+large\s+list\s+of)?\s+pr review comments for (?P<owners>.+?)\.\s*work\b",
+        text,
+    )
+    if pr_review:
+        owners = pr_review.group("owners")
+        owners = re.sub(r"\band\b", ",", owners, flags=re.IGNORECASE)
+        owner_terms = [term.strip(" /`'\"") for term in re.split(r"[,;]+", owners) if term.strip(" /`'\"")]
+        owner_text = " ".join(owner_terms[:4])
+        return concise_title_text(f"{owner_text} PR review comments audit", max_words=10)
+    return ""
+
+
+def useful_name_seed(value: str) -> str:
+    special_seed = special_session_name_seed(value)
+    if special_seed:
+        return special_seed
+    attachment_seed = attachment_file_title_seed(value)
+    if attachment_seed:
+        return concise_title_text(attachment_seed)
+    text = clean_phase_candidate_text(value)
+    text = strip_session_meta_instruction_prefixes(text)
+    text = concise_title_text(text)
+    text = re.sub(r"(?i)\bread[- ]only\b\s*", "", text).strip()
+    text = re.sub(r"(?i)^не\s+редактируй(?:\s+файлы)?\s*[.!?:;,-]*\s*", "", text).strip()
+    text = re.sub(r"(?i)^codex in\s+", "", text).strip()
+    text = re.sub(r"(?i)^in this session\s+", "", text).strip()
+    text = re.sub(r"(?i)^continue\s+", "", text).strip()
+    text = re.sub(r"^В этой сессии\s+", "", text).strip()
+    text = re.sub(r"^Мы будем\s+", "", text).strip()
+    return text
+
+
+def compact_session_name(parts: list[str]) -> str:
+    joined = " ".join(part for part in parts if str(part or "").strip())
+    slug = semantic_name_slug(joined)
+    words = [word for word in slug.split("-") if word]
+    deduped: list[str] = []
+    for word in words:
+        if deduped and deduped[-1] == word:
+            continue
+        deduped.append(word)
+    return "-".join(deduped[:12]) or "unresolved-session-name"
+
+
+def name_seed_has_owner_signal(value: str) -> bool:
+    slug = semantic_name_slug(value)
+    terms = set(slug.split("-"))
+    if any(term.startswith("aoa") for term in terms):
+        return True
+    return bool(terms & {"agents", "abyss", "tree", "sophia", "dionysus", "rios"})
+
+
+def procedural_session_name_flags(terms: list[str]) -> list[str]:
+    flags: list[str] = []
+    term_set = set(terms)
+    if not terms:
+        return flags
+    joined = " ".join(terms)
+    procedural_prefixes = (
+        ("review", "the", "current"),
+        ("evaluate", "the", "current"),
+        ("give", "a", "final"),
+        ("return", "a", "fast"),
+        ("run", "this", "harmless"),
+        ("map", "the", "requested"),
+        ("изучи",),
+        ("проведи",),
+        ("проверь",),
+        ("нужен",),
+    )
+    if any(tuple(terms[: len(prefix)]) == prefix for prefix in procedural_prefixes):
+        flags.append("procedural_prompt_residue")
+    if "only" in term_set and ({"review", "repo"} & term_set or "branch" in term_set):
+        flags.append("instruction_scope_residue")
+    if "task" in term_set and ({"wave", "repo", "user"} & term_set):
+        flags.append("procedural_prompt_residue")
+    if "user" in term_set and ({"authorized", "explicitly"} & term_set):
+        flags.append("instruction_scope_residue")
+    if "srv" in term_set or "worktrees" in term_set or "tmp" in term_set:
+        flags.append("path_scaffold_in_name")
+    if terms[-1] in {"for", "after", "current", "branch", "task", "user", "only", "для", "в", "in", "on", "the"}:
+        flags.append("truncated_name_tail")
+    if re.search(r"\b(?:review|evaluate|inspect|judge|return|give|run|map|проверь|проведи|изучи)\b", joined):
+        content_terms = [
+            term
+            for term in terms
+            if term not in GENERIC_SESSION_NAME_WORDS
+            and term not in {"review", "evaluate", "inspect", "judge", "return", "give", "run", "map", "проверь", "проведи", "изучи"}
+        ]
+        if len(content_terms) <= 3 and not (
+            {"pr", "comments", "audit"} <= term_set or {"seed", "planting", "meaning"} <= term_set
+        ):
+            flags.append("low_semantic_content_name")
+    return sorted(set(flags))
+
+
+def quality_allows_title_seed(quality: dict[str, Any]) -> bool:
+    flags = set(quality.get("flags", []) if isinstance(quality.get("flags"), list) else [])
+    rejected = {
+        "generic_name",
+        "instruction_text_in_name",
+        "banned_placeholder_term",
+        "procedural_prompt_residue",
+        "instruction_scope_residue",
+        "path_scaffold_in_name",
+        "truncated_name_tail",
+        "low_semantic_content_name",
+    }
+    return not (flags & rejected)
+
+
+def phase_discovery_summary_for_session(session_dir: Path) -> dict[str, Any]:
+    path = session_phase_discovery_path(session_dir)
+    if not path.is_file():
+        return {"present": False, "candidate_names": [], "evidence": [], "top_paths": []}
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return {"present": True, "candidate_names": [], "evidence": [], "top_paths": [], "read_error": "invalid_payload"}
+    names: list[str] = []
+    evidence: list[str] = []
+    top_paths: list[str] = []
+    for candidate in payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("name") or "").strip()
+        if name and not generic_session_name_text(name):
+            names.append(name)
+        for ref in candidate.get("evidence", []) if isinstance(candidate.get("evidence"), list) else []:
+            if str(ref).strip() and len(evidence) < 8:
+                evidence.append(str(ref).strip())
+        signals = candidate.get("signals") if isinstance(candidate.get("signals"), dict) else {}
+        linked = candidate.get("linked_signals") if isinstance(candidate.get("linked_signals"), dict) else {}
+        for source in (signals.get("top_paths"), linked.get("support_paths")):
+            for item in source if isinstance(source, list) else []:
+                value = str(item or "").strip()
+                if value and value not in top_paths:
+                    top_paths.append(value)
+                if len(top_paths) >= 12:
+                    break
+    return {
+        "present": True,
+        "candidate_names": names[:8],
+        "evidence": evidence,
+        "top_paths": top_paths[:12],
+        "review_queue_count": int_value(payload.get("review_queue_count")),
+    }
+
+
+def semantic_phase_name_summaries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    semantic = semantic_names_payload(manifest)
+    items: list[dict[str, Any]] = []
+    for item in semantic.get("names", []) if isinstance(semantic.get("names"), list) else []:
+        if not isinstance(item, dict) or semantic_name_scope(item) not in {"phase", "topic"}:
+            continue
+        items.append(
+            {
+                "name": item.get("name"),
+                "slug": item.get("slug"),
+                "scope": semantic_name_scope(item),
+                "evidence": item.get("evidence", []) if isinstance(item.get("evidence"), list) else [],
+                "coverage": item.get("coverage") if isinstance(item.get("coverage"), dict) else {},
+            }
+        )
+    return items
+
+
+def session_name_candidate_quality(
+    name: str,
+    *,
+    evidence: list[str],
+    anchor: dict[str, Any] | None = None,
+    existing_slug_count: int = 0,
+) -> dict[str, Any]:
+    slug = semantic_name_slug(name)
+    terms = slug.split("-")
+    flags: list[str] = []
+    if not name.strip():
+        flags.append("missing_name")
+    if len(terms) < 3:
+        flags.append("name_too_short")
+    if len(slug) > 80:
+        flags.append("name_too_long")
+    if generic_session_name_text(name):
+        flags.append("generic_name")
+    if set(terms) & DEFAULT_BANNED_DURABLE_NAME_TERMS:
+        flags.append("banned_placeholder_term")
+    flags.extend(procedural_session_name_flags(terms))
+    has_you_are = any(terms[index : index + 2] == ["you", "are"] for index in range(max(len(terms) - 1, 0)))
+    if has_you_are or "role" in terms[:4] or "ты" in terms[:4]:
+        flags.append("role_prompt_boilerplate")
+    if {"read", "only", "context"} <= set(terms) or {"read", "only", "these"} <= set(terms):
+        flags.append("instruction_text_in_name")
+    if len(terms) >= 2 and terms[-2:] == ["read", "only"]:
+        flags.append("instruction_text_in_name")
+    context_prompt_prefix = (
+        bool(terms and terms[0] == "context")
+        or terms[:2] == ["audit", "context"]
+        or ("context" in terms[:4] and {"user", "provided"} <= set(terms[:8]))
+    )
+    if {"user", "approved"} <= set(terms) or context_prompt_prefix:
+        flags.append("instruction_text_in_name")
+    if "редактируй" in terms:
+        flags.append("instruction_text_in_name")
+    if {"отвечай", "только", "русском"} <= set(terms) or {"answer", "only"} <= set(terms) or {"respond", "only"} <= set(terms):
+        flags.append("instruction_text_in_name")
+    if not evidence:
+        flags.append("missing_raw_evidence")
+    if existing_slug_count > 1:
+        flags.append("duplicate_slug")
+    if anchor:
+        if not anchor.get("raw_sha256"):
+            flags.append("raw_sha256_missing")
+        if not anchor.get("raw_line_count"):
+            flags.append("raw_line_count_missing")
+    if len([term for term in terms if term not in GENERIC_SESSION_NAME_WORDS]) <= 2 and any(
+        term in {"validation", "implementation", "investigation"} for term in terms
+    ):
+        flags.append("too_phase_like_for_session")
+    level = "ok"
+    if {"missing_name", "banned_placeholder_term", "missing_raw_evidence"} & set(flags):
+        level = "blocker"
+    elif flags:
+        level = "warn"
+    return {
+        "slug": slug,
+        "level": level,
+        "flags": flags,
+    }
+
+
+NAMING_EVIDENCE_HIGH_SIGNAL_TYPES = {
+    "USER_INTENT",
+    "DECISION",
+    "CHECKPOINT",
+    "OPEN_THREAD",
+    "PROCESS_LESSON",
+    "FINAL_STATE",
+}
+
+
+def naming_evidence_quality_flags(session_dir: Path, evidence: list[str]) -> list[str]:
+    previews = [raw_evidence_preview(session_dir, ref, max_chars=120) for ref in evidence[:5]]
+    valid = [preview for preview in previews if preview.get("ok")]
+    if not valid:
+        return []
+    high_signal = [
+        preview
+        for preview in valid
+        if str(preview.get("event_type") or "") in NAMING_EVIDENCE_HIGH_SIGNAL_TYPES and not preview.get("runtime_envelope")
+    ]
+    if high_signal:
+        return []
+    flags = ["weak_raw_evidence_refs"]
+    event_types = {str(preview.get("event_type") or "") for preview in valid}
+    if event_types and event_types <= {"COMMAND_OUTPUT", "TOOL_OUTPUT", "ERROR", "VERIFICATION"}:
+        flags.append("command_output_evidence_only")
+    return flags
+
+
+def prioritized_naming_evidence_refs(session_dir: Path, evidence: list[str], *, max_probe: int = 12) -> list[str]:
+    if not evidence:
+        return []
+    scored: list[tuple[int, int, str]] = []
+    for index, ref in enumerate(evidence[:max_probe]):
+        preview = raw_evidence_preview(session_dir, ref, max_chars=80)
+        event_type = str(preview.get("event_type") or "")
+        if preview.get("ok") and event_type in NAMING_EVIDENCE_HIGH_SIGNAL_TYPES and not preview.get("runtime_envelope"):
+            priority = 0
+        elif preview.get("ok"):
+            priority = 1
+        else:
+            priority = 2
+        scored.append((priority, index, ref))
+    ordered = [ref for _, _, ref in sorted(scored)]
+    ordered.extend(evidence[max_probe:])
+    return ordered
+
+
+def apply_evidence_quality_flags(quality: dict[str, Any], session_dir: Path, evidence: list[str]) -> dict[str, Any]:
+    evidence_flags = naming_evidence_quality_flags(session_dir, evidence)
+    if not evidence_flags:
+        return quality
+    flags = list(quality.get("flags", [])) if isinstance(quality.get("flags"), list) else []
+    flags.extend(evidence_flags)
+    return {
+        **quality,
+        "level": "warn" if quality.get("level") == "ok" else quality.get("level"),
+        "flags": sorted(set(flags)),
+    }
+
+
+def adjust_quality_for_candidate_basis(quality: dict[str, Any], basis: str) -> dict[str, Any]:
+    if basis != "domain_and_event_signals":
+        return quality
+    flags = list(quality.get("flags", [])) if isinstance(quality.get("flags"), list) else []
+    if "fallback_name_needs_review" not in flags:
+        flags.append("fallback_name_needs_review")
+    return {**quality, "level": "warn" if quality.get("level") == "ok" else quality.get("level"), "flags": flags}
+
+
+def synthesize_session_name_candidate(aoa_root: Path, record: dict[str, Any], readiness: dict[str, Any]) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict):
+        manifest = {}
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    active = active_semantic_name(manifest, scope="session") if manifest else None
+    phase_names = semantic_phase_name_summaries(manifest)
+    phase_summary = phase_discovery_summary_for_session(session_dir)
+    title = str(display.get("title") or manifest.get("session_title") or record.get("session_title") or "")
+    cwd = str(source.get("cwd") or record.get("cwd") or "")
+    raw_path = Path(str(raw.get("path") or session_dir / "raw" / "session.raw.jsonl"))
+    policy = naming_policy(aoa_root)
+    domain_hints = naming_policy_domain_hints(policy)
+    action_hints = naming_policy_action_hints(policy)
+    first_user_raw_event = first_raw_event_for_event_type(raw_path)
+    first_user_raw_ref = first_user_raw_event[0] if first_user_raw_event else None
+    first_user_raw_text = first_user_raw_event[1] if first_user_raw_event else ""
+
+    evidence: list[str] = []
+    coverage_from: int | None = None
+    coverage_to: int | None = None
+    basis = "title_and_index_signals"
+    confidence = "medium"
+    source_texts = [title, first_user_raw_text, cwd, str(display.get("label") or record.get("session_label") or "")]
+
+    if isinstance(active, dict) and active.get("name"):
+        name = str(active.get("name") or "")
+        evidence = [str(ref) for ref in active.get("evidence", []) if str(ref).strip()] if isinstance(active.get("evidence"), list) else []
+        coverage = active.get("coverage") if isinstance(active.get("coverage"), dict) else {}
+        ranges = coverage.get("raw_ranges") if isinstance(coverage.get("raw_ranges"), list) else []
+        first_range = ranges[0] if ranges and isinstance(ranges[0], dict) else {}
+        coverage_from = int_value(first_range.get("from_line")) or None
+        coverage_to = int_value(first_range.get("to_line")) or None
+        basis = "existing_active_session_name"
+        confidence = "high"
+    elif phase_names:
+        phase_texts = [str(item.get("name") or "") for item in phase_names if item.get("name")]
+        source_texts.extend(phase_texts)
+        domain = detect_session_domain(source_texts, hints=domain_hints)
+        action = detect_session_action(source_texts, hints=action_hints)
+        name = compact_session_name([domain, action, "session"])
+        for item in phase_names:
+            for ref in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+                if str(ref).strip() and str(ref).strip() not in evidence:
+                    evidence.append(str(ref).strip())
+        basis = "existing_phase_topic_names"
+        confidence = "high" if domain else "medium"
+    else:
+        phase_candidate_names = phase_summary.get("candidate_names", []) if isinstance(phase_summary.get("candidate_names"), list) else []
+        top_paths = phase_summary.get("top_paths", []) if isinstance(phase_summary.get("top_paths"), list) else []
+        source_texts.extend(str(item) for item in phase_candidate_names)
+        source_texts.extend(str(item) for item in top_paths)
+        domain = detect_session_domain(source_texts, hints=domain_hints)
+        action = detect_session_action(source_texts, hints=action_hints)
+        title_seed = ""
+        title_inputs: list[tuple[str, str]] = []
+        if first_user_raw_text:
+            title_inputs.append((first_user_raw_text, "first_raw_user_request"))
+        if title and title != first_user_raw_text:
+            title_inputs.append((title, str(display.get("title_source") or "")))
+        for candidate_title, candidate_source in title_inputs:
+            candidate_seed = useful_name_seed(candidate_title)
+            seed_quality = session_name_candidate_quality(candidate_seed, evidence=[first_user_raw_ref or "raw:line:1"])
+            if (
+                usable_title_text(candidate_seed)
+                and not title_is_generic_for_naming(candidate_seed, candidate_source)
+                and quality_allows_title_seed(seed_quality)
+            ):
+                title_seed = candidate_seed
+                break
+        if title_seed:
+            prefix_domain = domain and domain not in semantic_name_slug(title_seed) and not name_seed_has_owner_signal(title_seed)
+            name = compact_session_name([domain, title_seed] if prefix_domain else [title_seed])
+            confidence = "medium" if generic_session_name_text(name) else "high"
+            basis = "first_intent_title"
+        else:
+            name = compact_session_name([domain, action, "session"])
+            confidence = "low" if not domain else "medium"
+            basis = "domain_and_event_signals"
+        evidence = [str(ref) for ref in phase_summary.get("evidence", []) if str(ref).strip()][:8]
+
+    if not evidence:
+        first_ref = first_user_raw_ref or first_raw_ref_for_event_type(raw_path)
+        if first_ref:
+            evidence = [first_ref]
+    evidence = prioritized_naming_evidence_refs(session_dir, evidence)
+    line_values = [line_from_raw_ref(ref) for ref in evidence]
+    line_values = [line for line in line_values if line is not None]
+    if line_values and coverage_from is None:
+        coverage_from = min(line_values)
+    if coverage_to is None:
+        observed = ((readiness.get("evidence") or {}).get("observed_raw_line_count") if isinstance(readiness.get("evidence"), dict) else None)
+        coverage_to = int_value(observed or raw.get("line_count")) or (max(line_values) if line_values else None)
+    anchor: dict[str, Any] = {}
+    if manifest:
+        try:
+            anchor = build_identity_anchor(session_dir, manifest, verify_raw_hash=False)
+        except ValueError:
+            anchor = {}
+    quality = adjust_quality_for_candidate_basis(session_name_candidate_quality(name, evidence=evidence, anchor=anchor), basis)
+    quality = apply_evidence_quality_flags(quality, session_dir, evidence)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "name": name,
+        "slug": semantic_name_slug(name),
+        "scope": "session",
+        "kind": "session_essence",
+        "basis": basis,
+        "confidence": confidence,
+        "quality": quality,
+        "evidence": evidence,
+        "coverage": {
+            "from_line": coverage_from,
+            "to_line": coverage_to,
+            "note": "Mass naming wave candidate; review before applying as a session-level semantic name.",
+        },
+        "signals": {
+            "title": title,
+            "cwd": cwd,
+            "phase_names": phase_names[:8],
+            "phase_discovery": phase_summary,
+            "active_session_name": active.get("name") if isinstance(active, dict) else None,
+        },
+    }
+
+
+def naming_wave_next_id(aoa_root: Path) -> str:
+    root = aoa_root / DIAGNOSTICS_ROOT / "naming-waves"
+    existing = sorted(root.glob("naming-wave-*")) if root.exists() else []
+    numbers: list[int] = []
+    for path in existing:
+        match = re.search(r"naming-wave-(\d+)", path.name)
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"naming-wave-{(max(numbers) + 1) if numbers else 1}"
+
+
+def naming_wave_item(
+    aoa_root: Path,
+    result: dict[str, Any],
+    *,
+    include_readable: bool,
+    include_low_signal: bool,
+    include_diagnostic: bool,
+) -> dict[str, Any] | None:
+    readiness = result.get("naming_readiness") if isinstance(result.get("naming_readiness"), dict) else {}
+    status = str(readiness.get("status") or "")
+    route = str(readiness.get("route") or "")
+    if status == "readable_label" and not include_readable:
+        return None
+    if status == "low_signal" and not include_low_signal:
+        return None
+    if status == "diagnostic_only" and not include_diagnostic:
+        return None
+    session_label = str(result.get("session_label") or "")
+    session_dir = Path(str(result.get("path") or ""))
+    base = {
+        "session_id": result.get("session_id"),
+        "session_label": session_label,
+        "session_title": result.get("session_title"),
+        "session_dir": str(session_dir),
+        "event_count": result.get("event_count", 0),
+        "segment_count": result.get("segment_count", 0),
+        "readiness": readiness,
+        "physical_relabel_allowed": False,
+        "archive_label_change": False,
+    }
+    if status == "diagnostic_only":
+        return {**base, "action": "leave_diagnostic_visible", "reviewed_name": "", "approved": False}
+    if status == "low_signal":
+        return {**base, "action": "skip_low_signal", "reviewed_name": "", "approved": False}
+    if status == "needs_sync":
+        return {
+            **base,
+            "action": "sync_source_transcript",
+            "approved": False,
+            "reviewed_name": "",
+            "preflight_command": (
+                "python3 scripts/aoa_session_memory.py sync "
+                f"--session-id {shlex.quote(str(result.get('session_id') or ''))} "
+                "--transcript-path '<source transcript path>'"
+            ),
+        }
+    if status == "needs_reindex":
+        return {
+            **base,
+            "action": "reindex_session",
+            "approved": False,
+            "reviewed_name": "",
+            "preflight_command": f"python3 scripts/aoa_session_memory.py reindex-sessions {shlex.quote(session_label)} --write-report",
+        }
+    if route == "review_open_phase_discovery_for_named_session":
+        candidate = synthesize_session_name_candidate(aoa_root, result, readiness)
+        return {
+            **base,
+            "action": "review_phase_queue_then_refine_session_name",
+            "candidate": candidate,
+            "proposed_name": candidate.get("name"),
+            "reviewed_name": "",
+            "approved": False,
+            "phase_review_command": f"python3 scripts/aoa_session_memory.py phase-review-assist {shlex.quote(session_label)} --write --write-report",
+        }
+    if status in {"readable_label", "ready_for_semantic_name", "phase_discovery_ready", "named"}:
+        candidate = synthesize_session_name_candidate(aoa_root, result, readiness)
+        return {
+            **base,
+            "action": "semantic_session_name_review",
+            "candidate": candidate,
+            "proposed_name": candidate.get("name"),
+            "reviewed_name": "",
+            "approved": False,
+            "apply_template": (
+                "Set reviewed_name in this plan item, then run "
+                "python3 scripts/aoa_session_memory.py naming-wave apply --plan <plan> --apply --write-report"
+            ),
+        }
+    return {**base, "action": "inspect_lower_layer", "reviewed_name": "", "approved": False}
+
+
+def annotate_naming_wave_candidate_duplicates(items: list[dict[str, Any]]) -> None:
+    slug_counts: Counter[str] = Counter()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        slug = str(candidate.get("slug") or semantic_name_slug(str(item.get("proposed_name") or "")))
+        if slug:
+            slug_counts[slug] += 1
+    for item in items:
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        slug = str(candidate.get("slug") or semantic_name_slug(str(item.get("proposed_name") or "")))
+        if not slug or slug_counts.get(slug, 0) <= 1:
+            continue
+        quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+        flags = list(quality.get("flags", [])) if isinstance(quality.get("flags"), list) else []
+        if "duplicate_proposed_slug" not in flags:
+            flags.append("duplicate_proposed_slug")
+        candidate["quality"] = {
+            **quality,
+            "level": "warn" if quality.get("level") == "ok" else quality.get("level", "warn"),
+            "flags": sorted(set(flags)),
+        }
+        candidate.setdefault("diagnostics", {})["duplicate_proposed_slug_count"] = slug_counts[slug]
+
+
+def naming_wave_markdown(payload: dict[str, Any]) -> str:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    lines = [
+        "# Naming Wave Plan",
+        "",
+        "Mass session naming work surface. This is a review plan, not reviewed truth.",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- wave_id: `{payload.get('wave_id')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- item_count: `{payload.get('item_count')}`",
+        f"- plan_json: `{payload.get('plan_path', '')}`",
+        "",
+        "## Counts",
+        "",
+    ]
+    for key, value in sorted(counts.items()):
+        lines.append(f"- `{key}`: {value}")
+    lines.extend(
+        [
+            "",
+            "## Queue",
+            "",
+            "| action | status | session | proposed name | confidence | flags |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        readiness = item.get("readiness") if isinstance(item.get("readiness"), dict) else {}
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+        lines.append(
+            "| `{action}` | `{status}` | `{session}` | {name} | `{confidence}` | {flags} |".format(
+                action=item.get("action"),
+                status=readiness.get("status"),
+                session=markdown_cell(item.get("session_label")),
+                name=markdown_cell(item.get("proposed_name") or ""),
+                confidence=candidate.get("confidence", ""),
+                flags=markdown_cell(", ".join(str(flag) for flag in quality.get("flags", []) if flag)),
+            )
+        )
+    lines.extend(["", "## Review Instructions", ""])
+    lines.append("- Edit the JSON plan, not generated session files.")
+    lines.append("- For semantic names, fill `reviewed_name` only after checking the candidate signals and raw refs.")
+    lines.append("- For sync/reindex preflight items, set `approved=true` or run apply with `--apply-preflight` deliberately.")
+    lines.append("- Physical archive relabeling is explicitly out of this wave; every item has `physical_relabel_allowed=false`.")
+    lines.append("- Re-run `naming-wave audit` after applying reviewed names.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_naming_wave_artifacts(aoa_root: Path, payload: dict[str, Any]) -> dict[str, str]:
+    wave_id = safe_slug(str(payload.get("wave_id") or naming_wave_next_id(aoa_root)))
+    wave_dir = aoa_root / DIAGNOSTICS_ROOT / "naming-waves" / wave_id
+    wave_dir.mkdir(parents=True, exist_ok=True)
+    plan_json = wave_dir / "naming-wave-plan.json"
+    plan_md = wave_dir / "naming-wave-plan.md"
+    payload["plan_path"] = str(plan_json)
+    payload["plan_markdown"] = str(plan_md)
+    write_json(plan_json, payload)
+    write_markdown(plan_md, naming_wave_markdown(payload))
+    return {"plan_path": str(plan_json), "plan_markdown": str(plan_md)}
+
+
+def build_naming_wave(
+    aoa_root: Path,
+    *,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    include_readable: bool = True,
+    include_low_signal: bool = False,
+    include_diagnostic: bool = False,
+    refresh_indexes: bool = False,
+    write: bool = False,
+    write_report: bool = False,
+    wave_id: str | None = None,
+) -> dict[str, Any]:
+    readiness = build_naming_readiness_report(
+        aoa_root,
+        target=target,
+        since=since,
+        until=until,
+        limit=None,
+        refresh_indexes=refresh_indexes,
+        write_report=write_report,
+    )
+    results = readiness.get("results") if isinstance(readiness.get("results"), list) else []
+    items: list[dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        item = naming_wave_item(
+            aoa_root,
+            result,
+            include_readable=include_readable,
+            include_low_signal=include_low_signal,
+            include_diagnostic=include_diagnostic,
+        )
+        if item is not None:
+            items.append(item)
+    if limit is not None:
+        items = items[: max(0, limit)]
+    annotate_naming_wave_candidate_duplicates(items)
+    counts = Counter(str(item.get("action") or "missing") for item in items)
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "naming_wave_plan",
+        "generated_at": utc_now(),
+        "ok": True,
+        "status": "review_plan_ready",
+        "wave_id": wave_id or naming_wave_next_id(aoa_root),
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "since": since,
+        "until": until,
+        "item_limit": limit,
+        "selected_count": readiness.get("selected_count"),
+        "item_count": len(items),
+        "counts": dict(sorted(counts.items())),
+        "readiness_counts": readiness.get("naming_readiness_counts"),
+        "policy": {
+            "semantic_names_only": True,
+            "physical_relabel_allowed": False,
+            "apply_requires_reviewed_name_or_explicit_flag": True,
+        },
+        "items": items,
+    }
+    if write:
+        payload.update(write_naming_wave_artifacts(aoa_root, payload))
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__naming-wave__{safe_slug(str(payload.get('wave_id')))}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, naming_wave_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def sync_record_source_transcript(aoa_root: Path, item: dict[str, Any]) -> dict[str, Any]:
+    session_label = str(item.get("session_label") or "")
+    record = resolve_session_record(aoa_root, session_label or str(item.get("session_id") or ""))
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict):
+        return {"ok": False, "status": "diagnostic", "diagnostics": ["missing_manifest"]}
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    transcript_path_value = source.get("transcript_path")
+    if not transcript_path_value:
+        return {"ok": False, "status": "diagnostic", "diagnostics": ["missing_source_transcript_path"]}
+    transcript_path = Path(str(transcript_path_value)).expanduser()
+    if not transcript_path.is_file():
+        return {"ok": False, "status": "diagnostic", "diagnostics": ["source_transcript_missing"], "path": str(transcript_path)}
+    return {
+        "ok": True,
+        "status": "synced",
+        **sync_session_from_transcript(
+            aoa_root=aoa_root,
+            event={
+                "session_id": manifest.get("session_id") or item.get("session_id"),
+                "transcript_path": str(transcript_path),
+                "cwd": source.get("cwd"),
+                "model": source.get("model"),
+                "permission_mode": source.get("permission_mode"),
+            },
+            transcript_path=transcript_path,
+            hook_event_name="NamingWavePreflight",
+        ),
+    }
+
+
+def apply_naming_wave(
+    aoa_root: Path,
+    *,
+    plan_path: Path,
+    apply: bool = False,
+    apply_preflight: bool = False,
+    accept_proposed: bool = False,
+    replace: bool = False,
+    verify_raw_hash: bool = True,
+    write_report: bool = False,
+    stop_on_error: bool = False,
+) -> dict[str, Any]:
+    plan = read_json(plan_path, {})
+    diagnostics: list[str] = []
+    if not isinstance(plan, dict) or plan.get("artifact_type") != "naming_wave_plan":
+        diagnostics.append("invalid_naming_wave_plan")
+        plan = {}
+    items = plan.get("items") if isinstance(plan.get("items"), list) else []
+    results: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            diagnostics.append(f"item_{index}_invalid")
+            if stop_on_error:
+                break
+            continue
+        action = str(item.get("action") or "")
+        session_label = str(item.get("session_label") or "")
+        result: dict[str, Any] = {
+            "session_label": session_label,
+            "action": action,
+            "status": "skipped",
+            "diagnostics": [],
+        }
+        try:
+            if action == "sync_source_transcript":
+                if apply and (apply_preflight or item.get("approved") is True):
+                    result.update(sync_record_source_transcript(aoa_root, item))
+                else:
+                    result["diagnostics"].append("preflight_not_approved")
+            elif action == "reindex_session":
+                if apply and (apply_preflight or item.get("approved") is True):
+                    record = resolve_session_record(aoa_root, session_label or str(item.get("session_id") or ""))
+                    result.update(reindex_session_from_raw(aoa_root, record, dry_run=False))
+                    result["ok"] = result.get("status") in {"reindexed", "planned"}
+                else:
+                    result["diagnostics"].append("preflight_not_approved")
+            elif action in {"semantic_session_name_review", "review_phase_queue_then_refine_session_name"}:
+                candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+                reviewed_name = str(item.get("reviewed_name") or "").strip()
+                if not reviewed_name and accept_proposed and str(candidate.get("confidence") or "") == "high":
+                    quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+                    if quality.get("level") == "ok":
+                        reviewed_name = str(candidate.get("name") or "").strip()
+                        result["accepted_proposed_by_flag"] = True
+                if not reviewed_name:
+                    result["diagnostics"].append("reviewed_name_empty")
+                elif apply:
+                    coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
+                    semantic_result = set_session_semantic_name(
+                        aoa_root=aoa_root,
+                        target=session_label,
+                        name=reviewed_name,
+                        kind="session_essence",
+                        scope="session",
+                        evidence_refs=[str(ref) for ref in candidate.get("evidence", []) if str(ref).strip()]
+                        if isinstance(candidate.get("evidence"), list)
+                        else [],
+                        from_line=int_value(coverage.get("from_line")) or None,
+                        to_line=int_value(coverage.get("to_line")) or None,
+                        coverage_note=str(coverage.get("note") or "Applied from naming-wave reviewed plan."),
+                        source="naming_wave_review",
+                        note=f"wave_id={plan.get('wave_id')}; basis={candidate.get('basis')}",
+                        apply=True,
+                        replace=replace,
+                        verify_raw_hash=verify_raw_hash,
+                        write_report=write_report,
+                    )
+                    result.update(
+                        {
+                            "ok": semantic_result.get("ok"),
+                            "status": semantic_result.get("status"),
+                            "reviewed_name": reviewed_name,
+                            "semantic_name_result": semantic_result,
+                        }
+                    )
+                else:
+                    result.update({"ok": True, "status": "preview_ready", "reviewed_name": reviewed_name})
+            else:
+                result["diagnostics"].append("action_not_applyable")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            result.update({"ok": False, "status": "diagnostic"})
+            result["diagnostics"].append(str(exc))
+        counts[str(result.get("status") or "unknown")] += 1
+        if result.get("diagnostics"):
+            diagnostics.extend(f"{session_label}:{diag}" for diag in result.get("diagnostics", []) if diag)
+        results.append(result)
+        if stop_on_error and not result.get("ok") and result.get("status") != "skipped":
+            break
+    refreshed_indexes: list[str] = []
+    if apply:
+        sessions = registry_sessions(aoa_root)
+        write_session_name_index(aoa_root, sessions)
+        write_sessions_directory_index(aoa_root, sessions)
+        refreshed_indexes = [
+            str(aoa_root / SESSION_NAME_INDEX_JSON),
+            str(aoa_root / SESSION_NAME_INDEX_MARKDOWN),
+            str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON),
+            str(aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN),
+        ]
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "naming_wave_apply",
+        "generated_at": utc_now(),
+        "ok": not any(result.get("status") == "diagnostic" for result in results),
+        "status": "applied" if apply and any(result.get("status") in {"applied", "synced", "reindexed"} for result in results) else "preview_ready",
+        "apply": apply,
+        "apply_preflight": apply_preflight,
+        "accept_proposed": accept_proposed,
+        "aoa_root": str(aoa_root),
+        "plan_path": str(plan_path),
+        "wave_id": plan.get("wave_id"),
+        "item_count": len(items),
+        "counts": dict(sorted(counts.items())),
+        "diagnostics": diagnostics,
+        "results": results,
+        "refreshed_indexes": refreshed_indexes,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__naming-wave-apply__{safe_slug(str(plan.get('wave_id') or 'wave'))}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, naming_wave_apply_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def naming_wave_apply_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Naming Wave Apply",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- wave_id: `{payload.get('wave_id')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- item_count: `{payload.get('item_count')}`",
+        "",
+        "## Counts",
+        "",
+    ]
+    count_items = sorted((payload.get("counts") or {}).items()) if isinstance(payload.get("counts"), dict) else []
+    for key, value in count_items:
+        lines.append(f"- `{key}`: {value}")
+    lines.extend(["", "## Results", "", "| status | action | session | diagnostics |", "| --- | --- | --- | --- |"])
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        lines.append(
+            "| `{status}` | `{action}` | `{session}` | {diagnostics} |".format(
+                status=result.get("status"),
+                action=result.get("action"),
+                session=markdown_cell(result.get("session_label")),
+                diagnostics=markdown_cell(", ".join(str(item) for item in result.get("diagnostics", []) if item)),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def naming_quality_record(aoa_root: Path, record: dict[str, Any], slug_counts: Counter[str]) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {"session_label": record.get("session_label"), "level": "blocker", "flags": ["missing_manifest"]}
+    readiness = session_naming_readiness(aoa_root, session_dir, manifest, record=record)
+    active = active_semantic_name(manifest, scope="session")
+    flags: list[str] = []
+    quality: dict[str, Any] = {"level": "warn", "flags": ["missing_active_session_name"], "slug": ""}
+    if isinstance(active, dict):
+        anchor = active.get("anchor") if isinstance(active.get("anchor"), dict) else {}
+        evidence = [str(ref) for ref in active.get("evidence", []) if str(ref).strip()] if isinstance(active.get("evidence"), list) else []
+        quality = session_name_candidate_quality(
+            str(active.get("name") or ""),
+            evidence=evidence,
+            anchor=anchor,
+            existing_slug_count=slug_counts.get(str(active.get("slug") or ""), 0),
+        )
+        flags.extend(quality.get("flags", []))
+    else:
+        flags.extend(quality["flags"])
+    if readiness.get("status") == "needs_sync":
+        flags.append("needs_sync_before_final_name_review")
+    evidence = readiness.get("evidence") if isinstance(readiness.get("evidence"), dict) else {}
+    if evidence.get("active_session_coverage_stale"):
+        flags.append("active_session_name_coverage_stale")
+    if int_value(evidence.get("phase_discovery_review_queue_count")):
+        flags.append("phase_review_queue_open")
+    level = "ok"
+    if any(flag in flags for flag in ["missing_manifest", "missing_raw_evidence", "banned_placeholder_term"]):
+        level = "blocker"
+    elif flags:
+        level = "warn"
+    return {
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label") or record.get("session_label"),
+        "active_session_name": active.get("name") if isinstance(active, dict) else None,
+        "slug": active.get("slug") if isinstance(active, dict) else None,
+        "level": level,
+        "flags": sorted(set(flags)),
+        "readiness_status": readiness.get("status"),
+        "readiness_route": readiness.get("route"),
+    }
+
+
+def raw_evidence_preview(session_dir: Path, evidence_ref: str, *, max_chars: int = 240) -> dict[str, Any]:
+    line_no = line_from_raw_ref(evidence_ref)
+    if line_no is None:
+        return {"ref": evidence_ref, "ok": False, "reason": "not_raw_line_ref"}
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    if not raw_path.is_file():
+        return {"ref": evidence_ref, "ok": False, "reason": "missing_raw_archive"}
+    try:
+        with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for current, line in enumerate(handle, start=1):
+                if current != line_no:
+                    continue
+                raw_line = line.rstrip("\n")
+                parsed: dict[str, Any] | None = None
+                try:
+                    loaded = json.loads(raw_line)
+                    if isinstance(loaded, dict):
+                        parsed = loaded
+                except json.JSONDecodeError:
+                    parsed = None
+                event = classify_raw_event(raw_line, parsed, line_no)
+                text = event_semantic_text(event)
+                return {
+                    "ref": evidence_ref,
+                    "ok": True,
+                    "event_type": event.event_type,
+                    "source_type": event.source_type,
+                    "text": short_text(text, max_chars=max_chars),
+                    "runtime_envelope": naming_evidence_text_is_runtime_envelope(text),
+                }
+    except OSError as exc:
+        return {"ref": evidence_ref, "ok": False, "reason": str(exc)}
+    return {"ref": evidence_ref, "ok": False, "reason": "line_not_found"}
+
+
+def naming_quality_sample_bucket(item: dict[str, Any]) -> str:
+    action = str(item.get("action") or "")
+    candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+    quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+    flags = [str(flag) for flag in quality.get("flags", []) if str(flag).strip()] if isinstance(quality.get("flags"), list) else []
+    level = str(quality.get("level") or "none")
+    name = str(item.get("proposed_name") or candidate.get("name") or "")
+    slug_terms = set(semantic_name_slug(name).split("-"))
+    if action in {"sync_source_transcript", "reindex_session"}:
+        return f"preflight:{action}"
+    if flags:
+        return f"flag:{flags[0]}"
+    if level != "ok":
+        return f"level:{level}"
+    if {"you", "are"} <= slug_terms or "role" in slug_terms or "ты" in slug_terms:
+        return "unflagged_role_or_prompt_residue"
+    if {"context", "user", "approved"} <= slug_terms or {"read", "only"} <= slug_terms:
+        return "unflagged_instruction_residue"
+    if str(candidate.get("basis") or "") == "domain_and_event_signals":
+        return "domain_action_fallback_ok"
+    if len(slug_terms) <= 4:
+        return "short_ok_name"
+    return "ok_candidate"
+
+
+def naming_quality_sample_priority(bucket: str) -> int:
+    if bucket.startswith("preflight:"):
+        return 0
+    if bucket.startswith("flag:"):
+        return 1
+    if bucket.startswith("level:"):
+        return 2
+    if bucket.startswith("unflagged_"):
+        return 3
+    if bucket in {"domain_action_fallback_ok", "short_ok_name"}:
+        return 4
+    return 5
+
+
+def naming_quality_plan_sample(
+    items: list[dict[str, Any]],
+    *,
+    sample_size: int,
+    sample_seed: str,
+    raw_chars: int = 240,
+) -> list[dict[str, Any]]:
+    if sample_size <= 0:
+        return []
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        bucket = naming_quality_sample_bucket(item)
+        digest = hashlib.sha256(
+            f"{sample_seed}\0{bucket}\0{item.get('session_label')}\0{item.get('proposed_name')}\0{index}".encode("utf-8", errors="replace")
+        ).hexdigest()
+        buckets[bucket].append({"index": index, "score": digest, "item": item})
+    ordered_buckets = sorted(buckets, key=lambda key: (naming_quality_sample_priority(key), key))
+    selected: list[dict[str, Any]] = []
+    used_indexes: set[int] = set()
+    for bucket in ordered_buckets:
+        choices = sorted(buckets[bucket], key=lambda entry: entry["score"])
+        if choices and len(selected) < sample_size:
+            selected.append(choices[0])
+            used_indexes.add(int(choices[0]["index"]))
+    remaining = sorted(
+        (entry for bucket in ordered_buckets for entry in buckets[bucket] if int(entry["index"]) not in used_indexes),
+        key=lambda entry: (naming_quality_sample_priority(naming_quality_sample_bucket(entry["item"])), entry["score"]),
+    )
+    for entry in remaining:
+        if len(selected) >= sample_size:
+            break
+        selected.append(entry)
+    sample: list[dict[str, Any]] = []
+    for entry in selected[:sample_size]:
+        item = entry["item"]
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+        evidence = [str(ref) for ref in candidate.get("evidence", []) if str(ref).strip()] if isinstance(candidate.get("evidence"), list) else []
+        session_dir = Path(str(item.get("session_dir") or ""))
+        previews = [raw_evidence_preview(session_dir, ref, max_chars=raw_chars) for ref in evidence[:3]] if session_dir else []
+        sample.append(
+            {
+                "plan_index": entry["index"],
+                "bucket": naming_quality_sample_bucket(item),
+                "session_label": item.get("session_label"),
+                "action": item.get("action"),
+                "proposed_name": item.get("proposed_name") or candidate.get("name"),
+                "basis": candidate.get("basis"),
+                "confidence": candidate.get("confidence"),
+                "quality_level": quality.get("level"),
+                "quality_flags": quality.get("flags", []) if isinstance(quality.get("flags"), list) else [],
+                "evidence": evidence[:3],
+                "evidence_preview": previews,
+            }
+        )
+    return sample
+
+
+def naming_quality_audit(
+    aoa_root: Path,
+    *,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    plan_path: Path | None = None,
+    sample_size: int = 0,
+    sample_seed: str = "naming-quality",
+    sample_raw_chars: int = 240,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    slug_counts: Counter[str] = Counter()
+    for record in records:
+        manifest = read_json(session_dir_from_record(record) / "session.manifest.json", {})
+        if isinstance(manifest, dict):
+            active = active_semantic_name(manifest, scope="session")
+            if isinstance(active, dict) and active.get("slug"):
+                slug_counts[str(active.get("slug"))] += 1
+    results = [naming_quality_record(aoa_root, record, slug_counts) for record in records]
+    plan_results: list[dict[str, Any]] = []
+    plan_items: list[dict[str, Any]] = []
+    if plan_path is not None:
+        plan = read_json(plan_path, {})
+        plan_items = [item for item in plan.get("items", []) if isinstance(item, dict)] if isinstance(plan, dict) and isinstance(plan.get("items"), list) else []
+        plan_slug_counts: Counter[str] = Counter()
+        for item in plan_items:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+            name = str(item.get("reviewed_name") or candidate.get("name") or item.get("proposed_name") or "")
+            slug = semantic_name_slug(name)
+            if slug:
+                plan_slug_counts[slug] += 1
+        for item in plan_items:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+            name = str(item.get("reviewed_name") or candidate.get("name") or item.get("proposed_name") or "")
+            evidence = [str(ref) for ref in candidate.get("evidence", []) if str(ref).strip()] if isinstance(candidate.get("evidence"), list) else []
+            quality = session_name_candidate_quality(name, evidence=evidence, existing_slug_count=plan_slug_counts.get(semantic_name_slug(name), 0))
+            quality = apply_evidence_quality_flags(quality, Path(str(item.get("session_dir") or "")), evidence)
+            flags = list(quality.get("flags", [])) if isinstance(quality.get("flags"), list) else []
+            if plan_slug_counts.get(semantic_name_slug(name), 0) > 1 and "duplicate_proposed_slug" not in flags:
+                flags.append("duplicate_proposed_slug")
+                quality = {
+                    **quality,
+                    "level": "warn" if quality.get("level") == "ok" else quality.get("level"),
+                    "flags": sorted(set(flags)),
+                }
+            plan_results.append(
+                {
+                    "session_label": item.get("session_label"),
+                    "action": item.get("action"),
+                    "name": name,
+                    "level": quality.get("level"),
+                    "flags": quality.get("flags", []),
+                }
+            )
+    quality_sample = (
+        naming_quality_plan_sample(plan_items, sample_size=sample_size, sample_seed=sample_seed, raw_chars=sample_raw_chars)
+        if plan_items and sample_size
+        else []
+    )
+    by_level = Counter(str(item.get("level") or "missing") for item in results)
+    by_plan_level = Counter(str(item.get("level") or "missing") for item in plan_results)
+    by_flag: Counter[str] = Counter()
+    for item in results + plan_results:
+        for flag in item.get("flags", []) if isinstance(item.get("flags"), list) else []:
+            by_flag[str(flag)] += 1
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "naming_quality_audit",
+        "generated_at": utc_now(),
+        "ok": by_level.get("blocker", 0) == 0 and by_plan_level.get("blocker", 0) == 0,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "selected_count": len(records),
+        "counts": {
+            "by_level": dict(sorted(by_level.items())),
+            "by_plan_level": dict(sorted(by_plan_level.items())),
+            "by_flag": dict(sorted(by_flag.items())),
+        },
+        "quality_sample_seed": sample_seed if sample_size else None,
+        "quality_sample_size": len(quality_sample),
+        "quality_sample": quality_sample,
+        "results": results,
+        "plan_results": plan_results,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__naming-quality-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, naming_quality_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def naming_quality_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Naming Quality Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- ok: `{str(payload.get('ok')).lower()}`",
+        "",
+        "## Counts",
+        "",
+    ]
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    for group, values in counts.items():
+        lines.extend([f"### {group}", ""])
+        value_items = values.items() if isinstance(values, dict) else []
+        for key, value in value_items:
+            lines.append(f"- `{key}`: {value}")
+        lines.append("")
+    lines.extend(["## Findings", "", "| level | session | active name | flags |", "| --- | --- | --- | --- |"])
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(result, dict):
+            continue
+        if result.get("level") == "ok":
+            continue
+        lines.append(
+            "| `{level}` | `{session}` | {name} | {flags} |".format(
+                level=result.get("level"),
+                session=markdown_cell(result.get("session_label")),
+                name=markdown_cell(result.get("active_session_name") or ""),
+                flags=markdown_cell(", ".join(str(flag) for flag in result.get("flags", []) if flag)),
+            )
+        )
+    lines.append("")
+    sample = payload.get("quality_sample") if isinstance(payload.get("quality_sample"), list) else []
+    if sample:
+        lines.extend(
+            [
+                "## Quality Sample",
+                "",
+                f"- seed: `{payload.get('quality_sample_seed')}`",
+                f"- size: `{payload.get('quality_sample_size')}`",
+                "",
+                "| bucket | session | proposed name | flags | raw preview |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for item in sample:
+            if not isinstance(item, dict):
+                continue
+            previews = item.get("evidence_preview") if isinstance(item.get("evidence_preview"), list) else []
+            first_preview = previews[0] if previews and isinstance(previews[0], dict) else {}
+            lines.append(
+                "| `{bucket}` | `{session}` | {name} | {flags} | {preview} |".format(
+                    bucket=item.get("bucket"),
+                    session=markdown_cell(item.get("session_label")),
+                    name=markdown_cell(item.get("proposed_name") or ""),
+                    flags=markdown_cell(", ".join(str(flag) for flag in item.get("quality_flags", []) if flag)),
+                    preview=markdown_cell(first_preview.get("text") or first_preview.get("reason") or ""),
+                )
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def compact_naming_wave_item(item: dict[str, Any]) -> dict[str, Any]:
+    candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+    quality = candidate.get("quality") if isinstance(candidate.get("quality"), dict) else {}
+    readiness = item.get("readiness") if isinstance(item.get("readiness"), dict) else {}
+    return {
+        "session_label": item.get("session_label"),
+        "action": item.get("action"),
+        "status": readiness.get("status"),
+        "route": readiness.get("route"),
+        "proposed_name": item.get("proposed_name"),
+        "confidence": candidate.get("confidence"),
+        "quality_level": quality.get("level"),
+        "quality_flags": quality.get("flags", [])[:8] if isinstance(quality.get("flags"), list) else [],
+        "physical_relabel_allowed": item.get("physical_relabel_allowed"),
+    }
+
+
+def naming_wave_print_payload(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    printable = {key: value for key, value in payload.items() if key != "items"}
+    printable["results"] = payload.get("items", [])
+    return bounded_results_print_payload(
+        printable,
+        full=full,
+        compact_func=compact_naming_wave_item,
+        note="items are bounded on stdout; pass --full or read the written naming-wave plan for complete results",
+    )
+
+
 def naming_readiness_markdown(payload: dict[str, Any]) -> str:
     counts = payload.get("naming_readiness_counts") if isinstance(payload.get("naming_readiness_counts"), dict) else {}
     by_status = counts.get("by_status") if isinstance(counts.get("by_status"), dict) else {}
@@ -6376,13 +8832,23 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
     now = utc_now()
     events = parse_raw_events(raw_path)
     clear_generated_segments(session_dir)
+    clear_generated_raw_blocks(session_dir)
     raw_rel = "raw/session.raw.jsonl"
+    ranges = segment_ranges(events)
+    raw_blocks = write_raw_block_artifacts(session_dir, raw_rel, ranges, events)
+    raw_blocks_by_segment = {
+        str(block.get("segment_id")): block
+        for block in raw_blocks.get("blocks", [])
+        if isinstance(block, dict)
+    }
     segment_payloads = [
-        write_segment(session_dir, raw_rel, segment_no, role, events[start:end])
-        for segment_no, (start, end, role) in enumerate(segment_ranges(events))
+        write_segment(session_dir, raw_rel, segment_no, role, events[start:end], raw_blocks_by_segment.get(f"{segment_no:03d}"))
+        for segment_no, (start, end, role) in enumerate(ranges)
     ]
     manifest["archive_status"] = "indexed"
+    manifest["archive_format_version"] = 2
     manifest["segments"] = segment_payloads
+    manifest["raw_blocks"] = raw_blocks
     manifest["latest_event_count"] = len(events)
     manifest["updated_at"] = now
     manifest["index_schema"] = {
@@ -6395,6 +8861,8 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         manifest["raw"]["bytes"] = raw_path.stat().st_size
         manifest["raw"]["sha256"] = sha256_file(raw_path)
         manifest["raw"]["indexing_status"] = "indexed"
+        manifest["raw"]["blocks_index"] = raw_blocks.get("index")
+        manifest["raw"]["compaction_events"] = raw_blocks.get("compaction_events")
     refresh_semantic_name_anchors(session_dir, manifest)
     write_json(manifest_path, manifest)
     raw_source_path = session_dir / "raw" / RAW_SOURCE_JSON
@@ -8426,6 +10894,7 @@ def write_raw_unavailable_incident(
     event: dict[str, Any],
     transcript_path: Path | None,
     hook_event_name: str,
+    registry_lock_timeout_sec: float | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     session_id = session_id_from(event, transcript_path)
@@ -8539,7 +11008,7 @@ def write_raw_unavailable_incident(
         "latest_diagnostic": str(diagnostic_path),
     }
     write_json(manifest_path, manifest)
-    update_registry(aoa_root, manifest, session_dir)
+    registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
     return {
         "session_id": session_id,
         "display_name": display["label"],
@@ -8547,6 +11016,7 @@ def write_raw_unavailable_incident(
         "session_dir": str(session_dir),
         "incident": str(incident_path),
         "diagnostic": str(diagnostic_path),
+        "registry_updated": registry_updated,
     }
 
 
@@ -8575,6 +11045,7 @@ def handle_hook_event(
     )
     actions = ["hook_event_recorded"]
     errors: list[str] = []
+    start_hook_light = event_name == "SessionStart" and os.environ.get("AOA_SESSION_MEMORY_FULL_START_SYNC") != "1"
     if event_name == "UserPromptSubmit" and os.environ.get("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC") != "1":
         actions.append("prompt_hook_light_recorded")
         return {
@@ -8587,21 +11058,79 @@ def handle_hook_event(
             "actions": actions,
             "errors": errors,
         }
+    if start_hook_light and transcript_path is not None and transcript_path.exists() and os.access(transcript_path, os.R_OK):
+        existing = read_json(session_dir / "session.manifest.json", {})
+        display = existing.get("display") if isinstance(existing.get("display"), dict) else {}
+        actions.append("session_start_hook_light_recorded")
+        actions.append("raw_sync_deferred")
+        actions.append("indexing_deferred")
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "hook_event_name": event_name,
+            "timestamp": now,
+            "session_id": session_id,
+            "session_dir": str(session_dir),
+            "display_name": existing.get("session_label") or display.get("label") or session_dir.name,
+            "navigation_path": display.get("navigation_path") or display.get("path") or str(session_dir),
+            "actions": actions,
+            "errors": errors,
+        }
+        return attach_hook_sync_job(
+            receipt,
+            root,
+            event_name=event_name,
+            event=event,
+            session_id=session_id,
+            transcript_path=transcript_path,
+            reason="session_start_light_deferred",
+        )
     compact_hook_light = event_name in {"PreCompact", "PostCompact"} and os.environ.get("AOA_SESSION_MEMORY_FULL_COMPACT_SYNC") != "1"
     stop_hook_light = event_name == "Stop" and stop_hook_should_defer_indexing(transcript_path)
     if compact_hook_light or stop_hook_light:
         try:
             if transcript_path is not None and transcript_path.exists() and os.access(transcript_path, os.R_OK):
+                if hook_should_defer_raw_mirror(transcript_path):
+                    actions.append("raw_mirror_deferred")
+                    actions.append("indexing_deferred")
+                    receipt = {
+                        "schema_version": SCHEMA_VERSION,
+                        "ok": True,
+                        "hook_event_name": event_name,
+                        "timestamp": now,
+                        "session_id": session_id,
+                        "session_dir": str(session_dir),
+                        "actions": actions,
+                        "raw": {
+                            "source_path": str(transcript_path),
+                            "bytes": transcript_path.stat().st_size,
+                            "mirror_max_bytes": hook_mirror_max_bytes(),
+                            "mirror_status": "deferred_from_hook",
+                        },
+                        "errors": errors,
+                    }
+                    return attach_hook_sync_job(
+                        receipt,
+                        root,
+                        event_name=event_name,
+                        event=event,
+                        session_id=session_id,
+                        transcript_path=transcript_path,
+                        reason="large_lifecycle_hook_raw_mirror_deferred",
+                    )
                 mirrored = mirror_transcript_without_indexing(
                     aoa_root=root,
                     event=event,
                     transcript_path=transcript_path,
                     hook_event_name=event_name,
                     now=now,
+                    registry_lock_timeout_sec=DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC,
                 )
                 actions.append("raw_mirrored")
                 actions.append("indexing_deferred")
-                return {
+                if not mirrored.get("registry_updated"):
+                    actions.append("registry_update_deferred")
+                receipt = {
                     "schema_version": SCHEMA_VERSION,
                     "ok": True,
                     "hook_event_name": event_name,
@@ -8614,6 +11143,15 @@ def handle_hook_event(
                     "archive": mirrored,
                     "errors": errors,
                 }
+                return attach_hook_sync_job(
+                    receipt,
+                    root,
+                    event_name=event_name,
+                    event=event,
+                    session_id=str(mirrored.get("session_id") or session_id),
+                    transcript_path=transcript_path,
+                    reason="lifecycle_hook_indexing_deferred",
+                )
         except Exception as exc:
             errors.append(f"{exc.__class__.__name__}: {exc}")
             actions.append("light_mirror_failed")
@@ -8640,8 +11178,11 @@ def handle_hook_event(
                 event=event,
                 transcript_path=transcript_path,
                 hook_event_name=event_name,
+                registry_lock_timeout_sec=DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC if event_name in HOOK_EVENT_ORDER else None,
             )
             actions.append("raw_unavailable_incident_written")
+            if not incident.get("registry_updated"):
+                actions.append("registry_update_deferred")
             return {
                 "schema_version": SCHEMA_VERSION,
                 "ok": True,
@@ -8660,10 +11201,13 @@ def handle_hook_event(
             event=event,
             transcript_path=transcript_path,
             hook_event_name=event_name,
+            registry_lock_timeout_sec=DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC if event_name in HOOK_EVENT_ORDER else None,
         )
         actions.append("raw_mirrored")
         actions.append("segments_indexed")
-        return {
+        if not synced.get("registry_updated"):
+            actions.append("registry_update_deferred")
+        receipt = {
             "schema_version": SCHEMA_VERSION,
             "ok": True,
             "hook_event_name": event_name,
@@ -8676,6 +11220,17 @@ def handle_hook_event(
             "archive": synced,
             "errors": errors,
         }
+        if not synced.get("registry_updated"):
+            return attach_hook_sync_job(
+                receipt,
+                root,
+                event_name=event_name,
+                event=event,
+                session_id=str(synced.get("session_id") or session_id),
+                transcript_path=transcript_path,
+                reason="registry_update_deferred",
+            )
+        return receipt
     except Exception as exc:  # Hooks must fail open.
         errors.append(f"{exc.__class__.__name__}: {exc}")
         try:
@@ -8684,8 +11239,11 @@ def handle_hook_event(
                 event={**event, "hook_exception": errors[-1]},
                 transcript_path=transcript_path,
                 hook_event_name=event_name,
+                registry_lock_timeout_sec=DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC if event_name in HOOK_EVENT_ORDER else None,
             )
             actions.append("hook_exception_diagnostic_written")
+            if not incident.get("registry_updated"):
+                actions.append("registry_update_deferred")
         except Exception:
             incident = None
         return {
@@ -8713,6 +11271,27 @@ def codex_hook_output(event_name: str, receipt: dict[str, Any]) -> dict[str, Any
             "additionalContext": f"AoA session memory archive active: {display} ({path}).",
         }
     return output
+
+
+def record_hook_receipt(receipt: dict[str, Any], *, duration_ms: int | None = None) -> None:
+    session_dir_value = receipt.get("session_dir")
+    if not session_dir_value:
+        return
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "timestamp": utc_now(),
+        "hook_event_name": receipt.get("hook_event_name"),
+        "ok": receipt.get("ok"),
+        "session_id": receipt.get("session_id"),
+        "actions": receipt.get("actions", []),
+        "errors": receipt.get("errors", []),
+    }
+    if duration_ms is not None:
+        payload["duration_ms"] = duration_ms
+    try:
+        append_jsonl(Path(str(session_dir_value)) / "hooks" / "receipts.jsonl", payload)
+    except Exception:
+        pass
 
 
 def command_list(args: argparse.Namespace) -> int:
@@ -9392,15 +11971,35 @@ def command_stress_pass(args: argparse.Namespace) -> int:
 def command_hook(args: argparse.Namespace) -> int:
     raw = sys.stdin.read().strip()
     event = json.loads(raw) if raw else {}
+    started_at = time.monotonic()
+    workspace_root = Path(args.workspace_root) if args.workspace_root else None
+    aoa_root = Path(args.aoa_root) if args.aoa_root else None
     receipt = handle_hook_event(
         args.event_name,
         event if isinstance(event, dict) else {"payload": event},
-        workspace_root=Path(args.workspace_root) if args.workspace_root else None,
-        aoa_root=Path(args.aoa_root) if args.aoa_root else None,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
     )
+    launch_background = bool(receipt.get("background_job"))
+    if launch_background and hook_background_sync_enabled():
+        actions = receipt.setdefault("actions", [])
+        if isinstance(actions, list):
+            actions.append("background_worker_queued_for_launch")
+    record_hook_receipt(receipt, duration_ms=int((time.monotonic() - started_at) * 1000))
+    if launch_background:
+        root = aoa_root_for(workspace_root, aoa_root)
+        launch_hook_worker(workspace_root=workspace_root, aoa_root=root)
     output = codex_hook_output(args.event_name, receipt)
     print(json.dumps(output, ensure_ascii=False))
     return 0
+
+
+def command_hook_worker(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = run_hook_worker(workspace_root=explicit_workspace, aoa_root=root, limit=args.limit)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
 
 
 def command_sync(args: argparse.Namespace) -> int:
@@ -9509,6 +12108,105 @@ def command_naming_readiness(args: argparse.Namespace) -> int:
     )
     print(json.dumps(naming_readiness_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
+
+
+def compact_naming_wave_apply_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_label": result.get("session_label"),
+        "action": result.get("action"),
+        "status": result.get("status"),
+        "ok": result.get("ok"),
+        "reviewed_name": result.get("reviewed_name"),
+        "diagnostics": result.get("diagnostics", [])[:6] if isinstance(result.get("diagnostics"), list) else [],
+    }
+
+
+def compact_naming_quality_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_label": result.get("session_label"),
+        "level": result.get("level"),
+        "active_session_name": result.get("active_session_name"),
+        "flags": result.get("flags", [])[:10] if isinstance(result.get("flags"), list) else [],
+        "readiness_status": result.get("readiness_status"),
+        "readiness_route": result.get("readiness_route"),
+    }
+
+
+def command_naming_wave(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    if args.action == "build":
+        payload = build_naming_wave(
+            root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            include_readable=not args.exclude_readable,
+            include_low_signal=args.include_low_signal,
+            include_diagnostic=args.include_diagnostic,
+            refresh_indexes=args.refresh_indexes,
+            write=args.write,
+            write_report=args.write_report,
+            wave_id=args.wave_id,
+        )
+        print(json.dumps(naming_wave_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+        return 0 if payload.get("ok") else 1
+    if args.action == "apply":
+        if not args.plan:
+            raise SystemExit("naming-wave apply requires --plan")
+        payload = apply_naming_wave(
+            root,
+            plan_path=Path(args.plan),
+            apply=args.apply,
+            apply_preflight=args.apply_preflight,
+            accept_proposed=args.accept_proposed,
+            replace=args.replace,
+            verify_raw_hash=not args.skip_raw_hash_check,
+            write_report=args.write_report,
+            stop_on_error=args.stop_on_error,
+        )
+        print(
+            json.dumps(
+                bounded_results_print_payload(
+                    payload,
+                    full=args.full,
+                    compact_func=compact_naming_wave_apply_result,
+                    note="apply results are bounded on stdout; pass --full or read the written report for complete results",
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0 if payload.get("ok") else 1
+    if args.action == "audit":
+        payload = naming_quality_audit(
+            root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            plan_path=Path(args.plan) if args.plan else None,
+            sample_size=args.sample_size,
+            sample_seed=args.sample_seed,
+            sample_raw_chars=args.sample_raw_chars,
+            write_report=args.write_report,
+        )
+        print(
+            json.dumps(
+                bounded_results_print_payload(
+                    payload,
+                    full=args.full,
+                    compact_func=compact_naming_quality_result,
+                    note="quality audit results are bounded on stdout; pass --full or read the written report for complete results",
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0 if payload.get("ok") else 1
+    raise SystemExit(f"unknown naming-wave action: {args.action}")
 
 
 def command_manual_review(args: argparse.Namespace) -> int:
@@ -9836,6 +12534,17 @@ def validate_pipeline(*, workspace_root: Path | None = None, aoa_root: Path | No
                 all("indexing_deferred" in receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")),
                 {name: receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")},
             )
+            add_check(
+                "lifecycle_hooks_queue_background_sync",
+                all("background_sync_queued" in receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")),
+                {name: receipts[name].get("actions", []) for name in ("PreCompact", "PostCompact", "Stop")},
+            )
+            worker_payload = run_hook_worker(workspace_root=temp_workspace, aoa_root=temp_aoa, limit=5)
+            add_check(
+                "hook_worker_auto_indexes_compaction_interval",
+                worker_payload.get("ok") is True and int(worker_payload.get("processed", 0) or 0) >= 1,
+                worker_payload,
+            )
             synced = sync_session_from_transcript(
                 aoa_root=temp_aoa,
                 event={**event, "hook_event_name": "ManualSync"},
@@ -9850,10 +12559,23 @@ def validate_pipeline(*, workspace_root: Path | None = None, aoa_root: Path | No
             segment_roles = [segment.get("role") for segment in segments if isinstance(segment, dict)]
             add_check("raw_copy_exists", (session_dir / "raw" / "session.raw.jsonl").exists())
             add_check("raw_source_metadata_exists", (session_dir / "raw" / RAW_SOURCE_JSON).exists())
+            add_check("raw_blocks_index_exists", (session_dir / "raw" / RAW_BLOCK_INDEX_JSON).exists())
+            add_check("raw_compaction_events_ledger_exists", (session_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL).exists())
             add_check("segments_include_compaction_interval", segment_roles == ["initial-to-compaction", "compaction-to-latest"], segment_roles)
             add_check(
                 "segment_indexes_exist",
                 bool(segments) and all(Path(str(segment.get("index") or "")).exists() for segment in segments if isinstance(segment, dict)),
+            )
+            add_check(
+                "segments_link_to_raw_blocks",
+                bool(segments)
+                and all(
+                    isinstance(segment, dict)
+                    and isinstance(segment.get("raw_block"), dict)
+                    and Path(str(segment["raw_block"].get("path") or "")).exists()
+                    for segment in segments
+                ),
+                [segment.get("raw_block") for segment in segments if isinstance(segment, dict)],
             )
 
             packet = rehydrate_packet(temp_aoa, "latest")
@@ -10170,6 +12892,7 @@ REQUIRED_ROOT_FILES = [
     "config/batch-distillation-policy.json",
     "config/event-distillation-routes.json",
     "config/event-taxonomy.json",
+    "config/naming-golden-set.json",
     "config/naming-policy.json",
     "hooks/AGENTS.md",
     "hooks/README.md",
@@ -10195,6 +12918,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-memory-doctor/SKILL.md",
     "skills/aoa-session-memory-global-route/SKILL.md",
     "skills/aoa-session-memory-stress-pass/SKILL.md",
+    "skills/aoa-session-naming-wave/SKILL.md",
     "skills/aoa-session-naming-readiness/SKILL.md",
     "skills/aoa-session-raw-diagnostic/SKILL.md",
     "skills/aoa-session-reindex/SKILL.md",
@@ -10361,6 +13085,15 @@ def command_doctor(args: argparse.Namespace) -> int:
                 problems.append(f"indexed session missing raw copy: {session_path}")
             if not (session_path / "raw" / RAW_SOURCE_JSON).exists():
                 problems.append(f"indexed session missing raw source metadata: {session_path}")
+            archive_format_version = int_value(manifest_payload.get("archive_format_version"), 1)
+            raw_blocks_required = archive_format_version >= 2 or isinstance(manifest_payload.get("raw_blocks"), dict)
+            raw_blocks = manifest_payload.get("raw_blocks") if isinstance(manifest_payload.get("raw_blocks"), dict) else {}
+            if raw_blocks_required:
+                raw_block_index = Path(str(raw_blocks.get("index") or session_path / "raw" / RAW_BLOCK_INDEX_JSON))
+                if not raw_block_index.exists():
+                    problems.append(f"indexed session missing raw block index: {session_path}")
+                if not (session_path / "raw" / RAW_COMPACTION_EVENTS_JSONL).exists():
+                    problems.append(f"indexed session missing compaction events ledger: {session_path}")
             segments = manifest_payload.get("segments", [])
             if not isinstance(segments, list) or not segments:
                 problems.append(f"indexed session has no segments: {session_path}")
@@ -10371,6 +13104,10 @@ def command_doctor(args: argparse.Namespace) -> int:
                 role = str(segment.get("role") or "")
                 if allowed_segment_roles and role not in allowed_segment_roles:
                     problems.append(f"invalid segment role {role}: {session_path}")
+                raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
+                raw_block_path = Path(str(raw_block.get("path") or ""))
+                if raw_blocks_required and not raw_block_path.exists():
+                    problems.append(f"missing segment raw block: {session_path}:{segment.get('segment_id')}")
                 md_path = Path(str(segment.get("markdown") or ""))
                 idx_path = Path(str(segment.get("index") or ""))
                 if not md_path.exists():
@@ -10585,6 +13322,38 @@ def build_parser() -> argparse.ArgumentParser:
     naming_readiness.add_argument("--full", action="store_true", help="Print complete readiness results to stdout.")
     naming_readiness.set_defaults(func=command_naming_readiness)
 
+    naming_wave = sub.add_parser(
+        "naming-wave",
+        help="Build, apply, or audit mass semantic session naming waves.",
+    )
+    naming_wave.add_argument("action", choices=["build", "apply", "audit"], help="Wave action.")
+    naming_wave.add_argument("session", nargs="?", default="all", help="Session label/id/title/name fragment or all.")
+    naming_wave.add_argument("--workspace-root")
+    naming_wave.add_argument("--aoa-root")
+    naming_wave.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    naming_wave.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    naming_wave.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    naming_wave.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    naming_wave.add_argument("--wave-id", help="Explicit naming wave id. Defaults to the next naming-wave-N.")
+    naming_wave.add_argument("--plan", help="Naming wave plan JSON for apply or plan-aware audit.")
+    naming_wave.add_argument("--write", action="store_true", help="Write naming-wave plan artifacts under diagnostics/naming-waves.")
+    naming_wave.add_argument("--write-report", action="store_true", help="Write JSON and Markdown diagnostics reports.")
+    naming_wave.add_argument("--refresh-indexes", action="store_true", help="Refresh SESSION_NAMES.md and sessions/INDEX.md during build.")
+    naming_wave.add_argument("--exclude-readable", action="store_true", help="Do not include readable_label sessions in build output.")
+    naming_wave.add_argument("--include-low-signal", action="store_true", help="Include low-signal probe sessions in build output.")
+    naming_wave.add_argument("--include-diagnostic", action="store_true", help="Include raw-unavailable diagnostic sessions in build output.")
+    naming_wave.add_argument("--apply", action="store_true", help="Apply reviewed names or approved preflight actions. Default previews only.")
+    naming_wave.add_argument("--apply-preflight", action="store_true", help="Apply sync/reindex preflight actions from the plan deliberately.")
+    naming_wave.add_argument("--accept-proposed", action="store_true", help="Treat high-confidence ok proposed names as reviewed during apply.")
+    naming_wave.add_argument("--replace", action="store_true", help="Replace an existing semantic name with the same slug.")
+    naming_wave.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing semantic names.")
+    naming_wave.add_argument("--stop-on-error", action="store_true", help="Stop apply after the first diagnostic item.")
+    naming_wave.add_argument("--sample-size", type=int, default=0, help="For audit, include a deterministic stratified quality sample from the plan.")
+    naming_wave.add_argument("--sample-seed", default="naming-quality", help="Seed string for deterministic audit sampling.")
+    naming_wave.add_argument("--sample-raw-chars", type=int, default=240, help="Maximum raw evidence preview characters per sampled item.")
+    naming_wave.add_argument("--full", action="store_true", help="Print complete wave/audit results to stdout.")
+    naming_wave.set_defaults(func=command_naming_wave)
+
     manual_review = sub.add_parser("manual-review", help="Build manual review packets for first-wave review lanes.")
     manual_review.add_argument("--workspace-root")
     manual_review.add_argument("--aoa-root")
@@ -10625,6 +13394,12 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--workspace-root")
     hook.add_argument("--aoa-root")
     hook.set_defaults(func=command_hook)
+
+    hook_worker = sub.add_parser("hook-worker", help="Process queued hook sync jobs outside the Codex hook timeout window.")
+    hook_worker.add_argument("--workspace-root")
+    hook_worker.add_argument("--aoa-root")
+    hook_worker.add_argument("--limit", type=int, default=5)
+    hook_worker.set_defaults(func=command_hook_worker)
 
     sync = sub.add_parser("sync", help="Manually sync one transcript into the archive.")
     sync.add_argument("--transcript-path", required=True)

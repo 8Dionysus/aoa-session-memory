@@ -52,8 +52,10 @@ Codex hook event
   -> hooks/events.jsonl receipt
   -> raw transcript mirror when transcript_path is readable
   -> light hook closeout for prompt, compaction, and large stop lifecycle hooks
-  -> full sync on manual sync, import, or reindex
+  -> background hook-worker for queued lifecycle sync
   -> JSONL event classification
+  -> raw/blocks/*.raw.jsonl sealed by compaction interval
+  -> raw/blocks.index.json and raw/compaction-events.jsonl
   -> compaction-interval segment Markdown
   -> sibling segment index JSON
   -> SESSION.md and session.index.json
@@ -98,11 +100,13 @@ Behavior:
 - records the hook event
 - mirrors raw when available
 - marks segment and index regeneration as deferred by default
+- queues background lifecycle sync so the worker can seal the closing interval
 - full-syncs only when `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1`
 - returns only `{"continue": true}` by default
 
 Reason: pre-compact hooks run on the active lifecycle path and must preserve
-raw state without risking a timeout on large transcripts.
+raw state without risking a timeout on large transcripts. Heavy interval
+sealing belongs to `hook-worker`, not the foreground hook.
 
 ### PostCompact
 
@@ -113,12 +117,14 @@ Behavior:
 - records the hook event
 - mirrors raw when available
 - marks segment and index regeneration as deferred by default
+- queues background lifecycle sync that writes the closed compaction interval,
+  raw block ledger, segment Markdown, and sibling segment index
 - full-syncs only when `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1`
 - returns only `{"continue": true}` by default
 
-Reason: post-compact hooks are preservation receipts. Full interval indexing
-belongs to manual `sync`, import, or reindex unless explicitly enabled for
-debugging.
+Reason: post-compact hooks are preservation receipts on the active lifecycle
+path. The automatic `hook-worker` is the primary archive path; manual `sync`,
+import, and reindex are recovery or rebuild paths.
 
 ### Stop
 
@@ -153,6 +159,19 @@ The durable segment roles are:
 When no compaction boundary exists, use `initial-to-latest`.
 
 When compaction boundaries exist, each boundary closes the previous interval.
+
+The preservation layer must also write raw interval blocks:
+
+- `raw/session.raw.jsonl` keeps the full mirrored black-box transcript.
+- `raw/blocks/NNN__role.raw.jsonl` keeps each interval as a bounded raw block.
+- `raw/blocks.index.json` maps segment IDs to raw block paths, status, hashes,
+  source ranges, and boundary event IDs.
+- `raw/compaction-events.jsonl` records the raw compaction markers observed in
+  the transcript.
+
+`PostCompact` must queue this sealing work automatically. A later manual
+`reindex-sessions` may rebuild the same artifacts from `raw/session.raw.jsonl`,
+but it is not the normal collection path.
 
 Real Codex raw transcripts may express a compaction boundary as:
 
@@ -367,6 +386,55 @@ python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-
 This batch command still routes each item through the reviewed phase-name
 writer, skips empty `reviewed_name` entries, and does not auto-accept machine
 candidates.
+
+For many sessions, create a mass naming wave:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave build \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --write-report
+```
+
+The wave plan groups sessions by next action:
+
+- `sync_source_transcript`: source transcript is newer than archived raw;
+- `reindex_session`: generated indexes are stale or deferred;
+- `semantic_session_name_review`: fill `reviewed_name` before applying;
+- `review_phase_queue_then_refine_session_name`: resolve open phase queues
+  before treating the umbrella session name as settled;
+- diagnostic/low-signal skips.
+
+Apply only reviewed or deliberately approved work:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave apply \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --apply \
+  --write-report
+```
+
+Use `--apply-preflight` only when the sync/reindex preflight batch has been
+sampled. Use `--accept-proposed` only after sampling high-confidence `ok`
+candidate names. The default apply path requires `reviewed_name`.
+
+Check naming quality separately:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --write-report
+```
+
+This audit is not a proxy for reading raw evidence. It catches repeatable
+quality failures: generic names, missing raw refs, duplicate slugs, stale
+coverage, open phase queues, missing anchors, and accidental physical relabel
+pressure.
 
 Review one candidate through the guarded route before applying:
 

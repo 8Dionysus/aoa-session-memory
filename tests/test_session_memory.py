@@ -62,6 +62,41 @@ def test_readable_slug_removes_banned_topology_terms() -> None:
     assert generic_payload["name"] == "aoa_session_memory.py validation"
     assert generic_payload["basis"] == "linked_path_event_signals"
     assert "generic_user_intent_present" in generic_payload["quality_flags"]
+    commit_payload = module.phase_candidate_name(
+        "005",
+        ["Коммить, пуш, мердж"],
+        ["docs/ROADMAP.md"],
+        module.Counter({"VERIFICATION": 1}),
+    )
+    assert commit_payload["name"] == "ROADMAP.md validation"
+    assert commit_payload["basis"] == "linked_path_event_signals"
+    assert "generic_user_intent_present" in commit_payload["quality_flags"]
+    continue_payload = module.phase_candidate_name(
+        "006",
+        ["Это ещё не всё"],
+        ["scripts/validate_repo.py"],
+        module.Counter({"COMMAND": 2}),
+    )
+    assert continue_payload["name"] == "validate_repo.py investigation"
+    assert continue_payload["basis"] == "linked_path_event_signals"
+    assert "generic_user_intent_present" in continue_payload["quality_flags"]
+    intro_payload = module.phase_candidate_name(
+        "007",
+        ["В этой сессии мы будем продолжать заниматься машиной.", "У нас работает ембеддинг модель сейчас, так? А реранкер?"],
+        ["abyss-machine"],
+        module.Counter({"COMMAND": 3}),
+    )
+    assert intro_payload["name"] == "У нас работает ембеддинг модель сейчас, так? А реранкер?"
+    assert intro_payload["basis"] == "specific_user_intent"
+    assert "generic_user_intent_present" in intro_payload["quality_flags"]
+    tail_payload = module.phase_candidate_name(
+        "008",
+        ["Что теперь?"],
+        ["docs/ROOT_SURFACE_LAW.md"],
+        module.Counter({"VERIFICATION": 1}),
+    )
+    assert tail_payload["name"] == "ROOT_SURFACE_LAW.md validation"
+    assert tail_payload["basis"] == "linked_path_event_signals"
 
 
 def test_phase_candidate_review_turns_weak_names_into_actionable_queue_items() -> None:
@@ -556,6 +591,155 @@ def test_user_prompt_submit_is_light_by_default(tmp_path: Path, monkeypatch) -> 
     assert not (session_dir / "session.manifest.json").exists()
 
 
+def test_session_start_is_light_by_default_when_raw_exists(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-start-light.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-start-light"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Start should stay light"}]}},
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_START_SYNC", raising=False)
+
+    receipt = module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "session-start-light",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "session-start-light"
+    assert receipt["ok"] is True
+    assert "session_start_hook_light_recorded" in receipt["actions"]
+    assert "raw_sync_deferred" in receipt["actions"]
+    assert "indexing_deferred" in receipt["actions"]
+    assert "background_sync_queued" in receipt["actions"]
+    assert receipt["background_job"].endswith(".json")
+    assert (session_dir / "hooks" / "events.jsonl").exists()
+    assert not (session_dir / "raw" / "session.raw.jsonl").exists()
+    assert not (session_dir / "session.manifest.json").exists()
+
+
+def test_large_lifecycle_hook_defers_raw_mirror_by_size(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-large-hook.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-large-hook"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Large hook mirror"}]}},
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_COMPACT_SYNC", raising=False)
+    monkeypatch.setenv("AOA_SESSION_MEMORY_HOOK_MIRROR_MAX_BYTES", "1")
+
+    receipt = module.handle_hook_event(
+        "PreCompact",
+        {
+            "session_id": "session-large-hook",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "PreCompact",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "session-large-hook"
+    assert receipt["ok"] is True
+    assert "raw_mirror_deferred" in receipt["actions"]
+    assert "indexing_deferred" in receipt["actions"]
+    assert "background_sync_queued" in receipt["actions"]
+    assert receipt["raw"]["mirror_status"] == "deferred_from_hook"
+    assert (session_dir / "hooks" / "events.jsonl").exists()
+    assert not (session_dir / "raw" / "session.raw.jsonl").exists()
+    assert not (session_dir / "session.manifest.json").exists()
+
+
+def test_hook_worker_processes_deferred_sync_job(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-auto.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-auto"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker automatic sync"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: worker syncs outside hook"}]}},
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_START_SYNC", raising=False)
+
+    receipt = module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "session-worker-auto",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert "background_sync_queued" in receipt["actions"]
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__worker-automatic-sync"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert payload["ok"] is True
+    assert payload["processed"] == 1
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["latest_event_count"] == 3
+    assert (session_dir / "segments" / "000__initial-to-latest.index.json").exists()
+    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
+    assert list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))
+
+
+def test_hook_registry_lock_contention_defers_registry_update(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-lock.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-lock"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Registry lock hook"}]}},
+        ],
+    )
+    lock_path = aoa_root / ".session-registry.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        module.fcntl.flock(lock_handle, module.fcntl.LOCK_EX)
+        receipt = module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": "session-lock",
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__registry-lock-hook"
+    assert receipt["ok"] is True
+    assert "segments_indexed" in receipt["actions"]
+    assert "registry_update_deferred" in receipt["actions"]
+    assert (session_dir / "session.manifest.json").exists()
+    assert not (aoa_root / "session-registry.json").exists()
+
+
 def test_codex_hook_output_uses_only_protocol_fields() -> None:
     receipt = {
         "ok": True,
@@ -578,6 +762,39 @@ def test_codex_hook_output_uses_only_protocol_fields() -> None:
     assert "aoaSessionMemory" not in start_payload
     assert set(start_payload) == {"continue", "hookSpecificOutput"}
     assert start_payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+
+
+def test_record_hook_receipt_writes_bounded_runtime_trace(tmp_path: Path) -> None:
+    session_dir = tmp_path / "AbyssOS" / ".aoa" / "sessions" / "session-receipt"
+
+    module.record_hook_receipt(
+        {
+            "hook_event_name": "Stop",
+            "ok": True,
+            "session_id": "session-receipt",
+            "session_dir": str(session_dir),
+            "actions": ["hook_event_recorded", "indexing_deferred"],
+            "errors": [],
+        },
+        duration_ms=123,
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (session_dir / "hooks" / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows == [
+        {
+            "schema_version": 1,
+            "timestamp": rows[0]["timestamp"],
+            "hook_event_name": "Stop",
+            "ok": True,
+            "session_id": "session-receipt",
+            "actions": ["hook_event_recorded", "indexing_deferred"],
+            "errors": [],
+            "duration_ms": 123,
+        }
+    ]
 
 
 def test_hooks_config_builder_uses_supplied_roots(tmp_path: Path) -> None:
@@ -646,7 +863,7 @@ def test_default_aoa_root_uses_script_parent() -> None:
     assert module.aoa_root_for() == SCRIPT.parents[1]
 
 
-def test_lifecycle_hooks_defer_indexing_and_manual_sync_full_syncs(tmp_path: Path, monkeypatch) -> None:
+def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-14T00-00-00-session-compact.jsonl"
@@ -692,12 +909,42 @@ def test_lifecycle_hooks_defer_indexing_and_manual_sync_full_syncs(tmp_path: Pat
     assert post["ok"] is True
     assert "indexing_deferred" in pre["actions"]
     assert "indexing_deferred" in post["actions"]
+    assert "background_sync_queued" in pre["actions"]
+    assert "background_sync_queued" in post["actions"]
     light_session_dir = aoa_root / "sessions" / "2026-05-14__001__codex-in-abyssos"
     light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert light_manifest["archive_status"] == "raw_mirrored_index_deferred"
     assert light_manifest["hooks_seen"] == ["PostCompact", "PreCompact"]
     assert light_manifest["segments"] == []
     assert (light_session_dir / "raw" / "session.raw.jsonl").exists()
+
+    worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    assert worker["ok"] is True
+    assert worker["processed"] == 2
+    session_dir = aoa_root / "sessions" / "2026-05-14__001__archive-compaction-intervals"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["archive_format_version"] == 2
+    assert manifest["hooks_seen"] == ["HookWorker:PostCompact", "HookWorker:PreCompact", "PostCompact", "PreCompact"]
+    assert [segment["role"] for segment in manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
+    assert not light_session_dir.exists()
+    raw_blocks = manifest["raw_blocks"]["blocks"]
+    assert [block["role"] for block in raw_blocks] == ["initial-to-compaction", "compaction-to-latest"]
+    assert raw_blocks[0]["status"] == "sealed"
+    assert raw_blocks[1]["status"] == "open"
+    assert (session_dir / "raw" / "blocks.index.json").exists()
+    assert (session_dir / "raw" / "compaction-events.jsonl").exists()
+    assert (session_dir / "raw" / "blocks" / "000__initial-to-compaction.raw.jsonl").exists()
+    first_segment_index = json.loads((session_dir / "segments" / "000__initial-to-compaction.index.json").read_text(encoding="utf-8"))
+    assert first_segment_index["source_block"]["rel"] == "raw/blocks/000__initial-to-compaction.raw.jsonl"
+    assert manifest["segments"][0]["raw_block"]["rel"] == "raw/blocks/000__initial-to-compaction.raw.jsonl"
+    compaction_events = [
+        json.loads(line)
+        for line in (session_dir / "raw" / "compaction-events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert compaction_events
+    assert compaction_events[0]["segment_id"] == "000"
 
     stop = module.handle_hook_event(
         "Stop",
@@ -713,24 +960,24 @@ def test_lifecycle_hooks_defer_indexing_and_manual_sync_full_syncs(tmp_path: Pat
 
     assert stop["ok"] is True
     assert "indexing_deferred" in stop["actions"]
-    light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
-    assert light_manifest["archive_status"] == "raw_mirrored_index_deferred"
-    assert light_manifest["hooks_seen"] == ["PostCompact", "PreCompact", "Stop"]
-    assert light_manifest["segments"] == []
+    assert "background_sync_queued" in stop["actions"]
+    stop_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert stop_manifest["archive_status"] == "raw_mirrored_index_deferred"
+    assert stop_manifest["hooks_seen"] == ["HookWorker:PostCompact", "HookWorker:PreCompact", "PostCompact", "PreCompact", "Stop"]
 
     deferred_audit = module.completion_audit(workspace_root=workspace, aoa_root=aoa_root, check_codex=False)
     topology = [
         item for item in deferred_audit["checklist"] if item["requirement"] == "Segment topology matches raw compaction boundaries"
     ][0]
     assert topology["status"] == "missing"
-    assert topology["evidence"]["indexed_archives"] == []
     assert topology["evidence"]["deferred_archives"][0]["archive_status"] == "raw_mirrored_index_deferred"
 
-    reindexed = module.reindex_sessions(aoa_root=aoa_root, target="latest")
-    assert reindexed["counts"] == {"reindexed": 1}
-    light_manifest = json.loads((light_session_dir / "session.manifest.json").read_text(encoding="utf-8"))
-    assert light_manifest["archive_status"] == "indexed"
-    assert [segment["role"] for segment in light_manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
+    stop_worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    assert stop_worker["ok"] is True
+    assert stop_worker["processed"] == 1
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["archive_status"] == "indexed"
+    assert [segment["role"] for segment in manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
 
     synced = module.sync_session_from_transcript(
         aoa_root=aoa_root,
@@ -739,12 +986,13 @@ def test_lifecycle_hooks_defer_indexing_and_manual_sync_full_syncs(tmp_path: Pat
         hook_event_name="ManualSync",
     )
     assert synced["segment_count"] == 2
-    session_dir = aoa_root / "sessions" / "2026-05-14__001__archive-compaction-intervals"
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert manifest["archive_status"] == "indexed"
-    assert manifest["hooks_seen"] == ["ManualSync", "PostCompact", "PreCompact", "Stop"]
+    assert manifest["archive_format_version"] == 2
+    assert "ManualSync" in manifest["hooks_seen"]
+    assert "Stop" in manifest["hooks_seen"]
     assert [segment["role"] for segment in manifest["segments"]] == ["initial-to-compaction", "compaction-to-latest"]
-    assert not light_session_dir.exists()
+    assert manifest["segments"][0]["raw_block"]["sha256"]
     packet = module.rehydrate_packet(aoa_root, "latest")
     assert "AoA Session Rehydration Packet" in packet
     assert "2026-05-14__001__archive-compaction-intervals" in packet
@@ -1645,6 +1893,516 @@ def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Pa
     assert "aoa-techniques-continuation" in sessions_index_md
     assert "aoa-techniques-final-residual-promotion-pass" in sessions_index_md
     assert "2026-05-18__001__continue-the-work/SESSION.md" in sessions_index_md
+
+
+def test_naming_wave_build_apply_and_audit_semantic_names(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T00-00-00-naming-wave.jsonl"
+    rows: list[dict[str, object]] = [
+        {"timestamp": "2026-05-19T00:00:00Z", "type": "session_meta", "payload": {"id": "naming-wave-session", "cwd": str(workspace / ".aoa")}},
+        {"timestamp": "2026-05-19T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build the mass naming wave route"}]}},
+        {"timestamp": "2026-05-19T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: keep semantic naming separate from physical relabel."}]}},
+    ]
+    for index in range(3, 24):
+        rows.append(
+            {
+                "timestamp": f"2026-05-19T00:00:{index:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Progress marker {index}"}]},
+            }
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "naming-wave-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace / ".aoa"),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    wave = module.build_naming_wave(aoa_root, target="all", write=True, wave_id="naming-wave-test")
+    item = next(item for item in wave["items"] if item["session_id"] == "naming-wave-session")
+    assert wave["policy"]["semantic_names_only"] is True
+    assert item["action"] == "semantic_session_name_review"
+    assert item["physical_relabel_allowed"] is False
+    assert item["archive_label_change"] is False
+    assert item["candidate"]["evidence"] == ["raw:line:2"]
+    assert item["reviewed_name"] == ""
+    assert Path(wave["plan_path"]).exists()
+
+    plan = json.loads(Path(wave["plan_path"]).read_text(encoding="utf-8"))
+    for plan_item in plan["items"]:
+        if plan_item["session_id"] == "naming-wave-session":
+            plan_item["reviewed_name"] = "session-memory-naming-wave-route"
+    plan_path = Path(wave["plan_path"])
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    preview = module.apply_naming_wave(aoa_root, plan_path=plan_path)
+    applied = module.apply_naming_wave(aoa_root, plan_path=plan_path, apply=True, write_report=True)
+    session_dir = aoa_root / "sessions" / "2026-05-19__001__build-the-mass-naming-wave-route"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    audit = module.naming_quality_audit(aoa_root, target="session-memory-naming-wave-route", plan_path=plan_path, sample_size=1, sample_seed="test")
+
+    assert preview["status"] == "preview_ready"
+    assert preview["refreshed_indexes"] == []
+    assert applied["status"] == "applied"
+    assert applied["counts"]["applied"] == 1
+    assert session_dir.exists()
+    assert manifest["semantic_names"]["active_session"] == "session-memory-naming-wave-route"
+    assert manifest["display"]["label"] == "2026-05-19__001__build-the-mass-naming-wave-route"
+    assert audit["results"][0]["level"] == "ok"
+    assert not audit["results"][0]["flags"]
+    assert audit["quality_sample_size"] == 1
+    assert audit["quality_sample"][0]["evidence_preview"][0]["text"] == "Build the mass naming wave route"
+    assert Path(applied["report_json"]).exists()
+    assert (aoa_root / module.SESSION_NAME_INDEX_JSON).exists()
+    assert (aoa_root / "sessions" / module.SESSIONS_INDEX_JSON).exists()
+
+
+def test_naming_wave_evidence_skips_agents_instruction_envelope(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T00-30-00-envelope-skip.jsonl"
+    rows: list[dict[str, object]] = [
+        {"timestamp": "2026-05-19T00:30:00Z", "type": "session_meta", "payload": {"id": "envelope-skip-session", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-19T00:30:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /workspace\n<INSTRUCTIONS>project law</INSTRUCTIONS>"}]}},
+        {"timestamp": "2026-05-19T00:30:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Name the real session from the real request"}]}},
+    ]
+    for index in range(3, 24):
+        rows.append(
+            {
+                "timestamp": f"2026-05-19T00:30:{index:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Progress marker {index}"}]},
+            }
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "envelope-skip-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    wave = module.build_naming_wave(aoa_root, target="envelope-skip-session", write=True, wave_id="naming-wave-envelope")
+    item = wave["items"][0]
+
+    assert item["candidate"]["evidence"] == ["raw:line:3"]
+    assert item["proposed_name"].endswith("name-the-real-session-from-the-real-request")
+    assert "agents-md" not in item["proposed_name"]
+
+
+def test_naming_wave_uses_raw_request_after_setup_prefix_title(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T00-40-00-setup-prefix.jsonl"
+    prompt = (
+        "Работай в /srv/work/rios-de-color. Отвечай только на русском. "
+        "Сначала прочитай: 1. AGENTS.md 2. AUDIT_STATE.md 3. ROADMAP_MAY.md. "
+        "Проверь SocratiCode по runbook."
+    )
+    rows: list[dict[str, object]] = [
+        {"timestamp": "2026-05-19T00:40:00Z", "type": "session_meta", "payload": {"id": "setup-prefix-session", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-19T00:40:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}},
+    ]
+    for index in range(2, 24):
+        rows.append(
+            {
+                "timestamp": f"2026-05-19T00:40:{index:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Progress marker {index}"}]},
+            }
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "setup-prefix-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    wave = module.build_naming_wave(aoa_root, target="setup-prefix-session", write=True, wave_id="naming-wave-setup-prefix")
+    item = wave["items"][0]
+    name_terms = set(module.semantic_name_slug(item["proposed_name"]).split("-"))
+
+    assert item["candidate"]["evidence"] == ["raw:line:2"]
+    assert "socraticode" in name_terms
+    assert not ({"работай", "отвечай", "сначала"} & name_terms)
+
+
+def test_naming_wave_uses_full_raw_when_short_title_is_context_noise(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T00-45-00-pr-review-title.jsonl"
+    prompt = (
+        "Read-only audit. Context: user provided PR review comments for aoa-evals, aoa-stats, aoa-memo. "
+        "Work in /srv. Do not edit. Inspect current state against: aoa-evals PR138 verdict_shape categorical."
+    )
+    rows: list[dict[str, object]] = [
+        {"timestamp": "2026-05-19T00:45:00Z", "type": "session_meta", "payload": {"id": "pr-review-title-session", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-19T00:45:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}},
+    ]
+    for index in range(2, 24):
+        rows.append(
+            {
+                "timestamp": f"2026-05-19T00:45:{index:02d}Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Progress marker {index}"}]},
+            }
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "pr-review-title-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    wave = module.build_naming_wave(aoa_root, target="pr-review-title-session", write=True, wave_id="naming-wave-pr-review-title")
+    item = wave["items"][0]
+    name_slug = module.semantic_name_slug(item["proposed_name"])
+
+    assert item["candidate"]["evidence"] == ["raw:line:2"]
+    assert "context" not in name_slug
+    assert "aoa-evals" in name_slug
+    assert "pr-review-comments-audit" in name_slug
+
+
+def test_naming_wave_preflight_sync_updates_stale_source_before_naming(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T01-00-00-sync-wave.jsonl"
+    rows = [
+        {"timestamp": "2026-05-19T01:00:00Z", "type": "session_meta", "payload": {"id": "sync-wave-session", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-19T01:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Start the sync wave"}]}},
+    ]
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "sync-wave-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    rows.append(
+        {"timestamp": "2026-05-19T01:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "New source transcript evidence."}]}}
+    )
+    write_jsonl(transcript, rows)
+
+    wave = module.build_naming_wave(aoa_root, target="sync-wave-session", write=True, wave_id="naming-wave-sync")
+    item = wave["items"][0]
+    applied = module.apply_naming_wave(aoa_root, plan_path=Path(wave["plan_path"]), apply=True, apply_preflight=True)
+    manifest_path = next((aoa_root / "sessions").glob("*/session.manifest.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert item["action"] == "sync_source_transcript"
+    assert item["readiness"]["status"] == "needs_sync"
+    assert applied["counts"]["synced"] == 1
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["latest_event_count"] == 3
+    assert manifest["raw"]["line_count"] == 3
+
+
+def test_naming_wave_preflight_reindexes_deferred_archives(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-19T02-00-00-reindex-wave.jsonl"
+    rows = [
+        {"timestamp": "2026-05-19T02:00:00Z", "type": "session_meta", "payload": {"id": "reindex-wave-session", "cwd": str(workspace)}},
+        {"timestamp": "2026-05-19T02:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Reindex the deferred naming wave archive"}]}},
+        {"timestamp": "2026-05-19T02:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Keep raw first, then refresh indexes."}]}},
+    ]
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "reindex-wave-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = next((aoa_root / "sessions").glob("*reindex-the-deferred-naming-wave-archive"))
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["archive_status"] = "raw_mirrored_index_deferred"
+    manifest["raw"]["sha256"] = None
+    manifest["raw"]["line_count"] = None
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    wave = module.build_naming_wave(aoa_root, target="reindex-wave-session", write=True, wave_id="naming-wave-reindex")
+    item = wave["items"][0]
+    applied = module.apply_naming_wave(aoa_root, plan_path=Path(wave["plan_path"]), apply=True, apply_preflight=True)
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert item["action"] == "reindex_session"
+    assert item["readiness"]["status"] == "needs_reindex"
+    assert applied["counts"]["reindexed"] == 1
+    assert refreshed["archive_status"] == "indexed"
+    assert refreshed["raw"]["line_count"] == 3
+    assert refreshed["raw"]["sha256"]
+
+
+def test_naming_golden_set_quality_examples_are_enforced() -> None:
+    golden_path = module.NAMING_GOLDEN_SET_PATH
+    payload = json.loads((SCRIPT.parents[1] / golden_path).read_text(encoding="utf-8"))
+    cases = {case["id"]: case for case in payload["cases"]}
+    specific = module.session_name_candidate_quality(
+        "repository-route-surfaces-refactor-and-release-validation",
+        evidence=["raw:line:2"],
+    )
+    generic = module.session_name_candidate_quality("Continue the work", evidence=["raw:line:2"])
+    language_instruction = cases["language_instruction_prefix_not_name"]
+    stripped_seed = module.useful_name_seed(language_instruction["title"])
+    language_instruction_quality = module.session_name_candidate_quality(
+        language_instruction["title"],
+        evidence=["raw:line:2"],
+    )
+    readlist_instruction = cases["workdir_language_readlist_prefix_not_name"]
+    readlist_seed = module.useful_name_seed(readlist_instruction["title"])
+    readlist_slug = module.semantic_name_slug(readlist_seed)
+    role_prompt = cases["role_prompt_prefix_not_name"]
+    role_prompt_seed = module.useful_name_seed(role_prompt["title"])
+    role_prompt_quality = module.session_name_candidate_quality(
+        role_prompt["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    russian_role_prompt = cases["russian_role_prompt_prefix_not_name"]
+    russian_role_prompt_seed = module.useful_name_seed(russian_role_prompt["title"])
+    russian_role_prompt_quality = module.session_name_candidate_quality(
+        russian_role_prompt["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    role_context = cases["role_context_prefix_not_name"]
+    role_context_seed = module.useful_name_seed(role_context["title"])
+    task_in_workspace = cases["task_in_shared_workspace_prefix_not_name"]
+    task_in_workspace_seed = module.useful_name_seed(task_in_workspace["title"])
+    russian_do_not_edit = cases["russian_do_not_edit_prefix_not_name"]
+    russian_do_not_edit_seed = module.useful_name_seed(russian_do_not_edit["title"])
+    truncated_do_not_edit = cases["truncated_russian_do_not_edit_title_is_generic"]
+    truncated_do_not_edit_seed = module.useful_name_seed(truncated_do_not_edit["title"])
+    truncated_do_not_edit_quality = module.session_name_candidate_quality(
+        truncated_do_not_edit["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    domain_scaffold_short = cases["domain_scaffold_short_name_requires_review"]
+    domain_scaffold_short_quality = module.session_name_candidate_quality(
+        domain_scaffold_short["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    read_only_wave = cases["read_only_inside_wave_title_not_name"]
+    read_only_wave_seed = module.useful_name_seed(read_only_wave["title"])
+    pr_review_context = cases["pr_review_context_seed"]
+    pr_review_context_seed = module.useful_name_seed(pr_review_context["title"])
+    pr_review_large_list = cases["pr_review_large_list_context_seed"]
+    pr_review_large_list_seed = module.useful_name_seed(pr_review_large_list["title"])
+    experience_wave_artifact = cases["experience_wave_branch_and_artifact_seed"]
+    experience_wave_artifact_seed = module.useful_name_seed(experience_wave_artifact["title"])
+    experience_wave_archive = cases["experience_wave_seed_archive_seed"]
+    experience_wave_archive_seed = module.useful_name_seed(experience_wave_archive["title"])
+    experience_wave_planning = cases["experience_wave_planning_full_raw_seed"]
+    experience_wave_planning_seed = module.useful_name_seed(experience_wave_planning["title"])
+    experience_wave_ownership = cases["experience_wave_role_ownership_seed"]
+    experience_wave_ownership_seed = module.useful_name_seed(experience_wave_ownership["title"])
+    final_verdict_artifact = cases["final_verdict_uses_artifact_topic_seed"]
+    final_verdict_artifact_seed = module.useful_name_seed(final_verdict_artifact["title"])
+    repo_final_judgment = cases["repo_final_judgment_uses_review_artifact_seed"]
+    repo_final_judgment_seed = module.useful_name_seed(repo_final_judgment["title"])
+    russian_scout = cases["russian_experience_scout_uses_lane_and_repos"]
+    russian_scout_seed = module.useful_name_seed(russian_scout["title"])
+    wave_sidecar = cases["wave_sidecar_uses_named_topics"]
+    wave_sidecar_seed = module.useful_name_seed(wave_sidecar["title"])
+    wave2_archive_topic = cases["wave2_archive_topic_seed"]
+    wave2_archive_topic_seed = module.useful_name_seed(wave2_archive_topic["title"])
+    wave5_cartography = cases["wave5_seed_cartography_uses_seed_dir"]
+    wave5_cartography_seed = module.useful_name_seed(wave5_cartography["title"])
+    pr_gate = cases["pr_gate_watcher_seed"]
+    pr_gate_seed = module.useful_name_seed(pr_gate["title"])
+    remaining_pr_gate = cases["remaining_pr_gate_watcher_seed"]
+    remaining_pr_gate_seed = module.useful_name_seed(remaining_pr_gate["title"])
+    socraticode_runbook = cases["socraticode_runbook_seed"]
+    socraticode_runbook_seed = module.useful_name_seed(socraticode_runbook["title"])
+    russian_seed_planting = cases["russian_seed_planting_meaning_seed"]
+    russian_seed_planting_seed = module.useful_name_seed(russian_seed_planting["title"])
+    slash_phrase = cases["slash_phrase_is_not_path_domain"]
+    slash_phrase_domain = module.detect_session_domain([slash_phrase["title"]])
+    procedural_name = cases["procedural_name_requires_review"]
+    procedural_name_quality = module.session_name_candidate_quality(
+        procedural_name["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    truncated_tail = cases["truncated_tail_requires_review"]
+    truncated_tail_quality = module.session_name_candidate_quality(
+        truncated_tail["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    scope_only_branch = cases["scope_only_branch_requires_review"]
+    scope_only_branch_quality = module.session_name_candidate_quality(
+        scope_only_branch["warn_name"],
+        evidence=["raw:line:2"],
+    )
+    working_context = cases["working_context_prefix_not_name"]
+    working_context_seed = module.useful_name_seed(working_context["title"])
+    working_context_domain = module.detect_session_domain([working_context["title"]])
+    github_owner_context = cases["github_owner_prefix_not_name"]
+    github_owner_context_seed = module.useful_name_seed(github_owner_context["title"])
+    read_only_task_for_wave = cases["read_only_task_for_wave_prefix_not_name"]
+    read_only_task_for_wave_seed = module.useful_name_seed(read_only_task_for_wave["title"])
+    fallback_quality_case = cases["fallback_domain_action_requires_review"]["quality"]
+    path_attachment = cases["path_attachment_domain_uses_stem"]
+    path_attachment_domain = module.detect_session_domain([path_attachment["title"]])
+    quoted_path_attachment = cases["quoted_path_attachment_uses_stem"]
+    quoted_path_seed = module.useful_name_seed(quoted_path_attachment["title"])
+    repo_topology_refactor = cases["russian_repo_topology_refactor_path_not_name"]
+    repo_topology_refactor_seed = module.useful_name_seed(repo_topology_refactor["title"])
+    systemic_seed_case_ids = [
+        "next_wave_deployment_scout_seed",
+        "next_wave_certification_scout_seed",
+        "experience_wave_owner_landing_plan_seed",
+        "owner_split_final_judgment_seed",
+        "wave2_second_pass_judgment_seed",
+        "wave2_authority_note_judgment_seed",
+        "repo_fix_round_final_verdict_seed",
+        "repo_diff_review_seed",
+        "experience_wave2_seed_scope_authority_review_seed",
+        "experience_wave2_certification_watchtower_seed",
+        "experience_wave1_seed_authority_risk_seed",
+        "titan_wave0_risk_review_seed",
+        "titan_wave0_final_judgment_seed",
+        "titan_wave0_structural_framing_seed",
+        "titan_wave1_center_bridge_risk_seed",
+        "wave1_center_bridge_surface_seed",
+        "wave1_dionysus_provenance_bridge_seed",
+        "experience_v12_v20_wave0_lineage_seed",
+        "wave4_polis_constitution_seed",
+        "dionysus_closeout_map_seed",
+        "dionysus_closeout_lineage_audit_seed",
+        "dionysus_closeout_final_judgment_seed",
+        "compact_hook_probe_seed",
+        "post_w10_gap_audit_seed",
+        "post_w10_runtime_gap_audit_seed",
+        "srv_mirror_drift_seed",
+        "cross_repo_wave5_review_gate_seed",
+        "wave5_review_uses_review_not_provenance_seed",
+        "wave5_rereview_gets_distinct_seed",
+        "multi_repo_fix_map_seed",
+        "rfc3339_lineage_seed",
+    ]
+
+    assert payload["artifact_type"] == "naming_golden_set"
+    assert specific["level"] == cases["specific_repo_refactor"]["expected_quality_level"]
+    assert "generic_name" not in specific["flags"]
+    assert generic["level"] == cases["generic_continue_requires_signals"]["expected_quality_level"]
+    assert cases["generic_continue_requires_signals"]["expected_flag"] in generic["flags"]
+    assert stripped_seed == language_instruction["expected_seed"]
+    assert not module.semantic_name_slug(stripped_seed).startswith(language_instruction["forbidden_slug_prefix"])
+    assert "instruction_text_in_name" in language_instruction_quality["flags"]
+    assert readlist_seed == readlist_instruction["expected_seed"]
+    assert not set(readlist_slug.split("-")) & set(readlist_instruction["forbidden_slug_terms"])
+    assert role_prompt_seed == role_prompt["expected_seed"]
+    assert role_prompt["expected_flag"] in role_prompt_quality["flags"]
+    assert russian_role_prompt_seed == russian_role_prompt["expected_seed"]
+    assert russian_role_prompt["expected_flag"] in russian_role_prompt_quality["flags"]
+    assert role_context_seed == role_context["expected_seed"]
+    assert task_in_workspace_seed == task_in_workspace["expected_seed"]
+    assert russian_do_not_edit_seed == russian_do_not_edit["expected_seed"]
+    assert module.title_is_generic_for_naming(truncated_do_not_edit_seed, "first_user_message") is truncated_do_not_edit["expected_generic"]
+    assert truncated_do_not_edit["expected_flag"] in truncated_do_not_edit_quality["flags"]
+    assert domain_scaffold_short_quality["level"] == domain_scaffold_short["expected_quality_level"]
+    assert domain_scaffold_short["expected_flag"] in domain_scaffold_short_quality["flags"]
+    assert read_only_wave_seed == read_only_wave["expected_seed"]
+    assert pr_review_context_seed == pr_review_context["expected_seed"]
+    assert pr_review_large_list_seed == pr_review_large_list["expected_seed"]
+    assert experience_wave_artifact_seed == experience_wave_artifact["expected_seed"]
+    assert experience_wave_archive_seed == experience_wave_archive["expected_seed"]
+    assert experience_wave_planning_seed == experience_wave_planning["expected_seed"]
+    assert experience_wave_ownership_seed == experience_wave_ownership["expected_seed"]
+    assert final_verdict_artifact_seed == final_verdict_artifact["expected_seed"]
+    assert repo_final_judgment_seed == repo_final_judgment["expected_seed"]
+    assert russian_scout_seed == russian_scout["expected_seed"]
+    assert wave_sidecar_seed == wave_sidecar["expected_seed"]
+    assert wave2_archive_topic_seed == wave2_archive_topic["expected_seed"]
+    assert wave5_cartography_seed == wave5_cartography["expected_seed"]
+    assert pr_gate_seed == pr_gate["expected_seed"]
+    assert remaining_pr_gate_seed == remaining_pr_gate["expected_seed"]
+    assert socraticode_runbook_seed == socraticode_runbook["expected_seed"]
+    assert russian_seed_planting_seed == russian_seed_planting["expected_seed"]
+    assert slash_phrase_domain == slash_phrase["expected_domain"]
+    assert procedural_name["expected_flag"] in procedural_name_quality["flags"]
+    assert truncated_tail["expected_flag"] in truncated_tail_quality["flags"]
+    assert scope_only_branch["expected_flag"] in scope_only_branch_quality["flags"]
+    assert working_context_seed == working_context["expected_seed"]
+    assert working_context_domain == working_context["expected_domain"]
+    assert github_owner_context_seed == github_owner_context["expected_seed"]
+    assert read_only_task_for_wave_seed == read_only_task_for_wave["expected_seed"]
+    fallback_quality = module.adjust_quality_for_candidate_basis(
+        module.session_name_candidate_quality("agents-of-abyss-repo-ordering-session", evidence=["raw:line:2"]),
+        "domain_and_event_signals",
+    )
+    assert fallback_quality["level"] == fallback_quality_case["level"]
+    assert fallback_quality_case["flag"] in fallback_quality["flags"]
+    assert path_attachment_domain == path_attachment["expected_domain"]
+    assert quoted_path_seed == quoted_path_attachment["expected_seed"]
+    assert repo_topology_refactor_seed == repo_topology_refactor["expected_seed"]
+    for case_id in systemic_seed_case_ids:
+        case = cases[case_id]
+        assert module.useful_name_seed(case["title"]) == case["expected_seed"]
+    assert cases["semantic_only_no_physical_relabel"]["expected_policy"]["physical_relabel_allowed"] is False
+
+
+def test_naming_evidence_quality_warns_on_command_output_only_refs(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {"timestamp": "2026-05-20T00:00:00Z", "type": "session_meta", "payload": {"id": "evidence-quality"}},
+            {
+                "timestamp": "2026-05-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Name the session from the operator request"}]},
+            },
+            {
+                "timestamp": "2026-05-20T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "output": "sed: can't read /srv/AbyssOS/docs/START_HERE.md: No such file or directory"},
+            },
+        ],
+    )
+
+    assert module.naming_evidence_quality_flags(session_dir, ["raw:line:2"]) == []
+    flags = module.naming_evidence_quality_flags(session_dir, ["raw:line:3"])
+    ordered = module.prioritized_naming_evidence_refs(session_dir, ["raw:line:3", "raw:line:2"])
+
+    assert "weak_raw_evidence_refs" in flags
+    assert "command_output_evidence_only" in flags
+    assert ordered[:2] == ["raw:line:2", "raw:line:3"]
 
 
 def test_deferred_mirror_preserves_semantic_name_verified_anchor(tmp_path: Path) -> None:

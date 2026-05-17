@@ -16,8 +16,8 @@ segments with indexes.
 
 - Codex `SessionStart` or manual recovery provides a `transcript_path` for a
   full archive rebuild.
-- Codex `PreCompact`, `PostCompact`, or `Stop` has mirrored raw with deferred
-  indexing, and the archive now needs a deliberate full rebuild.
+- Codex `PreCompact`, `PostCompact`, or `Stop` has queued lifecycle sync and
+  the archive needs automatic interval sealing or a deliberate rebuild.
 - Manual recovery has found a raw session JSONL.
 - A segment/index needs to be rebuilt from raw.
 
@@ -35,15 +35,19 @@ segments with indexes.
 2. Parse JSONL line by line without discarding raw lines.
 3. Split by detected compaction boundaries. If no boundary exists, write
    segment `000__initial-to-latest`.
-4. Write one Markdown segment per interval with raw event bodies intact.
-5. Write a sibling `.index.json` for each segment.
-6. Update `session.manifest.json`, `SESSION.md`, `session.index.json`, and
+4. Write bounded raw interval blocks under `raw/blocks/` plus
+   `raw/blocks.index.json` and `raw/compaction-events.jsonl`.
+5. Write one Markdown segment per interval with raw event bodies intact.
+6. Write a sibling `.index.json` for each segment.
+7. Update `session.manifest.json`, `SESSION.md`, `session.index.json`, and
    `session-registry.json`.
-7. Ensure the session archive directory itself uses the readable label.
+8. Ensure the session archive directory itself uses the readable label.
 
 ## Verification
 
 - Raw copy exists and has a SHA-256 in the manifest.
+- Every segment has a raw block record and a corresponding
+  `raw/blocks/*.raw.jsonl` file.
 - Every segment has a sibling index.
 - Index records include `event_id`, `type`, `md_anchor`, and `raw_ref`.
 - The manifest and registry expose `display.label` for human navigation.

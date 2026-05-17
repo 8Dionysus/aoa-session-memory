@@ -101,6 +101,10 @@ sessions/
     session.index.json
     hooks/
     raw/
+      session.raw.jsonl
+      blocks/
+      blocks.index.json
+      compaction-events.jsonl
     segments/
     incidents/
     distillation/
@@ -117,6 +121,12 @@ initial-to-latest
 
 When no compaction has happened yet, `initial-to-latest` is the correct segment
 role. When compaction boundaries exist, they become the archive boundaries.
+
+The full raw transcript remains the black box. Each generated segment also has
+a bounded raw block under `raw/blocks/` so a closed compaction epoch can be
+inspected without reopening the whole session transcript. `raw/blocks.index.json`
+is the raw block ledger; `raw/compaction-events.jsonl` is the observed boundary
+ledger.
 
 ## Preservation Before Intelligence
 

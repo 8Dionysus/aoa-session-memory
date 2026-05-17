@@ -12,8 +12,8 @@ repeatable without turning hooks into heavy interpretation.
 - Each skill directory owns one `SKILL.md`.
 - `aoa-session-memory-global-route` is the user-level router target.
 - Narrow skills own manual routes such as rehydrate, raw diagnostic, reindex,
-  naming readiness, phase discovery, stress pass, audit, doctor, history
-  import, and review packets.
+  naming readiness, naming waves, phase discovery, stress pass, audit,
+  doctor, history import, and review packets.
 
 ## Rules
 
