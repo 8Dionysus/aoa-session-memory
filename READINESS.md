@@ -32,6 +32,8 @@ Build the `.aoa` session-memory mechanism end to end:
 - Batch distillation policy: `config/batch-distillation-policy.json`
 - Portable search route: `search-index`, `search`, runtime `search/`, and
   `skills/aoa-session-search`
+- Optional search provider gates: `config/search-providers.json` and
+  `search-provider-status`
 - Hook docs and generated example: `hooks/`
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
@@ -58,6 +60,7 @@ python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py naming-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --refresh-indexes --write-report
@@ -104,6 +107,11 @@ Last observed result:
   complaints, raw-unavailable incidents, commit/push/merge delivery requests,
   and `aoa-techniques` sessions. The generated SQLite DB under `search/` is a
   runtime route cache, not portable source.
+- Optional host-provider proof: `search-provider-status --include-host`
+  probes host capability gates without making them authority. If
+  `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
+  authoritative hits on `portable_sqlite` and treats host output as contextual
+  only.
 - `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
@@ -210,6 +218,7 @@ Stress-pass evidence:
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |
 | Agents can search across many archived sessions without loading bulk raw into active context | `search-index`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
+| Host retrieval tools can be used without merging `abyss-machine` into `.aoa` authority | `config/search-providers.json`, `search-provider-status`, `search --provider abyss_machine_nervous`, host-provider regression test |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
 | Historical sessions can be split into automatic, prioritized responsible review, mechanics, low-risk, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |

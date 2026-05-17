@@ -20,6 +20,8 @@ turning search hits into authority.
 - The archive has been reindexed and needs a fresh portable retrieval layer.
 - A search result must show session, segment, raw block, raw line, and
   freshness refs before the agent opens heavier material.
+- The agent wants to check whether optional host retrieval tools can be used
+  without replacing `.aoa` raw/segment authority.
 
 ## Procedure
 
@@ -53,6 +55,19 @@ python3 scripts/aoa_session_memory.py search \
   --explain
 ```
 
+Check optional provider status before using host overlays:
+
+```bash
+python3 scripts/aoa_session_memory.py search-provider-status \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --include-host
+```
+
+When using `--provider abyss_machine_nervous`, keep the returned `.aoa` hits as
+the authoritative route. The host overlay is context only and should be ignored
+for promotion unless its claim is reopened through raw/segment refs.
+
 ## Verification
 
 - Search hits include `session_label`, `segment_id` or `event_id`, refs, and a
@@ -62,6 +77,9 @@ python3 scripts/aoa_session_memory.py search \
   inspect the raw archive before using the hit.
 - Open the returned raw/segment refs for any claim that will become a decision,
   name, distillation note, or promoted automation.
+- If host provider status is `ready_with_warnings`, use `portable_sqlite`
+  results as the only reliable `.aoa` route and record the warning as
+  capability state rather than failure of archive search.
 
 ## Stop Line
 

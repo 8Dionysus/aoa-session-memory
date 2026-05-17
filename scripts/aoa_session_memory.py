@@ -35,6 +35,7 @@ DIAGNOSTICS_ROOT = Path("diagnostics")
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
+SEARCH_PROVIDER_CONFIG_PATH = Path("config/search-providers.json")
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
@@ -64,6 +65,7 @@ RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SEARCH_SCHEMA_VERSION = 1
+SEARCH_PROVIDER_SCHEMA_VERSION = 1
 EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
@@ -12388,6 +12390,405 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def default_search_provider_config() -> dict[str, Any]:
+    return {
+        "schema_version": SEARCH_PROVIDER_SCHEMA_VERSION,
+        "artifact_type": "search_provider_config",
+        "default_provider": "portable_sqlite",
+        "authority_law": (
+            ".aoa owns schemas, raw refs, segment refs, and freshness. "
+            "Host providers are optional accelerators and cannot replace archive evidence."
+        ),
+        "providers": {
+            "portable_sqlite": {
+                "enabled": True,
+                "portable": True,
+                "role": "authoritative_aoa_retrieval",
+                "truth_level": "route_cache_over_aoa_raw_and_segments",
+                "index_command": ["search-index"],
+                "search_command": ["search"],
+                "writes": ["search/aoa-search.sqlite3", "diagnostics/*__search-index.*"],
+            },
+            "abyss_machine_nervous": {
+                "enabled": False,
+                "portable": False,
+                "role": "optional_host_context_overlay",
+                "truth_level": "host_read_model_evidence_not_aoa_truth",
+                "capability_gate": ["abyss-machine", "stack-bridge", "validate", "--json"],
+                "quality_gate": ["abyss-machine", "nervous", "quality-audit", "--json"],
+                "refresh_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--json"],
+                "refresh_index_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--refresh-index", "--json"],
+                "recall_command": ["abyss-machine", "nervous", "recall", "--mode", "lexical", "--query", "{query}", "--limit", "{limit}", "--json"],
+                "write_policy": "read_only_status_by_default",
+                "host_write_requires_operator_enablement": True,
+            },
+            "abyss_stack_rag": {
+                "enabled": False,
+                "portable": False,
+                "role": "future_optional_runtime_service",
+                "truth_level": "runtime_accelerator_not_archive_authority",
+                "capability_gate": ["abyss-machine", "stack-bridge", "validate", "--json"],
+                "write_policy": "not_implemented_in_portable_bundle",
+                "host_write_requires_operator_enablement": True,
+            },
+        },
+    }
+
+
+def search_provider_config(aoa_root: Path) -> dict[str, Any]:
+    config = default_search_provider_config()
+    configured = read_json(aoa_root / SEARCH_PROVIDER_CONFIG_PATH, {})
+    if not isinstance(configured, dict):
+        return config
+    for key in ("default_provider", "authority_law"):
+        if configured.get(key):
+            config[key] = configured[key]
+    if isinstance(configured.get("providers"), dict):
+        providers = config["providers"]
+        for name, value in configured["providers"].items():
+            if not isinstance(value, dict):
+                continue
+            base = providers.get(str(name), {})
+            merged = dict(base)
+            merged.update(value)
+            providers[str(name)] = merged
+    return config
+
+
+def run_json_command(command: list[str], *, timeout: int = 30, cwd: Path | None = None) -> dict[str, Any]:
+    if not command:
+        return {"ok": False, "status": "invalid_command", "error": "empty command", "command": command}
+    executable = shutil.which(command[0])
+    if executable is None:
+        return {"ok": False, "status": "command_missing", "error": f"command not found: {command[0]}", "command": command}
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd) if cwd else None,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout", "error": f"timed out after {timeout}s", "command": command}
+    except Exception as exc:
+        return {"ok": False, "status": "error", "error": f"{exc.__class__.__name__}: {exc}", "command": command}
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    payload: Any = None
+    parse_error = ""
+    if stdout:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            parse_error = f"{exc.__class__.__name__}: {exc}"
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "status": "invalid_json" if completed.returncode == 0 else "failed",
+            "returncode": completed.returncode,
+            "command": command,
+            "stderr": short_text(stderr, max_chars=1200),
+            "stdout": short_text(stdout, max_chars=1200),
+            "parse_error": parse_error,
+        }
+    return {
+        "ok": completed.returncode == 0 and bool(payload.get("ok", True)),
+        "status": "ok" if completed.returncode == 0 else "failed",
+        "returncode": completed.returncode,
+        "command": command,
+        "payload": payload,
+        "stderr": short_text(stderr, max_chars=1200),
+    }
+
+
+def summary_warning_count(payload: dict[str, Any]) -> int:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return int_value(summary.get("warnings"), 0)
+
+
+def summary_fail_count(payload: dict[str, Any]) -> int:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return int_value(summary.get("fails"), 0)
+
+
+def compact_gate_result(result: dict[str, Any]) -> dict[str, Any]:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    return {
+        "ok": bool(result.get("ok")),
+        "status": result.get("status"),
+        "returncode": result.get("returncode"),
+        "command": result.get("command"),
+        "schema": payload.get("schema") or payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "summary": payload.get("summary"),
+        "warnings": summary_warning_count(payload),
+        "fails": summary_fail_count(payload),
+        "error": result.get("error"),
+        "stderr": result.get("stderr"),
+    }
+
+
+def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "provider": "portable_sqlite",
+            "ok": False,
+            "status": "missing",
+            "db_path": str(db_path),
+            "diagnostics": ["search index missing; run search-index"],
+        }
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        metadata = search_index_metadata(conn)
+        rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
+        counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
+        total = sum(counts.values())
+        conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "provider": "portable_sqlite",
+            "ok": False,
+            "status": "sqlite_error",
+            "db_path": str(db_path),
+            "diagnostics": [f"sqlite_error:{exc}"],
+        }
+    return {
+        "provider": "portable_sqlite",
+        "ok": total > 0,
+        "status": "ready" if total > 0 else "empty",
+        "db_path": str(db_path),
+        "index_generated_at": metadata.get("generated_at"),
+        "search_schema_version": metadata.get("schema_version"),
+        "document_count": total,
+        "document_counts": counts,
+        "diagnostics": [] if total > 0 else ["search index has no documents"],
+    }
+
+
+def host_provider_status(
+    *,
+    config: dict[str, Any],
+    provider_name: str,
+    force_probe: bool = False,
+    refresh_host: bool = False,
+    refresh_host_index: bool = False,
+    timeout: int = 45,
+) -> dict[str, Any]:
+    provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
+    if not isinstance(provider, dict):
+        return {"provider": provider_name, "ok": False, "status": "unknown_provider", "diagnostics": ["provider is not configured"]}
+    if provider.get("write_policy") == "not_implemented_in_portable_bundle":
+        return {
+            "provider": provider_name,
+            "ok": True,
+            "status": "declared_future_optional",
+            "portable": bool(provider.get("portable")),
+            "role": provider.get("role"),
+            "truth_level": provider.get("truth_level"),
+            "write_policy": provider.get("write_policy"),
+            "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
+            "diagnostics": ["provider is declared for future runtime integration and is not used by portable search"],
+        }
+    if not provider.get("enabled") and not force_probe:
+        return {
+            "provider": provider_name,
+            "ok": True,
+            "status": "disabled_by_default",
+            "portable": bool(provider.get("portable")),
+            "role": provider.get("role"),
+            "truth_level": provider.get("truth_level"),
+            "diagnostics": ["provider disabled in config; use explicit host probing before relying on it"],
+        }
+    gates: dict[str, Any] = {}
+    diagnostics: list[str] = []
+    capability_command = provider.get("capability_gate") if isinstance(provider.get("capability_gate"), list) else []
+    capability = run_json_command([str(part) for part in capability_command], timeout=timeout) if capability_command else {"ok": False, "status": "missing_gate", "error": "capability gate missing"}
+    gates["capability_gate"] = compact_gate_result(capability)
+    if not capability.get("ok"):
+        diagnostics.append("capability_gate_failed")
+
+    quality_key = "quality_gate"
+    if refresh_host_index and isinstance(provider.get("refresh_index_quality_gate"), list):
+        quality_key = "refresh_index_quality_gate"
+    elif refresh_host and isinstance(provider.get("refresh_quality_gate"), list):
+        quality_key = "refresh_quality_gate"
+    quality_command = provider.get(quality_key) if isinstance(provider.get(quality_key), list) else provider.get("quality_gate")
+    quality = run_json_command([str(part) for part in quality_command], timeout=timeout) if isinstance(quality_command, list) else {"ok": False, "status": "missing_gate", "error": "quality gate missing"}
+    gates["quality_gate"] = compact_gate_result(quality)
+    if not quality.get("ok"):
+        diagnostics.append("quality_gate_failed")
+
+    warning_count = int(gates["capability_gate"].get("warnings") or 0) + int(gates["quality_gate"].get("warnings") or 0)
+    fail_count = int(gates["capability_gate"].get("fails") or 0) + int(gates["quality_gate"].get("fails") or 0)
+    if warning_count:
+        diagnostics.append("host_backend_has_warnings")
+    status = "ready"
+    ok = bool(capability.get("ok")) and bool(quality.get("ok")) and fail_count == 0
+    if not ok:
+        status = "unavailable"
+    elif warning_count:
+        status = "ready_with_warnings"
+    return {
+        "provider": provider_name,
+        "ok": ok,
+        "status": status,
+        "portable": bool(provider.get("portable")),
+        "role": provider.get("role"),
+        "truth_level": provider.get("truth_level"),
+        "write_policy": provider.get("write_policy"),
+        "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
+        "warning_count": warning_count,
+        "fail_count": fail_count,
+        "gates": gates,
+        "diagnostics": diagnostics,
+    }
+
+
+def search_provider_status(
+    *,
+    aoa_root: Path,
+    provider_name: str = "all",
+    include_host: bool = False,
+    refresh_host: bool = False,
+    refresh_host_index: bool = False,
+    timeout: int = 45,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    config = search_provider_config(aoa_root)
+    providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
+    selected = sorted(providers) if provider_name == "all" else [provider_name]
+    results: dict[str, Any] = {}
+    diagnostics: list[str] = []
+    for name in selected:
+        if name == "portable_sqlite":
+            results[name] = sqlite_provider_status(aoa_root)
+        elif name in providers:
+            if include_host or bool(providers.get(name, {}).get("enabled")):
+                results[name] = host_provider_status(
+                    config=config,
+                    provider_name=name,
+                    force_probe=include_host,
+                    refresh_host=refresh_host,
+                    refresh_host_index=refresh_host_index,
+                    timeout=timeout,
+                )
+            else:
+                provider = providers.get(name, {})
+                results[name] = {
+                    "provider": name,
+                    "ok": True,
+                    "status": "disabled_by_default",
+                    "portable": bool(provider.get("portable")),
+                    "role": provider.get("role"),
+                    "truth_level": provider.get("truth_level"),
+                    "diagnostics": ["host provider not probed; pass --include-host to run host gates"],
+                }
+        else:
+            results[name] = {"provider": name, "ok": False, "status": "unknown_provider", "diagnostics": ["provider is not configured"]}
+    for name, result in results.items():
+        if not result.get("ok"):
+            diagnostics.append(f"{name}:{result.get('status')}")
+    default_provider = str(config.get("default_provider") or "portable_sqlite")
+    default_status = results.get(default_provider) or sqlite_provider_status(aoa_root)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_provider_status",
+        "provider_schema_version": SEARCH_PROVIDER_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": bool(default_status.get("ok")) and not any(
+            not result.get("ok") and result.get("status") != "disabled_by_default"
+            for result in results.values()
+            if provider_name != "all" or result.get("provider") == default_provider
+        ),
+        "aoa_root": str(aoa_root),
+        "config_path": str(aoa_root / SEARCH_PROVIDER_CONFIG_PATH),
+        "default_provider": default_provider,
+        "authority_law": config.get("authority_law"),
+        "selected_provider": provider_name,
+        "providers": results,
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__search-provider-status"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, search_provider_status_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_provider_status_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Search Provider Status",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- default_provider: `{payload.get('default_provider')}`",
+        f"- selected_provider: `{payload.get('selected_provider')}`",
+        "",
+        "## Providers",
+        "",
+        "| provider | status | ok | role | diagnostics |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
+    for name, item in providers.items():
+        if not isinstance(item, dict):
+            continue
+        diagnostics = ", ".join(str(value) for value in item.get("diagnostics", []) if value) if isinstance(item.get("diagnostics"), list) else ""
+        lines.append(f"| `{name}` | `{item.get('status')}` | `{item.get('ok')}` | `{item.get('role')}` | {diagnostics or 'none'} |")
+    lines.extend(["", "## Authority Law", "", str(payload.get("authority_law") or "")])
+    return "\n".join(lines)
+
+
+def compact_host_recall_payload(result: dict[str, Any]) -> dict[str, Any]:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else []
+    return {
+        "ok": bool(result.get("ok")),
+        "status": result.get("status"),
+        "command": result.get("command"),
+        "schema": payload.get("schema") or payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "mode": payload.get("mode"),
+        "query": payload.get("query"),
+        "summary": payload.get("summary"),
+        "evidence_count": len(evidence),
+        "paths": payload.get("paths") if isinstance(payload.get("paths"), dict) else {},
+        "truth_level": "host_context_only_not_aoa_authority",
+    }
+
+
+def host_context_overlay(
+    *,
+    config: dict[str, Any],
+    provider_name: str,
+    query: str,
+    limit: int,
+    timeout: int,
+) -> dict[str, Any]:
+    provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
+    command = provider.get("recall_command") if isinstance(provider, dict) else None
+    if not isinstance(command, list):
+        return {"ok": False, "status": "not_supported", "diagnostics": ["provider has no recall_command"]}
+    rendered = [
+        str(part).replace("{query}", query).replace("{limit}", str(max(1, min(limit, 10))))
+        for part in command
+    ]
+    result = run_json_command(rendered, timeout=timeout)
+    return compact_host_recall_payload(result)
+
+
 def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if rebuild and db_path.exists():
@@ -13066,6 +13467,10 @@ def search_sessions(
     aoa_root: Path,
     query: str = "",
     limit: int = 20,
+    provider: str = "portable_sqlite",
+    include_host_context: bool = False,
+    allow_host_warnings: bool = False,
+    host_timeout: int = 45,
     session: str | None = None,
     doc_type: str | None = None,
     event_type: str | None = None,
@@ -13079,6 +13484,21 @@ def search_sessions(
     explain: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
+    provider_config = search_provider_config(aoa_root)
+    configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
+    if provider not in configured_providers:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "result_count": 0,
+            "results": [],
+            "provider": {"selected": provider, "status": "unknown_provider"},
+            "diagnostics": [f"unknown search provider: {provider}"],
+        }
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return {
@@ -13091,6 +13511,7 @@ def search_sessions(
             "db_path": str(db_path),
             "result_count": 0,
             "results": [],
+            "provider": {"selected": provider, "status": "portable_sqlite_missing"},
             "diagnostics": ["search index missing; run search-index"],
         }
     conn = sqlite3.connect(str(db_path))
@@ -13161,6 +13582,29 @@ def search_sessions(
     finally:
         conn.close()
     results = [compact_search_result(row, explain=explain, query=query) for row in rows]
+    provider_payload = search_provider_status(
+        aoa_root=aoa_root,
+        provider_name=provider,
+        include_host=provider != "portable_sqlite",
+        timeout=host_timeout,
+    )
+    diagnostics: list[str] = []
+    provider_overlay: dict[str, Any] | None = None
+    if provider != "portable_sqlite":
+        selected_status = provider_payload.get("providers", {}).get(provider) if isinstance(provider_payload.get("providers"), dict) else {}
+        status = str(selected_status.get("status") if isinstance(selected_status, dict) else "")
+        if status == "ready_with_warnings" and not allow_host_warnings:
+            diagnostics.append("host provider has warnings; returned portable SQLite .aoa hits without host context overlay")
+        elif not selected_status.get("ok"):
+            diagnostics.append(f"host provider unavailable: {status}")
+        elif include_host_context:
+            provider_overlay = host_context_overlay(
+                config=provider_config,
+                provider_name=provider,
+                query=query,
+                limit=limit,
+                timeout=host_timeout,
+            )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_results",
@@ -13172,9 +13616,16 @@ def search_sessions(
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
         "aoa_root": str(aoa_root),
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "portable_sqlite",
+            "status": provider_payload,
+            "overlay": provider_overlay,
+            "authority_law": provider_config.get("authority_law"),
+        },
         "result_count": len(results),
         "results": results,
-        "diagnostics": [],
+        "diagnostics": diagnostics,
     }
 
 
@@ -13481,6 +13932,22 @@ def command_search_index(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_provider_status(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = search_provider_status(
+        aoa_root=root,
+        provider_name=args.provider,
+        include_host=args.include_host,
+        refresh_host=args.refresh_host,
+        refresh_host_index=args.refresh_host_index,
+        timeout=args.timeout,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -13489,6 +13956,10 @@ def command_search(args: argparse.Namespace) -> int:
         aoa_root=root,
         query=query,
         limit=args.limit,
+        provider=args.provider,
+        include_host_context=args.include_host_context,
+        allow_host_warnings=args.allow_host_warnings,
+        host_timeout=args.host_timeout,
         session=args.session_filter,
         doc_type=args.doc_type,
         event_type=args.event_type,
@@ -13891,6 +14362,7 @@ def write_validation_config(aoa_root: Path) -> None:
             "banned_durable_name_terms": ["temp", "stub", "misc", "dump"],
         },
     )
+    write_json(aoa_root / SEARCH_PROVIDER_CONFIG_PATH, default_search_provider_config())
 
 
 def validation_transcript_rows() -> list[dict[str, Any]]:
@@ -14210,6 +14682,8 @@ def completion_audit(
     standalone_remote = git_remote_url(standalone_repo)
     standalone_github_ready = bool(standalone_remote and "github.com" in standalone_remote.lower())
     user_skill_state = user_skill_install_state(aoa_root)
+    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_config_exists = (aoa_root / SEARCH_PROVIDER_CONFIG_PATH).exists()
 
     def checklist_item(requirement: str, status: str, evidence: Any, gap: str | None = None) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -14305,6 +14779,12 @@ def completion_audit(
             {"commands": ["export-bundle", "install", "hooks-config", "install-user-skill"]},
         ),
         checklist_item(
+            "Search provider config keeps portable SQLite authoritative and host backends optional",
+            "covered" if provider_config_exists and provider_status.get("ok") else "remaining",
+            {"config": str(aoa_root / SEARCH_PROVIDER_CONFIG_PATH), "provider_status": provider_status},
+            None if provider_config_exists and provider_status.get("ok") else "Build the search index and keep config/search-providers.json present.",
+        ),
+        checklist_item(
             "User-level router skill is installed for the current Codex user",
             "covered" if user_skill_state.get("ok") else "remaining",
             user_skill_state,
@@ -14386,6 +14866,7 @@ REQUIRED_ROOT_FILES = [
     "config/event-taxonomy.json",
     "config/naming-golden-set.json",
     "config/naming-policy.json",
+    "config/search-providers.json",
     "hooks/AGENTS.md",
     "hooks/README.md",
     "hooks/codex-hooks.user.example.json",
@@ -14415,6 +14896,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-raw-diagnostic/SKILL.md",
     "skills/aoa-session-reindex/SKILL.md",
     "skills/aoa-session-rehydrate/SKILL.md",
+    "skills/aoa-session-search/SKILL.md",
     "tests/AGENTS.md",
 ]
 
@@ -14956,6 +15438,20 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")
     search_index.set_defaults(func=command_search_index)
 
+    provider_status = sub.add_parser(
+        "search-provider-status",
+        help="Inspect portable and optional host search provider capability without changing archive truth.",
+    )
+    provider_status.add_argument("--workspace-root")
+    provider_status.add_argument("--aoa-root")
+    provider_status.add_argument("--provider", default="all", help="Provider name or all.")
+    provider_status.add_argument("--include-host", action="store_true", help="Run optional host provider gates such as abyss-machine quality audit.")
+    provider_status.add_argument("--refresh-host", action="store_true", help="Use the host deterministic refresh quality gate where configured.")
+    provider_status.add_argument("--refresh-host-index", action="store_true", help="Use the host refresh-index quality gate where configured.")
+    provider_status.add_argument("--timeout", type=int, default=45)
+    provider_status.add_argument("--write-report", action="store_true", help="Write JSON and Markdown provider reports under .aoa/diagnostics.")
+    provider_status.set_defaults(func=command_search_provider_status)
+
     search = sub.add_parser(
         "search",
         aliases=["aoa-search"],
@@ -14966,6 +15462,10 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--workspace-root")
     search.add_argument("--aoa-root")
     search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains the authoritative .aoa route.")
+    search.add_argument("--include-host-context", action="store_true", help="For optional host providers, include a compact host context overlay summary.")
+    search.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay even when host quality gates report warnings.")
+    search.add_argument("--host-timeout", type=int, default=45)
     search.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
     search.add_argument("--doc-type", choices=["session", "segment", "event", "incident"])
     search.add_argument("--event-type")
