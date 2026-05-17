@@ -385,6 +385,20 @@ python3 scripts/aoa_session_memory.py search-provider-status \
 `abyss_machine_nervous` are status-gated overlays; their evidence is context,
 not reviewed `.aoa` truth.
 
+Build a compact evidence packet for a continuation or investigation recipe:
+
+```bash
+python3 scripts/aoa_session_memory.py retrieve continue-techniques-session \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --query "aoa-techniques continuation" \
+  --write-report
+```
+
+Retrieval packets combine search hits, session identity, continuation signals,
+phase-discovery candidates, and next route commands. They are route packets,
+not summaries detached from raw refs.
+
 Export a clean portable bundle without session archives:
 
 ```bash

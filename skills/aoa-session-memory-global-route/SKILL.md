@@ -42,6 +42,8 @@ Use this skill in any Codex session when the task touches:
 - portable SQLite search, `search-index`, `aoa-search`,
   `search-provider-status`, optional host provider gates, or retrieval
   freshness
+- retrieval packets, `retrieve`, `retrieval-packet`, or long-session
+  continuation recipes
 - naming readiness, `SESSION_NAMES.md`, `sessions/INDEX.md`, or
   `naming-readiness`
 - mass session naming, `naming-wave`, semantic session-name review plans, or
@@ -80,7 +82,8 @@ Use this skill in any Codex session when the task touches:
   `aoa-session-manual-review`
 - Regenerate generated indexes after taxonomy/classifier changes:
   `aoa-session-reindex`
-- Portable search index, provider gates, and evidence-routed retrieval:
+- Portable search index, provider gates, retrieval packets, and evidence-routed
+  retrieval:
   `aoa-session-search`
 - Naming queue, phase-discovery routing, and pre-rename checks:
   `aoa-session-naming-readiness`

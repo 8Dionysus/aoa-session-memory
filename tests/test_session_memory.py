@@ -599,6 +599,80 @@ def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, mo
     assert with_overlay["results"][0]["refs"]["raw"] == "raw:line:2"
 
 
+def test_retrieval_packet_routes_continuation_to_refs_and_phase_candidates(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-retrieve.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "retrieve-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Continue the aoa-techniques session from exact raw refs"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: continue from the phase map and verify open threads"}]}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Open thread: continue long techniques work after checking evidence"}]}},
+            {"timestamp": "2026-05-12T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Final state: retrieval packet should name next route"}]}},
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "retrieve-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    naming_dir = session_dir / "naming"
+    naming_dir.mkdir(parents=True, exist_ok=True)
+    phase_payload = {
+        "artifact_type": "session_phase_discovery",
+        "candidate_count": 1,
+        "review_queue_count": 1,
+        "candidates": [
+            {
+                "segment_id": "000",
+                "name": "techniques continuation evidence route",
+                "confidence": "medium",
+                "name_basis": "specific_user_intent",
+                "quality_flags": [],
+                "evidence": ["raw:line:2"],
+                "coverage": {"raw_ranges": [{"from_line": 1, "to_line": 5}]},
+            }
+        ],
+        "review_queue": [
+            {
+                "segment_id": "000",
+                "name": "techniques continuation evidence route",
+                "reason": "needs_reviewed_name",
+                "evidence": ["raw:line:2"],
+            }
+        ],
+    }
+    (naming_dir / "phase-discovery.json").write_text(json.dumps(phase_payload, ensure_ascii=False), encoding="utf-8")
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    packet = module.retrieval_packet(
+        aoa_root=aoa_root,
+        recipe="continue-techniques-session",
+        query="aoa-techniques continue evidence",
+        session="retrieve-session",
+        limit=4,
+    )
+
+    assert packet["ok"] is True
+    assert packet["session"]["session_id"] == "retrieve-session"
+    assert packet["evidence_hits"]
+    assert packet["evidence_hits"][0]["refs"]["raw"].startswith("raw:line:")
+    assert packet["phase_discovery"]["present"] is True
+    assert packet["phase_discovery"]["review_queue_count"] == 1
+    assert packet["continuation_signals"]
+    assert any("rehydrate" in route for route in packet["next_routes"])
+    assert any("phase-review-assist" in route for route in packet["next_routes"])
+
+
 def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

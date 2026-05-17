@@ -22,6 +22,8 @@ turning search hits into authority.
   freshness refs before the agent opens heavier material.
 - The agent wants to check whether optional host retrieval tools can be used
   without replacing `.aoa` raw/segment authority.
+- The agent needs a bounded continuation or investigation packet for a long
+  session before opening raw or segment files.
 
 ## Procedure
 
@@ -68,6 +70,20 @@ When using `--provider abyss_machine_nervous`, keep the returned `.aoa` hits as
 the authoritative route. The host overlay is context only and should be ignored
 for promotion unless its claim is reopened through raw/segment refs.
 
+Build a recipe packet when search alone is too thin:
+
+```bash
+python3 scripts/aoa_session_memory.py retrieve continue-techniques-session \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --query "aoa-techniques continuation" \
+  --write-report
+```
+
+Use retrieval packets before continuing a long session, investigating hook
+failure, reviewing a naming candidate, collecting process lessons, comparing
+repeated errors, or preparing manual review.
+
 ## Verification
 
 - Search hits include `session_label`, `segment_id` or `event_id`, refs, and a
@@ -80,6 +96,9 @@ for promotion unless its claim is reopened through raw/segment refs.
 - If host provider status is `ready_with_warnings`, use `portable_sqlite`
   results as the only reliable `.aoa` route and record the warning as
   capability state rather than failure of archive search.
+- Retrieval packets must include `evidence_hits`, `continuation_signals`,
+  `phase_discovery`, and `next_routes`; if any of these are empty, treat the
+  packet as an orientation gap and refine the query or run lower-layer repair.
 
 ## Stop Line
 

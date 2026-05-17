@@ -63,6 +63,7 @@ Codex hook event
   -> session-registry.json
   -> optional search-index runtime cache
   -> optional provider capability status for host overlays
+  -> retrieval packet recipes
   -> rehydrate packet
   -> later reviewed distillation
   -> pattern / skill / automation candidate
@@ -257,6 +258,20 @@ python3 scripts/aoa_session_memory.py search-provider-status \
 providers such as `abyss_machine_nervous` are capability-gated overlays; their
 context can accelerate orientation, but it cannot replace raw/segment refs or
 reviewed promotion.
+
+Build a recipe-based retrieval packet:
+
+```bash
+python3 scripts/aoa_session_memory.py retrieve continue-techniques-session \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --query "aoa-techniques continuation" \
+  --write-report
+```
+
+Retrieval packets are the Agentic RAG layer over the archive: search recall,
+session identity, phase candidates, continuation signals, and next commands in
+one bounded packet. They still route back to raw and segment refs.
 
 Run a focused stress pass over the first 100 compaction-closing intervals:
 
