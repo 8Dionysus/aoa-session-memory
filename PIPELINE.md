@@ -61,6 +61,7 @@ Codex hook event
   -> SESSION.md and session.index.json
   -> session.manifest.json
   -> session-registry.json
+  -> optional search-index runtime cache
   -> rehydrate packet
   -> later reviewed distillation
   -> pattern / skill / automation candidate

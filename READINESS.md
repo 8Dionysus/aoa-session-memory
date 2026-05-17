@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-Date: 2026-05-13
+Date: 2026-05-17
 
 This file maps the current `.aoa` session-memory goal to concrete evidence.
 It is a readiness snapshot for agents, not a substitute for running the gates.
@@ -30,6 +30,8 @@ Build the `.aoa` session-memory mechanism end to end:
 - Event taxonomy: `config/event-taxonomy.json`
 - Distillation routes: `config/event-distillation-routes.json`
 - Batch distillation policy: `config/batch-distillation-policy.json`
+- Portable search route: `search-index`, `search`, runtime `search/`, and
+  `skills/aoa-session-search`
 - Hook docs and generated example: `hooks/`
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
@@ -55,6 +57,8 @@ python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py naming-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --refresh-indexes --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
@@ -93,6 +97,13 @@ Last observed result:
   `session_meta` from non-semantic raw JSON fields, avoids promoting stream
   message duplicates, uses structured command status, and separates security
   policy/check mentions and sensitive touchpoints from actual risk signals.
+- Portable search proof: `search-index all --write-report` built
+  `559524` runtime documents across `161` sessions with no diagnostics; report:
+  `diagnostics/20260517T161336Z__search-index.json` and `.md`. Control
+  searches returned fresh refs for hook timeout signals, naming/techniques
+  complaints, raw-unavailable incidents, commit/push/merge delivery requests,
+  and `aoa-techniques` sessions. The generated SQLite DB under `search/` is a
+  runtime route cache, not portable source.
 - `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
@@ -198,6 +209,7 @@ Stress-pass evidence:
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |
+| Agents can search across many archived sessions without loading bulk raw into active context | `search-index`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
 | Historical sessions can be split into automatic, prioritized responsible review, mechanics, low-risk, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |

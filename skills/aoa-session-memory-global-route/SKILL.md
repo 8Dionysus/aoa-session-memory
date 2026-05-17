@@ -39,6 +39,7 @@ Use this skill in any Codex session when the task touches:
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
 - event taxonomy, classifier, generated segment indexes, or `reindex-sessions`
+- portable SQLite search, `search-index`, `aoa-search`, or retrieval freshness
 - naming readiness, `SESSION_NAMES.md`, `sessions/INDEX.md`, or
   `naming-readiness`
 - mass session naming, `naming-wave`, semantic session-name review plans, or
@@ -77,6 +78,7 @@ Use this skill in any Codex session when the task touches:
   `aoa-session-manual-review`
 - Regenerate generated indexes after taxonomy/classifier changes:
   `aoa-session-reindex`
+- Portable search index and evidence-routed retrieval: `aoa-session-search`
 - Naming queue, phase-discovery routing, and pre-rename checks:
   `aoa-session-naming-readiness`
 - Mass semantic naming waves, guarded batch apply, and naming quality audit:

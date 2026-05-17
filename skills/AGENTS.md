@@ -13,7 +13,7 @@ repeatable without turning hooks into heavy interpretation.
 - `aoa-session-memory-global-route` is the user-level router target.
 - Narrow skills own manual routes such as rehydrate, raw diagnostic, reindex,
   naming readiness, naming waves, phase discovery, stress pass, audit,
-  doctor, history import, and review packets.
+  doctor, history import, search, and review packets.
 
 ## Rules
 

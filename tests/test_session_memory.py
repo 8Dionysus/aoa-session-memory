@@ -383,6 +383,162 @@ def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> 
     assert audit["diagnostics"] == ["session registry is empty"]
 
 
+def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-index.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "search-index-session", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Важная мысль: имена должны держать мост-якорь"}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Ты не понял, имена слишком общие"}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-hook", "arguments": json.dumps({"cmd": "pytest -q"})},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-hook", "output": "Stop hook failed: error: hook timed out after 20s"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "План: сверю search-index по raw refs"}]},
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-index-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    missing = tmp_path / "missing.jsonl"
+    module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "raw-missing-session",
+            "transcript_path": str(missing),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", write_report=True)
+
+    assert indexed["ok"] is True
+    assert indexed["session_document_count"] == 2
+    assert indexed["event_document_count"] == 6
+    assert indexed["incident_document_count"] >= 1
+    assert Path(indexed["db_path"]).exists()
+    assert Path(indexed["report_json"]).exists()
+
+    hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
+    assert hook_results["ok"] is True
+    assert hook_results["result_count"] >= 1
+    hook_hit = hook_results["results"][0]
+    assert hook_hit["doc_type"] == "event"
+    assert hook_hit["refs"]["raw"] == "raw:line:5"
+    assert hook_hit["refs"]["segment"]
+    assert hook_hit["refs"]["raw_block"] == "raw/blocks/000__initial-to-latest.raw.jsonl"
+    assert hook_hit["freshness"]["status"] == "fresh"
+    assert hook_hit["explain"]["why_this_is_not_authority"]
+
+    correction_results = module.search_sessions(
+        aoa_root=aoa_root,
+        query="имена общие",
+        conversation_act="operator_correction",
+        explain=True,
+    )
+    assert correction_results["result_count"] == 1
+    assert correction_results["results"][0]["conversation_act"] == "operator_correction"
+    assert correction_results["results"][0]["refs"]["raw"] == "raw:line:3"
+
+    raw_unavailable = module.search_sessions(aoa_root=aoa_root, query="raw unavailable", archive_status="raw_unavailable")
+    assert raw_unavailable["result_count"] >= 1
+    assert raw_unavailable["results"][0]["archive_status"] == "raw_unavailable"
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__важная-мысль-имена-должны-держать-мост-якорь"
+    index_path = session_dir / "segments" / "000__initial-to-latest.index.json"
+    broken = json.loads(index_path.read_text(encoding="utf-8"))
+    broken["stale_marker"] = True
+    index_path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+
+    stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
+    assert stale_results["results"][0]["freshness"]["status"] == "stale"
+    assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
+
+
+def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-audit-race.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "audit-race", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Audit race"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "audit-race",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    original_parse = module.parse_raw_events
+    mutated = {"done": False}
+
+    def mutate_once(raw_path: Path):
+        if not mutated["done"] and raw_path.name == "session.raw.jsonl":
+            mutated["done"] = True
+            with raw_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-12T00:00:02Z",
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after mutation"}]},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        return original_parse(raw_path)
+
+    monkeypatch.setattr(module, "parse_raw_events", mutate_once)
+
+    audits = module.archive_compaction_audit(aoa_root)
+
+    assert mutated["done"] is True
+    assert audits[0]["matches_expected_segments"] is True
+    assert audits[0]["diagnostics"] == ["archive_changed_during_audit_retry", "archive_snapshot_stabilized_after_retry:1"]
+
+
 def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

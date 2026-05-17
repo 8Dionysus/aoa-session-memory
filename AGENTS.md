@@ -62,6 +62,7 @@ The following paths are generated or runtime-owned:
 - `session-registry.json`
 - `session-name-index.json`
 - `SESSION_NAMES.md`
+- `search/`
 - `diagnostics/`
 
 Agents may regenerate these files from raw session evidence. Do not manually
