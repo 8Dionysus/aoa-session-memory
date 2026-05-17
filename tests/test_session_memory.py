@@ -202,7 +202,59 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert "index: ./000__initial-to-compaction.index.json" in segment_md
     assert "stdout line" in segment_md
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
-    assert registry["sessions"][0]["session_label"] == "2026-05-12__001__start-hooks-now"
+    registry_record = registry["sessions"][0]
+    assert registry_record["session_label"] == "2026-05-12__001__start-hooks-now"
+    assert registry_record["raw"]["path"] == str(session_dir / "raw" / "session.raw.jsonl")
+    assert registry_record["raw"]["indexing_status"] == "indexed"
+    assert registry_record["raw"]["blocks_index"] == str(session_dir / "raw" / "blocks.index.json")
+    assert registry_record["raw_blocks"]["block_count"] == 2
+
+
+def test_sync_indexes_copied_snapshot_when_transcript_grows_during_copy(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-growing.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "growing-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Growing transcript"}]}},
+        ],
+    )
+    original_copy2 = module.shutil.copy2
+
+    def copy_after_append(src: Path, dst: Path) -> Path:
+        with Path(src).open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-12T00:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "appended"}]},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        return original_copy2(src, dst)
+
+    monkeypatch.setattr(module.shutil, "copy2", copy_after_append)
+
+    payload = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={"session_id": "growing-session", "transcript_path": str(transcript), "cwd": str(workspace)},
+        transcript_path=transcript,
+        hook_event_name="ManualSync",
+    )
+
+    session_dir = Path(payload["session_dir"])
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    raw_blocks = json.loads((session_dir / "raw" / "blocks.index.json").read_text(encoding="utf-8"))
+    raw_line_count = len((session_dir / "raw" / "session.raw.jsonl").read_text(encoding="utf-8").splitlines())
+
+    assert manifest["latest_event_count"] == 3
+    assert manifest["raw"]["line_count"] == raw_line_count == 3
+    assert sum(block["line_count"] for block in raw_blocks["blocks"]) == 3
 
 
 def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path) -> None:
@@ -264,6 +316,71 @@ def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path
         workspace_root=workspace,
     )
     assert "mechanics_candidate" not in profile["lanes"]
+
+
+def test_segment_index_records_conversation_acts(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-conversation-acts.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "conversation-acts", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Важная идея: нужно индексировать мысли"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "План: сначала проверю индекс"}]}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Ты не понял, это ошибка"}]}},
+            {"timestamp": "2026-05-12T00:00:04Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-test", "arguments": json.dumps({"cmd": "pytest -q"})}},
+            {"timestamp": "2026-05-12T00:00:05Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-test", "output": "Process exited with code 0\nOutput:\n2 passed\n"}},
+            {"timestamp": "2026-05-12T00:00:06Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Готово: итог проверки зеленый"}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "conversation-acts",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__важная-идея-нужно-индексировать-мысли"
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+
+    assert segment_index["conversation_act_schema_version"] == module.CONVERSATION_ACT_SCHEMA_VERSION
+    assert records["000002"]["facets"]["conversation_act"]["kind"] == "operator_concept"
+    assert records["000003"]["facets"]["conversation_act"]["kind"] == "assistant_plan"
+    assert records["000004"]["facets"]["conversation_act"]["kind"] == "operator_correction"
+    assert records["000005"]["facets"]["conversation_act"]["kind"] == "command_verification_request"
+    assert records["000006"]["facets"]["conversation_act"]["kind"] == "verification_result"
+    assert records["000007"]["facets"]["conversation_act"]["kind"] == "assistant_final_closeout"
+    assert segment_index["by_conversation_act"]["operator_concept"] == ["000002"]
+    assert segment_index["by_conversation_act"]["operator_correction"] == ["000004"]
+    assert segment_index["by_conversation_act"]["verification_result"] == ["000006"]
+
+    audit = module.conversation_act_audit(aoa_root=aoa_root, target="conversation-acts", write_report=True)
+    assert audit["ok"] is True
+    assert audit["missing_eligible_conversation_act"] == 0
+    assert audit["counts"]["operator_concept"] == 1
+    assert audit["counts"]["operator_correction"] == 1
+    assert audit["counts"]["verification_result"] == 1
+    assert Path(audit["report_json"]).exists()
+    assert Path(audit["report_markdown"]).exists()
+
+
+def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    audit = module.conversation_act_audit(aoa_root=aoa_root, target="latest")
+
+    assert audit["ok"] is False
+    assert audit["selected_count"] == 0
+    assert audit["diagnostics"] == ["session registry is empty"]
 
 
 def test_classifier_avoids_stream_status_and_policy_noise(tmp_path: Path) -> None:
@@ -523,11 +640,16 @@ def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path)
 
     rebuilt = json.loads(index_path.read_text(encoding="utf-8"))
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert payload["counts"] == {"reindexed": 1}
+    assert payload["results"][0]["raw_block_count"] == 1
+    assert payload["results"][0]["raw_blocks_index"] == str(session_dir / "raw" / "blocks.index.json")
     assert Path(payload["report_json"]).exists()
     assert "workspace_navigation" in rebuilt["by_family"]
     assert rebuilt["events"][2]["family"] == "workspace_navigation"
     assert manifest["index_schema"]["universal_event_facets"] is True
+    assert manifest["raw_blocks"]["blocks"][0]["role"] == "initial-to-latest"
+    assert registry["sessions"][0]["raw_blocks"]["block_count"] == 1
 
 
 def test_raw_unavailable_writes_diagnostic(tmp_path: Path) -> None:
