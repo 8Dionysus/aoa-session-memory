@@ -147,6 +147,16 @@ python3 scripts/aoa_session_memory.py audit \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+For a clean standalone bundle checkout, audit the package surface without
+requiring local runtime sessions or a generated search DB:
+
+```bash
+python3 scripts/aoa_session_memory.py audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/aoa-session-memory \
+  --portable-bundle
+```
+
 `audit` is intentionally stricter than `doctor`: it can return non-zero when
 the local kernel is healthy but the end-to-end objective still has remaining
 gates.

@@ -1716,6 +1716,41 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
+def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_sessions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    bundle_root = tmp_path / "aoa-session-memory"
+    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
+    (bundle_root / ".git").mkdir()
+
+    def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
+        if repo_root == bundle_root:
+            return "git@github.com:8Dionysus/aoa-session-memory.git"
+        return None
+
+    monkeypatch.setattr(module, "git_remote_url", fake_remote)
+
+    payload = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        check_codex=False,
+        portable_bundle=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["audit_mode"] == "portable_bundle"
+    statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
+    assert statuses["Portable bundle intentionally excludes local raw session archives"] == "covered"
+    assert statuses["Portable bundle carries compaction logic without bundled live raw proof"] == "covered"
+    assert statuses["Portable bundle has clean runtime topology without bundled segment drift"] == "covered"
+    assert statuses["Portable hook examples cover required lifecycle events"] == "covered"
+    assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
+    assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
+    assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+
+
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     git_dir = target / ".git"

@@ -15001,6 +15001,7 @@ def completion_audit(
     workspace_root: Path,
     aoa_root: Path,
     check_codex: bool = True,
+    portable_bundle: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     sessions = registry_sessions(aoa_root)
@@ -15034,6 +15035,75 @@ def completion_audit(
     user_skill_state = user_skill_install_state(aoa_root)
     provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
     provider_config_exists = (aoa_root / SEARCH_PROVIDER_CONFIG_PATH).exists()
+    provider_config = read_json(aoa_root / SEARCH_PROVIDER_CONFIG_PATH, {})
+    provider_config_ok = (
+        isinstance(provider_config, dict)
+        and provider_config.get("default_provider") == "portable_sqlite"
+        and isinstance(provider_config.get("providers"), dict)
+        and "portable_sqlite" in provider_config.get("providers", {})
+    )
+    hook_example_path = aoa_root / "hooks/codex-hooks.user.example.json"
+    hook_example_events = configured_hook_events(hook_example_path)
+    hook_example_ok = set(REQUIRED_HOOK_EVENTS).issubset(hook_example_events)
+    portable_clean_runtime = (
+        len(sessions) == 0
+        and sessions_index_ok
+        and not any((aoa_root / SESSION_ROOT).glob("*/session.manifest.json"))
+        and not (aoa_root / "search/aoa-search.sqlite3").exists()
+    )
+    raw_requirement = (
+        "Raw session material is preserved for indexed archives"
+        if not portable_bundle
+        else "Portable bundle intentionally excludes local raw session archives"
+    )
+    real_compaction_requirement = (
+        "Real Codex compaction boundaries are detected from raw transcripts"
+        if not portable_bundle
+        else "Portable bundle carries compaction logic without bundled live raw proof"
+    )
+    segment_requirement = (
+        "Segment topology matches raw compaction boundaries"
+        if not portable_bundle
+        else "Portable bundle has clean runtime topology without bundled segment drift"
+    )
+    raw_status = "covered" if raw_preserved or (portable_bundle and portable_clean_runtime) else "missing"
+    real_compaction_status = (
+        "covered" if real_compaction_archives or (portable_bundle and portable_clean_runtime) else "missing"
+    )
+    segment_status = "covered" if segments_match or (portable_bundle and portable_clean_runtime) else "missing"
+    provider_status_ok = (
+        bool(provider_config_exists and provider_status.get("ok"))
+        if not portable_bundle
+        else bool(provider_config_exists and provider_config_ok)
+    )
+    user_skill_ok = bool(user_skill_state.get("ok")) if not portable_bundle else (
+        (aoa_root / "skills/aoa-session-memory-global-route/SKILL.md").exists()
+    )
+    live_hook_requirement = (
+        "Live user hooks are wired for required lifecycle events"
+        if not portable_bundle
+        else "Portable hook examples cover required lifecycle events"
+    )
+    user_skill_requirement = (
+        "User-level router skill is installed for the current Codex user"
+        if not portable_bundle
+        else "User-level router skill can be installed from the portable bundle"
+    )
+    live_prepost_requirement = (
+        "Live PreCompact and PostCompact hook receipts observed in archived sessions"
+        if not portable_bundle
+        else "Portable bundle intentionally excludes live hook receipt archives"
+    )
+    live_hook_status = (
+        "covered"
+        if (
+            set(REQUIRED_HOOK_EVENTS).issubset(configured_hook_events(Path.home() / ".codex" / "hooks.json"))
+            if not portable_bundle
+            else hook_example_ok
+        )
+        else "missing"
+    )
+    live_prepost_status = "covered" if live_prepost_seen or portable_bundle else "remaining"
 
     def checklist_item(requirement: str, status: str, evidence: Any, gap: str | None = None) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -15062,21 +15132,27 @@ def completion_audit(
             },
         ),
         checklist_item(
-            "Raw session material is preserved for indexed archives",
-            "covered" if raw_preserved else "missing",
-            {"indexed_archive_count": len(indexed_archives)},
-        ),
-        checklist_item(
-            "Real Codex compaction boundaries are detected from raw transcripts",
-            "covered" if real_compaction_archives else "missing",
+            raw_requirement,
+            raw_status,
             {
-                "real_compaction_archive_count": len(real_compaction_archives),
-                "boundary_counts": {item["session_label"]: item["compaction_boundary_count"] for item in real_compaction_archives},
+                "indexed_archive_count": len(indexed_archives),
+                "portable_bundle": portable_bundle,
+                "portable_clean_runtime": portable_clean_runtime,
             },
         ),
         checklist_item(
-            "Segment topology matches raw compaction boundaries",
-            "covered" if segments_match else "missing",
+            real_compaction_requirement,
+            real_compaction_status,
+            {
+                "real_compaction_archive_count": len(real_compaction_archives),
+                "boundary_counts": {item["session_label"]: item["compaction_boundary_count"] for item in real_compaction_archives},
+                "portable_bundle": portable_bundle,
+                "portable_clean_runtime": portable_clean_runtime,
+            },
+        ),
+        checklist_item(
+            segment_requirement,
+            segment_status,
             {
                 "indexed_archive_count": len(indexed_archives),
                 "mismatch_count": len(segment_mismatches),
@@ -15105,8 +15181,12 @@ def completion_audit(
                     }
                     for item in deferred_archives
                 ],
+                "portable_bundle": portable_bundle,
+                "portable_clean_runtime": portable_clean_runtime,
             },
-            None if segments_match else "Reindex indexed archives whose segment counts no longer match raw boundaries.",
+            None
+            if segment_status == "covered"
+            else "Reindex indexed archives whose segment counts no longer match raw boundaries.",
         ),
         checklist_item(
             "Hook output remains schema-limited and fail-open",
@@ -15114,9 +15194,14 @@ def completion_audit(
             {"allowed_fields": sorted(CODEX_HOOK_OUTPUT_FIELDS), "hook_output_function": "codex_hook_output"},
         ),
         checklist_item(
-            "Live user hooks are wired for required lifecycle events",
-            "covered" if set(REQUIRED_HOOK_EVENTS).issubset(configured_hook_events(Path.home() / ".codex" / "hooks.json")) else "missing",
-            {"required_events": REQUIRED_HOOK_EVENTS, "live_hook_counts": hook_counts},
+            live_hook_requirement,
+            live_hook_status,
+            {
+                "required_events": REQUIRED_HOOK_EVENTS,
+                "live_hook_counts": hook_counts,
+                "hook_example": str(hook_example_path),
+                "hook_example_events": sorted(hook_example_events),
+            },
         ),
         checklist_item(
             "Local Codex compact and hook contract is grounded",
@@ -15130,15 +15215,28 @@ def completion_audit(
         ),
         checklist_item(
             "Search provider config keeps portable SQLite authoritative and host backends optional",
-            "covered" if provider_config_exists and provider_status.get("ok") else "remaining",
-            {"config": str(aoa_root / SEARCH_PROVIDER_CONFIG_PATH), "provider_status": provider_status},
-            None if provider_config_exists and provider_status.get("ok") else "Build the search index and keep config/search-providers.json present.",
+            "covered" if provider_status_ok else "remaining",
+            {
+                "config": str(aoa_root / SEARCH_PROVIDER_CONFIG_PATH),
+                "provider_status": provider_status,
+                "provider_config_ok": provider_config_ok,
+                "portable_bundle": portable_bundle,
+            },
+            None
+            if provider_status_ok
+            else "Build the search index for live installs; clean portable bundles only require config/search-providers.json.",
         ),
         checklist_item(
-            "User-level router skill is installed for the current Codex user",
-            "covered" if user_skill_state.get("ok") else "remaining",
-            user_skill_state,
-            None if user_skill_state.get("ok") else "Install the user-level router with install-user-skill.",
+            user_skill_requirement,
+            "covered" if user_skill_ok else "remaining",
+            {
+                **user_skill_state,
+                "portable_bundle": portable_bundle,
+                "source_skill": str(aoa_root / "skills/aoa-session-memory-global-route/SKILL.md"),
+            },
+            None
+            if user_skill_ok
+            else "Install the user-level router with install-user-skill.",
         ),
         checklist_item(
             "Standalone local repository is prepared for the portable bundle",
@@ -15152,10 +15250,12 @@ def completion_audit(
             {"test_file": str(aoa_root / "tests/test_session_memory.py")},
         ),
         checklist_item(
-            "Live PreCompact and PostCompact hook receipts observed in archived sessions",
-            "covered" if live_prepost_seen else "remaining",
-            {"live_hook_counts": hook_counts},
-            None if live_prepost_seen else "Real compaction markers exist, but current archives do not yet include live PreCompact/PostCompact hook receipts.",
+            live_prepost_requirement,
+            live_prepost_status,
+            {"live_hook_counts": hook_counts, "portable_bundle": portable_bundle},
+            None
+            if live_prepost_status == "covered"
+            else "Real compaction markers exist, but current archives do not yet include live PreCompact/PostCompact hook receipts.",
         ),
         checklist_item(
             "Standalone GitHub repository exists for the portable bundle",
@@ -15170,6 +15270,7 @@ def completion_audit(
         "generated_at": now,
         "ok": completion_ready,
         "completion_ready": completion_ready,
+        "audit_mode": "portable_bundle" if portable_bundle else "live_install",
         "workspace_root": str(workspace_root),
         "aoa_root": str(aoa_root),
         "session_count": len(sessions),
@@ -15197,6 +15298,7 @@ def command_audit(args: argparse.Namespace) -> int:
         workspace_root=workspace_root,
         aoa_root=root,
         check_codex=not args.skip_codex_grounding,
+        portable_bundle=args.portable_bundle,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -15922,6 +16024,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--workspace-root")
     audit.add_argument("--aoa-root")
     audit.add_argument("--skip-codex-grounding", action="store_true")
+    audit.add_argument(
+        "--portable-bundle",
+        action="store_true",
+        help="Audit a clean standalone bundle checkout without requiring local runtime sessions or live user hook receipts.",
+    )
     audit.set_defaults(func=command_audit)
 
     doctor = sub.add_parser("doctor", help="Check registry and generated surfaces.")

@@ -633,6 +633,15 @@ python3 scripts/aoa_session_memory.py audit \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+Run the standalone bundle audit from a clean package checkout:
+
+```bash
+python3 scripts/aoa_session_memory.py audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/aoa-session-memory \
+  --portable-bundle
+```
+
 The audit may return non-zero while honest remaining gates exist. Do not treat
 it as a replacement for tests or `doctor`.
 
