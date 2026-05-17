@@ -13629,6 +13629,276 @@ def search_sessions(
     }
 
 
+RETRIEVAL_RECIPE_QUERIES = {
+    "continue-session": "final state open thread decision verification",
+    "continue-techniques-session": "aoa-techniques techniques continuation open thread final state",
+    "hook-failure": "hook timed out hook failed PreCompact PostCompact Stop",
+    "naming-candidate": "naming name bridge anchor phase candidate too general",
+    "process-lessons": "process lesson decision verification dead branch",
+    "repeated-errors": "error failed failure timeout",
+    "manual-review": "manual review promotion candidate open for future passes",
+}
+
+
+def compact_event_for_packet(event: dict[str, Any], *, segment_id: str = "") -> dict[str, Any]:
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    return {
+        "event_id": event.get("event_id"),
+        "segment_id": segment_id or event.get("segment_id"),
+        "type": event.get("type"),
+        "family": event.get("family"),
+        "phase": event.get("phase"),
+        "actor": event.get("actor"),
+        "action": event.get("action"),
+        "outcome": event.get("outcome"),
+        "conversation_act": conversation_act.get("kind"),
+        "title": event.get("title"),
+        "raw_ref": event.get("raw_ref"),
+        "segment_ref": event.get("md_anchor"),
+    }
+
+
+def session_event_signals(manifest: dict[str, Any], *, event_types: set[str], limit: int = 16) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+    for segment in reversed([item for item in segments if isinstance(item, dict)]):
+        index_path = Path(str(segment.get("index") or ""))
+        if not index_path.exists():
+            continue
+        segment_index = read_json(index_path, {})
+        events = segment_index.get("events") if isinstance(segment_index.get("events"), list) else []
+        for event in reversed([item for item in events if isinstance(item, dict)]):
+            if str(event.get("type") or "") not in event_types:
+                continue
+            signals.append(compact_event_for_packet(event, segment_id=str(segment.get("segment_id") or "")))
+            if len(signals) >= limit:
+                return signals
+    return signals
+
+
+def phase_discovery_packet_summary(session_dir: Path, *, limit: int = 8) -> dict[str, Any]:
+    path = session_phase_discovery_path(session_dir)
+    if not path.exists():
+        return {"present": False, "path": str(path), "candidate_count": 0, "review_queue_count": 0, "candidates": [], "review_queue": []}
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return {"present": True, "path": str(path), "read_error": "invalid_payload", "candidate_count": 0, "review_queue_count": 0, "candidates": [], "review_queue": []}
+    candidates: list[dict[str, Any]] = []
+    for candidate in payload.get("candidates", []) if isinstance(payload.get("candidates"), list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        candidates.append(
+            {
+                "segment_id": candidate.get("segment_id"),
+                "name": candidate.get("name"),
+                "confidence": candidate.get("confidence"),
+                "name_basis": candidate.get("name_basis"),
+                "quality_flags": candidate.get("quality_flags", []),
+                "evidence": candidate.get("evidence", []) if isinstance(candidate.get("evidence"), list) else [],
+                "coverage": candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {},
+            }
+        )
+        if len(candidates) >= limit:
+            break
+    review_queue: list[dict[str, Any]] = []
+    for item in payload.get("review_queue", []) if isinstance(payload.get("review_queue"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        review_queue.append(
+            {
+                "segment_id": item.get("segment_id"),
+                "name": item.get("name"),
+                "reason": item.get("reason") or item.get("review_reason"),
+                "quality_flags": item.get("quality_flags", []),
+                "evidence": item.get("evidence", []) if isinstance(item.get("evidence"), list) else [],
+            }
+        )
+        if len(review_queue) >= limit:
+            break
+    return {
+        "present": True,
+        "path": str(path),
+        "candidate_count": int_value(payload.get("candidate_count")),
+        "review_queue_count": int_value(payload.get("review_queue_count")),
+        "candidates": candidates,
+        "review_queue": review_queue,
+    }
+
+
+def retrieval_packet_markdown(payload: dict[str, Any]) -> str:
+    identity = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+    lines = [
+        "# Retrieval Packet",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- recipe: `{payload.get('recipe')}`",
+        f"- query: `{payload.get('query')}`",
+        f"- ok: `{payload.get('ok')}`",
+        "",
+        "## Session",
+        "",
+        f"- label: `{identity.get('label')}`",
+        f"- title: `{identity.get('title')}`",
+        f"- path: `{identity.get('path')}`",
+        f"- events: `{identity.get('event_count')}`",
+        f"- segments: `{identity.get('segment_count')}`",
+        "",
+        "## Evidence Hits",
+        "",
+    ]
+    hits = payload.get("evidence_hits") if isinstance(payload.get("evidence_hits"), list) else []
+    if hits:
+        lines.extend(["| type | event | raw | segment | freshness | snippet |", "| --- | --- | --- | --- | --- | --- |"])
+        for hit in hits[:20]:
+            refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+            freshness = hit.get("freshness") if isinstance(hit.get("freshness"), dict) else {}
+            lines.append(
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | {} |".format(
+                    hit.get("event_type") or hit.get("doc_type"),
+                    hit.get("event_id") or "",
+                    refs.get("raw") or "",
+                    refs.get("segment") or "",
+                    freshness.get("status") or "",
+                    short_text(hit.get("snippet"), max_chars=120),
+                )
+            )
+    else:
+        lines.append("- none")
+    phase = payload.get("phase_discovery") if isinstance(payload.get("phase_discovery"), dict) else {}
+    lines.extend(["", "## Phase Discovery", "", f"- present: `{phase.get('present')}`", f"- review_queue_count: `{phase.get('review_queue_count', 0)}`", "", "## Next Routes", ""])
+    for route in payload.get("next_routes", []) if isinstance(payload.get("next_routes"), list) else []:
+        lines.append(f"- `{route}`")
+    return "\n".join(lines)
+
+
+def retrieval_packet(
+    *,
+    aoa_root: Path,
+    recipe: str,
+    query: str = "",
+    session: str | None = None,
+    provider: str = "portable_sqlite",
+    include_host_context: bool = False,
+    allow_host_warnings: bool = False,
+    limit: int = 8,
+    event_limit: int = 16,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    if recipe not in RETRIEVAL_RECIPE_QUERIES:
+        return {"schema_version": SCHEMA_VERSION, "artifact_type": "retrieval_packet", "ok": False, "generated_at": now, "recipe": recipe, "diagnostics": [f"unknown recipe: {recipe}"]}
+    effective_query = query.strip() or RETRIEVAL_RECIPE_QUERIES[recipe]
+    diagnostics: list[str] = []
+    search_payload = search_sessions(
+        aoa_root=aoa_root,
+        query=effective_query,
+        limit=max(1, limit),
+        provider=provider,
+        include_host_context=include_host_context,
+        allow_host_warnings=allow_host_warnings,
+        explain=True,
+    )
+    if search_payload.get("diagnostics"):
+        diagnostics.extend(str(item) for item in search_payload.get("diagnostics", []))
+    record: dict[str, Any] | None = None
+    if session:
+        try:
+            record = resolve_session_record(aoa_root, session)
+        except ValueError as exc:
+            diagnostics.append(str(exc))
+    if record is None:
+        for hit in search_payload.get("results", []) if isinstance(search_payload.get("results"), list) else []:
+            label = hit.get("session_label")
+            if label:
+                try:
+                    record = resolve_session_record(aoa_root, str(label))
+                    break
+                except ValueError:
+                    continue
+    if record is None:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "retrieval_packet",
+            "ok": False,
+            "generated_at": now,
+            "recipe": recipe,
+            "query": effective_query,
+            "search": search_payload,
+            "diagnostics": diagnostics + ["no session selected from search results"],
+        }
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {"schema_version": SCHEMA_VERSION, "artifact_type": "retrieval_packet", "ok": False, "generated_at": now, "recipe": recipe, "query": effective_query, "diagnostics": diagnostics + [f"manifest missing: {manifest_path}"]}
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    selected_label = str(display.get("label") or manifest.get("session_label") or record.get("session_label") or session_dir.name)
+    session_hits_payload = search_sessions(
+        aoa_root=aoa_root,
+        query=effective_query,
+        limit=max(1, limit),
+        provider=provider,
+        include_host_context=include_host_context,
+        allow_host_warnings=allow_host_warnings,
+        session=selected_label,
+        explain=True,
+    )
+    if session_hits_payload.get("diagnostics"):
+        diagnostics.extend(str(item) for item in session_hits_payload.get("diagnostics", []))
+    signal_types = {"OPEN_THREAD", "FINAL_STATE", "PROCESS_LESSON", "DECISION", "ERROR", "VERIFICATION", "RESUME_HINT"}
+    phase_packet = phase_discovery_packet_summary(session_dir, limit=limit)
+    next_routes = [
+        f"python3 scripts/aoa_session_memory.py rehydrate {shlex.quote(selected_label)} --aoa-root {shlex.quote(str(aoa_root))}",
+        f"python3 scripts/aoa_session_memory.py search --aoa-root {shlex.quote(str(aoa_root))} --session {shlex.quote(selected_label)} --query {shlex.quote(effective_query)} --explain",
+    ]
+    if phase_packet.get("present") and int_value(phase_packet.get("review_queue_count")):
+        next_routes.append(f"python3 scripts/aoa_session_memory.py phase-review-assist {shlex.quote(selected_label)} --aoa-root {shlex.quote(str(aoa_root))} --write-report")
+    elif not phase_packet.get("present") and int_value(manifest.get("segment_count")) > 8:
+        next_routes.append(f"python3 scripts/aoa_session_memory.py phase-discovery {shlex.quote(selected_label)} --aoa-root {shlex.quote(str(aoa_root))} --write --write-report")
+    packet = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "retrieval_packet",
+        "generated_at": now,
+        "ok": bool(session_hits_payload.get("ok")) and bool(manifest),
+        "recipe": recipe,
+        "query": effective_query,
+        "provider": session_hits_payload.get("provider"),
+        "session": {
+            "session_id": manifest.get("session_id"),
+            "label": selected_label,
+            "title": display.get("title") or manifest.get("session_title"),
+            "path": str(session_dir),
+            "manifest": str(manifest_path),
+            "cwd": manifest.get("source", {}).get("cwd") if isinstance(manifest.get("source"), dict) else "",
+            "archive_status": manifest.get("archive_status"),
+            "distillation_status": manifest.get("distillation_status"),
+            "review_status": manifest.get("review_status"),
+            "event_count": manifest.get("event_count"),
+            "segment_count": manifest.get("segment_count"),
+            "raw_path": raw.get("path"),
+            "raw_sha256": raw.get("sha256"),
+        },
+        "evidence_hits": session_hits_payload.get("results", []) if isinstance(session_hits_payload.get("results"), list) else [],
+        "continuation_signals": session_event_signals(manifest, event_types=signal_types, limit=event_limit),
+        "phase_discovery": phase_packet,
+        "next_routes": next_routes,
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__retrieval-packet__{readable_slug(recipe) or 'recipe'}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, packet)
+        write_markdown(report_md, retrieval_packet_markdown(packet))
+        packet["report_json"] = str(report_json)
+        packet["report_markdown"] = str(report_md)
+    return packet
+
+
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
     grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
     owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
@@ -13971,6 +14241,25 @@ def command_search(args: argparse.Namespace) -> int:
         date_from=args.date_from,
         date_to=args.date_to,
         explain=args.explain,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_retrieve(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = retrieval_packet(
+        aoa_root=root,
+        recipe=args.recipe,
+        query=args.query or "",
+        session=args.session_filter,
+        provider=args.provider,
+        include_host_context=args.include_host_context,
+        allow_host_warnings=args.allow_host_warnings,
+        limit=args.limit,
+        event_limit=args.event_limit,
+        write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -15478,6 +15767,28 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     search.set_defaults(func=command_search)
+
+    retrieve = sub.add_parser(
+        "retrieve",
+        aliases=["retrieval-packet"],
+        help="Build a compact evidence packet for a retrieval recipe without loading bulk raw.",
+    )
+    retrieve.add_argument(
+        "recipe",
+        choices=sorted(RETRIEVAL_RECIPE_QUERIES),
+        help="Evidence packet recipe.",
+    )
+    retrieve.add_argument("--query", help="Override the recipe query.")
+    retrieve.add_argument("--workspace-root")
+    retrieve.add_argument("--aoa-root")
+    retrieve.add_argument("--session", dest="session_filter", help="Pin the packet to a session id, label, title, or semantic name fragment.")
+    retrieve.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
+    retrieve.add_argument("--include-host-context", action="store_true", help="For optional host providers, include compact host context overlay summary.")
+    retrieve.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay when host quality gates report warnings.")
+    retrieve.add_argument("--limit", type=int, default=8, help="Maximum search hits and phase candidates.")
+    retrieve.add_argument("--event-limit", type=int, default=16, help="Maximum continuation signal events from session indexes.")
+    retrieve.add_argument("--write-report", action="store_true", help="Write JSON and Markdown retrieval packet reports under .aoa/diagnostics.")
+    retrieve.set_defaults(func=command_retrieve)
 
     relabel = sub.add_parser("relabel", help="Rebuild readable date/sequence session archive names.")
     relabel.add_argument("--workspace-root")

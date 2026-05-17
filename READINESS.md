@@ -34,6 +34,8 @@ Build the `.aoa` session-memory mechanism end to end:
   `skills/aoa-session-search`
 - Optional search provider gates: `config/search-providers.json` and
   `search-provider-status`
+- Retrieval packets: `retrieve` / `retrieval-packet` recipes over search,
+  phase-discovery, continuation signals, and raw refs
 - Hook docs and generated example: `hooks/`
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
@@ -62,6 +64,7 @@ python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /pat
 python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
+python3 scripts/aoa_session_memory.py retrieve continue-techniques-session --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "aoa-techniques continuation" --write-report
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py naming-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --refresh-indexes --write-report
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
@@ -112,6 +115,10 @@ Last observed result:
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
   authoritative hits on `portable_sqlite` and treats host output as contextual
   only.
+- Retrieval packet proof: `retrieve continue-techniques-session` returns a
+  bounded evidence packet with selected session identity, search hits,
+  continuation signals, phase-discovery queue state, raw refs, and next route
+  commands.
 - `batch-distill --since 2026-04-21 --limit 3 --write-report`: project
   grounding fallback is present for broad `cwd=/srv` sessions through
   `/srv/AbyssOS/AGENTS.md` and `/srv/AbyssOS/README.md`; report:
@@ -219,6 +226,7 @@ Stress-pass evidence:
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |
 | Agents can search across many archived sessions without loading bulk raw into active context | `search-index`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
 | Host retrieval tools can be used without merging `abyss-machine` into `.aoa` authority | `config/search-providers.json`, `search-provider-status`, `search --provider abyss_machine_nervous`, host-provider regression test |
+| A future agent can request a bounded continuation packet instead of scanning a long session manually | `retrieve`, `retrieval-packet`, continuation recipe regression test, real `continue-techniques-session` probe |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
 | Historical sessions can be split into automatic, prioritized responsible review, mechanics, low-risk, and diagnostic lanes before review | `batch-distill`, batch distillation policy, tests |
