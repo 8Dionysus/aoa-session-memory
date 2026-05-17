@@ -59,6 +59,7 @@ LEGACY_RAW_SOURCE_JSON = "raw-source.json"
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
+CONVERSATION_ACT_SCHEMA_VERSION = 1
 EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
@@ -1629,6 +1630,118 @@ def semantic_text_for_classification(source_type: str, payload: Any) -> str:
     return ""
 
 
+def text_has_any(text: str, needles: Iterable[str]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def classify_operator_prompt_act(text: str) -> tuple[str, str, str]:
+    if text_has_any(text, ["не понял", "не так", "ошиб", "нахуя", "блять", "я не говорил", "ты вообще"]):
+        return "operator_correction", "correct_agent", "correction_signal"
+    if text_has_any(text, ["коммить", "пуш", "мердж", "commit", "push", "merge"]):
+        return "operator_delivery_request", "publish_changes", "delivery_signal"
+    if text_has_any(text, ["идея", "концепт", "мысл", "задум", "философ"]):
+        return "operator_concept", "shape_concept", "concept_signal"
+    if "?" in text or text_has_any(text, ["почему", "зачем", "как ", "что ", "какие ", "верно", "правильно"]):
+        return "operator_question", "ask_question", "question_signal"
+    if text_has_any(text, ["действуй", "делай", "продолжай", "давай", "приступ", "go ahead"]):
+        return "operator_action_request", "request_action", "action_request_signal"
+    return "operator_instruction", "instruct", "instruction_signal"
+
+
+def classify_assistant_message_act(event_type: str, text: str, tags: set[str]) -> tuple[str, str, str]:
+    if event_type == "FINAL_STATE":
+        return "assistant_final_closeout", "closeout", "final_signal"
+    if event_type == "DECISION":
+        return "assistant_decision", "decide", "decision_signal"
+    if event_type == "ASSUMPTION":
+        return "assistant_assumption", "assume", "assumption_signal"
+    if event_type == "OPEN_THREAD":
+        return "assistant_open_thread", "mark_open_work", "open_thread_signal"
+    if event_type == "PROCESS_LESSON":
+        return "assistant_process_lesson", "distill_lesson", "lesson_signal"
+    if event_type == "CHECKPOINT":
+        return "assistant_checkpoint", "checkpoint", "checkpoint_signal"
+    if event_type == "ASSISTANT_PLAN" or text_has_any(text, ["план", "сначала", "буду ", "i will", "plan:"]):
+        return "assistant_plan", "plan", "plan_signal"
+    if text_has_any(text, ["ошиб", "неверно", "неправильно", "ты прав", "я не понял"]):
+        return "assistant_correction", "correct_self", "misread_or_correction_signal"
+    if text_has_any(text, ["провер", "тест", "validate", "verification", "green", "зелен"]):
+        return "assistant_verification_report", "report_verification", "verification_signal"
+    if text_has_any(text, ["сейчас", "делаю", "проверяю", "иду ", "перехожу"]):
+        return "assistant_progress_update", "report_progress", "progress_signal"
+    if "message_stream" in tags:
+        return "assistant_stream", "stream_message", "stream_signal"
+    return "assistant_response", "respond", "response_signal"
+
+
+def classify_command_or_tool_act(event_type: str, facets: dict[str, Any], tags: set[str]) -> tuple[str, str, str]:
+    command_kind = str(facets.get("command_kind") or "")
+    if event_type == "VERIFICATION" or command_kind == "verification":
+        return "command_verification_request", "request_verification", "verification_request_signal"
+    if command_kind == "read" or event_type == "FILE_READ":
+        return "command_inspection_request", "inspect_workspace", "inspection_request_signal"
+    if command_kind in {"write", "temporary_cleanup"} or event_type in {"FILE_WRITE", "DIFF"} or "file_write" in tags:
+        return "command_mutation_request", "mutate_workspace", "mutation_request_signal"
+    if command_kind == "destructive":
+        return "command_risk_request", "request_risky_command", "risk_request_signal"
+    if event_type == "TOOL_CALL":
+        return "tool_call_request", "call_tool", "tool_request_signal"
+    return "command_execution_request", "run_command", "command_request_signal"
+
+
+def classify_output_act(event_type: str, outcome: str, text: str, tags: set[str]) -> tuple[str, str, str]:
+    if event_type == "VERIFICATION":
+        return "verification_result", "report_verification_result", "verification_result_signal"
+    if event_type == "ERROR" or outcome == "failed" or "error_signal" in tags:
+        return "failure_signal", "report_failure", "failure_signal"
+    if "empty_nonzero_output_signal" in tags or text.strip() in {"", "{}", "[]"}:
+        return "tool_output_noise", "report_noisy_output", "noise_signal"
+    if outcome == "succeeded" or "success_signal" in tags:
+        return "tool_output_success", "report_success", "success_signal"
+    return "tool_output_observation", "report_output", "output_signal"
+
+
+def conversation_act_for_event(
+    event_type: str,
+    source_type: str,
+    payload: Any,
+    semantic_lower: str,
+    tags: set[str],
+    facets: dict[str, Any],
+    outcome: str,
+) -> dict[str, Any] | None:
+    universal = event_facets_for_type(event_type)
+    kind: str | None = None
+    intent: str | None = None
+    signal: str | None = None
+    if event_type == "USER_INTENT":
+        kind, intent, signal = classify_operator_prompt_act(semantic_lower)
+    elif event_type in {"ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "PROCESS_LESSON", "CHECKPOINT", "FINAL_STATE"}:
+        kind, intent, signal = classify_assistant_message_act(event_type, semantic_lower, tags)
+    elif event_type in {"COMMAND", "TOOL_CALL", "FILE_READ", "FILE_WRITE", "DIFF"}:
+        kind, intent, signal = classify_command_or_tool_act(event_type, facets, tags)
+    elif event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "ERROR", "VERIFICATION"}:
+        kind, intent, signal = classify_output_act(event_type, outcome, semantic_lower, tags)
+    elif event_type == "COMPACTION_EVENT":
+        kind, intent, signal = "context_compaction_boundary", "mark_compaction_boundary", "compaction_signal"
+    if kind is None:
+        return None
+    role = ""
+    if isinstance(payload, dict):
+        role = str(payload.get("role") or "")
+    return {
+        "schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
+        "kind": kind,
+        "actor": universal["actor"],
+        "role": role or universal["actor"],
+        "intent": intent,
+        "signal": signal,
+        "raw_event_type": event_type,
+        "source_type": source_type,
+        "confidence": "high" if event_type != "RAW_EVENT" else "medium",
+    }
+
+
 def parse_raw_events(raw_path: Path) -> list[RawEvent]:
     events: list[RawEvent] = []
     with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1852,7 +1965,8 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     elif event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT"} and has_success_signal(diagnostic_lower):
         tags.add("success_signal")
         outcome_override = "succeeded"
-        if re.search(r"\b\d+\s+passed\b", diagnostic_lower) or "ok=true" in diagnostic_lower or '"ok": true' in diagnostic_lower:
+        verification_lower = semantic_lower or diagnostic_lower
+        if re.search(r"\b\d+\s+passed\b", verification_lower) or "ok=true" in verification_lower or '"ok": true' in verification_lower:
             event_type = "VERIFICATION"
             importance = "high"
     signal_lower = semantic_lower
@@ -1959,6 +2073,18 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     if outcome_override:
         universal["outcome"] = outcome_override
     confidence = "high" if canonical_event_type != "RAW_EVENT" else "medium"
+    conversation_act = conversation_act_for_event(
+        canonical_event_type,
+        source_type,
+        payload,
+        semantic_lower,
+        tags,
+        facets,
+        universal["outcome"],
+    )
+    if conversation_act:
+        facets["conversation_act"] = conversation_act
+        tags.add(f"conversation_act:{conversation_act['kind']}")
 
     return RawEvent(
         event_id=event_id,
@@ -3158,6 +3284,7 @@ def write_segment(
     by_action: dict[str, list[str]] = defaultdict(list)
     by_outcome: dict[str, list[str]] = defaultdict(list)
     by_correlation: dict[str, list[str]] = defaultdict(list)
+    by_conversation_act: dict[str, list[str]] = defaultdict(list)
     for event in events:
         by_type[event.event_type].append(event.event_id)
         by_source_type[event.source_type].append(event.event_id)
@@ -3168,11 +3295,15 @@ def write_segment(
         by_outcome[event.outcome].append(event.event_id)
         if event.correlation_id:
             by_correlation[event.correlation_id].append(event.event_id)
+        conversation_act = event.facets.get("conversation_act") if isinstance(event.facets.get("conversation_act"), dict) else {}
+        if conversation_act.get("kind"):
+            by_conversation_act[str(conversation_act["kind"])].append(event.event_id)
         for tag in event.tags:
             by_tag[tag].append(event.event_id)
 
     index = {
         "schema_version": SCHEMA_VERSION,
+        "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
         "segment_id": segment_id,
         "segment_role": role,
         "source_raw": raw_rel,
@@ -3189,6 +3320,7 @@ def write_segment(
         "by_action": dict(sorted(by_action.items())),
         "by_outcome": dict(sorted(by_outcome.items())),
         "by_correlation": dict(sorted(by_correlation.items())),
+        "by_conversation_act": dict(sorted(by_conversation_act.items())),
     }
     write_json(index_path, index)
     return {
@@ -3492,6 +3624,7 @@ def sync_session_from_transcript(
 
     raw_path = raw_dir / "session.raw.jsonl"
     shutil.copy2(transcript_path, raw_path)
+    events = parse_raw_events(raw_path)
     raw_hash = sha256_file(raw_path)
     raw_rel = "raw/session.raw.jsonl"
 
@@ -3532,6 +3665,7 @@ def sync_session_from_transcript(
             "sha256": raw_hash,
             "line_count": len(events),
             "copied_at": now,
+            "indexing_status": "indexed",
             "blocks_index": raw_blocks.get("index"),
             "compaction_events": raw_blocks.get("compaction_events"),
         },
@@ -8508,6 +8642,9 @@ def registry_record(manifest: dict[str, Any], session_dir: Path) -> dict[str, An
     semantic_names = semantic_names_payload(manifest)
     active_name = semantic_name_summary(manifest)
     active_session_name = semantic_name_summary(manifest, scope="session")
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+    raw_block_items = raw_blocks.get("blocks") if isinstance(raw_blocks.get("blocks"), list) else []
     return {
         "session_id": manifest["session_id"],
         "display": display,
@@ -8525,6 +8662,21 @@ def registry_record(manifest: dict[str, Any], session_dir: Path) -> dict[str, An
         "cwd": source.get("cwd") if isinstance(source, dict) else None,
         "event_count": manifest.get("latest_event_count", 0),
         "segment_count": len(manifest.get("segments", [])),
+        "raw": {
+            "path": raw.get("path"),
+            "source_path": raw.get("source_path"),
+            "line_count": raw.get("line_count"),
+            "bytes": raw.get("bytes"),
+            "sha256": raw.get("sha256"),
+            "indexing_status": raw.get("indexing_status"),
+            "blocks_index": raw.get("blocks_index"),
+            "compaction_events": raw.get("compaction_events"),
+        },
+        "raw_blocks": {
+            "index": raw_blocks.get("index"),
+            "compaction_events": raw_blocks.get("compaction_events"),
+            "block_count": len(raw_block_items),
+        },
     }
 
 
@@ -8962,6 +9114,12 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         }
 
     if dry_run:
+        existing_raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+        existing_raw_block_items = (
+            existing_raw_blocks.get("blocks")
+            if isinstance(existing_raw_blocks.get("blocks"), list)
+            else []
+        )
         return {
             "session_id": manifest.get("session_id"),
             "session_label": manifest.get("session_label"),
@@ -8969,6 +9127,9 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
             "status": "planned",
             "raw_path": str(raw_path),
             "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+            "existing_raw_block_count": len(existing_raw_block_items),
+            "existing_raw_blocks_index": existing_raw_blocks.get("index") or raw.get("blocks_index"),
+            "needs_raw_block_backfill": not bool(existing_raw_blocks.get("index") or raw.get("blocks_index")),
         }
 
     now = utc_now()
@@ -9023,6 +9184,9 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
         "status": "reindexed",
         "event_count": len(events),
         "segment_count": len(segment_payloads),
+        "raw_block_count": len(raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []),
+        "raw_blocks_index": raw_blocks.get("index"),
+        "raw_compaction_events": raw_blocks.get("compaction_events"),
     }
 
 
@@ -9037,10 +9201,32 @@ def reindex_sessions(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
-    if target and target != "all":
-        records = [resolve_session_record(aoa_root, target)]
-    else:
-        records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    try:
+        if target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "conversation_act_audit",
+            "generated_at": now,
+            "ok": False,
+            "aoa_root": str(aoa_root),
+            "target": target,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "selected_count": 0,
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
+            "counts": {},
+            "samples": {},
+            "diagnostics": [str(exc)],
+        }
     counts: Counter[str] = Counter()
     results: list[dict[str, Any]] = []
     for record in records:
@@ -9244,10 +9430,32 @@ def repair_session_titles(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
-    if target and target != "all":
-        records = [resolve_session_record(aoa_root, target)]
-    else:
-        records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    try:
+        if target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "conversation_act_audit",
+            "generated_at": now,
+            "ok": False,
+            "aoa_root": str(aoa_root),
+            "target": target,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "selected_count": 0,
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
+            "counts": {},
+            "samples": {},
+            "diagnostics": [str(exc)],
+        }
     results: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     for record in records:
@@ -11955,6 +12163,191 @@ def reindex_print_payload(payload: dict[str, Any], *, full: bool = False, sample
     return compact
 
 
+CONVERSATION_ACT_ELIGIBLE_EVENT_TYPES = {
+    "USER_INTENT",
+    "ASSISTANT_PLAN",
+    "ASSISTANT_MESSAGE",
+    "TOOL_CALL",
+    "TOOL_OUTPUT",
+    "FILE_READ",
+    "FILE_WRITE",
+    "DIFF",
+    "COMMAND",
+    "COMMAND_OUTPUT",
+    "ERROR",
+    "DECISION",
+    "ASSUMPTION",
+    "CHECKPOINT",
+    "COMPACTION_EVENT",
+    "OPEN_THREAD",
+    "PROCESS_LESSON",
+    "VERIFICATION",
+    "FINAL_STATE",
+}
+
+
+def conversation_act_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Conversation Act Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- event_count: `{payload.get('event_count')}`",
+        f"- eligible_event_count: `{payload.get('eligible_event_count')}`",
+        f"- missing_eligible_conversation_act: `{payload.get('missing_eligible_conversation_act')}`",
+        "",
+        "## Counts",
+        "",
+        "| conversation_act | count |",
+        "| --- | ---: |",
+    ]
+    for kind, count in sorted((payload.get("counts") or {}).items()):
+        lines.append(f"| `{kind}` | {count} |")
+    lines.extend(["", "## Samples", ""])
+    samples = payload.get("samples") if isinstance(payload.get("samples"), dict) else {}
+    for kind, items in sorted(samples.items()):
+        lines.append(f"### `{kind}`")
+        lines.append("")
+        for item in items if isinstance(items, list) else []:
+            lines.append(
+                "- `{session}` `{segment}` `{event}` `{type}` {title}".format(
+                    session=item.get("session_label"),
+                    segment=item.get("segment_id"),
+                    event=item.get("event_id"),
+                    type=item.get("type"),
+                    title=str(item.get("title") or "").replace("\n", " "),
+                )
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def conversation_act_audit(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    sample_limit: int = 3,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        if target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "conversation_act_audit",
+            "generated_at": now,
+            "ok": False,
+            "aoa_root": str(aoa_root),
+            "target": target,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "selected_count": 0,
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
+            "counts": {},
+            "samples": {},
+            "diagnostics": [str(exc)],
+        }
+    counts: Counter[str] = Counter()
+    samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    missing: list[dict[str, Any]] = []
+    event_count = 0
+    eligible_count = 0
+    segment_count = 0
+    for record in records:
+        session_label = str(record.get("session_label") or "")
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            index_path = Path(str(segment.get("index") or ""))
+            if not index_path.is_file():
+                continue
+            segment_count += 1
+            index = read_json(index_path, {})
+            segment_id = str(index.get("segment_id") or segment.get("segment_id") or index_path.stem.split("__", 1)[0])
+            for event in index.get("events", []) if isinstance(index.get("events"), list) else []:
+                if not isinstance(event, dict):
+                    continue
+                event_count += 1
+                event_type = str(event.get("type") or "")
+                if event_type not in CONVERSATION_ACT_ELIGIBLE_EVENT_TYPES:
+                    continue
+                eligible_count += 1
+                facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+                act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+                kind = str(act.get("kind") or "")
+                if not kind:
+                    if len(missing) < 50:
+                        missing.append(
+                            {
+                                "session_label": session_label,
+                                "segment_id": segment_id,
+                                "event_id": event.get("event_id"),
+                                "type": event_type,
+                                "title": event.get("title"),
+                            }
+                        )
+                    continue
+                counts[kind] += 1
+                if len(samples[kind]) < sample_limit:
+                    samples[kind].append(
+                        {
+                            "session_label": session_label,
+                            "segment_id": segment_id,
+                            "event_id": event.get("event_id"),
+                            "type": event_type,
+                            "title": event.get("title"),
+                            "raw_ref": event.get("raw_ref"),
+                            "conversation_act": act,
+                        }
+                    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "conversation_act_audit",
+        "generated_at": now,
+        "ok": eligible_count > 0 and not missing,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(records),
+        "segment_count": segment_count,
+        "event_count": event_count,
+        "eligible_event_count": eligible_count,
+        "missing_eligible_conversation_act": len(missing),
+        "missing_samples": missing,
+        "counts": dict(sorted(counts.items())),
+        "samples": {kind: items for kind, items in sorted(samples.items())},
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__conversation-act-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, conversation_act_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def compact_batch_distill_result(result: dict[str, Any]) -> dict[str, Any]:
     grounding = result.get("project_grounding") if isinstance(result.get("project_grounding"), dict) else {}
     owner = result.get("owner_resolution") if isinstance(result.get("owner_resolution"), dict) else {}
@@ -12221,6 +12614,23 @@ def command_reindex_sessions(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     print(json.dumps(reindex_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_conversation_act_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = conversation_act_audit(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        sample_limit=args.sample_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -13604,6 +14014,18 @@ def build_parser() -> argparse.ArgumentParser:
     reindex.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reindex reports under .aoa/diagnostics.")
     reindex.add_argument("--full", action="store_true", help="Print complete reindex results to stdout.")
     reindex.set_defaults(func=command_reindex_sessions)
+
+    conversation_audit = sub.add_parser("conversation-act-audit", help="Audit conversation-act classifier coverage from generated segment indexes.")
+    conversation_audit.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    conversation_audit.add_argument("--workspace-root")
+    conversation_audit.add_argument("--aoa-root")
+    conversation_audit.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    conversation_audit.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    conversation_audit.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    conversation_audit.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    conversation_audit.add_argument("--sample-limit", type=int, default=3, help="Maximum evidence samples per conversation-act kind.")
+    conversation_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown conversation-act audit reports under .aoa/diagnostics.")
+    conversation_audit.set_defaults(func=command_conversation_act_audit)
 
     relabel = sub.add_parser("relabel", help="Rebuild readable date/sequence session archive names.")
     relabel.add_argument("--workspace-root")
