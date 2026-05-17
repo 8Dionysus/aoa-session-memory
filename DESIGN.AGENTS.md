@@ -234,6 +234,18 @@ candidate must pass through `review-phase-name --reviewed-name ... --apply`;
 sessions table of contents, so the route does not depend on the agent holding
 the whole chain in active context.
 
+For archive-wide naming, agents should use a naming wave. The wave is a
+multi-session review packet that turns the readiness map into explicit
+actions: sync, reindex, phase review, semantic session-name review, or skip.
+It can synthesize candidate umbrella names, but the apply layer still requires
+`reviewed_name` unless the operator deliberately chooses the high-confidence
+`--accept-proposed` path. This keeps speed from becoming silent promotion.
+
+Naming waves must keep semantic names separate from physical relabels. A wave
+may attach or revise a `session` semantic name with raw refs and bridge
+anchors; it may not move archive directories. Directory relabeling is a later
+operation after the semantic map has proved itself.
+
 ## Post-Change Route Review
 
 Any change to a route surface should end by checking the adjacent surfaces it

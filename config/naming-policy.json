@@ -20,6 +20,27 @@
     "stuff",
     "placeholder"
   ],
+  "session_name_domain_hints": [
+    {"name": "aoa-session-memory", "markers": [".aoa", "aoa-session-memory", "session-memory", "session memory", "codex session"]},
+    {"name": "aoa-techniques", "markers": ["aoa-techniques", "technique_index", "technique index"]},
+    {"name": "agents-of-abyss", "markers": ["agents-of-abyss", "agents of abyss", "aoa-experience"]},
+    {"name": "tree-of-sophia", "markers": ["tree-of-sophia", "tree of sophia"]},
+    {"name": "abyss-machine", "markers": ["abyss-machine", "nervous", "zram", "gnome shell"]},
+    {"name": "abyss-stack", "markers": ["abyss-stack", "mechanics", "validate_stack"]},
+    {"name": "rios-de-color", "markers": ["rios-de-color", "rios", "operator-review"]}
+  ],
+  "session_name_action_hints": [
+    {"name": "naming", "markers": ["name", "naming", "rename", "имен", "нейм", "назван"]},
+    {"name": "hook-hardening", "markers": ["hook", "precompact", "postcompact", "compact", "хук"]},
+    {"name": "skill-routing", "markers": ["skill", "skills", "скилл"]},
+    {"name": "repo-ordering", "markers": ["repo", "repository", "репо", "canon", "канон"]},
+    {"name": "validation", "markers": ["validate", "validation", "audit", "test", "pytest", "проверк"]},
+    {"name": "refactor", "markers": ["refactor", "рефактор"]},
+    {"name": "repair", "markers": ["repair", "fix", "исправ", "почин"]},
+    {"name": "release-landing", "markers": ["commit", "push", "merge", "pr ", "pull request", "релиз"]},
+    {"name": "runtime-hardening", "markers": ["runtime", "service", "systemd", "container", "machine"]},
+    {"name": "design", "markers": ["design", "architecture", "дизайн", "архитект"]}
+  ],
   "segment_roles": [
     "initial-to-compaction",
     "compaction-to-compaction",

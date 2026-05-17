@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "artifact_type": "naming_golden_set",
+  "purpose": "Portable regression examples for mass session naming quality. These examples do not rename archives; they define expected synthesis and audit behavior.",
+  "cases": [
+    {
+      "id": "specific_repo_refactor",
+      "title": "Refactor the repository route surfaces and validate release gates",
+      "cwd": "/workspace/example-repo",
+      "expected_action": "refactor",
+      "expected_quality_level": "ok",
+      "must_not_flag": ["generic_name", "missing_raw_evidence"]
+    },
+    {
+      "id": "generic_continue_requires_signals",
+      "title": "Continue the work",
+      "cwd": "/workspace/example-repo",
+      "expected_quality_level": "warn",
+      "expected_flag": "generic_name"
+    },
+    {
+      "id": "language_instruction_prefix_not_name",
+      "title": "Отвечай только на русском. Dedicated Spark-only rescue session.",
+      "expected_seed": "Dedicated Spark-only rescue session.",
+      "forbidden_slug_prefix": "отвечай-только-на-русском"
+    },
+    {
+      "id": "workdir_language_readlist_prefix_not_name",
+      "title": "Работай в /srv/work/rios-de-color. Отвечай только на русском. Сначала прочитай: 1. AGENTS.md 2. AUDIT_STATE.md. Проверь SocratiCode по runbook.",
+      "expected_seed": "rios-de-color SocratiCode runbook check",
+      "forbidden_slug_terms": ["работай", "отвечай", "сначала"]
+    },
+    {
+      "id": "role_prompt_prefix_not_name",
+      "title": "You are Atlas for Wave 8 only. Repo: /srv/Agents-of-Abyss. Task: inspect the Wave 8 seed archive.",
+      "expected_seed": "inspect the Wave 8 seed archive.",
+      "warn_name": "agents-of-abyss-you-are-atlas-for-wave-8-only",
+      "expected_flag": "role_prompt_boilerplate"
+    },
+    {
+      "id": "russian_role_prompt_prefix_not_name",
+      "title": "Ты — seed cartographer для Experience Wave 4. Задача read-only: изучи два архива.",
+      "expected_seed": "изучи два архива.",
+      "warn_name": "agents-of-abyss-read-only",
+      "expected_flag": "instruction_text_in_name"
+    },
+    {
+      "id": "role_context_prefix_not_name",
+      "title": "Role: Runtime Watchtower Scout. Read-only. Context: user approved invoking agents. Focus only on runtime deployment watchtower surfaces.",
+      "expected_seed": "runtime deployment watchtower surfaces."
+    },
+    {
+      "id": "next_wave_deployment_scout_seed",
+      "title": "Role: Runtime Watchtower Scout. Read-only. Context: user approved invoking agents for the next Experience wave in /srv. Focus only on runtime/deployment/watchtower surfaces. Inspect /srv/aoa-sdk and /home/dionysus/src/abyss-stack plus /home/dionysus/Загрузки/aoa-experience-deployment-watchtower-seed-v0_5.zip.",
+      "expected_seed": "aoa-sdk abyss-stack deployment watchtower scout map"
+    },
+    {
+      "id": "next_wave_certification_scout_seed",
+      "title": "Role: Proof Forge Scout. Read-only. Context: user approved invoking agents for the next Experience wave in /srv. Focus only on proof/certification surfaces. Inspect /srv/aoa-evals, /srv/aoa-stats, /srv/aoa-playbooks and /home/dionysus/Загрузки/aoa-experience-certification-forge-seed-v0_4.zip.",
+      "expected_seed": "aoa-evals aoa-stats aoa-playbooks certification forge scout map"
+    },
+    {
+      "id": "task_in_shared_workspace_prefix_not_name",
+      "title": "Task in /tmp/aoa-wave4-review-fixes-worktrees/aoa-sdk. You are working in a shared AoA workspace and are not alone in the codebase. Address Wave 4 review comments for PR #109.",
+      "expected_seed": "Address Wave 4 review comments for PR #109."
+    },
+    {
+      "id": "russian_do_not_edit_prefix_not_name",
+      "title": "Ты gate watcher для Wave 3. Не редактируй файлы. Проверь через gh открытые PR.",
+      "expected_seed": "AoA Experience Wave 3 cross repo PR merge gate status"
+    },
+    {
+      "id": "truncated_russian_do_not_edit_title_is_generic",
+      "title": "Ты gate watcher для Wave 3. Не редактируй",
+      "expected_generic": true,
+      "warn_name": "aoa-techniques-не-редактируй",
+      "expected_flag": "instruction_text_in_name"
+    },
+    {
+      "id": "domain_scaffold_short_name_requires_review",
+      "warn_name": "agents-of-abyss-risk",
+      "expected_quality_level": "warn",
+      "expected_flag": "generic_name"
+    },
+    {
+      "id": "read_only_inside_wave_title_not_name",
+      "title": "Wave 2 read-only review task. Inspect /srv/Agents-of-Abyss docs.",
+      "expected_seed": "Wave 2 review task. Inspect /srv/Agents-of-Abyss docs."
+    },
+    {
+      "id": "pr_review_context_seed",
+      "title": "Read-only audit. Context: user provided PR review comments for aoa-evals, aoa-stats, aoa-memo. Work in /srv. Do not edit. Inspect current state against: PR138.",
+      "expected_seed": "aoa-evals aoa-stats aoa-memo PR review comments audit"
+    },
+    {
+      "id": "pr_review_large_list_context_seed",
+      "title": "Read-only audit. Context: user provided a large list of PR review comments for Agents-of-Abyss, Tree-of-Sophia, aoa-playbooks. Work in /srv. Do not edit.",
+      "expected_seed": "Agents-of-Abyss Tree-of-Sophia aoa-playbooks PR review comments audit"
+    },
+    {
+      "id": "experience_wave_branch_and_artifact_seed",
+      "title": "You are Delta for Wave 8 only. Repo: /srv/Agents-of-Abyss, branch codex/wave8-v1_8-context-routing-20260423. Judge merge readiness for exactly these five files: docs/EXPERIENCE_V1_8_CONTEXT_ROUTING_NERVOUS_SYSTEM.md.",
+      "expected_seed": "Wave 8 context routing nervous system merge judgment"
+    },
+    {
+      "id": "experience_wave_seed_archive_seed",
+      "title": "You are Mneme for Wave 9 only. Repo: /srv/Agents-of-Abyss, branch codex/wave9-v1_9-continuity-loom-20260423. Inspect the Wave 9 seed archive /home/dionysus/Загрузки/aoa-experience-context-memory-weaving-continuity-loom-seed-v1_9.zip and extract the semantic invariants.",
+      "expected_seed": "Wave 9 context memory continuity loom invariant extraction"
+    },
+    {
+      "id": "experience_wave_planning_full_raw_seed",
+      "title": "Wave 7 planning only. Repo: /srv/Agents-of-Abyss, branch codex/wave7-v1_7-honor-treasury-20260423. Source archive: /home/dionysus/Загрузки/aoa-experience-affective-economy-honor-treasury-seed-v1_7.zip. Task: extract the lawful semantic core from the v1.7 seed.",
+      "expected_seed": "Wave 7 affective economy honor treasury semantic core plan"
+    },
+    {
+      "id": "experience_wave_owner_landing_plan_seed",
+      "title": "Wave 7 planning only. Repo: /srv/Agents-of-Abyss, branch codex/wave7-v1_7-honor-treasury-20260423. Source archive: /home/dionysus/Загрузки/aoa-experience-affective-economy-honor-treasury-seed-v1_7.zip. Task: map the exact owner-first landing shape for a narrow v1.7 center contract.",
+      "expected_seed": "Wave 7 affective economy honor treasury owner landing plan"
+    },
+    {
+      "id": "experience_wave_role_ownership_seed",
+      "title": "You are Forge/coder for AoA Experience Wave 1 in /srv. Wave 1 covers seed zips v0.1-v0.3 only: /home/dionysus/Загрузки/aoa-experience-mechanic-seed-v0_1.zip, aoa-experience-runtime-capture-seed-v0_2.zip, aoa-experience-pilot-integration-seed-v0_3.zip. Your write ownership is ONLY /srv/aoa-stats, /srv/aoa-playbooks, and /srv/aoa-evals. Task: plant minimal owner-local contracts.",
+      "expected_seed": "Wave 1 aoa-stats aoa-playbooks aoa-evals contract planting"
+    },
+    {
+      "id": "final_verdict_uses_artifact_topic_seed",
+      "title": "Final Wave 3 verdict pass for /srv/Agents-of-Abyss. Review current working tree for v1.3 office foundry role-pairs planting. Focus on docs/EXPERIENCE_V1_3_OFFICE_FOUNDRY_ROLE_PAIRS.md, schemas/experience-v1-3-office-foundry-role-pairs.schema.json, examples/experience_v1_3_office_foundry_role_pairs.example.json.",
+      "expected_seed": "Wave 3 office foundry role pairs final judgment"
+    },
+    {
+      "id": "owner_split_final_judgment_seed",
+      "title": "Final Wave 3 verdict pass after fixing owner_split exactness in /srv/Agents-of-Abyss. Review current working tree for v1.3 office foundry role-pairs planting, focusing on whether the previous P2 is fixed. Files: docs/EXPERIENCE_V1_3_OFFICE_FOUNDRY_ROLE_PAIRS.md.",
+      "expected_seed": "Wave 3 office foundry role pairs owner split final judgment"
+    },
+    {
+      "id": "wave2_second_pass_judgment_seed",
+      "title": "Second-pass verdict review for /srv/Agents-of-Abyss Wave 2 v1.2 service mesh operations after validator hardening. Review only current files: docs/EXPERIENCE_V1_2_SERVICE_MESH_OPERATIONS.md.",
+      "expected_seed": "Wave 2 service mesh operations second pass judgment"
+    },
+    {
+      "id": "wave2_authority_note_judgment_seed",
+      "title": "Final verdict review for /srv/Agents-of-Abyss Wave 2 v1.2 service mesh operations after exact operations_flow authority_note hardening. Review current files only.",
+      "expected_seed": "Wave 2 service mesh operations authority note hardening final judgment"
+    },
+    {
+      "id": "repo_final_judgment_uses_review_artifact_seed",
+      "title": "Give a final bounded judgment for the current uncommitted working-tree change in /srv/aoa-evals. Scope ONLY these changed files: docs/AGON_WAVE10_EVAL_LANDING.md, docs/RUNTIME_INTEGRITY_REVIEW.md, schemas/runtime-integrity-review.schema.json.",
+      "expected_seed": "aoa-evals Wave 10 runtime integrity review final judgment"
+    },
+    {
+      "id": "repo_fix_round_final_verdict_seed",
+      "title": "Review the current uncommitted working-tree change in /srv/aoa-evals after one fix round. Review ONLY these files: docs/AGON_WAVE10_EVAL_LANDING.md, docs/RUNTIME_INTEGRITY_REVIEW.md, schemas/runtime-integrity-review.schema.json.",
+      "expected_seed": "aoa-evals Wave 10 runtime integrity review fix round final verdict"
+    },
+    {
+      "id": "repo_diff_review_seed",
+      "title": "Review a narrow uncommitted diff in /srv/aoa-evals only. Review ONLY these changed files in the working tree: docs/AGON_WAVE10_EVAL_LANDING.md, docs/RUNTIME_INTEGRITY_REVIEW.md, schemas/runtime-integrity-review.schema.json.",
+      "expected_seed": "aoa-evals Wave 10 runtime integrity review diff review"
+    },
+    {
+      "id": "russian_experience_scout_uses_lane_and_repos",
+      "title": "Ты — routing/sdk/runtime scout для Experience Wave 4. Read-only. Изучи seed v0.8/v0.9 repo slices для `aoa-routing`, `aoa-sdk`, `abyss-stack` и локальные паттерны `/srv/aoa-routing`, `/srv/aoa-sdk`, `/home/dionysus/src/abyss-stack`.",
+      "expected_seed": "Wave 4 aoa-routing aoa-sdk abyss-stack routing sdk runtime landing map"
+    },
+    {
+      "id": "wave_sidecar_uses_named_topics",
+      "title": "Read-only sidecar for Experience Wave 3 in /srv. Context: Wave 3 likely plants federation harvest v0.6 and adoption forge v0.7 after Wave 2 certification/watchtower.",
+      "expected_seed": "Wave 3 federation harvest adoption forge sidecar review"
+    },
+    {
+      "id": "wave2_archive_topic_seed",
+      "title": "Wave 2 read-only lineage task. Inspect the Dionysus Wave 0 intake note/map and the v1.2 service mesh operations archive. Return what provenance must be preserved.",
+      "expected_seed": "Wave 2 service mesh operations lineage review"
+    },
+    {
+      "id": "experience_wave2_seed_scope_authority_review_seed",
+      "title": "Role: Authority Reviewer. Read-only. Context: user approved invoking agents for the next Experience wave in /srv. Wave 1 was merged across AoA repos. Review the likely Wave 2 scope from available seed artifacts and repository source-of-truth rules. Focus on authority drift, owner boundaries, whether v0_4/v0_5 are the right next seeds.",
+      "expected_seed": "AoA Experience Wave 2 seed scope authority review"
+    },
+    {
+      "id": "experience_wave2_certification_watchtower_seed",
+      "title": "Role: Seed Cartographer. Read-only. Context: user approved invoking agents for the next Experience wave in /srv. Wave 1 was already implemented/merged across AoA repos. Inspect aoa-experience-certification-forge-seed-v0_4.zip and aoa-experience-deployment-watchtower-seed-v0_5.zip.",
+      "expected_seed": "AoA Experience Wave 2 certification forge deployment watchtower seed inspection"
+    },
+    {
+      "id": "experience_wave1_seed_authority_risk_seed",
+      "title": "You are Mneme/Sentinel review role for AoA Experience Wave 1. Read-only task: inspect the three seed zips v0.1-v0.3 and produce a concise authority-risk checklist for Wave 1 validation.",
+      "expected_seed": "AoA Experience Wave 1 seed authority risk review"
+    },
+    {
+      "id": "titan_wave0_risk_review_seed",
+      "title": "You are Sentinel, Titan bearer titan:sentinel:founder. Task: read-only risk review for opening Dionysus Wave 0 for aoa-experience v1.2-v2.0 seed archives. Inspect current Dionysus/Agents-of-Abyss stop-lines.",
+      "expected_seed": "Dionysus Wave 0 v1.2 to v2.0 seed intake risk review"
+    },
+    {
+      "id": "titan_wave0_final_judgment_seed",
+      "title": "You are Delta, Titan bearer titan:delta:founder. Judgment gate: evaluate the completed Dionysus Wave 0 intake diff for seed.aoa.experience-wave0-v1-2-to-v2-0-intake-pack.v0. Return a bounded verdict.",
+      "expected_seed": "Dionysus Wave 0 v1.2 to v2.0 seed intake final judgment"
+    },
+    {
+      "id": "titan_wave0_structural_framing_seed",
+      "title": "You are Atlas, Titan bearer titan:atlas:founder. Task: read-only structural framing for opening Dionysus Wave 0 for the aoa-experience v1.2-v2.0 seed archives. Context: repo root is /srv/Dionysus.",
+      "expected_seed": "Dionysus Wave 0 v1.2 to v2.0 seed intake structural framing"
+    },
+    {
+      "id": "titan_wave1_center_bridge_risk_seed",
+      "title": "You are Sentinel, Titan bearer titan:sentinel:founder. Read-only risk review for Wave 1 center bridge in /srv/Agents-of-Abyss connecting Dionysus v1.2-v2.0 intake to existing Agon/Experience law.",
+      "expected_seed": "Agents-of-Abyss Wave 1 center bridge risk review"
+    },
+    {
+      "id": "wave1_center_bridge_surface_seed",
+      "title": "You are Atlas, Titan bearer titan:atlas:founder. Read-only task for Wave 1: inspect /srv/Agents-of-Abyss existing Experience and Agon center surfaces plus /srv/Dionysus Wave 0 intake note/map. Return the exact recommended center bridge surface shape.",
+      "expected_seed": "Agents-of-Abyss Wave 1 center bridge surface map"
+    },
+    {
+      "id": "wave1_dionysus_provenance_bridge_seed",
+      "title": "You are Mneme, Titan bearer titan:mneme:founder. Read-only lineage task for Wave 1: inspect Dionysus Wave 0 intake note/map and existing Agents-of-Abyss Experience Wave docs. Return how the center bridge should preserve provenance, predecessor wave lineage, and memory humility without turning archive transport into owner truth.",
+      "expected_seed": "Agents-of-Abyss Wave 1 Dionysus Wave 0 provenance bridge review"
+    },
+    {
+      "id": "experience_v12_v20_wave0_lineage_seed",
+      "title": "You are Mneme, Titan bearer titan:mneme:founder. Task: read-only lineage/provenance framing for aoa-experience v1.2-v2.0 Wave 0. Inspect the nine zip archives.",
+      "expected_seed": "AoA Experience v1.2 to v2.0 Wave 0 lineage provenance framing"
+    },
+    {
+      "id": "wave5_seed_cartography_uses_seed_dir",
+      "title": "Read-only Wave 5 seed cartography task. Inspect /tmp/aoa-wave5-seeds/aoa-experience-installation-sovereign-release-seed-v1_0 and /tmp/aoa-wave5-seeds/aoa-experience-live-office-expansion-seed-v1_1.",
+      "expected_seed": "Wave 5 installation sovereign release seed cartography"
+    },
+    {
+      "id": "wave4_polis_constitution_seed",
+      "title": "Ты — seed cartographer для Experience Wave 4. Задача read-only: изучи два архива aoa-experience-polis-governance-seed-v0_8.zip и aoa-experience-constitution-runtime-seed-v0_9.zip.",
+      "expected_seed": "AoA Experience Wave 4 polis governance constitution runtime seed cartography"
+    },
+    {
+      "id": "pr_gate_watcher_seed",
+      "title": "Ты gate watcher для Wave 3. Не редактируй файлы. Проверь через gh открытые PR: Tree-of-Sophia#57, aoa-evals#140, aoa-routing#101. Нужно коротко вернуть: какие CI checks сейчас pending/failing/success, есть ли unresolved review threads/comments.",
+      "expected_seed": "AoA Experience Wave 3 cross repo PR merge gate status"
+    },
+    {
+      "id": "remaining_pr_gate_watcher_seed",
+      "title": "Ты gate watcher для текущей Wave 3. Не редактируй файлы. Проверь оставшиеся PR: aoa-routing#101, aoa-skills#186. Нужно: список unresolved review threads.",
+      "expected_seed": "AoA Experience Wave 3 remaining PR review thread gate"
+    },
+    {
+      "id": "socraticode_runbook_seed",
+      "title": "Работай в /srv/work/rios-de-color. Отвечай только на русском. Проверь SocratiCode по runbook: audit-desk/runbooks/socraticode-local-index-2026-05-03.md. Следующий рабочий шаг: выбрать первый controlled repair candidate.",
+      "expected_seed": "rios-de-color SocratiCode runbook repair candidate routing"
+    },
+    {
+      "id": "dionysus_closeout_map_seed",
+      "title": "Ты Atlas. Нужен узкий final closeout map для Dionysus по кампании AoA Experience v1.2->v2.0, после того как W0-W10 и post-W10 hardening уже landed.",
+      "expected_seed": "Dionysus v1.2 to v2.0 final closeout map"
+    },
+    {
+      "id": "dionysus_closeout_lineage_audit_seed",
+      "title": "Ты Mneme. Нужен narrow lineage audit для truthful Dionysus closeout по кампании AoA Experience v1.2->v2.0, после того как W0-W10 и post-W10 hardening уже landed.",
+      "expected_seed": "Dionysus v1.2 to v2.0 closeout lineage audit"
+    },
+    {
+      "id": "dionysus_closeout_final_judgment_seed",
+      "title": "Ты Delta. Нужен final bounded judgment по Dionysus closeout diff на ветке codex/experience-v12-v20-closeout-20260423. Scope only: /srv/Dionysus/docs/SEED_SURFACE_MAP.md.",
+      "expected_seed": "Dionysus v1.2 to v2.0 closeout final judgment"
+    },
+    {
+      "id": "cross_repo_wave5_review_gate_seed",
+      "title": "Ты Sentinel. Быстрый независимый review gate, только чтение. Проверь два диффа: /srv/Agents-of-Abyss на branch codex/fix-experience-contract-review-comments-20260423 и /srv/aoa-memo на branch codex/fix-wave5-rfc3339-review-comments-20260423.",
+      "expected_seed": "Agents-of-Abyss aoa-memo Wave 5 review comment fixes gate"
+    },
+    {
+      "id": "compact_hook_probe_seed",
+      "title": "Run this harmless shell command: printf aoa-compact-tool-probe. Then reply exactly: aoa compact tool probe ok",
+      "expected_seed": "aoa-session-memory compact hook probe"
+    },
+    {
+      "id": "post_w10_gap_audit_seed",
+      "title": "Post-W10 hardening gap audit across /srv workspace. Starting from the merged v2.0 center contract in /srv/Agents-of-Abyss, map each owner-local obligation to actual existing surfaces.",
+      "expected_seed": "Agents-of-Abyss post-W10 center contract owner gap audit"
+    },
+    {
+      "id": "post_w10_runtime_gap_audit_seed",
+      "title": "Post-W10 hardening gap audit across /srv workspace. Starting from the merged v2.0 living workspace continuity runtime center contract and its runtime_requests, inspect the owner repos.",
+      "expected_seed": "Agents-of-Abyss post-W10 runtime continuity owner hardening audit"
+    },
+    {
+      "id": "srv_mirror_drift_seed",
+      "title": "В 8Dionysus и в корне /srv должны по задумке лежать зеркальные файлы и папки, но я наблюдаю расхождение - выясни кто и где отстает и доложи.",
+      "expected_seed": "8Dionysus mirror drift audit"
+    },
+    {
+      "id": "wave5_review_uses_review_not_provenance_seed",
+      "title": "Review Wave 5 planting in /srv/Agents-of-Abyss on branch codex/wave5-epistemic-duel-model-other-forge-20260423. Do not edit files. Take a code-review posture. Seed provenance: /home/dionysus/Загрузки/aoa-experience-epistemic-duel-model-of-other-forge-seed-v1_5.zip.",
+      "expected_seed": "Wave 5 epistemic duel model of other forge review"
+    },
+    {
+      "id": "wave5_rereview_gets_distinct_seed",
+      "title": "Re-review Wave 5 planting in /srv/Agents-of-Abyss on branch codex/wave5-epistemic-duel-model-other-forge-20260423. Do not edit files. Code-review posture. Seed provenance: /home/dionysus/Загрузки/aoa-experience-epistemic-duel-model-of-other-forge-seed-v1_5.zip.",
+      "expected_seed": "Wave 5 epistemic duel model of other forge recheck"
+    },
+    {
+      "id": "multi_repo_fix_map_seed",
+      "title": "Map the requested multi-repo fixes. Repos: /srv/aoa-techniques, /srv/aoa-skills, /srv/aoa-memo, /srv/Agents-of-Abyss. Do not edit files.",
+      "expected_seed": "aoa-techniques aoa-skills aoa-memo agents-of-abyss multi repo fix map"
+    },
+    {
+      "id": "rfc3339_lineage_seed",
+      "title": "Read-only lineage/consistency pass for RFC3339 date-time checker bugs across /srv/aoa-techniques, /srv/aoa-skills, /srv/aoa-memo. Do not edit.",
+      "expected_seed": "aoa-techniques aoa-skills aoa-memo RFC3339 date time semantics review"
+    },
+    {
+      "id": "russian_seed_planting_meaning_seed",
+      "title": "Изучи эти семена и расскажи к чему приведет их посадка. Естественно их надо сажать с учетом тех особенностей и без тех мусора. Меня интересует именно смысл и суть.",
+      "expected_seed": "seed planting meaning review"
+    },
+    {
+      "id": "slash_phrase_is_not_path_domain",
+      "title": "Inspect the Dionysus Wave 0 intake note/map and the v1.2 service mesh operations archive.",
+      "expected_domain": ""
+    },
+    {
+      "id": "procedural_name_requires_review",
+      "warn_name": "review-the-current-srv-agents-of-abyss-wave",
+      "expected_flag": "procedural_prompt_residue"
+    },
+    {
+      "id": "truncated_tail_requires_review",
+      "warn_name": "final-wave-2-verdict-pass-for-srv-agents-of-abyss-after",
+      "expected_flag": "truncated_name_tail"
+    },
+    {
+      "id": "scope_only_branch_requires_review",
+      "warn_name": "wave-9-narrow-review-only-repo-srv-agents-of-abyss-branch",
+      "expected_flag": "instruction_scope_residue"
+    },
+    {
+      "id": "working_context_prefix_not_name",
+      "title": "Рабочий контекст: /srv/github-owner/8Dionysus. Проверь оставшиеся route-index docs.",
+      "expected_seed": "Проверь оставшиеся route-index docs.",
+      "expected_domain": "8dionysus"
+    },
+    {
+      "id": "github_owner_prefix_not_name",
+      "title": "Рабочий контекст: /srv; GitHub owner 8Dionysus. Проверь оставшиеся PR: aoa-routing#101, aoa-skills#186.",
+      "expected_seed": "Проверь оставшиеся PR: aoa-routing#101, aoa-skills#186."
+    },
+    {
+      "id": "read_only_task_for_wave_prefix_not_name",
+      "title": "Read-only task for Wave 1: inspect /srv/Agents-of-Abyss existing experience docs.",
+      "expected_seed": "Wave 1: inspect /srv/Agents-of-Abyss existing experience docs."
+    },
+    {
+      "id": "fallback_domain_action_requires_review",
+      "quality": {
+        "level": "warn",
+        "flag": "fallback_name_needs_review"
+      }
+    },
+    {
+      "id": "path_attachment_domain_uses_stem",
+      "title": "/home/dionysus/Загрузки/Spark_Quest_E2B(3).md\nВот задача. Отвечай только на русском.",
+      "expected_domain": "spark-quest-e2b-3"
+    },
+    {
+      "id": "quoted_path_attachment_uses_stem",
+      "title": "'/home/dionysus/Загрузки/Spark_Quest_E2B.md'\nВ этом файле лежит задание для тебя.",
+      "expected_seed": "Spark_Quest_E2B"
+    },
+    {
+      "id": "russian_repo_topology_refactor_path_not_name",
+      "title": "В /srv/AbyssOS/aoa-techniques делали рефакторинг репо как в Agents-of-Abyss, по топологии и упорядочиванию. Надо продолжить. Сейчас в корневых папках осталось много файлов принадлежащих механикам.",
+      "expected_seed": "aoa-techniques topology ordering refactor mechanics routing"
+    },
+    {
+      "id": "semantic_only_no_physical_relabel",
+      "title": "Build the session naming wave",
+      "cwd": "/workspace/session-memory",
+      "expected_policy": {
+        "semantic_names_only": true,
+        "physical_relabel_allowed": false
+      }
+    }
+  ]
+}

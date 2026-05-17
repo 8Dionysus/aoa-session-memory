@@ -41,6 +41,8 @@ Use this skill in any Codex session when the task touches:
 - event taxonomy, classifier, generated segment indexes, or `reindex-sessions`
 - naming readiness, `SESSION_NAMES.md`, `sessions/INDEX.md`, or
   `naming-readiness`
+- mass session naming, `naming-wave`, semantic session-name review plans, or
+  naming quality audit
 - phase discovery, `phase-discovery`, `review-phase-name`, or session naming
   candidate layers
 - historical Codex session import from `~/.codex/sessions`
@@ -77,6 +79,8 @@ Use this skill in any Codex session when the task touches:
   `aoa-session-reindex`
 - Naming queue, phase-discovery routing, and pre-rename checks:
   `aoa-session-naming-readiness`
+- Mass semantic naming waves, guarded batch apply, and naming quality audit:
+  `aoa-session-naming-wave`
 - Long-session phase/topic candidate extraction and guarded candidate apply:
   `aoa-session-phase-discovery`
 - Large archive / compaction stress: `aoa-session-memory-stress-pass`

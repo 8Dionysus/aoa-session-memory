@@ -26,6 +26,7 @@ Build the `.aoa` session-memory mechanism end to end:
 - Operation route: `PIPELINE.md`
 - Install/export route: `INSTALL.md`
 - Naming policy: `NAMING.md` and `config/naming-policy.json`
+- Naming wave quality examples: `config/naming-golden-set.json`
 - Event taxonomy: `config/event-taxonomy.json`
 - Distillation routes: `config/event-distillation-routes.json`
 - Batch distillation policy: `config/batch-distillation-policy.json`
@@ -34,6 +35,8 @@ Build the `.aoa` session-memory mechanism end to end:
 - Skills: `skills/`, including the user-level router
   `aoa-session-memory-global-route` and narrow operation skills for stress,
   historical import, audit, doctor, hook trust, and compact probe work
+- Mass naming route: `naming-wave build/apply/audit` and
+  `skills/aoa-session-naming-wave`
 - CLI and hooks: `scripts/aoa_session_memory.py`
 - Tests: `tests/test_session_memory.py`
 - Standalone repository: `https://github.com/8Dionysus/aoa-session-memory`
@@ -178,8 +181,9 @@ Stress-pass evidence:
 | Full raw transcript mirror when `transcript_path` is readable | `handle_hook_event`, `sync_session_from_transcript`, tests for raw mirror |
 | Raw unavailable is diagnostic, not fake memory | `write_raw_unavailable_incident`, raw-unavailable test |
 | `raw_unavailable` archives do not crash global audit | raw-unavailable completion-audit regression test |
-| PreCompact/PostCompact and large Stop hooks stay timeout-safe by mirroring raw and deferring indexing | deferred lifecycle hook regression test, largest-transcript hook benchmark |
-| Explicit full-sync routes regenerate compaction interval indexes | manual sync regression test, `validate`, `sync`, import, reindex |
+| PreCompact/PostCompact and large Stop hooks stay timeout-safe while queueing automatic background sync | lifecycle hook worker regression test, largest-transcript hook benchmark |
+| PostCompact worker sealing writes raw interval blocks, raw ledgers, segment Markdown, and sibling indexes | raw block checks in `validate`, lifecycle hook worker regression test |
+| Explicit full-sync routes regenerate compaction interval indexes as recovery/rebuild paths | manual sync regression test, `validate`, `sync`, import, reindex |
 | Real Codex `compacted` and `context_compacted` raw events define one logical segment boundary | rebuilt live archives, `audit`, real compact marker regression test |
 | Large-session stress pass can audit the first 100 compaction intervals without loading bulk raw into the agent context | `stress-pass --compactions 100 --write`, largest-session diagnostics |
 | Hook stdout is schema-limited | `codex_hook_output`, protocol-field tests |

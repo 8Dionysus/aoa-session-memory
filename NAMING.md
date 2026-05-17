@@ -214,6 +214,56 @@ The plan route skips empty `reviewed_name` entries and applies each non-empty
 item through the same guarded phase-name writer used by `review-phase-name`.
 It does not treat machine candidates or `--use-candidate` as reviewed truth.
 
+For many sessions, use a naming wave instead of repeating one-session commands:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave build \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write \
+  --write-report
+```
+
+`naming-wave build` creates a multi-session review plan. It routes `needs_sync`
+and `needs_reindex` entries as preflight work, proposes semantic session names
+for ready/readable sessions, carries raw evidence refs and coverage where
+available, and marks every item with `physical_relabel_allowed=false`.
+
+After reviewing the plan, fill `reviewed_name` for accepted session-level
+names and apply only reviewed items:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave apply \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --apply \
+  --write-report
+```
+
+Run a quality pass before and after mass application:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave audit \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --sample-size 18 \
+  --sample-seed wave-quality-1 \
+  --write-report
+```
+
+The sample is deterministic and stratified by quality bucket: preflight work,
+flagged names, unflagged instruction residue, fallback names, short names, and
+ordinary `ok` candidates. Each sampled item includes raw evidence preview text
+from the candidate's first raw refs. This makes the long polishing loop
+repeatable: sample, inspect raw preview, add a narrow golden case for any
+defect class, rebuild, and sample again with a new seed.
+
+Naming waves are semantic-name waves. They do not physically relabel archive
+directories. Physical relabel remains a later, narrower operation after the
+semantic map and anchors are trusted.
+
 Each phase candidate should be read as a signal bundle, not a title string:
 
 - `name_basis=specific_user_intent` means a usable user request anchored the

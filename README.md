@@ -6,6 +6,8 @@ The first implementation target is Codex session capture:
 
 ```text
 raw transcript jsonl
+  -> raw compaction interval blocks
+  -> raw block and compaction-event ledgers
   -> compaction-interval Markdown segments
   -> segment indexes
   -> universal event facets and relationships
@@ -45,11 +47,12 @@ Existing Codex hooks call into this layer on:
 The hook path is fail-open. If raw session access fails, it writes an incident
 and diagnostic record instead of blocking the active Codex session.
 
-`PreCompact` and `PostCompact` stay deliberately light: they record the hook
-receipt, mirror the readable raw transcript state when available, and defer
-segment/index regeneration. `Stop` is size-bounded: small transcripts may be
-indexed immediately, while large transcripts are mirrored and left for manual
-`sync`, import, or reindex. Set `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1` or
+`PreCompact` and `PostCompact` stay deliberately light in the foreground: they
+record the hook receipt, mirror readable raw transcript state when cheap, and
+queue `hook-worker` for the heavy archive work. `PostCompact` is the normal
+automatic path for sealing the closed compaction interval into raw blocks,
+segment Markdown, and segment indexes. Manual `sync`, import, or reindex are
+recovery and rebuild paths. Set `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1` or
 `AOA_SESSION_MEMORY_FULL_STOP_SYNC=1` only for deliberate debugging, not for
 normal long-session hooks. `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES` controls
 the default Stop full-sync threshold.
@@ -71,6 +74,10 @@ sessions/
     raw/
       session.raw.jsonl
       source.json
+      blocks.index.json
+      compaction-events.jsonl
+      blocks/
+        000__initial-to-latest.raw.jsonl
     segments/
       000__initial-to-latest.md
       000__initial-to-latest.index.json
@@ -254,6 +261,42 @@ python3 scripts/aoa_session_memory.py apply-phase-review-plan <session-label-or-
 
 The plan route skips empty `reviewed_name` entries and applies each non-empty
 item through the same guarded phase-name writer.
+
+For mass session naming, build a wave plan:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave build \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --write-report
+```
+
+The wave plan is the fast path for large archives: it separates sync/reindex
+preflight, session-name candidates, open phase queues, diagnostic-only
+archives, and low-signal probes. It writes a reviewable
+`diagnostics/naming-waves/<wave-id>/naming-wave-plan.json`.
+
+Apply only reviewed entries:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave apply \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --apply \
+  --write-report
+```
+
+Then audit naming quality:
+
+```bash
+python3 scripts/aoa_session_memory.py naming-wave audit \
+  --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
+  --write-report
+```
+
+`naming-wave` applies semantic session names only. It does not rename archive
+directories. This keeps the raw source bridge stable while making the archive
+much faster to navigate.
 
 Review and apply one phase candidate through the guarded route:
 

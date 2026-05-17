@@ -10,10 +10,13 @@ review lanes. They are machine-readable route law, not generated reports.
 
 ## Authority
 
-- `naming-policy.json` defines durable label and semantic-name policy.
+- `naming-policy.json` defines durable label and semantic-name policy,
+  including portable domain/action hints for mass naming waves.
 - `event-taxonomy.json` defines universal event facets.
 - `event-distillation-routes.json` maps event classes toward review lanes.
 - `batch-distillation-policy.json` controls first-wave batch review routing.
+- `naming-golden-set.json` defines portable naming-quality examples for
+  mass naming wave regression checks.
 
 ## Rules
 
