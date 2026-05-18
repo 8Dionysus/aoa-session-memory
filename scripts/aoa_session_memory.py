@@ -15539,7 +15539,20 @@ def command_doctor(args: argparse.Namespace) -> int:
     if legacy_root.exists() and any(legacy_root.iterdir()):
         problems.append(f"legacy session root is not empty: {legacy_root}")
     session_root = root / SESSION_ROOT
-    archive_dirs = [path for path in session_root.iterdir() if path.is_dir()] if session_root.exists() else []
+    session_dirs = [path for path in session_root.iterdir() if path.is_dir()] if session_root.exists() else []
+    archive_dirs = [path for path in session_dirs if (path / "session.manifest.json").exists()]
+    hook_only_dirs = [path for path in session_dirs if not (path / "session.manifest.json").exists() and (path / "hooks").exists()]
+    non_archive_dirs = [path for path in session_dirs if path not in archive_dirs and path not in hook_only_dirs]
+    if hook_only_dirs:
+        warnings.append(
+            "session hook placeholder dirs without manifests ignored in archive count: "
+            f"{[path.name for path in hook_only_dirs]}"
+        )
+    if non_archive_dirs:
+        warnings.append(
+            "non-archive session dirs without manifests ignored in archive count: "
+            f"{[path.name for path in non_archive_dirs]}"
+        )
     if isinstance(sessions, list) and len(sessions) != len(archive_dirs):
         problems.append(f"session registry count {len(sessions)} does not match archive directory count {len(archive_dirs)}")
     name_index = read_json(root / SESSION_NAME_INDEX_JSON, {})
@@ -15691,6 +15704,8 @@ def command_doctor(args: argparse.Namespace) -> int:
         "aoa_root": str(root),
         "session_count": len(sessions) if isinstance(sessions, list) else 0,
         "archive_dir_count": len(archive_dirs),
+        "hook_only_dir_count": len(hook_only_dirs),
+        "non_archive_dir_count": len(non_archive_dirs),
         "user_skill": user_skill_state,
         "problems": problems,
         "warnings": warnings,

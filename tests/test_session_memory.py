@@ -3832,6 +3832,60 @@ def test_registry_update_recovers_from_invalid_registry_when_manifests_exist(tmp
     assert sessions_index["session_count"] == 2
 
 
+def test_doctor_ignores_hook_only_placeholder_dirs(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    module.copy_portable_bundle(source_aoa_root=SCRIPT.parents[1], target_aoa_root=aoa_root, overwrite=True)
+    transcript = tmp_path / "rollout-2026-05-19T00-00-00-doctor-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-19T00:00:00Z", "type": "session_meta", "payload": {"id": "doctor-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-19T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Doctor should ignore hook-only placeholders"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "doctor-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    placeholder = aoa_root / "sessions" / "019e3895-8c33-7823-a81e-cd6232ca8e4c"
+    write_jsonl(
+        placeholder / "hooks" / "events.jsonl",
+        [
+            {
+                "schema_version": 1,
+                "timestamp": "2026-05-19T00:00:02Z",
+                "hook_event_name": "UserPromptSubmit",
+                "event": {"session_id": "019e3895-8c33-7823-a81e-cd6232ca8e4c"},
+            }
+        ],
+    )
+    args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        check_live_hooks=False,
+        check_user_skill=False,
+        check_codex_grounding=False,
+    )
+
+    code = module.command_doctor(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["session_count"] == 1
+    assert payload["archive_dir_count"] == 1
+    assert payload["hook_only_dir_count"] == 1
+    assert payload["problems"] == []
+    assert "hook placeholder dirs" in payload["warnings"][0]
+
+
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     legacy_dir = aoa_root / "codex-sessions" / "legacy-session"
