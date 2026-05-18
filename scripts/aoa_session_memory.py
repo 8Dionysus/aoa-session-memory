@@ -36,6 +36,7 @@ HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
 SEARCH_PROVIDER_CONFIG_PATH = Path("config/search-providers.json")
+DEFAULT_SEARCH_FRESHNESS_SCAN_LIMIT = 1000
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
@@ -3129,6 +3130,9 @@ def clear_generated_raw_blocks(session_dir: Path) -> None:
         for path in blocks_dir.iterdir():
             if path.name.endswith(".raw.jsonl") or path.name == RAW_BLOCK_INDEX_JSON:
                 path.unlink()
+    raw_block_index_path = raw_dir / RAW_BLOCK_INDEX_JSON
+    if raw_block_index_path.exists():
+        raw_block_index_path.unlink()
     compaction_events_path = raw_dir / RAW_COMPACTION_EVENTS_JSONL
     if compaction_events_path.exists():
         compaction_events_path.unlink()
@@ -3455,6 +3459,10 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
     if legacy_md.exists():
         legacy_md.unlink()
+
+
+def write_deferred_session_index(session_dir: Path, manifest: dict[str, Any]) -> None:
+    write_session_index(session_dir, manifest, [])
 
 
 def update_session_index_identity(session_dir: Path, manifest: dict[str, Any]) -> None:
@@ -3797,6 +3805,8 @@ def mirror_transcript_without_indexing(
     hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
     previous_segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
     previous_event_count = int_value(existing.get("latest_event_count"))
+    clear_generated_segments(session_dir)
+    clear_generated_raw_blocks(session_dir)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -3834,8 +3844,7 @@ def mirror_transcript_without_indexing(
         manifest["semantic_names"] = existing["semantic_names"]
         refresh_semantic_name_anchors(session_dir, manifest)
     write_json(session_dir / "session.manifest.json", manifest)
-    if (session_dir / SESSION_INDEX_JSON).exists():
-        update_session_index_identity(session_dir, manifest)
+    write_deferred_session_index(session_dir, manifest)
     registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
     return {
         "session_id": session_id,
@@ -13437,18 +13446,37 @@ def search_index_sessions(
     return payload
 
 
-def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
+def search_result_freshness(row: sqlite3.Row, *, cache: dict[tuple[str, str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
     raw_path_value = row["raw_path"] if "raw_path" in row.keys() else ""
     segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
     checks: list[dict[str, Any]] = []
     if raw_path_value:
         raw_path = Path(str(raw_path_value))
-        if raw_path.exists() and row["raw_sha256"]:
-            checks.append(search_manifest_freshness({"raw": {"sha256": row["raw_sha256"]}}, raw_path))
+        expected_sha = str(row["raw_sha256"] or "")
+        cache_key = ("raw", str(raw_path), expected_sha)
+        if cache is not None and cache_key in cache:
+            checks.append(cache[cache_key])
+        elif raw_path.exists() and expected_sha:
+            freshness = search_manifest_freshness({"raw": {"sha256": expected_sha}}, raw_path)
+            if cache is not None:
+                cache[cache_key] = freshness
+            checks.append(freshness)
         else:
-            checks.append({"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]})
+            freshness = {"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]}
+            if cache is not None:
+                cache[cache_key] = freshness
+            checks.append(freshness)
     if segment_path_value:
-        checks.append(segment_index_freshness(Path(str(segment_path_value)), row["segment_index_sha256"]))
+        segment_path = Path(str(segment_path_value))
+        expected_sha = str(row["segment_index_sha256"] or "")
+        cache_key = ("segment", str(segment_path), expected_sha)
+        if cache is not None and cache_key in cache:
+            checks.append(cache[cache_key])
+        else:
+            freshness = segment_index_freshness(segment_path, expected_sha)
+            if cache is not None:
+                cache[cache_key] = freshness
+            checks.append(freshness)
     if checks:
         return combine_freshness(*checks)
     status = str(row["freshness_status"] or "unverifiable")
@@ -13456,8 +13484,14 @@ def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
     return {"status": status, "reasons": reasons}
 
 
-def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "") -> dict[str, Any]:
-    freshness = search_result_freshness(row)
+def compact_search_result(
+    row: sqlite3.Row,
+    *,
+    explain: bool = False,
+    query: str = "",
+    freshness_cache: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    freshness = search_result_freshness(row, cache=freshness_cache)
     refs = {
         "session": row["manifest_path"],
         "segment": row["segment_ref"],
@@ -13506,6 +13540,12 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
 def search_index_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute("SELECT key, value FROM meta").fetchall()
     return {str(row["key"]): row["value"] for row in rows}
+
+
+def search_freshness_scan_limit(limit: int) -> int:
+    requested = max(1, int_value(limit, 20))
+    configured = int_value(os.environ.get("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT"), DEFAULT_SEARCH_FRESHNESS_SCAN_LIMIT)
+    return max(requested, configured)
 
 
 def search_sessions(
@@ -13587,6 +13627,7 @@ def search_sessions(
         params.append(parse_date_arg(date_to))
     where = " AND ".join(filters)
     fts_query = fts_query_from_user(query)
+    query_limit = search_freshness_scan_limit(limit) if freshness_status else limit
     try:
         if fts_query:
             sql = (
@@ -13599,9 +13640,8 @@ def search_sessions(
                 sql += " AND " + where
                 query_params.extend(params)
             sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC"
-            if not freshness_status:
-                sql += " LIMIT ?"
-                query_params.append(limit)
+            sql += " LIMIT ?"
+            query_params.append(query_limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = "SELECT documents.*, 0.0 AS rank FROM documents"
@@ -13609,9 +13649,8 @@ def search_sessions(
             if where:
                 sql += " WHERE " + where
             sql += " ORDER BY documents.session_date DESC, documents.rowid DESC"
-            if not freshness_status:
-                sql += " LIMIT ?"
-                query_params.append(limit)
+            sql += " LIMIT ?"
+            query_params.append(query_limit)
             rows = conn.execute(sql, query_params).fetchall()
         metadata = search_index_metadata(conn)
     except sqlite3.Error as exc:
@@ -13630,7 +13669,8 @@ def search_sessions(
         }
     finally:
         conn.close()
-    results = [compact_search_result(row, explain=explain, query=query) for row in rows]
+    freshness_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+    results = [compact_search_result(row, explain=explain, query=query, freshness_cache=freshness_cache) for row in rows]
     if freshness_status:
         results = [
             result
@@ -13644,6 +13684,19 @@ def search_sessions(
         timeout=host_timeout,
     )
     diagnostics: list[str] = []
+    freshness_filter: dict[str, Any] | None = None
+    if freshness_status:
+        scan_exhausted = len(rows) >= query_limit
+        limit_satisfied = len(results) >= limit
+        freshness_filter = {
+            "requested_status": freshness_status,
+            "scan_limit": query_limit,
+            "scanned_count": len(rows),
+            "limit_satisfied": limit_satisfied,
+            "scan_exhausted": scan_exhausted,
+        }
+        if scan_exhausted and not limit_satisfied:
+            diagnostics.append("freshness filter scan limit reached before satisfying requested result limit")
     provider_overlay: dict[str, Any] | None = None
     if provider != "portable_sqlite":
         selected_status = provider_payload.get("providers", {}).get(provider) if isinstance(provider_payload.get("providers"), dict) else {}
@@ -13660,7 +13713,7 @@ def search_sessions(
                 limit=limit,
                 timeout=host_timeout,
             )
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_results",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
@@ -13682,6 +13735,9 @@ def search_sessions(
         "results": results,
         "diagnostics": diagnostics,
     }
+    if freshness_filter is not None:
+        payload["freshness_filter"] = freshness_filter
+    return payload
 
 
 RETRIEVAL_RECIPE_QUERIES = {
