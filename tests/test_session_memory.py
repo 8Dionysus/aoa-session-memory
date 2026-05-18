@@ -409,7 +409,7 @@ def test_reindex_and_title_repair_empty_registry_keep_own_payload_schema(tmp_pat
     assert repair["diagnostics"] == ["session registry is empty"]
 
 
-def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path) -> None:
+def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-index.jsonl"
@@ -506,6 +506,19 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     raw_unavailable = module.search_sessions(aoa_root=aoa_root, query="raw unavailable", archive_status="raw_unavailable")
     assert raw_unavailable["result_count"] >= 1
     assert raw_unavailable["results"][0]["archive_status"] == "raw_unavailable"
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT", "1")
+    bounded_fresh = module.search_sessions(
+        aoa_root=aoa_root,
+        freshness_status="fresh",
+        limit=2,
+    )
+    assert bounded_fresh["freshness_filter"]["scan_limit"] == 2
+    assert bounded_fresh["freshness_filter"]["scanned_count"] == 2
+    assert bounded_fresh["freshness_filter"]["limit_satisfied"] is False
+    assert bounded_fresh["result_count"] < 2
+    assert "freshness filter scan limit reached" in bounded_fresh["diagnostics"][0]
+    monkeypatch.delenv("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT")
 
     session_dir = aoa_root / "sessions" / "2026-05-12__001__важная-мысль-имена-должны-держать-мост-якорь"
     index_path = session_dir / "segments" / "000__initial-to-latest.index.json"
@@ -3218,6 +3231,13 @@ def test_deferred_mirror_preserves_semantic_name_verified_anchor(tmp_path: Path)
     assert deferred_manifest["deferred_indexing"]["status"] == "stale_generated_metadata_cleared"
     assert deferred_manifest["deferred_indexing"]["previous_segment_count"] == 1
     assert deferred_manifest["deferred_indexing"]["previous_event_count"] == raw_line_count
+    deferred_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    assert deferred_index["archive_status"] == "raw_mirrored_index_deferred"
+    assert deferred_index["event_count"] == 0
+    assert deferred_index["event_counts"] == {}
+    assert deferred_index["segments"] == []
+    assert not list((session_dir / "segments").glob("*.index.json"))
+    assert not (session_dir / "raw" / "blocks.index.json").exists()
     assert anchor["raw_sha256"] == raw_sha
     assert anchor["raw_line_count"] == raw_line_count
     assert anchor["raw_anchor_status"] == "deferred_refresh_preserved_verified_anchor"
