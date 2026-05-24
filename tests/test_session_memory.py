@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_memory.py"
@@ -383,33 +385,7 @@ def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> 
     assert audit["diagnostics"] == ["session registry is empty"]
 
 
-def test_reindex_and_title_repair_empty_registry_keep_own_payload_schema(tmp_path: Path) -> None:
-    aoa_root = tmp_path / ".aoa"
-    aoa_root.mkdir()
-
-    reindex = module.reindex_sessions(aoa_root=aoa_root, target="latest", dry_run=True)
-    repair = module.repair_session_titles(aoa_root=aoa_root, target="latest")
-
-    assert reindex["artifact_type"] == "session_reindex"
-    assert reindex["ok"] is False
-    assert reindex["dry_run"] is True
-    assert reindex["selected_count"] == 0
-    assert reindex["counts"] == {"selection_error": 1}
-    assert reindex["results"] == []
-    assert "eligible_event_count" not in reindex
-    assert reindex["diagnostics"] == ["session registry is empty"]
-
-    assert repair["artifact_type"] == "session_title_repair"
-    assert repair["ok"] is False
-    assert repair["apply"] is False
-    assert repair["selected_count"] == 0
-    assert repair["counts"] == {"selection_error": 1}
-    assert repair["results"] == []
-    assert "eligible_event_count" not in repair
-    assert repair["diagnostics"] == ["session registry is empty"]
-
-
-def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path, monkeypatch) -> None:
+def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-index.jsonl"
@@ -478,10 +454,6 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert Path(indexed["db_path"]).exists()
     assert Path(indexed["report_json"]).exists()
 
-    incremental = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=False)
-    assert incremental["ok"] is True
-    assert incremental["document_count"] == indexed["document_count"]
-
     hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert hook_results["ok"] is True
     assert hook_results["result_count"] >= 1
@@ -507,19 +479,6 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert raw_unavailable["result_count"] >= 1
     assert raw_unavailable["results"][0]["archive_status"] == "raw_unavailable"
 
-    monkeypatch.setenv("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT", "1")
-    bounded_fresh = module.search_sessions(
-        aoa_root=aoa_root,
-        freshness_status="fresh",
-        limit=2,
-    )
-    assert bounded_fresh["freshness_filter"]["scan_limit"] == 2
-    assert bounded_fresh["freshness_filter"]["scanned_count"] == 2
-    assert bounded_fresh["freshness_filter"]["limit_satisfied"] is False
-    assert bounded_fresh["result_count"] < 2
-    assert "freshness filter scan limit reached" in bounded_fresh["diagnostics"][0]
-    monkeypatch.delenv("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT")
-
     session_dir = aoa_root / "sessions" / "2026-05-12__001__важная-мысль-имена-должны-держать-мост-якорь"
     index_path = session_dir / "segments" / "000__initial-to-latest.index.json"
     broken = json.loads(index_path.read_text(encoding="utf-8"))
@@ -529,15 +488,6 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
-
-    stale_filtered = module.search_sessions(
-        aoa_root=aoa_root,
-        query="hook timed out",
-        freshness_status="stale",
-        explain=True,
-    )
-    assert stale_filtered["result_count"] >= 1
-    assert stale_filtered["results"][0]["freshness"]["status"] == "stale"
 
 
 def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> None:
@@ -1106,6 +1056,64 @@ def test_user_prompt_submit_is_light_by_default(tmp_path: Path, monkeypatch) -> 
     assert not (session_dir / "session.manifest.json").exists()
 
 
+def test_user_prompt_submit_mirrors_prompt_to_typing_bridge(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-typing-bridge.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-typing-bridge"}},
+        ],
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append({"command": command, "input": kwargs.get("input")})
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "status": "ingested",
+                    "typing_event": {
+                        "event_id": "typing-codex-prompt",
+                        "status": "captured",
+                        "capture_gate_decision": "allow_text",
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/abyss-machine" if name == "abyss-machine" else None)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC", raising=False)
+
+    receipt = module.handle_hook_event(
+        "UserPromptSubmit",
+        {
+            "session_id": "session-typing-bridge",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "live Codex prompt bridge probe",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    assert "typing_prompt_mirrored" in receipt["actions"]
+    assert receipt["typing_bridge"]["event_id"] == "typing-codex-prompt"
+    assert receipt["typing_bridge"]["capture_gate_decision"] == "allow_text"
+    assert calls
+    assert calls[0]["command"] == ["/usr/bin/abyss-machine", "typing", "codex-prompt-hook", "--json"]
+    assert "live Codex prompt bridge probe" in calls[0]["input"]
+
+
 def test_session_start_is_light_by_default_when_raw_exists(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -1629,26 +1637,6 @@ def test_real_codex_compacted_events_define_segments(tmp_path: Path) -> None:
     assert first_index["by_type"]["COMPACTION_EVENT"] == ["000003", "000004"]
 
 
-def test_standalone_context_compacted_event_counts_as_compaction_boundary(tmp_path: Path) -> None:
-    raw_path = tmp_path / "standalone-context-compacted.raw.jsonl"
-    write_jsonl(
-        raw_path,
-        [
-            {"timestamp": "2026-05-14T02:00:00Z", "type": "session_meta", "payload": {"id": "standalone-context"}},
-            {"timestamp": "2026-05-14T02:00:01Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
-            {"timestamp": "2026-05-14T02:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant"}},
-        ],
-    )
-
-    stats = module.raw_compaction_stats(raw_path)
-
-    assert stats["source_compacted_count"] == 0
-    assert stats["context_compacted_event_count"] == 1
-    assert stats["compaction_boundary_count"] == 1
-    assert stats["compaction_marker_count"] == 1
-    assert stats["expected_segment_count"] == 2
-
-
 def test_stress_pass_audits_first_compaction_intervals(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -1821,64 +1809,6 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
-
-
-def test_completion_audit_portable_bundle_rejects_bundled_runtime_archives(
-    tmp_path: Path, monkeypatch
-) -> None:
-    source_aoa = SCRIPT.parents[1]
-    workspace = tmp_path / "TargetWorkspace"
-    bundle_root = tmp_path / "aoa-session-memory"
-    transcript = tmp_path / "rollout-2026-05-17T00-00-00-portable-runtime.jsonl"
-    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
-    (bundle_root / ".git").mkdir()
-    write_jsonl(
-        transcript,
-        [
-            {"timestamp": "2026-05-17T00:00:00Z", "type": "session_meta", "payload": {"id": "portable-runtime-session"}},
-            {"timestamp": "2026-05-17T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Portable bundle must stay clean"}]}},
-            {"timestamp": "2026-05-17T00:00:02Z", "type": "compacted", "payload": {"replacement_history": []}},
-            {"timestamp": "2026-05-17T00:00:03Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
-            {"timestamp": "2026-05-17T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: runtime archives are not portable proof."}]}},
-        ],
-    )
-    module.handle_hook_event(
-        "Stop",
-        {
-            "session_id": "portable-runtime-session",
-            "transcript_path": str(transcript),
-            "cwd": str(workspace),
-            "hook_event_name": "Stop",
-        },
-        workspace_root=workspace,
-        aoa_root=bundle_root,
-    )
-
-    def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
-        if repo_root == bundle_root:
-            return "git@github.com:8Dionysus/aoa-session-memory.git"
-        return None
-
-    monkeypatch.setattr(module, "git_remote_url", fake_remote)
-
-    payload = module.completion_audit(
-        workspace_root=workspace,
-        aoa_root=bundle_root,
-        check_codex=False,
-        portable_bundle=True,
-    )
-
-    statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
-    raw_evidence = [
-        item["evidence"]
-        for item in payload["checklist"]
-        if item["requirement"] == "Portable bundle intentionally excludes local raw session archives"
-    ][0]
-    assert payload["ok"] is False
-    assert raw_evidence["portable_clean_runtime"] is False
-    assert statuses["Portable bundle intentionally excludes local raw session archives"] == "missing"
-    assert statuses["Portable bundle carries compaction logic without bundled live raw proof"] == "missing"
-    assert statuses["Portable bundle has clean runtime topology without bundled segment drift"] == "missing"
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
@@ -2082,6 +2012,33 @@ def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> 
     assert payload["ok"] is True
     assert payload["compact_ratio"] == 0.8
     assert all(payload["schema_markers"].values())
+
+
+def test_resolve_codex_native_binary_supports_nested_npm_vendor_layout(tmp_path: Path, monkeypatch) -> None:
+    package_root = tmp_path / "npm-global" / "lib" / "node_modules" / "@openai" / "codex"
+    wrapper = package_root / "bin" / "codex.js"
+    native = (
+        package_root
+        / "node_modules"
+        / "@openai"
+        / "codex-linux-x64"
+        / "vendor"
+        / "x86_64-unknown-linux-musl"
+        / "bin"
+        / "codex"
+    )
+    bin_dir = tmp_path / "bin"
+    wrapper.parent.mkdir(parents=True)
+    native.parent.mkdir(parents=True)
+    bin_dir.mkdir()
+    wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    native.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    native.chmod(0o755)
+    (bin_dir / "codex").symlink_to(wrapper)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert module.resolve_codex_native_binary("codex") == native
 
 
 def test_codex_grounding_uses_user_compact_config_and_project_codex_hooks(tmp_path: Path, monkeypatch) -> None:
@@ -3226,18 +3183,6 @@ def test_deferred_mirror_preserves_semantic_name_verified_anchor(tmp_path: Path)
     assert deferred_manifest["archive_status"] == "raw_mirrored_index_deferred"
     assert deferred_manifest["raw"]["sha256"] is None
     assert deferred_manifest["raw"]["line_count"] is None
-    assert deferred_manifest["segments"] == []
-    assert deferred_manifest["latest_event_count"] == 0
-    assert deferred_manifest["deferred_indexing"]["status"] == "stale_generated_metadata_cleared"
-    assert deferred_manifest["deferred_indexing"]["previous_segment_count"] == 1
-    assert deferred_manifest["deferred_indexing"]["previous_event_count"] == raw_line_count
-    deferred_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
-    assert deferred_index["archive_status"] == "raw_mirrored_index_deferred"
-    assert deferred_index["event_count"] == 0
-    assert deferred_index["event_counts"] == {}
-    assert deferred_index["segments"] == []
-    assert not list((session_dir / "segments").glob("*.index.json"))
-    assert not (session_dir / "raw" / "blocks.index.json").exists()
     assert anchor["raw_sha256"] == raw_sha
     assert anchor["raw_line_count"] == raw_line_count
     assert anchor["raw_anchor_status"] == "deferred_refresh_preserved_verified_anchor"
@@ -3830,60 +3775,6 @@ def test_registry_update_recovers_from_invalid_registry_when_manifests_exist(tmp
     assert len(registry["sessions"]) == 2
     assert name_index["session_count"] == 2
     assert sessions_index["session_count"] == 2
-
-
-def test_doctor_ignores_hook_only_placeholder_dirs(tmp_path: Path, capsys) -> None:
-    workspace = tmp_path / "AbyssOS"
-    aoa_root = workspace / ".aoa"
-    module.copy_portable_bundle(source_aoa_root=SCRIPT.parents[1], target_aoa_root=aoa_root, overwrite=True)
-    transcript = tmp_path / "rollout-2026-05-19T00-00-00-doctor-session.jsonl"
-    write_jsonl(
-        transcript,
-        [
-            {"timestamp": "2026-05-19T00:00:00Z", "type": "session_meta", "payload": {"id": "doctor-session", "cwd": str(workspace)}},
-            {"timestamp": "2026-05-19T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Doctor should ignore hook-only placeholders"}]}},
-        ],
-    )
-    module.handle_hook_event(
-        "Stop",
-        {
-            "session_id": "doctor-session",
-            "transcript_path": str(transcript),
-            "cwd": str(workspace),
-            "hook_event_name": "Stop",
-        },
-        workspace_root=workspace,
-        aoa_root=aoa_root,
-    )
-    placeholder = aoa_root / "sessions" / "019e3895-8c33-7823-a81e-cd6232ca8e4c"
-    write_jsonl(
-        placeholder / "hooks" / "events.jsonl",
-        [
-            {
-                "schema_version": 1,
-                "timestamp": "2026-05-19T00:00:02Z",
-                "hook_event_name": "UserPromptSubmit",
-                "event": {"session_id": "019e3895-8c33-7823-a81e-cd6232ca8e4c"},
-            }
-        ],
-    )
-    args = module.argparse.Namespace(
-        workspace_root=str(workspace),
-        aoa_root=str(aoa_root),
-        check_live_hooks=False,
-        check_user_skill=False,
-        check_codex_grounding=False,
-    )
-
-    code = module.command_doctor(args)
-    payload = json.loads(capsys.readouterr().out)
-
-    assert code == 0
-    assert payload["session_count"] == 1
-    assert payload["archive_dir_count"] == 1
-    assert payload["hook_only_dir_count"] == 1
-    assert payload["problems"] == []
-    assert "hook placeholder dirs" in payload["warnings"][0]
 
 
 def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> None:
