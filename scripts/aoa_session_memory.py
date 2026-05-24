@@ -36,7 +36,6 @@ HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
 SEARCH_PROVIDER_CONFIG_PATH = Path("config/search-providers.json")
-DEFAULT_SEARCH_FRESHNESS_SCAN_LIMIT = 1000
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
@@ -984,7 +983,9 @@ def resolve_codex_native_binary(codex_bin: str) -> Path | None:
     candidates: list[Path] = []
     package_root = path.parents[1] if path.name == "codex.js" and len(path.parents) > 1 else None
     if package_root:
+        candidates.extend(package_root.glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
         candidates.extend(package_root.glob("node_modules/@openai/codex-*/vendor/*/codex/codex"))
+        candidates.extend(package_root.glob("vendor/*/bin/codex"))
         candidates.extend(package_root.glob("vendor/*/codex/codex"))
     if path.is_file() and os.access(path, os.X_OK) and path.suffix != ".js":
         candidates.append(path)
@@ -3130,9 +3131,6 @@ def clear_generated_raw_blocks(session_dir: Path) -> None:
         for path in blocks_dir.iterdir():
             if path.name.endswith(".raw.jsonl") or path.name == RAW_BLOCK_INDEX_JSON:
                 path.unlink()
-    raw_block_index_path = raw_dir / RAW_BLOCK_INDEX_JSON
-    if raw_block_index_path.exists():
-        raw_block_index_path.unlink()
     compaction_events_path = raw_dir / RAW_COMPACTION_EVENTS_JSONL
     if compaction_events_path.exists():
         compaction_events_path.unlink()
@@ -3459,10 +3457,6 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
     if legacy_md.exists():
         legacy_md.unlink()
-
-
-def write_deferred_session_index(session_dir: Path, manifest: dict[str, Any]) -> None:
-    write_session_index(session_dir, manifest, [])
 
 
 def update_session_index_identity(session_dir: Path, manifest: dict[str, Any]) -> None:
@@ -3803,10 +3797,7 @@ def mirror_transcript_without_indexing(
         legacy_raw_source.unlink()
 
     hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
-    previous_segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
-    previous_event_count = int_value(existing.get("latest_event_count"))
-    clear_generated_segments(session_dir)
-    clear_generated_raw_blocks(session_dir)
+    segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -3830,21 +3821,15 @@ def mirror_transcript_without_indexing(
             "copied_at": now,
             "indexing_status": "deferred_from_hook",
         },
-        "segments": [],
-        "latest_event_count": 0,
-        "deferred_indexing": {
-            "status": "stale_generated_metadata_cleared",
-            "reason": "raw_mirrored_index_deferred",
-            "deferred_at": now,
-            "previous_segment_count": len(previous_segments),
-            "previous_event_count": previous_event_count,
-        },
+        "segments": segments,
+        "latest_event_count": existing.get("latest_event_count", 0),
     }
     if isinstance(existing.get("semantic_names"), dict):
         manifest["semantic_names"] = existing["semantic_names"]
         refresh_semantic_name_anchors(session_dir, manifest)
     write_json(session_dir / "session.manifest.json", manifest)
-    write_deferred_session_index(session_dir, manifest)
+    if (session_dir / SESSION_INDEX_JSON).exists():
+        update_session_index_identity(session_dir, manifest)
     registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
     return {
         "session_id": session_id,
@@ -9232,7 +9217,7 @@ def reindex_sessions(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "session_reindex",
+            "artifact_type": "conversation_act_audit",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -9240,10 +9225,14 @@ def reindex_sessions(
             "since": since,
             "until": until,
             "limit": limit,
-            "dry_run": dry_run,
             "selected_count": 0,
-            "counts": {"selection_error": 1},
-            "results": [],
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
+            "counts": {},
+            "samples": {},
             "diagnostics": [str(exc)],
         }
     counts: Counter[str] = Counter()
@@ -9457,7 +9446,7 @@ def repair_session_titles(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "session_title_repair",
+            "artifact_type": "conversation_act_audit",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -9465,10 +9454,14 @@ def repair_session_titles(
             "since": since,
             "until": until,
             "limit": limit,
-            "apply": apply,
             "selected_count": 0,
-            "counts": {"selection_error": 1},
-            "results": [],
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
+            "counts": {},
+            "samples": {},
             "diagnostics": [str(exc)],
         }
     results: list[dict[str, Any]] = []
@@ -11385,6 +11378,74 @@ def write_raw_unavailable_incident(
     }
 
 
+def hook_user_prompt_typing_bridge(event: dict[str, Any], *, timeout_sec: float = 3.0) -> dict[str, Any]:
+    prompt = event.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {
+            "ok": True,
+            "status": "skipped_no_prompt",
+            "adapter": "codex_user_prompt_submit",
+        }
+    if os.environ.get("AOA_SESSION_MEMORY_TYPING_BRIDGE", "1") in {"0", "false", "False", "no"}:
+        return {
+            "ok": True,
+            "status": "disabled",
+            "adapter": "codex_user_prompt_submit",
+        }
+    executable = shutil.which("abyss-machine")
+    if not executable:
+        return {
+            "ok": True,
+            "status": "unavailable",
+            "adapter": "codex_user_prompt_submit",
+            "reason": "abyss-machine-not-found",
+        }
+    try:
+        completed = subprocess.run(
+            [executable, "typing", "codex-prompt-hook", "--json"],
+            input=json.dumps(event, ensure_ascii=False),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "status": "timeout",
+            "adapter": "codex_user_prompt_submit",
+            "timeout_sec": timeout_sec,
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "status": "exec_failed",
+            "adapter": "codex_user_prompt_submit",
+            "error": str(exc)[:240],
+        }
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        payload = {
+            "ok": False,
+            "status": "invalid_json",
+            "error": str(exc)[:240],
+            "stdout_head": (completed.stdout or "")[:240],
+        }
+    typing_event = payload.get("typing_event") if isinstance(payload, dict) and isinstance(payload.get("typing_event"), dict) else {}
+    return {
+        "ok": completed.returncode == 0 and bool(payload.get("ok")) if isinstance(payload, dict) else False,
+        "status": payload.get("status") if isinstance(payload, dict) else "invalid_json",
+        "adapter": "codex_user_prompt_submit",
+        "returncode": completed.returncode,
+        "event_id": typing_event.get("event_id"),
+        "typing_status": typing_event.get("status"),
+        "capture_gate_decision": typing_event.get("capture_gate_decision"),
+        "stderr_head": (completed.stderr or "")[:240],
+    }
+
+
 def handle_hook_event(
     event_name: str,
     event: dict[str, Any],
@@ -11412,6 +11473,15 @@ def handle_hook_event(
     errors: list[str] = []
     start_hook_light = event_name == "SessionStart" and os.environ.get("AOA_SESSION_MEMORY_FULL_START_SYNC") != "1"
     if event_name == "UserPromptSubmit" and os.environ.get("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC") != "1":
+        typing_bridge = hook_user_prompt_typing_bridge(event)
+        if typing_bridge.get("status") == "ingested":
+            actions.append("typing_prompt_mirrored")
+        elif typing_bridge.get("status") in {"skipped_no_prompt", "disabled", "unavailable"}:
+            actions.append(f"typing_prompt_bridge_{typing_bridge.get('status')}")
+        else:
+            actions.append("typing_prompt_bridge_failed")
+            if typing_bridge.get("stderr_head") or typing_bridge.get("error"):
+                errors.append(str(typing_bridge.get("error") or typing_bridge.get("stderr_head"))[:240])
         actions.append("prompt_hook_light_recorded")
         return {
             "schema_version": SCHEMA_VERSION,
@@ -11421,6 +11491,7 @@ def handle_hook_event(
             "session_id": session_id,
             "session_dir": str(session_dir),
             "actions": actions,
+            "typing_bridge": typing_bridge,
             "errors": errors,
         }
     if start_hook_light and transcript_path is not None and transcript_path.exists() and os.access(transcript_path, os.R_OK):
@@ -11680,6 +11751,8 @@ def record_hook_receipt(receipt: dict[str, Any], *, duration_ms: int | None = No
     }
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
+    if isinstance(receipt.get("typing_bridge"), dict):
+        payload["typing_bridge"] = receipt["typing_bridge"]
     try:
         append_jsonl(Path(str(session_dir_value)) / "hooks" / "receipts.jsonl", payload)
     except Exception:
@@ -12986,113 +13059,67 @@ def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
 
 def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> None:
     payload = search_doc_payload(doc)
-    params = {
-        **{key: doc.get(key) for key in [
-            "id",
-            "doc_type",
-            "session_id",
-            "session_label",
-            "session_title",
-            "session_date",
-            "cwd",
-            "archive_status",
-            "distillation_status",
-            "review_status",
-            "segment_id",
-            "event_id",
-            "event_type",
-            "family",
-            "phase",
-            "actor",
-            "action",
-            "object",
-            "outcome",
-            "conversation_act",
-            "tags",
-            "raw_ref",
-            "raw_block_ref",
-            "segment_ref",
-            "manifest_path",
-            "raw_path",
-            "segment_index_path",
-            "raw_sha256",
-            "segment_index_sha256",
-            "freshness_status",
-            "stale_reason",
-            "title",
-            "body",
-        ]},
-        "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-    }
-    existing = conn.execute("SELECT rowid FROM documents WHERE id = ?", (doc.get("id"),)).fetchone()
-    if existing:
-        rowid = int(existing["rowid"])
-        conn.execute(
-            """
-            UPDATE documents SET
-                doc_type = :doc_type,
-                session_id = :session_id,
-                session_label = :session_label,
-                session_title = :session_title,
-                session_date = :session_date,
-                cwd = :cwd,
-                archive_status = :archive_status,
-                distillation_status = :distillation_status,
-                review_status = :review_status,
-                segment_id = :segment_id,
-                event_id = :event_id,
-                event_type = :event_type,
-                family = :family,
-                phase = :phase,
-                actor = :actor,
-                action = :action,
-                object = :object,
-                outcome = :outcome,
-                conversation_act = :conversation_act,
-                tags = :tags,
-                raw_ref = :raw_ref,
-                raw_block_ref = :raw_block_ref,
-                segment_ref = :segment_ref,
-                manifest_path = :manifest_path,
-                raw_path = :raw_path,
-                segment_index_path = :segment_index_path,
-                raw_sha256 = :raw_sha256,
-                segment_index_sha256 = :segment_index_sha256,
-                freshness_status = :freshness_status,
-                stale_reason = :stale_reason,
-                title = :title,
-                body = :body,
-                payload_json = :payload_json
-            WHERE id = :id
-            """,
-            params,
+    cursor = conn.execute(
+        """
+        INSERT INTO documents (
+            id, doc_type, session_id, session_label, session_title, session_date,
+            cwd, archive_status, distillation_status, review_status, segment_id,
+            event_id, event_type, family, phase, actor, action, object, outcome,
+            conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
+            manifest_path, raw_path, segment_index_path, raw_sha256,
+            segment_index_sha256, freshness_status, stale_reason, title, body,
+            payload_json
         )
-        conn.execute("DELETE FROM documents_fts WHERE rowid = ?", (rowid,))
-    else:
-        cursor = conn.execute(
-            """
-            INSERT INTO documents (
-                id, doc_type, session_id, session_label, session_title, session_date,
-                cwd, archive_status, distillation_status, review_status, segment_id,
-                event_id, event_type, family, phase, actor, action, object, outcome,
-                conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
-                manifest_path, raw_path, segment_index_path, raw_sha256,
-                segment_index_sha256, freshness_status, stale_reason, title, body,
-                payload_json
-            )
-            VALUES (
-                :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
-                :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
-                :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
-                :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
-                :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
-                :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
-                :payload_json
-            )
-            """,
-            params,
+        VALUES (
+            :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
+            :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
+            :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
+            :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+            :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
+            :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
+            :payload_json
         )
-        rowid = int(cursor.lastrowid)
+        """,
+        {
+            **{key: doc.get(key) for key in [
+                "id",
+                "doc_type",
+                "session_id",
+                "session_label",
+                "session_title",
+                "session_date",
+                "cwd",
+                "archive_status",
+                "distillation_status",
+                "review_status",
+                "segment_id",
+                "event_id",
+                "event_type",
+                "family",
+                "phase",
+                "actor",
+                "action",
+                "object",
+                "outcome",
+                "conversation_act",
+                "tags",
+                "raw_ref",
+                "raw_block_ref",
+                "segment_ref",
+                "manifest_path",
+                "raw_path",
+                "segment_index_path",
+                "raw_sha256",
+                "segment_index_sha256",
+                "freshness_status",
+                "stale_reason",
+                "title",
+                "body",
+            ]},
+            "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        },
+    )
+    rowid = cursor.lastrowid
     conn.execute(
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
         (rowid, doc.get("title") or "", doc.get("body") or "", doc.get("session_label") or "", doc.get("session_title") or ""),
@@ -13446,37 +13473,18 @@ def search_index_sessions(
     return payload
 
 
-def search_result_freshness(row: sqlite3.Row, *, cache: dict[tuple[str, str, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
     raw_path_value = row["raw_path"] if "raw_path" in row.keys() else ""
     segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
     checks: list[dict[str, Any]] = []
     if raw_path_value:
         raw_path = Path(str(raw_path_value))
-        expected_sha = str(row["raw_sha256"] or "")
-        cache_key = ("raw", str(raw_path), expected_sha)
-        if cache is not None and cache_key in cache:
-            checks.append(cache[cache_key])
-        elif raw_path.exists() and expected_sha:
-            freshness = search_manifest_freshness({"raw": {"sha256": expected_sha}}, raw_path)
-            if cache is not None:
-                cache[cache_key] = freshness
-            checks.append(freshness)
+        if raw_path.exists() and row["raw_sha256"]:
+            checks.append(search_manifest_freshness({"raw": {"sha256": row["raw_sha256"]}}, raw_path))
         else:
-            freshness = {"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]}
-            if cache is not None:
-                cache[cache_key] = freshness
-            checks.append(freshness)
+            checks.append({"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]})
     if segment_path_value:
-        segment_path = Path(str(segment_path_value))
-        expected_sha = str(row["segment_index_sha256"] or "")
-        cache_key = ("segment", str(segment_path), expected_sha)
-        if cache is not None and cache_key in cache:
-            checks.append(cache[cache_key])
-        else:
-            freshness = segment_index_freshness(segment_path, expected_sha)
-            if cache is not None:
-                cache[cache_key] = freshness
-            checks.append(freshness)
+        checks.append(segment_index_freshness(Path(str(segment_path_value)), row["segment_index_sha256"]))
     if checks:
         return combine_freshness(*checks)
     status = str(row["freshness_status"] or "unverifiable")
@@ -13484,14 +13492,8 @@ def search_result_freshness(row: sqlite3.Row, *, cache: dict[tuple[str, str, str
     return {"status": status, "reasons": reasons}
 
 
-def compact_search_result(
-    row: sqlite3.Row,
-    *,
-    explain: bool = False,
-    query: str = "",
-    freshness_cache: dict[tuple[str, str, str], dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    freshness = search_result_freshness(row, cache=freshness_cache)
+def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "") -> dict[str, Any]:
+    freshness = search_result_freshness(row)
     refs = {
         "session": row["manifest_path"],
         "segment": row["segment_ref"],
@@ -13540,12 +13542,6 @@ def compact_search_result(
 def search_index_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute("SELECT key, value FROM meta").fetchall()
     return {str(row["key"]): row["value"] for row in rows}
-
-
-def search_freshness_scan_limit(limit: int) -> int:
-    requested = max(1, int_value(limit, 20))
-    configured = int_value(os.environ.get("AOA_SESSION_MEMORY_SEARCH_FRESHNESS_SCAN_LIMIT"), DEFAULT_SEARCH_FRESHNESS_SCAN_LIMIT)
-    return max(requested, configured)
 
 
 def search_sessions(
@@ -13615,6 +13611,7 @@ def search_sessions(
         ("documents.outcome", outcome),
         ("documents.conversation_act", conversation_act),
         ("documents.archive_status", archive_status),
+        ("documents.freshness_status", freshness_status),
     ]:
         if value:
             filters.append(f"{column} = ?")
@@ -13627,7 +13624,6 @@ def search_sessions(
         params.append(parse_date_arg(date_to))
     where = " AND ".join(filters)
     fts_query = fts_query_from_user(query)
-    query_limit = search_freshness_scan_limit(limit) if freshness_status else limit
     try:
         if fts_query:
             sql = (
@@ -13639,18 +13635,16 @@ def search_sessions(
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
-            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC"
-            sql += " LIMIT ?"
-            query_params.append(query_limit)
+            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = "SELECT documents.*, 0.0 AS rank FROM documents"
             query_params = list(params)
             if where:
                 sql += " WHERE " + where
-            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC"
-            sql += " LIMIT ?"
-            query_params.append(query_limit)
+            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         metadata = search_index_metadata(conn)
     except sqlite3.Error as exc:
@@ -13669,14 +13663,7 @@ def search_sessions(
         }
     finally:
         conn.close()
-    freshness_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
-    results = [compact_search_result(row, explain=explain, query=query, freshness_cache=freshness_cache) for row in rows]
-    if freshness_status:
-        results = [
-            result
-            for result in results
-            if isinstance(result.get("freshness"), dict) and result["freshness"].get("status") == freshness_status
-        ][:limit]
+    results = [compact_search_result(row, explain=explain, query=query) for row in rows]
     provider_payload = search_provider_status(
         aoa_root=aoa_root,
         provider_name=provider,
@@ -13684,19 +13671,6 @@ def search_sessions(
         timeout=host_timeout,
     )
     diagnostics: list[str] = []
-    freshness_filter: dict[str, Any] | None = None
-    if freshness_status:
-        scan_exhausted = len(rows) >= query_limit
-        limit_satisfied = len(results) >= limit
-        freshness_filter = {
-            "requested_status": freshness_status,
-            "scan_limit": query_limit,
-            "scanned_count": len(rows),
-            "limit_satisfied": limit_satisfied,
-            "scan_exhausted": scan_exhausted,
-        }
-        if scan_exhausted and not limit_satisfied:
-            diagnostics.append("freshness filter scan limit reached before satisfying requested result limit")
     provider_overlay: dict[str, Any] | None = None
     if provider != "portable_sqlite":
         selected_status = provider_payload.get("providers", {}).get(provider) if isinstance(provider_payload.get("providers"), dict) else {}
@@ -13713,7 +13687,7 @@ def search_sessions(
                 limit=limit,
                 timeout=host_timeout,
             )
-    payload = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_results",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
@@ -13735,9 +13709,6 @@ def search_sessions(
         "results": results,
         "diagnostics": diagnostics,
     }
-    if freshness_filter is not None:
-        payload["freshness_filter"] = freshness_filter
-    return payload
 
 
 RETRIEVAL_RECIPE_QUERIES = {
@@ -14977,11 +14948,7 @@ def raw_compaction_stats(raw_path: Path) -> dict[str, Any]:
                     payload = loaded.get("payload")
                     if isinstance(payload, dict):
                         payload_type = str(payload.get("type") or "")
-                    boundary = (
-                        source_type == "compacted"
-                        or payload_has_compaction_boundary(payload)
-                        or (source_type == "event_msg" and payload_type == "context_compacted")
-                    )
+                    boundary = source_type == "compacted" or payload_has_compaction_boundary(payload)
             except json.JSONDecodeError:
                 pass
             if source_type == "compacted":
@@ -15181,14 +15148,11 @@ def completion_audit(
         if not portable_bundle
         else "Portable bundle has clean runtime topology without bundled segment drift"
     )
-    if portable_bundle:
-        raw_status = "covered" if portable_clean_runtime else "missing"
-        real_compaction_status = "covered" if portable_clean_runtime else "missing"
-        segment_status = "covered" if portable_clean_runtime else "missing"
-    else:
-        raw_status = "covered" if raw_preserved else "missing"
-        real_compaction_status = "covered" if real_compaction_archives else "missing"
-        segment_status = "covered" if segments_match else "missing"
+    raw_status = "covered" if raw_preserved or (portable_bundle and portable_clean_runtime) else "missing"
+    real_compaction_status = (
+        "covered" if real_compaction_archives or (portable_bundle and portable_clean_runtime) else "missing"
+    )
+    segment_status = "covered" if segments_match or (portable_bundle and portable_clean_runtime) else "missing"
     provider_status_ok = (
         bool(provider_config_exists and provider_status.get("ok"))
         if not portable_bundle
@@ -15541,17 +15505,28 @@ def command_doctor(args: argparse.Namespace) -> int:
     session_root = root / SESSION_ROOT
     session_dirs = [path for path in session_root.iterdir() if path.is_dir()] if session_root.exists() else []
     archive_dirs = [path for path in session_dirs if (path / "session.manifest.json").exists()]
-    hook_only_dirs = [path for path in session_dirs if not (path / "session.manifest.json").exists() and (path / "hooks").exists()]
-    non_archive_dirs = [path for path in session_dirs if path not in archive_dirs and path not in hook_only_dirs]
+    hook_only_dirs = [
+        path for path in session_dirs
+        if path not in archive_dirs
+        and (path / "hooks").is_dir()
+        and (
+            (path / "hooks" / "events.jsonl").exists()
+            or (path / "hooks" / "receipts.jsonl").exists()
+        )
+    ]
+    unexpected_session_dirs = [
+        path for path in session_dirs
+        if path not in archive_dirs and path not in hook_only_dirs
+    ]
     if hook_only_dirs:
         warnings.append(
-            "session hook placeholder dirs without manifests ignored in archive count: "
-            f"{[path.name for path in hook_only_dirs]}"
+            "hook-only receipt dirs are not counted as archive sessions: "
+            + ", ".join(path.name for path in hook_only_dirs[:8])
         )
-    if non_archive_dirs:
-        warnings.append(
-            "non-archive session dirs without manifests ignored in archive count: "
-            f"{[path.name for path in non_archive_dirs]}"
+    if unexpected_session_dirs:
+        problems.append(
+            "unexpected non-archive session dirs: "
+            + ", ".join(path.name for path in unexpected_session_dirs[:8])
         )
     if isinstance(sessions, list) and len(sessions) != len(archive_dirs):
         problems.append(f"session registry count {len(sessions)} does not match archive directory count {len(archive_dirs)}")
@@ -15704,8 +15679,8 @@ def command_doctor(args: argparse.Namespace) -> int:
         "aoa_root": str(root),
         "session_count": len(sessions) if isinstance(sessions, list) else 0,
         "archive_dir_count": len(archive_dirs),
+        "session_dir_count": len(session_dirs),
         "hook_only_dir_count": len(hook_only_dirs),
-        "non_archive_dir_count": len(non_archive_dirs),
         "user_skill": user_skill_state,
         "problems": problems,
         "warnings": warnings,
