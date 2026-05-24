@@ -9,9 +9,12 @@ or naming semantics by themselves.
 
 ## Authority
 
+- `atlas-route-entry.schema.json` describes generated atlas route entries.
 - `hook-receipt.schema.json` describes persisted hook receipts.
 - `incident.schema.json` describes diagnostic incidents.
 - `segment.index.schema.json` describes generated segment event indexes.
+  It includes route-signal projections such as `by_route_layer` and
+  `by_route_signal`.
 - `session.manifest.schema.json` describes session archive manifests.
 
 ## Rules

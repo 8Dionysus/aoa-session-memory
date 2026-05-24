@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "role": "agent_atlas_policy",
+  "status": "source_skeleton",
+  "source_generated_boundary": {
+    "source_owned": [
+      "maps/AGENTS.md",
+      "maps/START.md",
+      "maps/README.md",
+      "maps/_templates/",
+      "maps/by-*/README.md"
+    ],
+    "generated_reserved": [
+      "maps/by-*/entries/*.md",
+      "maps/by-*/entries/*.json",
+      "maps/by-*/INDEX.md",
+      "maps/by-*/index.json",
+      "maps/INDEX.md",
+      "maps/index.json"
+    ]
+  },
+  "entry_contract": {
+    "schema": "schemas/atlas-route-entry.schema.json",
+    "template": "maps/_templates/route-entry.template.md",
+    "required_refs": [
+      "session_ref",
+      "segment_ref",
+      "raw_ref"
+    ],
+    "truth_status": "route_signal_not_reviewed_truth"
+  },
+  "axes": [
+    {
+      "name": "by-work-context",
+      "route_question": "Which workspace or repository was active?",
+      "source_signals": ["work_context", "cwd", "indexed_path", "project_grounding"]
+    },
+    {
+      "name": "by-repo-family",
+      "route_question": "Which broad family does this work belong to?",
+      "source_signals": ["work_context.work_family", "repo_name", "route_card"]
+    },
+    {
+      "name": "by-memory-surface",
+      "route_question": "Which memory layer was used or discussed?",
+      "source_signals": ["session_act.memory_surface", "path", "memory_citation"]
+    },
+    {
+      "name": "by-authority-surface",
+      "route_question": "Which truth or ownership layer did this touch?",
+      "source_signals": ["path", "generated_material", "diagnostic", "runtime_cache", "external_snapshot"]
+    },
+    {
+      "name": "by-session-act",
+      "route_question": "What session activity shape happened?",
+      "source_signals": ["session_act.kind"]
+    },
+    {
+      "name": "by-conversation-act",
+      "route_question": "What conversational move happened?",
+      "source_signals": ["conversation_act.kind"]
+    },
+    {
+      "name": "by-scope-contract",
+      "route_question": "What user scope or delivery contract was active?",
+      "source_signals": ["operator_prompt", "conversation_act", "assistant_plan", "final_state"]
+    },
+    {
+      "name": "by-verification-state",
+      "route_question": "What was verified, failed, or left unverified?",
+      "source_signals": ["verification", "command_result", "test_command", "audit_result", "validation_result"]
+    },
+    {
+      "name": "by-open-thread",
+      "route_question": "What remains unresolved or planned for later?",
+      "source_signals": ["open_thread", "checkpoint", "final_state", "remaining", "blocked"]
+    },
+    {
+      "name": "by-entity",
+      "route_question": "Which named object matters?",
+      "source_signals": ["entity_mentions", "tool_name", "resource_uri", "repo", "issue", "pr", "env_var"]
+    },
+    {
+      "name": "by-path",
+      "route_question": "Which filesystem paths were touched or mentioned?",
+      "source_signals": ["path_mentions", "command", "diff", "file_read", "file_write"]
+    },
+    {
+      "name": "by-tool",
+      "route_question": "Which tools or namespaces were used?",
+      "source_signals": ["tool_name", "tool_namespace", "command_kind"]
+    },
+    {
+      "name": "by-mcp",
+      "route_question": "Which MCP resource, template, root, prompt, or tool was involved?",
+      "source_signals": ["mcp_resource", "mcp_tool", "mcp_template", "tool_name"]
+    },
+    {
+      "name": "by-hook-health",
+      "route_question": "What hook lifecycle or health signal appeared?",
+      "source_signals": ["hook_event", "raw_availability", "deferred_sync", "worker_queue"]
+    },
+    {
+      "name": "by-goal",
+      "route_question": "What Codex goal lifecycle state appeared?",
+      "source_signals": ["goal_created", "goal_updated", "goal_completed", "goal_blocked"]
+    },
+    {
+      "name": "by-delivery-state",
+      "route_question": "Was the work local, tested, committed, pushed, merged, or exported?",
+      "source_signals": ["git_command", "final_state", "verification", "export_bundle", "delivery_request"]
+    },
+    {
+      "name": "by-failure-mode",
+      "route_question": "What kind of failure or diagnostic occurred?",
+      "source_signals": ["error", "command_output", "diagnostic", "doctor", "test_failure"]
+    },
+    {
+      "name": "by-risk",
+      "route_question": "What risk signal should a future agent notice first?",
+      "source_signals": ["security_touchpoint", "secret_risk", "destructive_command", "external_staleness", "authority_drift"]
+    },
+    {
+      "name": "by-phase-topic",
+      "route_question": "Which phase, topic, or semantic naming candidate applies?",
+      "source_signals": ["semantic_names", "phase_discovery", "topic", "coverage_range"]
+    },
+    {
+      "name": "by-external-snapshot",
+      "route_question": "Which external source snapshot was used?",
+      "source_signals": ["web_source", "app_connector", "github", "gmail", "drive", "calendar", "freshness"]
+    },
+    {
+      "name": "by-review-state",
+      "route_question": "What review layer has this material reached?",
+      "source_signals": ["manual_review", "distillation", "review_index", "promotion_review"]
+    },
+    {
+      "name": "by-promotion-candidate",
+      "route_question": "What may later become a skill, playbook, lesson, or automation?",
+      "source_signals": ["process_lesson", "optimization_candidate", "mechanics_candidate", "promotion_candidate"]
+    },
+    {
+      "name": "by-index-health",
+      "route_question": "Can this archive be navigated safely right now?",
+      "source_signals": ["raw_exists", "segment_index", "search_index", "naming_readiness", "diagnostic_state"]
+    },
+    {
+      "name": "by-time",
+      "route_question": "When did this happen or get indexed?",
+      "source_signals": ["timestamp", "session_label", "compaction_interval", "diagnostic_report_time"]
+    },
+    {
+      "name": "by-operator-request",
+      "route_question": "What did the operator ask the agent to do?",
+      "source_signals": ["user_intent", "conversation_act", "delivery_request", "scope_contract"]
+    },
+    {
+      "name": "by-route-next-action",
+      "route_question": "What should the next agent do first?",
+      "source_signals": ["readiness_status", "open_thread", "verification_gap", "final_state", "diagnostic"]
+    },
+    {
+      "name": "by-evidence-provenance",
+      "route_question": "Where did the claim or route signal come from?",
+      "source_signals": ["raw_ref", "segment_index", "manifest", "diagnostic", "search_hit", "memory_file", "reviewed_distillation"]
+    },
+    {
+      "name": "by-owner-route",
+      "route_question": "Who owns the surface and where should the next agent go?",
+      "source_signals": ["cwd", "path_mentions", "owner_resolution", "work_context"]
+    },
+    {
+      "name": "by-freshness",
+      "route_question": "Is the knowledge current, stale, snapshot-only, or live-state dependent?",
+      "source_signals": ["live_verified", "snapshot", "stale_risk", "external_state_required", "source_newer_than_index"]
+    },
+    {
+      "name": "by-runtime-environment",
+      "route_question": "Which runtime state shaped the session?",
+      "source_signals": ["session_meta", "cwd", "model", "branch", "dirty_state", "env_var", "package_manager", "active_config"]
+    },
+    {
+      "name": "by-mutation-surface",
+      "route_question": "What surface was actually changed or prepared for change?",
+      "source_signals": ["file_write", "diff", "path", "command_kind", "mutation_surface"]
+    },
+    {
+      "name": "by-correlation",
+      "route_question": "Which events should be read together?",
+      "source_signals": ["correlation_id", "relationships", "tool_call", "tool_output", "command_result"]
+    },
+    {
+      "name": "by-confidence",
+      "route_question": "Where is the classifier confident, weak, ambiguous, or conflicting?",
+      "source_signals": ["confidence", "weak_signal", "ambiguity", "conflict"]
+    },
+    {
+      "name": "by-access-boundary",
+      "route_question": "Can this material be exported, cited, bundled, or shown in a review packet?",
+      "source_signals": ["secret_risk", "privacy_boundary", "export_boundary", "review_packet_boundary"]
+    },
+    {
+      "name": "by-resource-profile",
+      "route_question": "Which sessions or actions are expensive, slow, large, or timeout-prone?",
+      "source_signals": ["token_count", "timeout", "large_raw", "large_session", "latency", "cost"]
+    },
+    {
+      "name": "by-operator-preference",
+      "route_question": "Which standing operator preferences appeared?",
+      "source_signals": ["language_preference", "preserve_before_distill", "changelog_preservation", "agents_design_first", "landed_slices"]
+    }
+  ]
+}

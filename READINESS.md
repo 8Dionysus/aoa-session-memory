@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-Date: 2026-05-17
+Date: 2026-05-24
 
 This file maps the current `.aoa` session-memory goal to concrete evidence.
 It is a readiness snapshot for agents, not a substitute for running the gates.
@@ -28,12 +28,21 @@ Build the `.aoa` session-memory mechanism end to end:
 - Naming policy: `NAMING.md` and `config/naming-policy.json`
 - Naming wave quality examples: `config/naming-golden-set.json`
 - Event taxonomy: `config/event-taxonomy.json`
+- Operational route-signal layer: event `facets.route_signals`,
+  segment `by_route_layer` / `by_route_signal`, session
+  `route_signal_counts`, search filters, and atlas generation
+- Agent atlas skeleton: `maps/`, `config/atlas-policy.json`, and
+  `schemas/atlas-route-entry.schema.json`
 - Distillation routes: `config/event-distillation-routes.json`
 - Batch distillation policy: `config/batch-distillation-policy.json`
 - Portable search route: `search-index`, `search`, runtime `search/`, and
   `skills/aoa-session-search`
-- Optional search provider gates: `config/search-providers.json` and
-  `search-provider-status`
+- Automatic index maintenance route: `index-maintenance` / `maintain-index`
+  over stale route indexes, portable search freshness, atlas freshness, and
+  readiness reports
+- Optional search provider gates: `config/search-providers.json`,
+  `search-provider-status`, local embedding semantic context, and local
+  reranker ordering metadata
 - Retrieval packets: `retrieve` / `retrieval-packet` recipes over search,
   phase-discovery, continuation signals, and raw refs
 - Hook docs and generated example: `hooks/`
@@ -60,10 +69,16 @@ python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
-python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
-python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
+python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --write-report
+python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
+python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
+python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py route-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py route-sample-audit all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --sample-limit 1 --write-report
+python3 scripts/aoa_session_memory.py route-sample-review /path/to/workspace/.aoa/diagnostics/<stamp>__route-sample-audit.json --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py retrieve continue-techniques-session --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "aoa-techniques continuation" --write-report
 python3 scripts/aoa_session_memory.py batch-distill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --write-report
 python3 scripts/aoa_session_memory.py naming-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --refresh-indexes --write-report
@@ -77,8 +92,8 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `42 passed`
-- `codex-grounding`: `ok=true`, `codex-cli 0.130.0`, compact ratio `0.8`
+- `.aoa` tests: `81 passed`
+- `codex-grounding`: `ok=true`, `codex-cli 0.133.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
 - `install-user-skill`: `ok=true`, user-level router points to the active
@@ -111,11 +126,59 @@ Last observed result:
   complaints, raw-unavailable incidents, commit/push/merge delivery requests,
   and `aoa-techniques` sessions. The generated SQLite DB under `search/` is a
   runtime route cache, not portable source.
+- Route-layer readiness proof: the route-signal classifier is versioned
+  separately from the route schema (`route_signal_classifier_version=7`), so
+  stale route tags cannot silently masquerade as current classification.
+  `reindex-sessions all --stale-route-indexes --max-raw-mb 1300
+  --write-report` refreshed `157` current-indexable sessions and left `23`
+  `raw_unavailable` diagnostic archives as non-indexable evidence rather than
+  route-index failures. `atlas build all --write-report` built `36` axes and
+  `27820` generated route entries. `search-index all --max-raw-mb 16
+  --write-report` built `875817` runtime documents across `180` sessions,
+  `1393` segments, and `874142` events with no diagnostics.
+  `route-readiness all --write-report` returned `ok=true` and
+  `covered_requirement_count=22/22`: `157` route indexes are current,
+  `stale_route_classifier=0`, and the portable SQLite provider is ready.
+  `route-sample-audit all --sample-limit 2 --max-raw-chars 420
+  --write-report` generated `52` samples across all `26` required route
+  layers with `stale_route_index_count=0`; `route-sample-review` accepted
+  `52/52` with `open_count=0`. Version 7 folds the earlier calibration fixes
+  into regression tests: failed command/test output no longer becomes
+  `green_proof` or `tests_green`, successful source/doc reads that mention
+  `exit code N` no longer become failures, casual hook discussion no longer
+  creates lifecycle `hook_health`, and the path graph filters `/dev/null` plus
+  git remote refs/ranges. Reports:
+  `diagnostics/20260524T131717Z__reindex-sessions.json`,
+  `diagnostics/20260524T132026Z__agent-atlas.json`,
+  `diagnostics/20260524T132613Z__search-index.json`,
+  `diagnostics/20260524T132758Z__route-layer-readiness.json`,
+  `diagnostics/20260524T132804Z__route-sample-audit.json`, and
+  `diagnostics/20260524T132909Z__route-sample-review.json`.
+- Index-maintenance proof: `index-maintenance all --apply --write-report`
+  detected source-newer-than-search and source-newer-than-atlas drift after
+  the live session count moved to `181`, then applied `3` actions:
+  rebuilt portable search to `880562` documents across `181` sessions,
+  `1405` segments, `878870` events, and `106` incidents; rebuilt the atlas to
+  `36` axes and `27833` entries; and reran `route-readiness` with `ok=true`
+  and `covered_requirement_count=22/22`. The current route-index gate reports
+  `157` current indexable sessions, `24` diagnostic non-indexable sessions,
+  and `stale_route_classifier=0`. Reports:
+  `diagnostics/20260524T144637Z__index-maintenance.json`,
+  `diagnostics/20260524T144257Z__search-index.json`,
+  `diagnostics/20260524T144612Z__agent-atlas.json`, and
+  `diagnostics/20260524T144637Z__route-layer-readiness.json`.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
   authoritative hits on `portable_sqlite` and treats host output as contextual
   only.
+- Local semantic/rerank accelerator proof: optional host model gates expose
+  embedding freshness and reranker health; `search --include-semantic-context
+  --rerank-local` keeps `portable_sqlite` as the authoritative result provider
+  while adding host semantic context and `host_rerank` ordering metadata. Live
+  probe on 2026-05-24: embedding `ready`, reranker `ready`,
+  `semantic_overlay.ok=true`, local rerank `applied`; provider report:
+  `diagnostics/20260524T150706Z__search-provider-status.json`.
 - Retrieval packet proof: `retrieve continue-techniques-session` returns a
   bounded evidence packet with selected session identity, search hits,
   continuation signals, phase-discovery queue state, raw refs, and next route
@@ -224,9 +287,16 @@ Stress-pass evidence:
 | Session archives have a local route card and table of contents before agents open individual sessions | `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`, doctor checks, semantic-name and registry recovery regression tests |
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
-| Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all`, reindex report diagnostics, reindex regression test |
-| Agents can search across many archived sessions without loading bulk raw into active context | `search-index`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
-| Host retrieval tools can be used without merging `abyss-machine` into `.aoa` authority | `config/search-providers.json`, `search-provider-status`, `search --provider abyss_machine_nervous`, host-provider regression test |
+| Segment and session indexes expose operational route signals for the 22-layer map | `facets.route_signals`, `by_route_layer`, `by_route_signal`, `route_signal_counts`, route-signal regression tests |
+| Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all --max-raw-mb`, reindex report diagnostics, reindex regression test |
+| Secondary route caches repair themselves through a bounded controller | `index-maintenance`, queued `index_maintenance` worker jobs, semantic-name maintenance regression test |
+| Agents can search across many archived sessions without loading bulk raw into active context | `search-index --max-raw-mb`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
+| Agents can query route layers directly | `search --route-layer`, `search --route-signal`, SQLite route-signal columns |
+| The source atlas skeleton can be turned into generated entries and indexes | `atlas build`, `maps/by-*/entries/*.json`, `maps/by-*/INDEX.md`, atlas-build regression test |
+| The full 22-layer operational skeleton can be audited as one readiness gate | `route-readiness`, source atlas axes, generated atlas index, portable SQLite provider, route-readiness regression test |
+| Route-signal classifier quality can be manually sampled without opening bulk raw | `route-sample-audit`, reviewed calibration packets, raw previews, route-sample regression test |
+| Route-signal sample verdicts can become durable classifier feedback without mutating evidence | `route-sample-review`, append-only review diagnostics, classifier feedback list, route-sample review regression test |
+| Host retrieval tools can be used without merging `abyss-machine` into `.aoa` authority | `config/search-providers.json`, `search-provider-status`, `search --provider abyss_machine_nervous`, `search --include-semantic-context --rerank-local`, host-provider and local-rerank regression tests |
 | A future agent can request a bounded continuation packet instead of scanning a long session manually | `retrieve`, `retrieval-packet`, continuation recipe regression test, real `continue-techniques-session` probe |
 | Rehydration uses indexes before bulk files | `rehydrate`, tests |
 | First-pass distillation is provisional | `distill`, tests |
@@ -241,7 +311,7 @@ Stress-pass evidence:
 | Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |
 | Live hooks match expected commands | `doctor --check-live-hooks` |
 | Native Codex hook trust is inspectable and repairable | `codex-hooks-status`, app-server `hooks/list` and `config/batchWrite` |
-| Local Codex compact/hook contract is grounded | `codex-grounding`, local `codex-cli 0.130.0`, project config |
+| Local Codex compact/hook contract is grounded | `codex-grounding`, local `codex-cli 0.133.0`, project config |
 | Live PreCompact/PostCompact receipts are observed | `codex-compact-probe --trust-hooks`, sessions `2026-05-12__005__...` and `2026-05-12__006__...`, `audit` |
 | Clean bundle export excludes sessions by default | `export-bundle`, install/export CLI check |
 | Workspace install regenerates hook example for target roots | `install`, install test |
@@ -251,10 +321,24 @@ Stress-pass evidence:
 
 ## Remaining Gates
 
-No completion-blocking gates remain in the current local proof surface.
+Completion-blocking gates in the current local proof surface:
+
+- None for the 22-layer route atlas proof as of the 2026-05-24 v7 reports:
+  `route-readiness` is `ok=true`, all `157` indexable route indexes are
+  current, and the `24` `raw_unavailable`/diagnostic archives are explicitly routed as
+  diagnostic non-indexable sessions.
 
 Maintenance gates:
 
+- After route schema, classifier, semantic-name, or generated-cache changes,
+  run `index-maintenance --apply --write-report`. Add `--sample-audit` when
+  classifier/schema changes require a new manual calibration packet; apply
+  `route-sample-review` verdicts explicitly after human/agent review.
+- After search-provider or local accelerator changes, run
+  `search-provider-status --include-host --write-report` and a bounded
+  `search --include-semantic-context --rerank-local --allow-host-warnings
+  --host-timeout 120` probe. Treat host warnings as accelerator state, not
+  archive failure.
 - Re-run `codex-grounding` and `codex-hooks-status` when the local Codex CLI
   version changes.
 - Re-run `codex-compact-probe --trust-hooks` after changing hook commands.

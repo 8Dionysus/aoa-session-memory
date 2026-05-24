@@ -11,7 +11,9 @@ raw transcript jsonl
   -> compaction-interval Markdown segments
   -> segment indexes
   -> universal event facets and relationships
+  -> route-signal indexes for operational layers
   -> session index
+  -> agent atlas route entries
   -> diagnostics
   -> later reviewed distillation
 ```
@@ -103,6 +105,71 @@ Agent-facing route design lives in `DESIGN.AGENTS.md`.
 The operational route lives in `PIPELINE.md`.
 
 Current readiness and unfinished gates live in `READINESS.md`.
+
+## Agent Atlas
+
+`maps/` is the source-owned skeleton for the generated agent atlas.
+
+Start at:
+
+```text
+maps/START.md
+```
+
+The atlas is organized by route axes such as work context, memory surface,
+authority surface, session act, verification state, open thread, entity, tool,
+hook health, delivery state, failure mode, risk, review state, evidence
+provenance, owner route, freshness, runtime environment, mutation surface,
+correlation, confidence, access boundary, resource profile, operator
+preference, and next action. Generated entries belong under
+`maps/by-*/entries/` and must point back to session, segment, and raw evidence.
+
+Build generated atlas entries from current session indexes:
+
+```bash
+python3 scripts/aoa_session_memory.py atlas build all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+Audit whether the 22 operational route layers are currently covered by
+session route indexes, source atlas axes, generated atlas entries, and the
+portable SQLite search route:
+
+```bash
+python3 scripts/aoa_session_memory.py route-readiness all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+Build an unreviewed calibration packet for manual sampling of those route
+layers:
+
+```bash
+python3 scripts/aoa_session_memory.py route-sample-audit all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --sample-limit 1 \
+  --write-report
+```
+
+Plan or apply the automatic maintenance pass for generated route indexes,
+portable search, atlas entries, and readiness reports:
+
+```bash
+python3 scripts/aoa_session_memory.py index-maintenance all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --write-report
+```
+
+`index-maintenance` detects missing or stale route indexes, source-newer-than
+search/atlas drift, and deferred raw mirrors. `name-session --apply` queues
+this maintenance route so semantic name changes do not leave search or atlas
+surfaces behind the `session_id` bridge.
 
 ## Portable Route
 
@@ -354,6 +421,7 @@ Regenerate generated indexes from preserved raw JSONL after classifier changes:
 python3 scripts/aoa_session_memory.py reindex-sessions all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
+  --max-raw-mb 16 \
   --dry-run \
   --write-report
 ```
@@ -364,6 +432,7 @@ Build the portable SQLite search index from the generated archive layers:
 python3 scripts/aoa_session_memory.py search-index all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
+  --max-raw-mb 16 \
   --write-report
 ```
 
@@ -377,9 +446,67 @@ python3 scripts/aoa_session_memory.py search \
   --explain
 ```
 
+Filter by generated session-act routes when the activity shape matters:
+
+```bash
+python3 scripts/aoa_session_memory.py search \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --session-act memory_read \
+  --explain
+```
+
 Search results are route hints. They include session, segment, raw, raw-block,
 and freshness fields so the next agent can open the stronger evidence instead
 of treating a retrieval hit as reviewed truth.
+
+Audit the full operational route surface after classifier, atlas, or search
+changes:
+
+```bash
+python3 scripts/aoa_session_memory.py route-readiness all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+`route-readiness` checks the declared 22-layer skeleton: scope contract,
+authority surface, entity/path graph, verification, decision/open-thread,
+failure taxonomy, hook health, memory provenance, external snapshots,
+phase/topic, delivery, findability, evidence provenance, owner route,
+freshness, runtime environment, mutation surface, correlation, confidence,
+access boundary, resource profile, and operator preference. It reports gaps
+without turning generated route signals into reviewed truth.
+
+For classifier calibration, generate bounded review samples:
+
+```bash
+python3 scripts/aoa_session_memory.py route-sample-audit all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --sample-limit 1 \
+  --write-report
+```
+
+`route-sample-audit` writes unreviewed packets with route layer/key, signal
+source/confidence, raw/segment/index refs, raw previews, and reviewer verdict
+placeholders. It is the bridge from coverage proof to manual sampling; it does
+not promote classifier output into reviewed truth.
+
+Record append-only verdicts against a sample packet:
+
+```bash
+python3 scripts/aoa_session_memory.py route-sample-review \
+  /path/to/workspace/.aoa/diagnostics/<stamp>__route-sample-audit.json \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --verdict 'scope_contract:merge_requested:002356=accept:accept:raw supports the contract' \
+  --write-report
+```
+
+Verdicts are keyed by `layer:key:event_id`. Non-accept actions such as
+`reject`, `weaken`, `split`, and `add_rule` are collected as classifier
+feedback for a later narrow rule change.
 
 Check retrieval provider capability without moving archive authority out of
 `.aoa`:
@@ -394,6 +521,26 @@ python3 scripts/aoa_session_memory.py search-provider-status \
 `portable_sqlite` is the default provider. Optional host providers such as
 `abyss_machine_nervous` are status-gated overlays; their evidence is context,
 not reviewed `.aoa` truth.
+
+Use local embedding/reranker models as accelerators over the same evidence
+route:
+
+```bash
+python3 scripts/aoa_session_memory.py search \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --query "hook timeout route" \
+  --include-semantic-context \
+  --rerank-local \
+  --allow-host-warnings \
+  --host-timeout 120 \
+  --explain
+```
+
+`--include-semantic-context` adds a compact host semantic-search overlay.
+`--rerank-local` can reorder the returned `.aoa` hits through the local
+reranker, but the result provider remains `portable_sqlite` and every usable
+claim must still route through raw/segment refs.
 
 Build a compact evidence packet for a continuation or investigation recipe:
 

@@ -9,7 +9,7 @@ generation, indexes, diagnostics, rehydration, or tests.
 
 ## Current Codex Grounding
 
-As of the local Codex CLI `0.130.0` installation:
+As of the local Codex CLI `0.133.0` installation:
 
 - Codex compacts conversation context automatically when its configured compact
   threshold is exceeded.
@@ -36,7 +36,7 @@ References:
 - OpenAI Codex CLI docs:
   `https://developers.openai.com/codex/cli`
 - Local Codex binary schema inspection:
-  `codex-cli 0.130.0`
+  `codex-cli 0.133.0`
 - GitHub `openai/codex` issue #16098 documents why reliable compaction
   lifecycle hooks matter for long-running workflows:
   `https://github.com/openai/codex/issues/16098`
@@ -54,6 +54,7 @@ Codex hook event
   -> light hook closeout for prompt, compaction, and large stop lifecycle hooks
   -> background hook-worker for queued lifecycle sync
   -> JSONL event classification
+  -> route-signal classification for operational layers
   -> raw/blocks/*.raw.jsonl sealed by compaction interval
   -> raw/blocks.index.json and raw/compaction-events.jsonl
   -> compaction-interval segment Markdown
@@ -64,6 +65,8 @@ Codex hook event
   -> optional search-index runtime cache
   -> optional provider capability status for host overlays
   -> retrieval packet recipes
+  -> agent atlas route entries from generated route signals
+  -> index-maintenance drift detector / repair pass
   -> rehydrate packet
   -> later reviewed distillation
   -> pattern / skill / automation candidate
@@ -209,18 +212,109 @@ The archive directory must have:
 - `SESSION_NAMES.md`
 - `session-name-index.json`
 
+The secondary route caches must be maintained as caches, not as authority.
+Use `index-maintenance` as the automatic controller:
+
+```bash
+python3 scripts/aoa_session_memory.py index-maintenance all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --apply \
+  --write-report
+```
+
+It detects stale or missing route indexes, source-newer-than-search drift,
+source-newer-than-atlas drift, and deferred raw mirrors. With `--apply`, it
+reindexes only stale route indexes, rebuilds portable SQLite search when
+needed, rebuilds the atlas when needed, and records a route-readiness report.
+Use `--sample-audit` when a route schema or classifier change requires a new
+manual calibration packet. Sample verdicts still require explicit review.
+
 Segment indexes must keep both the legacy event map and the universal event
 facets:
 
 - `by_type` and `by_tag`
 - `by_family`, `by_phase`, `by_actor`, `by_action`, and `by_outcome`
 - `by_correlation` for tool-call/tool-output linkage
+- `by_conversation_act` and `by_session_act` for operator/tool/memory/MCP/goal
+  route queries
+- `by_route_layer` and `by_route_signal` for operational map layers such as
+  scope contract, authority surface, verification state, failure mode, memory
+  provenance, freshness, owner route, mutation surface, access boundary,
+  resource profile, and operator preference
 - per-event `relationships` for sequence and call/output refs
 
 The agent should use indexes before opening large Markdown or raw JSONL.
 Naming-readiness data in `SESSION_NAMES.md`, `session-name-index.json`,
 `sessions/INDEX.md`, and `sessions/index.json` should be checked before broad
 semantic naming or physical relabeling.
+
+`session.index.json` also carries generated `work_context`, which names the
+best current workspace/repository route from `cwd` and indexed path evidence.
+It is a naming aid and retrieval route, not reviewed ownership truth.
+It also carries generated `route_signal_counts`, which are search and atlas
+routes over event facets, not reviewed distillation.
+
+`maps/` is the source-owned atlas skeleton. Atlas generation writes entries
+under `maps/by-*/entries/` plus per-axis `INDEX.md` / `index.json` files and
+root `maps/INDEX.md` / `maps/index.json`. These files are navigation
+projections over existing indexes and diagnostics; they must not introduce
+claims that cannot be traced back to session, segment, raw, diagnostic, or
+reviewed-distillation refs.
+
+Build the atlas after reindexing or when route-signal classifiers change:
+
+```bash
+python3 scripts/aoa_session_memory.py atlas build all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write-report
+```
+
+Then audit route readiness when the question is whether the whole skeleton is
+findable for a future agent:
+
+```bash
+python3 scripts/aoa_session_memory.py route-readiness all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write-report
+```
+
+This command checks session route-signal indexes, source atlas axes, generated
+atlas entries, and the portable SQLite search route against the 22 operational
+layers. It is a navigation-quality gate, not a promotion or distillation step.
+
+When the question changes from coverage to classifier quality, generate a
+bounded manual-sampling packet:
+
+```bash
+python3 scripts/aoa_session_memory.py route-sample-audit all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --sample-limit 1 \
+  --write-report
+```
+
+`route-sample-audit` leaves every sample `unreviewed`. Its job is to expose
+raw previews, signal source/confidence, and evidence refs so a later reviewer
+can accept, reject, weaken, split, or convert a classifier observation into a
+narrow rule change.
+
+Record those verdicts as a separate diagnostic artifact:
+
+```bash
+python3 scripts/aoa_session_memory.py route-sample-review \
+  /srv/AbyssOS/.aoa/diagnostics/<stamp>__route-sample-audit.json \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --verdict 'scope_contract:merge_requested:002356=accept:accept:raw supports the contract' \
+  --write-report
+```
+
+The review artifact is append-only evidence. It does not mutate raw,
+segment indexes, atlas entries, or the sample audit. Reject/weaken/split/add
+rule verdicts become classifier feedback for a later targeted patch.
 
 ## Navigation Commands
 
@@ -258,6 +352,25 @@ python3 scripts/aoa_session_memory.py search-provider-status \
 providers such as `abyss_machine_nervous` are capability-gated overlays; their
 context can accelerate orientation, but it cannot replace raw/segment refs or
 reviewed promotion.
+
+Local model accelerators can be layered over portable hits:
+
+```bash
+python3 scripts/aoa_session_memory.py search \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --query "hook timeout route" \
+  --include-semantic-context \
+  --rerank-local \
+  --allow-host-warnings \
+  --host-timeout 120 \
+  --explain
+```
+
+The embedding route is a host semantic-search overlay. The reranker route only
+changes candidate order and writes `host_rerank` metadata onto `.aoa` hits.
+Neither layer is portable authority, and neither may promote a claim without
+the raw/segment refs already carried by the hit.
 
 Build a recipe-based retrieval packet:
 
@@ -313,12 +426,14 @@ Regenerate generated indexes from preserved raw JSONL after classifier changes:
 python3 scripts/aoa_session_memory.py reindex-sessions all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
+  --max-raw-mb 16 \
   --dry-run \
   --write-report
 ```
 
-Remove `--dry-run` for a bounded `--limit` smoke pass before reindexing a broad
-archive set.
+Remove `--dry-run` for a bounded pass. Keep `--max-raw-mb` on broad archive
+runs; large raw sessions should use an explicit heavy-session route instead of
+silent unbounded regeneration.
 
 Build a first-wave conveyor for many historical sessions:
 

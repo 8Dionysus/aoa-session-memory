@@ -21,8 +21,10 @@ python3 scripts/aoa_session_memory.py export-bundle \
 ```
 
 This writes an empty `sessions/` archive directory with `AGENTS.md`,
-`INDEX.md`, and `index.json`, plus an empty `session-registry.json`. It does
-not copy raw transcripts unless `--with-sessions` is explicitly used.
+`INDEX.md`, and `index.json`, plus an empty `session-registry.json`. It also
+copies the source-owned `maps/` atlas skeleton without generated atlas entries
+or generated atlas indexes. It does not copy raw transcripts unless
+`--with-sessions` is explicitly used.
 
 Use this path when preparing a standalone GitHub repository.
 When the target is already a Git repository, `--force` refreshes the portable

@@ -15,10 +15,13 @@ review lanes. They are machine-readable route law, not generated reports.
 - `event-taxonomy.json` defines universal event facets.
 - `event-distillation-routes.json` maps event classes toward review lanes.
 - `batch-distillation-policy.json` controls first-wave batch review routing.
+- `atlas-policy.json` defines the source skeleton and generated-entry contract
+  for the agent-facing atlas under `maps/`.
 - `naming-golden-set.json` defines portable naming-quality examples for
   mass naming wave regression checks.
-- `search-providers.json` defines the portable SQLite default and optional
-  host provider gates. Host providers are accelerators, not archive authority.
+- `search-providers.json` defines the portable SQLite default, optional host
+  provider gates, and local embedding/reranker accelerator probes. Host
+  providers are accelerators, not archive authority.
 
 ## Rules
 
@@ -26,8 +29,8 @@ review lanes. They are machine-readable route law, not generated reports.
   config is explicitly about portable defaults.
 - Preserve `schema_version` and structured JSON shape.
 - Do not hide policy changes inside generated indexes.
-- After taxonomy, naming, or routing changes, reindex or validate the affected
-  generated surfaces.
+- After taxonomy, route-signal, naming, or atlas routing changes, reindex or
+  validate the affected generated surfaces.
 - Update tests and nearby docs when config semantics change.
 
 ## Checks

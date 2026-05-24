@@ -41,9 +41,9 @@ When working here, read:
 14. The relevant segment index before opening a full segment
 
 When editing a source district, also read that directory's own `AGENTS.md`
-first: `config/`, `hooks/`, `schemas/`, `scripts/`, `skills/`, `tests/`, or
-`sessions/`. When inspecting live reports, read `diagnostics/AGENTS.md`; it is
-a runtime evidence district, not portable source.
+first: `config/`, `hooks/`, `maps/`, `schemas/`, `scripts/`, `skills/`,
+`tests/`, or `sessions/`. When inspecting live reports, read
+`diagnostics/AGENTS.md`; it is a runtime evidence district, not portable source.
 
 ## Generated Material
 
@@ -62,12 +62,23 @@ The following paths are generated or runtime-owned:
 - `session-registry.json`
 - `session-name-index.json`
 - `SESSION_NAMES.md`
+- `maps/by-*/entries/*.md`
+- `maps/by-*/entries/*.json`
+- `maps/by-*/INDEX.md`
+- `maps/by-*/index.json`
+- `maps/INDEX.md`
+- `maps/index.json`
 - `search/`
 - `diagnostics/`
 
 Agents may regenerate these files from raw session evidence. Do not manually
 edit generated session archives unless explicitly repairing a broken archive
 with a clear diagnostic note.
+
+The `maps/` root, its `AGENTS.md`, `START.md`, `README.md`, `_templates/`,
+axis `README.md` files, and placeholder `.gitkeep` files are source-owned
+atlas skeleton. Generated atlas entries belong only in the generated map paths
+listed above.
 
 Session archive directory names must follow `NAMING.md`. Keep the Codex UUID as
 `session_id` inside the manifest, not as the folder name.
