@@ -117,7 +117,9 @@
       "outcome",
       "confidence",
       "correlation_id",
-      "relationships"
+      "relationships",
+      "conversation_act",
+      "session_act"
     ]
   }
 }

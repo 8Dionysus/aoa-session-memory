@@ -46,6 +46,24 @@ python3 scripts/aoa_session_memory.py search \
   --explain
 ```
 
+Use local accelerators when semantic recall or reranking helps orientation:
+
+```bash
+python3 scripts/aoa_session_memory.py search \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --query "hook timeout route" \
+  --include-semantic-context \
+  --rerank-local \
+  --allow-host-warnings \
+  --host-timeout 120 \
+  --explain
+```
+
+The embedding overlay and reranker are host read-model accelerators. They may
+make the first route cheaper, but the returned `.aoa` raw/segment refs remain
+the only archive evidence to promote or cite.
+
 Use filters when the route is known:
 
 ```bash

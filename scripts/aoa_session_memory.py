@@ -16,6 +16,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -64,8 +66,16 @@ RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 1
+SESSION_ACT_SCHEMA_VERSION = 1
+WORK_CONTEXT_SCHEMA_VERSION = 1
+ROUTE_SIGNAL_SCHEMA_VERSION = 1
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 7
+ATLAS_SCHEMA_VERSION = 1
+SEARCH_SCHEMA_VERSION = 3
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
+ATLAS_ROOT = Path("maps")
+ATLAS_POLICY_PATH = Path("config/atlas-policy.json")
+ATLAS_ROUTE_ENTRY_SCHEMA_PATH = Path("schemas/atlas-route-entry.schema.json")
 EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
@@ -185,12 +195,200 @@ PORTABLE_BUNDLE_ITEMS = [
     "README.md",
     "config",
     "hooks",
+    "maps",
     "schemas",
     "scripts",
     "skills",
     "tests",
 ]
 PORTABLE_COPY_IGNORE = {".git", ".pytest_cache", "__pycache__"}
+
+ROUTE_SIGNAL_LAYER_TO_AXIS = {
+    "scope_contract": "by-scope-contract",
+    "authority_surface": "by-authority-surface",
+    "entity": "by-entity",
+    "path": "by-path",
+    "tool": "by-tool",
+    "mcp": "by-mcp",
+    "goal": "by-goal",
+    "verification_state": "by-verification-state",
+    "decision_thread": "by-open-thread",
+    "failure_mode": "by-failure-mode",
+    "hook_health": "by-hook-health",
+    "memory_provenance": "by-memory-surface",
+    "external_snapshot": "by-external-snapshot",
+    "phase_topic": "by-phase-topic",
+    "delivery_state": "by-delivery-state",
+    "index_health": "by-index-health",
+    "evidence_provenance": "by-evidence-provenance",
+    "owner_route": "by-owner-route",
+    "freshness_drift": "by-freshness",
+    "runtime_environment": "by-runtime-environment",
+    "mutation_surface": "by-mutation-surface",
+    "correlation": "by-correlation",
+    "confidence": "by-confidence",
+    "access_boundary": "by-access-boundary",
+    "resource_profile": "by-resource-profile",
+    "operator_preference": "by-operator-preference",
+    "risk": "by-risk",
+    "review_state": "by-review-state",
+    "promotion_candidate": "by-promotion-candidate",
+    "operator_request": "by-operator-request",
+    "route_next_action": "by-route-next-action",
+}
+
+DEFAULT_ATLAS_AXES = [
+    "by-work-context",
+    "by-repo-family",
+    "by-memory-surface",
+    "by-authority-surface",
+    "by-session-act",
+    "by-conversation-act",
+    "by-scope-contract",
+    "by-verification-state",
+    "by-open-thread",
+    "by-entity",
+    "by-path",
+    "by-tool",
+    "by-mcp",
+    "by-hook-health",
+    "by-goal",
+    "by-delivery-state",
+    "by-failure-mode",
+    "by-risk",
+    "by-phase-topic",
+    "by-external-snapshot",
+    "by-review-state",
+    "by-promotion-candidate",
+    "by-index-health",
+    "by-time",
+    "by-operator-request",
+    "by-route-next-action",
+    "by-evidence-provenance",
+    "by-owner-route",
+    "by-freshness",
+    "by-runtime-environment",
+    "by-mutation-surface",
+    "by-correlation",
+    "by-confidence",
+    "by-access-boundary",
+    "by-resource-profile",
+    "by-operator-preference",
+]
+MAX_ATLAS_ROUTE_KEYS_PER_LAYER = 40
+DEFAULT_ROUTE_SAMPLE_LIMIT = 2
+ROUTE_READINESS_REQUIREMENTS = [
+    {
+        "id": "scope_contract",
+        "title": "Scope / Contract",
+        "required_layers": ["scope_contract"],
+    },
+    {
+        "id": "authority_surface",
+        "title": "Authority / Truth Surface",
+        "required_layers": ["authority_surface"],
+    },
+    {
+        "id": "entity_path_graph",
+        "title": "Entity / Path Graph",
+        "required_layers": ["entity", "path", "tool", "mcp", "goal"],
+    },
+    {
+        "id": "verification_map",
+        "title": "Verification Map",
+        "required_layers": ["verification_state"],
+    },
+    {
+        "id": "decision_open_thread",
+        "title": "Decision / Assumption / Open Thread",
+        "required_layers": ["decision_thread"],
+    },
+    {
+        "id": "failure_taxonomy",
+        "title": "Failure / Diagnostic Taxonomy",
+        "required_layers": ["failure_mode"],
+    },
+    {
+        "id": "hook_health",
+        "title": "Hook Health",
+        "required_layers": ["hook_health"],
+    },
+    {
+        "id": "memory_provenance",
+        "title": "Memory Provenance",
+        "required_layers": ["memory_provenance"],
+    },
+    {
+        "id": "external_snapshot",
+        "title": "External Context Snapshot",
+        "required_layers": ["external_snapshot"],
+    },
+    {
+        "id": "phase_topic",
+        "title": "Phase / Topic Boundaries",
+        "required_layers": ["phase_topic"],
+    },
+    {
+        "id": "delivery_state",
+        "title": "Delivery State",
+        "required_layers": ["delivery_state"],
+    },
+    {
+        "id": "findability_index_health",
+        "title": "Findability / Index Health",
+        "required_layers": ["index_health"],
+    },
+    {
+        "id": "evidence_provenance",
+        "title": "Evidence / Provenance Chain",
+        "required_layers": ["evidence_provenance"],
+    },
+    {
+        "id": "owner_route",
+        "title": "Owner / Route Law",
+        "required_layers": ["owner_route"],
+    },
+    {
+        "id": "freshness_drift",
+        "title": "Freshness / Drift",
+        "required_layers": ["freshness_drift"],
+    },
+    {
+        "id": "runtime_environment",
+        "title": "Environment / Runtime State",
+        "required_layers": ["runtime_environment"],
+    },
+    {
+        "id": "mutation_surface",
+        "title": "Mutation / Impact Surface",
+        "required_layers": ["mutation_surface"],
+    },
+    {
+        "id": "correlation_graph",
+        "title": "Correlation Graph",
+        "required_layers": ["correlation"],
+    },
+    {
+        "id": "confidence_conflict",
+        "title": "Confidence / Ambiguity / Conflict",
+        "required_layers": ["confidence"],
+    },
+    {
+        "id": "access_boundary",
+        "title": "Access / Secret / Privacy Boundary",
+        "required_layers": ["access_boundary"],
+    },
+    {
+        "id": "resource_profile",
+        "title": "Resource / Cost / Latency",
+        "required_layers": ["resource_profile"],
+    },
+    {
+        "id": "operator_preference",
+        "title": "Operator Preference / Standing Instruction",
+        "required_layers": ["operator_preference"],
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -810,6 +1008,13 @@ def codex_manual_compact_probe(
 
 def copytree_ignore(_directory: str, names: list[str]) -> set[str]:
     ignored = {name for name in names if name in PORTABLE_COPY_IGNORE or name.endswith(".pyc")}
+    directory = Path(_directory)
+    parts = directory.parts
+    if "maps" in parts:
+        if directory.name == "entries":
+            ignored.update(name for name in names if name != ".gitkeep")
+        if directory.name.startswith("by-") or directory.name == "maps":
+            ignored.update(name for name in names if name in {"INDEX.md", "index.json"})
     return ignored
 
 
@@ -1531,8 +1736,13 @@ def json_object_from_string(value: Any) -> dict[str, Any]:
 def payload_correlation_id(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
-    for key in ("call_id", "id", "tool_call_id"):
+    for key in ("call_id", "tool_call_id"):
         value = payload.get(key)
+        if value:
+            return str(value)
+    payload_type = str(payload.get("type") or "")
+    if payload_type in {"function_call", "tool_call", "custom_tool_call", "function_call_output", "tool_call_output"}:
+        value = payload.get("id")
         if value:
             return str(value)
     return None
@@ -1549,6 +1759,771 @@ def command_text_from_payload(payload: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def tool_name_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("name") or payload.get("tool_name") or "").strip()
+
+
+def normalized_tool_name(tool_name: str) -> str:
+    name = str(tool_name or "").strip()
+    if not name:
+        return ""
+    return name.split(".")[-1]
+
+
+def tool_namespace_for_name(tool_name: str) -> str:
+    raw = str(tool_name or "").strip()
+    lowered = raw.lower()
+    short = normalized_tool_name(raw).lower()
+    if not raw:
+        return "unknown"
+    if raw.startswith("mcp__") or short in {"list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"}:
+        return "mcp"
+    if short in {"create_goal", "update_goal", "get_goal"}:
+        return "codex_goal"
+    if short in {
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+        "update_plan",
+        "create_goal",
+        "update_goal",
+        "get_goal",
+        "view_image",
+    }:
+        return "codex_developer_tool"
+    if any(marker in lowered for marker in ("gmail", "google", "github", "canva", "hugging", "openai", "notion")):
+        return "app_connector"
+    return raw.split(".")[0] if "." in raw else "tool"
+
+
+def session_act_for_goal_tool(tool_name: str) -> str | None:
+    short = normalized_tool_name(tool_name)
+    return {
+        "create_goal": "goal_created",
+        "update_goal": "goal_updated",
+        "get_goal": "goal_inspected",
+    }.get(short)
+
+
+def session_act_for_mcp_tool(tool_name: str) -> str | None:
+    short = normalized_tool_name(tool_name)
+    if short == "read_mcp_resource":
+        return "mcp_resource_read"
+    if short == "list_mcp_resources":
+        return "mcp_resource_list"
+    if short == "list_mcp_resource_templates":
+        return "mcp_resource_template_list"
+    if str(tool_name or "").startswith("mcp__"):
+        return "mcp_tool_call"
+    return None
+
+
+def memory_surface_from_text(text: str) -> str | None:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return None
+    if (
+        "/home/dionysus/.codex/memories" in lowered
+        or ".codex/memories" in lowered
+        or "memory_summary.md" in lowered
+        or "memory.md" in lowered
+        or "rollout_summaries" in lowered
+        or "oai-mem-citation" in lowered
+        or "codex-memories" in lowered
+        or "codex memories" in lowered
+    ):
+        return "codex_memories"
+    if (
+        "/srv/abyssos/.aoa" in lowered
+        or ".aoa/sessions" in lowered
+        or "session-registry.json" in lowered
+        or "session-name-index.json" in lowered
+        or "session_names.md" in lowered
+        or "aoa-session-memory" in lowered
+        or "session memory" in lowered
+        or "session-memory" in lowered
+    ):
+        return "aoa_session_memory"
+    if "/home/dionysus/.codex/sessions" in lowered or "rollout-" in lowered and ".jsonl" in lowered:
+        return "codex_transcripts"
+    generic_memory_patterns = [
+        r"\b(?:use|read|search|query|check|consult|load|open|inspect|refresh|update|write|save|remember|forget|skip|cite|verify)\s+(?:the\s+)?(?:codex\s+|session\s+|project\s+)?memor(?:y|ies)\b",
+        r"\bmemor(?:y|ies)\s+(?:pass|lookup|search|citation|citations|update|request|folder|registry|provenance|used|skipped|cited|verified|unverified)\b",
+        r"\b(?:memory-derived|unverified memory|skipped memory|memory skipped|memory used)\b",
+        r"\b(?:использ|прочит|найд|ищи|провер|обнов|запомн|цитир|пропуст|не использ).{0,48}памят",
+        r"\bпамят.{0,48}(?:использ|прочит|найд|ищи|провер|обнов|запомн|цитир|пропуст)",
+    ]
+    if any(re.search(pattern, lowered) for pattern in generic_memory_patterns):
+        return "memory_general"
+    return None
+
+
+def memory_surface_for_event(event_type: str, source_type: str, semantic_lower: str, tags: set[str], facets: dict[str, Any]) -> str | None:
+    texts = [semantic_lower, source_type, " ".join(sorted(tags))]
+    for key in ("command", "tool_name", "path", "payload_type"):
+        value = facets.get(key)
+        if value:
+            texts.append(str(value))
+    return memory_surface_from_text(" ".join(texts))
+
+
+def session_act_kind_for_memory(event_type: str, source_type: str, semantic_lower: str, tags: set[str], facets: dict[str, Any]) -> str | None:
+    surface = memory_surface_for_event(event_type, source_type, semantic_lower, tags, facets)
+    if not surface:
+        return None
+    if "oai-mem-citation" in semantic_lower:
+        return "memory_citation"
+    if event_type == "USER_INTENT":
+        return "memory_request"
+    if event_type in {"CONTEXT_STATE", "COMPACTION_EVENT"}:
+        return "memory_context"
+    if event_type in {"FILE_WRITE", "DIFF"}:
+        return "memory_write"
+    if event_type in {"COMMAND", "FILE_READ", "TOOL_CALL"}:
+        return "memory_read"
+    if event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "VERIFICATION"}:
+        return "memory_observation"
+    if event_type in {"ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "CHECKPOINT", "FINAL_STATE"}:
+        return "memory_discussion"
+    return "memory_signal"
+
+
+def session_act_for_event(
+    event_type: str,
+    source_type: str,
+    payload: Any,
+    semantic_lower: str,
+    tags: set[str],
+    facets: dict[str, Any],
+    outcome: str,
+) -> dict[str, Any] | None:
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    tool_name = str(facets.get("tool_name") or tool_name_from_payload(payload))
+    memory_kind = session_act_kind_for_memory(event_type, source_type, semantic_lower, tags, facets)
+    kind: str | None = memory_kind
+    if not kind and tool_name:
+        kind = session_act_for_goal_tool(tool_name)
+        if kind == "goal_updated" and isinstance(payload, dict):
+            status = str(command_payload_args(payload).get("status") or "").lower()
+            if status == "complete":
+                kind = "goal_completed"
+            elif status == "blocked":
+                kind = "goal_blocked"
+        kind = kind or session_act_for_mcp_tool(tool_name)
+        if not kind:
+            namespace = tool_namespace_for_name(tool_name)
+            kind = "app_connector_call" if namespace == "app_connector" else "tool_call"
+    if not kind:
+        if event_type == "USER_INTENT":
+            kind = "operator_prompt"
+        elif event_type == "ASSISTANT_PLAN":
+            kind = "assistant_plan"
+        elif event_type == "ASSISTANT_MESSAGE":
+            kind = "assistant_message"
+        elif event_type == "FINAL_STATE":
+            kind = "assistant_closeout"
+        elif event_type == "HOOK_EVENT":
+            kind = "hook_receipt"
+        elif event_type == "COMPACTION_EVENT":
+            kind = "compaction_boundary"
+        elif event_type == "VERIFICATION":
+            kind = "verification_result"
+        elif event_type == "ERROR":
+            kind = "error_signal"
+        elif event_type in {"FILE_READ"}:
+            kind = "file_inspection"
+        elif event_type in {"FILE_WRITE", "DIFF"}:
+            kind = "file_mutation"
+        elif event_type == "COMMAND":
+            command_kind = str(facets.get("command_kind") or "")
+            kind = "verification_request" if command_kind == "verification" else "command_run"
+        elif event_type == "COMMAND_OUTPUT":
+            kind = "command_result"
+        elif event_type == "TOOL_OUTPUT":
+            kind = "tool_output"
+    if not kind:
+        return None
+    surface = memory_surface_for_event(event_type, source_type, semantic_lower, tags, facets)
+    payload_type = ""
+    if isinstance(payload, dict):
+        payload_type = str(payload.get("type") or "")
+    act = {
+        "schema_version": SESSION_ACT_SCHEMA_VERSION,
+        "kind": kind,
+        "raw_event_type": event_type,
+        "source_type": source_type,
+        "payload_type": str(facets.get("payload_type") or payload_type),
+        "tool_name": tool_name,
+        "tool_namespace": tool_namespace_for_name(tool_name) if tool_name else "",
+        "memory_surface": surface or "",
+        "conversation_act": str(conversation_act.get("kind") or ""),
+        "outcome": outcome,
+        "confidence": "high" if kind not in {"memory_signal"} else "medium",
+    }
+    if isinstance(payload, dict):
+        args = command_payload_args(payload)
+        for key in ("server", "uri", "resource", "hook_event_name"):
+            value = payload.get(key) or args.get(key)
+            if value:
+                act[key] = str(value)
+    if facets.get("message_type"):
+        act["message_type"] = str(facets["message_type"])
+    return act
+
+
+def route_key_slug(value: Any, *, fallback: str = "signal", max_chars: int = 80) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    text = re.sub(r"\s+", "-", text)
+    slug = readable_slug(text, fallback=fallback, max_chars=max_chars)
+    return slug.replace("-", "_")
+
+
+ENTITY_STOPWORDS = {
+    "add",
+    "all",
+    "alter",
+    "and",
+    "as",
+    "by",
+    "case",
+    "column",
+    "constraint",
+    "create",
+    "default",
+    "delete",
+    "drop",
+    "else",
+    "exists",
+    "false",
+    "for",
+    "from",
+    "if",
+    "in",
+    "index",
+    "insert",
+    "integer",
+    "into",
+    "join",
+    "key",
+    "limit",
+    "not",
+    "null",
+    "on",
+    "or",
+    "primary",
+    "select",
+    "set",
+    "table",
+    "text",
+    "then",
+    "true",
+    "update",
+    "values",
+    "where",
+}
+
+
+def env_entity_candidate(value: str) -> bool:
+    token = str(value or "").strip()
+    if not token:
+        return False
+    slug = route_key_slug(token, fallback="entity")
+    if slug in ENTITY_STOPWORDS:
+        return False
+    if "_" in token:
+        return True
+    return len(token) >= 5
+
+
+def has_secret_or_privacy_boundary(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    patterns = [
+        r"\b(secret|secrets|credential|credentials|password|passwd|api[-_ ]?key|private[-_ ]?key)\b",
+        r"\b(access|auth|bearer|refresh|session)[-_ ]?token\b",
+        r"\btoken\b.{0,48}\b(expose|exposed|leak|leaked|redact|mask|secret|credential|password|private|privacy)\b",
+        r"\b(expose|exposed|leak|leaked|redact|mask|secret|credential|password|private|privacy)\b.{0,48}\btoken\b",
+        r"\b(pii|personal data|private data|privacy boundary|privacy)\b",
+        r"\b(секрет|секреты|парол|пароль|токен доступа|персональн|приватн)\b",
+        r"\bsk-[a-z0-9][a-z0-9_-]{8,}\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def has_findability_index_health_signal(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    patterns = [
+        r"\b(findability|index health|restore-ready|restore ready|repair/reindex)\b",
+        r"\b(session_act|work_context|verification map|open threads?|naming readiness|search freshness)\b",
+        r"\b(search-index|search index|route index|segment index|session index)\b",
+        r"\b(session\.index\.json|session\.manifest\.json|session-registry\.json|session-name-index\.json)\b",
+        r"\b(raw/session\.raw\.jsonl|raw refs?|raw:line:|raw_unavailable|raw unavailable)\b",
+        r"\b(reindex|reindex-sessions)\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def has_landed_slices_preference(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    if "<subagent_notification" in lowered:
+        return False
+    return bool(
+        re.search(r"\blanded[- ]?(?:slices?|срез\w*)\b", lowered)
+        or re.search(r"\b(?:small|narrow|узк\w*)\b.{0,48}\b(?:landed[- ]?)?срез\w*\b", lowered)
+        or re.search(r"\b(?:узк\w*)\b.{0,48}\blanded\b", lowered)
+    )
+
+
+def has_failed_command_or_test_signal(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    if re.search(r"\bprocess exited with code\s+[1-9]\d*\b", lowered):
+        return True
+    if re.search(r"\b(?:command failed with exit code|exited with code|exit code:)\s+[1-9]\d*\b", lowered):
+        return True
+    if re.search(r"\b\d+\s+failed\b", lowered):
+        return True
+    if "==== failures" in lowered or "traceback (most recent call last)" in lowered:
+        return True
+    if "pytest" in lowered and re.search(r"\b(failed|failures|error|errors)\b", lowered):
+        return True
+    return False
+
+
+def route_signal_index_stale_reasons(index: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if int_value(index.get("route_signal_schema_version")) != ROUTE_SIGNAL_SCHEMA_VERSION:
+        reasons.append("route_signal_schema_mismatch")
+    if int_value(index.get("route_signal_classifier_version")) != ROUTE_SIGNAL_CLASSIFIER_VERSION:
+        reasons.append("route_signal_classifier_mismatch")
+    return reasons
+
+
+def route_signal_index_is_current(index: dict[str, Any]) -> bool:
+    return not route_signal_index_stale_reasons(index)
+
+
+def compact_signal_detail(value: Any, *, max_chars: int = 240) -> str:
+    if isinstance(value, (dict, list)):
+        return short_text(json.dumps(value, ensure_ascii=False, sort_keys=True), max_chars=max_chars)
+    return short_text(value, max_chars=max_chars)
+
+
+def route_signals_for_event(
+    event_type: str,
+    source_type: str,
+    payload: Any,
+    semantic_text: str,
+    raw_text: str,
+    tags: set[str],
+    facets: dict[str, Any],
+    outcome: str,
+    correlation_id: str | None,
+) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(
+        layer: str,
+        key: str,
+        *,
+        confidence: str = "medium",
+        source: str = "heuristic",
+        detail: Any = "",
+        axis: str | None = None,
+    ) -> None:
+        route_key = route_key_slug(key)
+        if not layer or not route_key:
+            return
+        pair = (layer, route_key)
+        if pair in seen:
+            return
+        seen.add(pair)
+        item = {
+            "schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+            "layer": layer,
+            "key": route_key,
+            "axis": axis or ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
+            "confidence": confidence,
+            "source": source,
+        }
+        if detail:
+            item["detail"] = compact_signal_detail(detail)
+        signals.append(item)
+
+    semantic_limited = semantic_text[:6000]
+    raw_limited = raw_text[:6000]
+    command = str(facets.get("command") or "")
+    command_lower = command.lower()
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+    tool_name = str(facets.get("tool_name") or tool_name_from_payload(payload))
+    tool_namespace = str(facets.get("tool_namespace") or tool_namespace_for_name(tool_name) if tool_name else "")
+    haystack = " ".join(
+        str(part)
+        for part in [
+            semantic_limited,
+            raw_limited if event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "ERROR", "VERIFICATION"} else "",
+            " ".join(sorted(tags)),
+            facets.get("command"),
+            facets.get("tool_name"),
+            facets.get("tool_namespace"),
+            facets.get("message_type"),
+        ]
+        if part
+    ).lower()
+    surface_haystack = " ".join(
+        str(part)
+        for part in [
+            semantic_limited,
+            raw_limited if event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "ERROR", "VERIFICATION"} else "",
+            command,
+        ]
+        if part
+    ).lower()
+    route_text_haystack = "" if event_type == "CONTEXT_STATE" else haystack
+    route_surface_haystack = "" if event_type == "CONTEXT_STATE" else surface_haystack
+    route_semantic_limited = "" if event_type == "CONTEXT_STATE" else semantic_limited
+
+    if event_type == "SESSION_META":
+        add("evidence_provenance", "raw_line", confidence="high", source="raw_event_type")
+        add("runtime_environment", "session_meta", confidence="high", source="raw_event_type")
+        if isinstance(payload, dict):
+            for key in ("cwd", "model", "permission_mode", "sandbox_mode", "approval_policy"):
+                if payload.get(key):
+                    add("runtime_environment", key, confidence="high", source="session_meta", detail=payload.get(key))
+                    if key == "cwd":
+                        owner_root = work_context_root_for_path(str(payload.get(key)))
+                        if owner_root:
+                            add("owner_route", owner_name_from_root(owner_root) or owner_root, confidence="high", source="cwd", detail=owner_root)
+
+    if event_type == "USER_INTENT":
+        act_kind = str(conversation_act.get("kind") or "")
+        if act_kind:
+            add("operator_request", act_kind, confidence="high", source="conversation_act")
+        if re.search(r"\b(только анализ|сейчас только анализ|only analysis|analysis only)\b", haystack):
+            add("scope_contract", "analysis_only", confidence="high", source="operator_prompt")
+        if re.search(r"\b(не трогай|ничего не трогай|не редактируй|не меняй|do not touch|do not edit)\b", haystack):
+            add("scope_contract", "no_mutation", confidence="high", source="operator_prompt")
+        if re.search(r"\b(не коммит|не коммить|do not commit|don't commit|no commit)\b", haystack):
+            add("scope_contract", "no_commit", confidence="high", source="operator_prompt")
+        if re.search(r"\b(без внешн|без интернета|без внешних подключений|no external|do not browse|don't browse)\b", haystack):
+            add("scope_contract", "no_external_connectors", confidence="high", source="operator_prompt")
+        if re.search(r"\b(сначала погруз|сначала прочит|first read|start by reading|orient first)\b", haystack):
+            add("scope_contract", "orient_first", confidence="high", source="operator_prompt")
+        if re.search(r"\b(commit|коммит|коммить)\b", haystack):
+            add("scope_contract", "commit_requested", confidence="medium", source="operator_prompt")
+        if re.search(r"\b(push|пуш)\b", haystack):
+            add("scope_contract", "push_requested", confidence="medium", source="operator_prompt")
+        if re.search(r"\b(merge|мердж)\b", haystack):
+            add("scope_contract", "merge_requested", confidence="medium", source="operator_prompt")
+        if re.search(r"\b(по-русски|русск|russian)\b", haystack):
+            add("operator_preference", "russian_language", confidence="high", source="operator_prompt")
+        if "preserve before distill" in haystack or "preserve before distilling" in haystack or "сначала preserve" in haystack:
+            add("operator_preference", "preserve_before_distill", confidence="high", source="operator_prompt")
+        if re.search(r"\b(не терять|нельзя ничего потерять|preserve changelog|не потерять changelog)\b", haystack):
+            add("operator_preference", "preserve_changelog_or_full_body", confidence="high", source="operator_prompt")
+        if "agents/design" in haystack or ("agents.md" in haystack and "design" in haystack):
+            add("operator_preference", "read_agents_design_first", confidence="medium", source="operator_prompt")
+        if has_landed_slices_preference(haystack):
+            add("operator_preference", "landed_slices", confidence="medium", source="operator_prompt")
+
+    if event_type in {"DECISION", "ASSUMPTION", "OPEN_THREAD", "CHECKPOINT", "FINAL_STATE", "ASSISTANT_MESSAGE"}:
+        if event_type == "DECISION" or "decision_signal" in tags:
+            add("decision_thread", "decision", confidence="high", source="event_type")
+        if event_type == "ASSUMPTION" or "assumption_signal" in tags:
+            add("decision_thread", "assumption", confidence="high", source="event_type")
+        if event_type == "OPEN_THREAD" or "open_thread_signal" in tags:
+            add("decision_thread", "open_thread", confidence="high", source="event_type")
+        if re.search(r"\b(accepted|принято|подтвердил|одобрил)\b", haystack):
+            add("decision_thread", "operator_accepted", confidence="medium", source="assistant_text")
+        if re.search(r"\b(rejected|отклонил|не приняли|operator rejected)\b", haystack):
+            add("decision_thread", "operator_rejected", confidence="medium", source="assistant_text")
+        if re.search(r"\b(blocked|блокер|заблокировано|не могу продолжить)\b", haystack):
+            add("decision_thread", "blocked", confidence="medium", source="assistant_text")
+        if re.search(r"\b(осталось|remaining|gap|open question|todo|follow-up)\b", haystack):
+            add("decision_thread", "remaining_gap", confidence="medium", source="assistant_text")
+
+    if event_type == "COMPACTION_EVENT":
+        add("phase_topic", "compaction_boundary", confidence="high", source="event_type")
+        add("resource_profile", "context_compaction", confidence="high", source="event_type")
+    if event_type in {"DIFF", "FILE_WRITE"}:
+        add("phase_topic", "large_patch_or_mutation", confidence="medium", source="event_type")
+    if event_type == "VERIFICATION":
+        add("phase_topic", "verification_pass", confidence="high", source="event_type")
+    if event_type == "FINAL_STATE":
+        add("phase_topic", "final_closeout", confidence="high", source="event_type")
+        add("route_next_action", "inspect_final_state_and_gaps", confidence="medium", source="event_type")
+
+    failed_command_or_test_signal = has_failed_command_or_test_signal(route_text_haystack)
+
+    if event_type == "VERIFICATION" and not failed_command_or_test_signal:
+        add("verification_state", "green_proof", confidence="high", source="event_type")
+    if command and str(facets.get("command_kind") or "") == "verification":
+        add("verification_state", "verification_requested", confidence="high", source="command_kind", detail=command)
+    if ("success_signal" in tags or outcome in {"succeeded", "verified"}) and not failed_command_or_test_signal:
+        add("verification_state", "success_observed", confidence="medium", source="outcome")
+    if event_type == "ERROR" or outcome == "failed" or "error_signal" in tags or failed_command_or_test_signal:
+        add("verification_state", "failed_or_unverified", confidence="high", source="outcome")
+    if re.search(r"\b(not run|не запускал|не проверял|untested|не проверено)\b", haystack):
+        add("verification_state", "verification_gap", confidence="high", source="text")
+
+    if event_type == "ERROR" or outcome == "failed" or "error_signal" in tags or failed_command_or_test_signal:
+        failure_key = "generic_failure"
+        if "no such file or directory" in haystack or "missing file" in haystack:
+            failure_key = "missing_file"
+        elif "schema" in haystack and ("mismatch" in haystack or "invalid" in haystack):
+            failure_key = "schema_mismatch"
+        elif re.search(r"\b\d+\s+failed\b", haystack) or "pytest" in haystack and "failed" in haystack:
+            failure_key = "test_failure"
+        elif "permission denied" in haystack or "access denied" in haystack:
+            failure_key = "permission"
+        elif "timeout" in haystack or "timed out" in haystack:
+            failure_key = "timeout"
+        elif "command not found" in haystack or "not found:" in haystack:
+            failure_key = "command_not_found"
+        elif "raw unavailable" in haystack or "raw_unavailable" in haystack:
+            failure_key = "hook_raw_unavailable"
+        elif "drift" in haystack or "stale" in haystack:
+            failure_key = "external_state_drift"
+        elif "dirty generated" in haystack or "generated archive" in haystack:
+            failure_key = "dirty_generated_archive"
+        add("failure_mode", failure_key, confidence="high", source="diagnostic_text")
+        add("route_next_action", "diagnose_failure", confidence="medium", source="failure_mode")
+
+    hook_context = event_type == "HOOK_EVENT" or bool(
+        re.search(
+            r"\b(hook_event_recorded|hook_event_name|hookspecificoutput|codex-hooks-status|codex-compact-probe|precompact_receipt|postcompact_receipt|stop_receipt|raw_mirrored|indexing_deferred|background_sync_queued)\b",
+            route_text_haystack,
+        )
+        or re.search(
+            r"\b(?:sessionstart|userpromptsubmit|precompact|postcompact|stop)\b.{0,48}\b(?:hook|receipt|queued|deferred|raw_unavailable|json validity|timed out|timeout|completed|started)\b",
+            route_text_haystack,
+        )
+        or re.search(
+            r"\bhooks?\b.{0,48}\b(?:raw_unavailable|json validity|trusted|matching|enabled|configured|completed|started|timed out|timeout)\b",
+            route_text_haystack,
+        )
+    )
+    if hook_context:
+        for hook_name in HOOK_EVENT_ORDER:
+            hook_pattern = re.sub(r"(?<!^)([A-Z])", r"[-_ ]?\1", hook_name).lower()
+            if hook_name == "Stop":
+                hook_pattern = r"stop(?![-_ ]?lines?\b)"
+            if re.search(fr"\b{hook_pattern}\b", haystack.lower()):
+                add("hook_health", hook_name, confidence="high", source="hook_signal")
+        if "raw_unavailable" in haystack or "raw unavailable" in haystack:
+            add("hook_health", "raw_unavailable", confidence="high", source="hook_signal")
+        if "deferred" in haystack or "queue" in haystack or "worker" in haystack:
+            add("hook_health", "deferred_sync_or_worker_queue", confidence="medium", source="hook_signal")
+        if "invalid json" in haystack or "json validity" in haystack or "schema-valid" in haystack:
+            add("hook_health", "hook_json_validity", confidence="medium", source="hook_signal")
+
+    memory_surface = str(session_act.get("memory_surface") or "")
+    if memory_surface and event_type != "CONTEXT_STATE":
+        add("memory_provenance", memory_surface, confidence="high", source="session_act")
+    memory_patterns = [
+        ("memory_summary", ["memory_summary.md"]),
+        ("memory_md_registry", ["memory.md"]),
+        ("rollout_summary", ["rollout_summaries", "rollout summary"]),
+        ("skill_memory", ["/skills/", "skill memory"]),
+        ("ad_hoc_note", ["ad_hoc", "ad-hoc"]),
+        ("aoa_archive", [".aoa/sessions", "session-registry.json", "session-name-index.json"]),
+        ("codex_transcript", [".codex/sessions", "rollout-"]),
+        ("mcp_resource", ["read_mcp_resource", "mcp resource", "memory://"]),
+    ]
+    for key, needles in memory_patterns:
+        if any(needle in route_text_haystack for needle in needles):
+            add("memory_provenance", key, confidence="high", source="text")
+    if re.search(r"\b(oai-mem-citation|cited|citation|cite|citing)\b", route_text_haystack):
+        add("memory_provenance", "cited", confidence="high", source="text")
+    if re.search(r"\b(skipped memory|memory skipped|не использовал память)\b", route_text_haystack):
+        add("memory_provenance", "skipped", confidence="medium", source="text")
+    if re.search(r"\b(verified-current|live verified|проверил актуальность)\b", route_text_haystack):
+        add("memory_provenance", "verified_current", confidence="medium", source="text")
+    if re.search(r"\b(unverified memory|memory-derived|из памяти без проверки)\b", route_text_haystack):
+        add("memory_provenance", "memory_derived_unverified", confidence="medium", source="text")
+    if re.search(r"\b(update memory|обнови память|запомни)\b", route_text_haystack):
+        add("memory_provenance", "update_requested", confidence="medium", source="text")
+
+    mcp_kind = ""
+    if tool_name:
+        add("tool", normalized_tool_name(tool_name) or tool_name, confidence="high", source="tool_name", detail=tool_name)
+        if tool_namespace:
+            add("tool", f"namespace_{tool_namespace}", confidence="medium", source="tool_namespace")
+        goal_kind = session_act_for_goal_tool(tool_name)
+        if goal_kind:
+            add("goal", goal_kind, confidence="high", source="goal_tool")
+        mcp_kind = session_act_for_mcp_tool(tool_name)
+        if mcp_kind:
+            add("mcp", mcp_kind, confidence="high", source="mcp_tool")
+    external_keys: set[str] = set()
+    external_source = " ".join([tool_name.lower(), command_lower])
+    if tool_namespace == "app_connector":
+        external_keys.add("app_connector")
+        connector_haystack = " ".join([external_source, route_text_haystack])
+        if "github" in connector_haystack:
+            external_keys.add("github")
+        if "gmail" in connector_haystack:
+            external_keys.add("gmail")
+        if "google drive" in connector_haystack or re.search(r"\bdrive\b", connector_haystack):
+            external_keys.add("google_drive")
+        if "calendar" in connector_haystack:
+            external_keys.add("google_calendar")
+    if tool_namespace == "mcp" or mcp_kind:
+        external_keys.add("mcp")
+    if re.search(r"\b(web\.run|search_query|image_query|browser)\b", external_source):
+        external_keys.add("web")
+    if event_type in {"COMMAND", "COMMAND_OUTPUT"}:
+        if re.search(r"(^|\s)gh\s+", command_lower) or "github.com" in command_lower:
+            external_keys.add("github")
+        if re.search(r"\b(curl|wget|httpie|npm\s+view|pip\s+index|uv\s+pip\s+index)\b", command_lower) or re.search(r"https?://", command_lower):
+            external_keys.add("web")
+    for key in sorted(external_keys):
+        confidence = "high" if key in {"app_connector", "mcp"} or tool_namespace == "app_connector" else "medium"
+        add("external_snapshot", key, confidence=confidence, source="external_context", detail=tool_name or command)
+    if external_keys:
+        add("freshness_drift", "external_state_required", confidence="medium", source="external_snapshot")
+        add("freshness_drift", "external_snapshot_stale_risk", confidence="medium", source="external_snapshot")
+
+    if event_type in {"SECURITY_TOUCHPOINT", "SECURITY_OR_SECRET_RISK"} or "security_signal" in tags or "security_touchpoint_signal" in tags:
+        add("risk", "security_or_secret", confidence="high", source="event_type")
+    if "destructive_command_signal" in tags:
+        add("risk", "destructive_command", confidence="high", source="command")
+    if "security_policy_signal" in tags:
+        add("access_boundary", "security_policy", confidence="high", source="tag")
+    if has_secret_or_privacy_boundary(route_text_haystack):
+        add("access_boundary", "secret_or_privacy_boundary", confidence="medium", source="text")
+    if re.search(r"\b(export|bundle|portable|review packet|цитировать|показывать)\b", route_text_haystack) and re.search(r"\b(secret|privacy|private|секрет|приват)\b", route_text_haystack):
+        add("access_boundary", "export_or_quote_boundary", confidence="medium", source="text")
+
+    if event_type in {"FILE_WRITE", "DIFF"}:
+        add("mutation_surface", "workspace_mutation", confidence="high", source="event_type")
+    surface_patterns = [
+        ("docs", [".md", "readme", "docs/"]),
+        ("source_code", [".py", ".ts", ".tsx", ".js", ".go", ".rs"]),
+        ("tests", ["tests/", "pytest", "test_"]),
+        ("generated_files", ["generated", "session.index.json", "segments/", "maps/by-", "index.json"]),
+        ("schemas", ["schemas/", ".schema.json"]),
+        ("hooks", ["hooks/", "hook"]),
+        ("config", ["config/", ".toml", ".json"]),
+        ("portable_bundle", ["export-bundle", "bundle exported", "/bundles/aoa-session-memory"]),
+        ("runtime_diagnostics", ["diagnostics/", "doctor", "audit"]),
+    ]
+    for key, needles in surface_patterns:
+        if any(needle in route_surface_haystack for needle in needles):
+            add("mutation_surface", key, confidence="medium", source="path_or_command")
+            if key == "generated_files":
+                add("authority_surface", "generated", confidence="medium", source="path_or_command")
+            elif key == "runtime_diagnostics":
+                add("authority_surface", "diagnostics", confidence="medium", source="path_or_command")
+            elif key == "portable_bundle":
+                add("authority_surface", "portable_bundle", confidence="medium", source="path_or_command")
+            elif key in {"schemas", "config", "hooks", "docs", "source_code", "tests"}:
+                add("authority_surface", "source", confidence="medium", source="path_or_command")
+    if memory_surface:
+        add("authority_surface", "memory", confidence="medium", source="memory_surface")
+    if "runtime" in route_text_haystack or "cache" in route_text_haystack or "search/" in route_text_haystack:
+        add("authority_surface", "runtime", confidence="medium", source="text")
+    if "external snapshot" in route_text_haystack or "connector" in route_text_haystack:
+        add("authority_surface", "external_connector_snapshot", confidence="medium", source="text")
+    if "local overlay" in route_text_haystack:
+        add("authority_surface", "local_overlay", confidence="medium", source="text")
+
+    path_candidates = []
+    path_candidates.extend(path_mentions_from_text(route_semantic_limited))
+    path_candidates.extend(path_mentions_from_text(command))
+    path_candidates.extend(extract_path_terms([route_semantic_limited, command], limit=8))
+    for path_value in sorted(set(path_candidates))[:10]:
+        add("path", route_key_slug(path_value, fallback="path", max_chars=96), confidence="medium", source="path_mention", detail=path_value)
+        owner_root = work_context_root_for_path(path_value)
+        if owner_root:
+            add("owner_route", owner_name_from_root(owner_root) or owner_root, confidence="medium", source="path_mention", detail=owner_root)
+    entity_text = route_semantic_limited + " " + command
+    named_entity_pattern = re.compile(
+        r"\b(?:aoa-[a-z0-9-]+|abyss[a-z0-9-]*|agents-of-abyss|tree-of-sophia|tos|mcp|codex|github|gmail|drive|openai|pytest)\b",
+        flags=re.IGNORECASE,
+    )
+    env_entity_pattern = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+    entities = {match.group(0) for match in named_entity_pattern.finditer(entity_text)}
+    entities.update(match.group(0) for match in env_entity_pattern.finditer(entity_text) if env_entity_candidate(match.group(0)))
+    for entity in sorted(entities)[:12]:
+        add("entity", entity, confidence="medium", source="entity_mention", detail=entity)
+
+    if event_type == "SESSION_META" or re.search(r"\b(cwd|branch|dirty|env|os|version|package manager|npm|pip|uv|poetry|cargo)\b", route_text_haystack):
+        add("runtime_environment", "environment_state", confidence="medium", source="text")
+    if "token_count" in haystack:
+        add("resource_profile", "context_token_count", confidence="high", source="token_count")
+    if re.search(r"\b(timeout|timed out|long command|large session|heavy raw|latency|cost|expensive)\b", route_text_haystack):
+        add("resource_profile", "cost_latency_or_size", confidence="medium", source="text")
+    if correlation_id and event_type in {"COMMAND", "COMMAND_OUTPUT", "TOOL_CALL", "TOOL_OUTPUT", "FILE_READ", "FILE_WRITE", "DIFF", "VERIFICATION", "ERROR"}:
+        add("correlation", "tool_call_output_link", confidence="high", source="correlation_id", detail=correlation_id)
+    if "ambiguous" in route_text_haystack or "неоднознач" in route_text_haystack:
+        add("confidence", "ambiguity", confidence="medium", source="text")
+    if "weak signal" in route_text_haystack or "low confidence" in route_text_haystack or "слабый сигнал" in route_text_haystack:
+        add("confidence", "weak_signal", confidence="medium", source="text")
+    if "conflict" in route_text_haystack or "mismatch" in route_text_haystack or "противореч" in route_text_haystack:
+        add("confidence", "conflict", confidence="medium", source="text")
+    if event_type == "RAW_EVENT":
+        add("confidence", "low_structural_confidence", confidence="medium", source="event_type")
+
+    if re.search(r"\b(git\s+status|local diff|uncommitted|not committed|не закоммич)\b", command_lower + " " + route_text_haystack):
+        add("delivery_state", "local_diff", confidence="medium", source="git_or_text")
+    if not failed_command_or_test_signal and re.search(r"\b(\d+\s+passed|tests green|тесты зелен|pytest.*passed)\b", route_text_haystack):
+        add("delivery_state", "tests_green", confidence="high", source="verification_text")
+    if re.search(r"\bgit\s+commit\b", command_lower) or "committed" in route_text_haystack:
+        add("delivery_state", "committed", confidence="medium", source="git_or_text")
+    if re.search(r"\bgit\s+push\b", command_lower) or "pushed" in route_text_haystack:
+        add("delivery_state", "pushed", confidence="medium", source="git_or_text")
+    if re.search(r"\b(pr opened|pull request|gh pr create)\b", route_text_haystack + " " + command_lower):
+        add("delivery_state", "pr_opened", confidence="medium", source="git_or_text")
+    if re.search(r"\b(merged|gh pr merge|мердж)\b", route_text_haystack + " " + command_lower):
+        add("delivery_state", "merged", confidence="medium", source="git_or_text")
+    if "export-bundle" in command_lower or "bundle exported" in route_text_haystack:
+        add("delivery_state", "bundle_exported", confidence="high", source="command_or_text")
+
+    if has_findability_index_health_signal(route_surface_haystack):
+        add("index_health", "findability_signal", confidence="medium", source="text")
+    if "reindex" in route_surface_haystack:
+        add("route_next_action", "reindex", confidence="medium", source="text")
+    if "repair" in route_surface_haystack or "почин" in route_surface_haystack:
+        add("route_next_action", "repair", confidence="medium", source="text")
+    if "review" in route_text_haystack or "manual review" in route_text_haystack or "reviewed" in route_text_haystack:
+        add("review_state", "review_signal", confidence="medium", source="text")
+    if "promotion" in route_text_haystack or "skill" in route_text_haystack or "automation" in route_text_haystack or "playbook" in route_text_haystack:
+        add("promotion_candidate", "possible_promotion", confidence="medium", source="text")
+    if event_type in {"PROCESS_LESSON", "OPTIMIZATION_CANDIDATE"}:
+        add("promotion_candidate", event_type.lower(), confidence="high", source="event_type")
+    if "raw:line:" in route_text_haystack:
+        add("evidence_provenance", "raw_ref", confidence="high", source="text")
+    if "segment.index" in route_text_haystack or ".index.json" in route_text_haystack:
+        add("evidence_provenance", "segment_index", confidence="medium", source="text")
+    if "manifest" in route_text_haystack or "session.manifest.json" in route_text_haystack:
+        add("evidence_provenance", "manifest", confidence="medium", source="text")
+    if "search hit" in route_text_haystack or "search result" in route_text_haystack:
+        add("evidence_provenance", "search_hit", confidence="medium", source="text")
+    if "reviewed distillation" in route_text_haystack:
+        add("evidence_provenance", "reviewed_distillation", confidence="medium", source="text")
+    if "live-verified" in route_text_haystack or "live verified" in route_text_haystack:
+        add("freshness_drift", "live_verified", confidence="medium", source="text")
+    if "snapshot" in route_text_haystack:
+        add("freshness_drift", "snapshot", confidence="medium", source="text")
+    if "stale" in route_text_haystack or "drift" in route_text_haystack:
+        add("freshness_drift", "stale_or_drift_risk", confidence="medium", source="text")
+    if "source-newer-than-index" in route_text_haystack or "source newer than index" in route_text_haystack:
+        add("freshness_drift", "source_newer_than_index", confidence="medium", source="text")
+
+    return signals
 
 
 def command_classifier(cmd: str) -> dict[str, Any]:
@@ -1867,13 +2842,16 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             tags.add(str(name))
             importance = "high"
             tool_name = str(name)
-            if tool_name in {"exec_command", "write_stdin"}:
+            short_tool_name = normalized_tool_name(tool_name)
+            facets["tool_name"] = tool_name
+            facets["tool_namespace"] = tool_namespace_for_name(tool_name)
+            if short_tool_name in {"exec_command", "write_stdin"}:
                 command_info = command_classifier(command_text_from_payload(payload))
                 event_type = str(command_info.get("event_type") or "COMMAND")
                 tags.update(str(tag) for tag in command_info.get("tags", []) if str(tag))
                 facets.update(command_info.get("facets", {}) if isinstance(command_info.get("facets"), dict) else {})
                 tags.add("command")
-            elif tool_name == "apply_patch":
+            elif short_tool_name == "apply_patch":
                 event_type = "DIFF"
                 tags.update(["patch", "file_write"])
         elif item_type in {"function_call_output", "tool_call_output"}:
@@ -1881,6 +2859,9 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             title = f"Tool output: {short_text(payload.get('call_id'), max_chars=80)}"
             tags.add("tool_output")
             importance = "high"
+            if payload.get("name") or payload.get("tool_name"):
+                facets["tool_name"] = tool_name_from_payload(payload)
+                facets["tool_namespace"] = tool_namespace_for_name(str(facets["tool_name"]))
             output_lower = semantic_lower or raw_lower
             if "process exited" in output_lower or "stdout" in output_lower or "stderr" in output_lower:
                 event_type = "COMMAND_OUTPUT"
@@ -1958,6 +2939,13 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
         tags.add("empty_nonzero_output_signal")
         event_type = "COMMAND_OUTPUT"
         outcome_override = "failed"
+    elif broad_diagnostic_scan and event_type in {"TOOL_OUTPUT", "COMMAND_OUTPUT"} and has_success_signal(diagnostic_lower):
+        tags.add("success_signal")
+        outcome_override = "succeeded"
+        verification_lower = semantic_lower or diagnostic_lower
+        if re.search(r"\b\d+\s+passed\b", verification_lower) or "ok=true" in verification_lower or '"ok": true' in verification_lower:
+            event_type = "VERIFICATION"
+            importance = "high"
     elif structured_outcome == "failed" and broad_diagnostic_scan:
         tags.add("error_signal")
         if event_type in {"RAW_EVENT", "TOOL_OUTPUT", "COMMAND_OUTPUT"}:
@@ -2093,6 +3081,42 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
     if conversation_act:
         facets["conversation_act"] = conversation_act
         tags.add(f"conversation_act:{conversation_act['kind']}")
+    session_act = session_act_for_event(
+        canonical_event_type,
+        source_type,
+        payload,
+        semantic_lower,
+        tags,
+        facets,
+        universal["outcome"],
+    )
+    if session_act:
+        facets["session_act"] = session_act
+        tags.add(f"session_act:{session_act['kind']}")
+        if session_act.get("memory_surface"):
+            tags.add(f"memory_surface:{session_act['memory_surface']}")
+        if session_act.get("tool_namespace"):
+            tags.add(f"tool_namespace:{session_act['tool_namespace']}")
+    route_signals = route_signals_for_event(
+        canonical_event_type,
+        source_type,
+        payload,
+        semantic_text,
+        raw,
+        tags,
+        facets,
+        universal["outcome"],
+        correlation_id,
+    )
+    if route_signals:
+        facets["route_signals"] = route_signals
+        for signal in route_signals:
+            layer = str(signal.get("layer") or "")
+            key = str(signal.get("key") or "")
+            if layer:
+                tags.add(f"route_layer:{layer}")
+            if layer and key:
+                tags.add(f"route_signal:{layer}:{key}")
 
     return RawEvent(
         event_id=event_id,
@@ -3091,6 +4115,49 @@ def event_relationships(events: list[RawEvent]) -> dict[str, list[dict[str, Any]
     return relationships
 
 
+def event_route_signals(event: RawEvent) -> list[dict[str, Any]]:
+    route_signals = event.facets.get("route_signals") if isinstance(event.facets, dict) else None
+    if not isinstance(route_signals, list):
+        return []
+    return [signal for signal in route_signals if isinstance(signal, dict) and signal.get("layer") and signal.get("key")]
+
+
+def route_signal_token(layer: str, key: str) -> str:
+    return f"{layer}:{key}"
+
+
+def route_signal_counts_for_events(events: list[RawEvent]) -> dict[str, dict[str, int]]:
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for event in events:
+        for signal in event_route_signals(event):
+            counts[str(signal["layer"])][str(signal["key"])] += 1
+    return {layer: dict(sorted(counter.items())) for layer, counter in sorted(counts.items())}
+
+
+def conversation_act_counts_for_events(events: list[RawEvent]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                str(event.facets.get("conversation_act", {}).get("kind"))
+                for event in events
+                if isinstance(event.facets.get("conversation_act"), dict) and event.facets["conversation_act"].get("kind")
+            ).items()
+        )
+    )
+
+
+def session_act_counts_for_events(events: list[RawEvent]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                str(event.facets.get("session_act", {}).get("kind"))
+                for event in events
+                if isinstance(event.facets.get("session_act"), dict) and event.facets["session_act"].get("kind")
+            ).items()
+        )
+    )
+
+
 def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     record = {
         "event_id": event.event_id,
@@ -3293,6 +4360,9 @@ def write_segment(
     by_outcome: dict[str, list[str]] = defaultdict(list)
     by_correlation: dict[str, list[str]] = defaultdict(list)
     by_conversation_act: dict[str, list[str]] = defaultdict(list)
+    by_session_act: dict[str, list[str]] = defaultdict(list)
+    by_route_layer: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    by_route_signal: dict[str, list[str]] = defaultdict(list)
     for event in events:
         by_type[event.event_type].append(event.event_id)
         by_source_type[event.source_type].append(event.event_id)
@@ -3306,12 +4376,23 @@ def write_segment(
         conversation_act = event.facets.get("conversation_act") if isinstance(event.facets.get("conversation_act"), dict) else {}
         if conversation_act.get("kind"):
             by_conversation_act[str(conversation_act["kind"])].append(event.event_id)
+        session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
+        if session_act.get("kind"):
+            by_session_act[str(session_act["kind"])].append(event.event_id)
+        for signal in event_route_signals(event):
+            layer = str(signal["layer"])
+            key = str(signal["key"])
+            by_route_layer[layer][key].append(event.event_id)
+            by_route_signal[route_signal_token(layer, key)].append(event.event_id)
         for tag in event.tags:
             by_tag[tag].append(event.event_id)
 
     index = {
         "schema_version": SCHEMA_VERSION,
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
+        "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
+        "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+        "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "segment_id": segment_id,
         "segment_role": role,
         "source_raw": raw_rel,
@@ -3329,6 +4410,12 @@ def write_segment(
         "by_outcome": dict(sorted(by_outcome.items())),
         "by_correlation": dict(sorted(by_correlation.items())),
         "by_conversation_act": dict(sorted(by_conversation_act.items())),
+        "by_session_act": dict(sorted(by_session_act.items())),
+        "by_route_layer": {
+            layer: dict(sorted(keys.items()))
+            for layer, keys in sorted(by_route_layer.items())
+        },
+        "by_route_signal": dict(sorted(by_route_signal.items())),
     }
     write_json(index_path, index)
     return {
@@ -3358,13 +4445,23 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     phase_counts = dict(sorted(Counter(event.phase for event in events).items()))
     actor_counts = dict(sorted(Counter(event.actor for event in events).items()))
     outcome_counts = dict(sorted(Counter(event.outcome for event in events).items()))
+    conversation_act_counts = conversation_act_counts_for_events(events)
+    session_act_counts = session_act_counts_for_events(events)
+    route_signal_counts = route_signal_counts_for_events(events)
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     semantic_names = semantic_names_payload(manifest)
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
     session_index_json = {
         "schema_version": SCHEMA_VERSION,
+        "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
+        "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
+        "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+        "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        "work_context_schema_version": WORK_CONTEXT_SCHEMA_VERSION,
         "session_id": manifest["session_id"],
         "display": display,
         "semantic_names": semantic_names,
+        "work_context": work_context,
         "updated_at": manifest["updated_at"],
         "archive_status": manifest["archive_status"],
         "distillation_status": manifest.get("distillation_status", "raw_archived"),
@@ -3374,6 +4471,9 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "phase_counts": phase_counts,
         "actor_counts": actor_counts,
         "outcome_counts": outcome_counts,
+        "conversation_act_counts": conversation_act_counts,
+        "session_act_counts": session_act_counts,
+        "route_signal_counts": route_signal_counts,
         "segments": manifest.get("segments", []),
         "raw_blocks": manifest.get("raw_blocks", {}),
         "read_order": [
@@ -3412,6 +4512,14 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         f"- path: `{display.get('path', str(session_dir))}`",
         f"- source transcript: `{manifest.get('source', {}).get('transcript_path', '') if isinstance(manifest.get('source'), dict) else ''}`",
         *semantic_name_identity_lines(manifest),
+        "",
+        "## Work Context",
+        "",
+        f"- status: `{work_context.get('status', '')}`",
+        f"- work_name: `{work_context.get('work_name', '')}`",
+        f"- work_family: `{work_context.get('work_family', '')}`",
+        f"- work_root: `{work_context.get('work_root', '')}`",
+        f"- confidence: `{work_context.get('confidence', '')}`",
         "",
         "## Status",
         "",
@@ -3453,6 +4561,18 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     for outcome, count in outcome_counts.items():
         lines.append(f"- `{outcome}`: {count}")
     lines.append("")
+    if session_act_counts:
+        lines.append("### Session Acts")
+        for act, count in session_act_counts.items():
+            lines.append(f"- `{act}`: {count}")
+        lines.append("")
+    if route_signal_counts:
+        lines.append("### Route Signals")
+        for layer, keys in route_signal_counts.items():
+            lines.append(f"- `{layer}`: {sum(keys.values())}")
+            for key, count in list(keys.items())[:12]:
+                lines.append(f"  - `{key}`: {count}")
+        lines.append("")
     (session_dir / SESSION_INDEX_MARKDOWN).write_text("\n".join(lines), encoding="utf-8")
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
     if legacy_md.exists():
@@ -3684,6 +4804,7 @@ def sync_session_from_transcript(
     if isinstance(existing.get("semantic_names"), dict):
         manifest["semantic_names"] = existing["semantic_names"]
         refresh_semantic_name_anchors(session_dir, manifest)
+    manifest["work_context"] = work_context_for_session_events(source_payload, events)
     write_json(manifest_path, manifest)
     write_json(
         raw_dir / RAW_SOURCE_JSON,
@@ -4008,6 +5129,34 @@ def attach_registry_update_job(
     return receipt
 
 
+def enqueue_index_maintenance_job(
+    aoa_root: Path,
+    *,
+    reason: str,
+    target: str = "all",
+    sample_audit: bool = False,
+    max_raw_mb: float | None = 16,
+) -> Path | None:
+    if not hook_sync_queue_enabled():
+        return None
+    pending_root = aoa_root / HOOK_JOBS_ROOT / "pending"
+    pending_root.mkdir(parents=True, exist_ok=True)
+    job_path = pending_root / f"{hook_job_id('IndexMaintenance', target)}.json"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "job_type": "index_maintenance",
+        "queued_at": utc_now(),
+        "event_name": "IndexMaintenance",
+        "session_id": target,
+        "target": target,
+        "reason": reason,
+        "sample_audit": sample_audit,
+        "max_raw_mb": max_raw_mb,
+    }
+    write_json(job_path, payload)
+    return job_path
+
+
 def hook_worker_dirs(aoa_root: Path) -> dict[str, Path]:
     root = aoa_root / HOOK_JOBS_ROOT
     return {
@@ -4062,6 +5211,27 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             "status": "registry_updated",
                             "session_id": manifest.get("session_id"),
                             "session_dir": str(session_dir),
+                        }
+                    elif job_type == "index_maintenance":
+                        max_raw_mb = job.get("max_raw_mb")
+                        max_raw_bytes = int(float(max_raw_mb) * 1024 * 1024) if max_raw_mb is not None else None
+                        maintained = maintain_indexes(
+                            aoa_root=aoa_root,
+                            target=str(job.get("target") or "all"),
+                            apply=True,
+                            max_raw_bytes=max_raw_bytes,
+                            sample_audit=bool(job.get("sample_audit")),
+                            write_report=True,
+                            reason=str(job.get("reason") or "queued_index_maintenance"),
+                        )
+                        result = {
+                            "job": str(running_path),
+                            "status": "maintained_indexes" if maintained.get("ok") else "failed",
+                            "target": maintained.get("target"),
+                            "reason": maintained.get("reason"),
+                            "action_counts": maintained.get("action_counts"),
+                            "report_json": maintained.get("report_json"),
+                            "diagnostics": maintained.get("diagnostics", []),
                         }
                     else:
                         transcript_value = job.get("transcript_path")
@@ -4695,13 +5865,39 @@ def event_semantic_text(event: RawEvent) -> str:
     return semantic_text_for_classification(event.source_type, event.parsed.get("payload"))
 
 
+NOISY_PATH_MENTIONS = {"/", "./", "../", "/dev/null", "/srv", "/tmp", "/home", "/var", "/etc"}
+
+
+def is_indexable_path_mention(value: str) -> bool:
+    text = str(value or "").strip().rstrip(".,:;)]}")
+    if not text or len(text) < 3 or "\x00" in text or text in NOISY_PATH_MENTIONS:
+        return False
+    if re.search(
+        r"(?:^|[._/-])(?:origin|upstream)/(?:main|master|develop|dev|trunk|head)(?:$|[._/-])",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if re.fullmatch(r"(?:origin|upstream)/(?:main|master|develop|dev|trunk|head)", text, flags=re.IGNORECASE):
+        return False
+    if re.fullmatch(
+        r"(?:main|master|develop|dev|trunk)/(?:origin|upstream)/(?:main|master|develop|dev|trunk|head)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if re.fullmatch(r"refs/(?:heads|remotes|tags)/[A-Za-z0-9._/-]+", text, flags=re.IGNORECASE):
+        return False
+    return True
+
+
 def extract_path_terms(texts: list[str], *, limit: int = 12) -> list[str]:
     counts: Counter[str] = Counter()
     pattern = re.compile(r"(?<![\w.-])(?:/[^\s`'\"<>|)]+|(?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.-]+)")
     for text in texts:
         for match in pattern.findall(text):
             value = match.rstrip(".,:;)]}")
-            if len(value) < 3 or value in {"/", "./", "../", "/dev/null", "/srv", "/tmp", "/home", "/var", "/etc"}:
+            if not is_indexable_path_mention(value):
                 continue
             counts[value] += 1
     return [path for path, _count in counts.most_common(limit)]
@@ -9089,7 +10285,13 @@ def distill_session_first_pass(aoa_root: Path, target: str | None, *, max_events
     }
 
 
-def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+def reindex_session_from_raw(
+    aoa_root: Path,
+    record: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    max_raw_bytes: int | None = None,
+) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     manifest = read_json(manifest_path, {})
@@ -9120,6 +10322,18 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
             "status": "diagnostic",
             "diagnostics": ["raw_missing"],
         }
+    raw_bytes = raw_path.stat().st_size
+    if max_raw_bytes is not None and raw_bytes > max_raw_bytes:
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "skipped",
+            "raw_path": str(raw_path),
+            "raw_bytes": raw_bytes,
+            "max_raw_bytes": max_raw_bytes,
+            "diagnostics": [f"raw_too_large:{raw_bytes}>{max_raw_bytes}"],
+        }
 
     if dry_run:
         existing_raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
@@ -9134,6 +10348,7 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
             "session_dir": str(session_dir),
             "status": "planned",
             "raw_path": str(raw_path),
+            "raw_bytes": raw_bytes,
             "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
             "existing_raw_block_count": len(existing_raw_block_items),
             "existing_raw_blocks_index": existing_raw_blocks.get("index") or raw.get("blocks_index"),
@@ -9198,6 +10413,18 @@ def reindex_session_from_raw(aoa_root: Path, record: dict[str, Any], *, dry_run:
     }
 
 
+def session_record_has_stale_route_index(record: dict[str, Any]) -> bool:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "") if isinstance(manifest, dict) else ""
+    if archive_status not in {"indexed", "raw_mirrored_index_deferred"}:
+        return False
+    session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+    if not isinstance(session_index, dict) or not session_index:
+        return True
+    return bool(route_signal_index_stale_reasons(session_index))
+
+
 def reindex_sessions(
     *,
     aoa_root: Path,
@@ -9206,6 +10433,8 @@ def reindex_sessions(
     until: str | None = None,
     limit: int | None = None,
     dry_run: bool = False,
+    max_raw_bytes: int | None = None,
+    stale_route_indexes: bool = False,
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
@@ -9225,6 +10454,9 @@ def reindex_sessions(
             "since": since,
             "until": until,
             "limit": limit,
+            "max_raw_bytes": max_raw_bytes,
+            "stale_route_indexes": stale_route_indexes,
+            "candidate_selected_count": 0,
             "selected_count": 0,
             "segment_count": 0,
             "event_count": 0,
@@ -9235,10 +10467,18 @@ def reindex_sessions(
             "samples": {},
             "diagnostics": [str(exc)],
         }
+    candidate_selected_count = len(records)
+    if stale_route_indexes:
+        records = [record for record in records if session_record_has_stale_route_index(record)]
     counts: Counter[str] = Counter()
     results: list[dict[str, Any]] = []
     for record in records:
-        result = reindex_session_from_raw(aoa_root, record, dry_run=dry_run)
+        result = reindex_session_from_raw(
+            aoa_root,
+            record,
+            dry_run=dry_run,
+            max_raw_bytes=max_raw_bytes,
+        )
         counts[str(result.get("status") or "unknown")] += 1
         results.append(result)
     payload = {
@@ -9252,6 +10492,9 @@ def reindex_sessions(
         "until": until,
         "limit": limit,
         "dry_run": dry_run,
+        "max_raw_bytes": max_raw_bytes,
+        "stale_route_indexes": stale_route_indexes,
+        "candidate_selected_count": candidate_selected_count,
         "selected_count": len(records),
         "counts": dict(counts),
         "results": results,
@@ -9281,6 +10524,9 @@ def reindex_sessions_markdown(payload: dict[str, Any]) -> str:
         f"- since: `{payload.get('since')}`",
         f"- until: `{payload.get('until')}`",
         f"- dry_run: `{payload.get('dry_run')}`",
+        f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
+        f"- stale_route_indexes: `{payload.get('stale_route_indexes')}`",
+        f"- candidate_selected_count: `{payload.get('candidate_selected_count')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
         "",
@@ -9301,6 +10547,418 @@ def reindex_sessions_markdown(payload: dict[str, Any]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def latest_index_source_mtime(aoa_root: Path, records: list[dict[str, Any]]) -> tuple[float, list[str]]:
+    paths: list[Path] = [
+        aoa_root / REGISTRY_NAME,
+        aoa_root / SESSION_NAME_INDEX_JSON,
+        aoa_root / SESSION_NAME_INDEX_MARKDOWN,
+        aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON,
+        aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN,
+    ]
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest_path = session_dir / "session.manifest.json"
+        session_index_path = session_dir / SESSION_INDEX_JSON
+        paths.extend([manifest_path, session_index_path, session_dir / SESSION_INDEX_MARKDOWN])
+        manifest = read_json(manifest_path, {})
+        if isinstance(manifest, dict):
+            for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+                if not isinstance(segment, dict):
+                    continue
+                if segment.get("index"):
+                    paths.append(Path(str(segment["index"])))
+                if segment.get("markdown"):
+                    paths.append(Path(str(segment["markdown"])))
+        incidents_dir = session_dir / "incidents"
+        if incidents_dir.is_dir():
+            paths.extend(path for path in incidents_dir.iterdir() if path.is_file())
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return 0.0, []
+    newest = max(path_mtime(path) for path in existing)
+    newest_paths = [str(path) for path in existing if path_mtime(path) == newest]
+    return newest, newest_paths[:8]
+
+
+def route_index_drift_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    drift: list[dict[str, Any]] = []
+    for record in records:
+        if not session_record_has_stale_route_index(record):
+            continue
+        session_dir = session_dir_from_record(record)
+        session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        reasons = route_signal_index_stale_reasons(session_index if isinstance(session_index, dict) else {})
+        if not isinstance(session_index, dict) or not session_index:
+            reasons = ["missing_session_index"]
+        drift.append(
+            {
+                "session_id": record.get("session_id") or (manifest.get("session_id") if isinstance(manifest, dict) else ""),
+                "session_label": record.get("session_label") or (manifest.get("session_label") if isinstance(manifest, dict) else session_dir.name),
+                "session_dir": str(session_dir),
+                "archive_status": (manifest.get("archive_status") if isinstance(manifest, dict) else record.get("archive_status")),
+                "reasons": reasons,
+            }
+        )
+    return drift
+
+
+def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "db_path": str(db_path),
+            "diagnostics": ["search_index_missing"],
+        }
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        metadata = search_index_metadata(conn)
+        rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "status": "sqlite_error",
+            "needs_refresh": True,
+            "db_path": str(db_path),
+            "diagnostics": [f"sqlite_error:{exc}"],
+        }
+    schema_version = str(metadata.get("schema_version") or "")
+    counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
+    document_count = sum(counts.values())
+    db_mtime = path_mtime(db_path)
+    reasons: list[str] = []
+    if schema_version != str(SEARCH_SCHEMA_VERSION):
+        reasons.append("search_schema_mismatch")
+    if document_count <= 0:
+        reasons.append("search_index_empty")
+    if latest_source_mtime > 0 and db_mtime < latest_source_mtime:
+        reasons.append("source_newer_than_search_index")
+    status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
+    return {
+        "status": status,
+        "needs_refresh": bool(reasons),
+        "db_path": str(db_path),
+        "db_mtime": db_mtime,
+        "latest_source_mtime": latest_source_mtime,
+        "search_schema_version": schema_version,
+        "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
+        "document_count": document_count,
+        "document_counts": counts,
+        "reasons": reasons,
+        "diagnostics": [],
+    }
+
+
+def atlas_index_state(aoa_root: Path, latest_source_mtime: float) -> dict[str, Any]:
+    index_path = aoa_root / ATLAS_ROOT / "index.json"
+    payload = read_json(index_path, {})
+    if not index_path.exists():
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "index": str(index_path),
+            "diagnostics": ["atlas_index_missing"],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "invalid",
+            "needs_refresh": True,
+            "index": str(index_path),
+            "diagnostics": ["atlas_index_invalid"],
+        }
+    entry_count = int_value(payload.get("entry_count"))
+    index_mtime = path_mtime(index_path)
+    reasons: list[str] = []
+    if int_value(payload.get("schema_version")) != ATLAS_SCHEMA_VERSION:
+        reasons.append("atlas_schema_mismatch")
+    if entry_count <= 0:
+        reasons.append("atlas_index_empty")
+    if latest_source_mtime > 0 and index_mtime < latest_source_mtime:
+        reasons.append("source_newer_than_atlas_index")
+    status = "current" if not reasons else ("stale" if reasons != ["atlas_index_empty"] else "empty")
+    return {
+        "status": status,
+        "needs_refresh": bool(reasons),
+        "index": str(index_path),
+        "index_mtime": index_mtime,
+        "latest_source_mtime": latest_source_mtime,
+        "entry_count": entry_count,
+        "axis_count": int_value(payload.get("axis_count")),
+        "schema_version": payload.get("schema_version"),
+        "expected_schema_version": ATLAS_SCHEMA_VERSION,
+        "reasons": reasons,
+        "diagnostics": [],
+    }
+
+
+def maintenance_action(action_id: str, *, reason: str, needed: bool, command: list[str]) -> dict[str, Any]:
+    return {
+        "id": action_id,
+        "needed": needed,
+        "reason": reason,
+        "status": "planned" if needed else "not_needed",
+        "command": command,
+    }
+
+
+def maintain_indexes(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    apply: bool = False,
+    max_raw_bytes: int | None = None,
+    sample_audit: bool = False,
+    sample_limit: int = DEFAULT_ROUTE_SAMPLE_LIMIT,
+    max_raw_chars: int = 360,
+    write_report: bool = False,
+    reason: str = "operator_requested",
+) -> dict[str, Any]:
+    now = utc_now()
+    diagnostics: list[str] = []
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "index_maintenance",
+            "generated_at": now,
+            "ok": False,
+            "apply": apply,
+            "target": target,
+            "reason": reason,
+            "selected_count": 0,
+            "diagnostics": [str(exc)],
+            "actions": [],
+        }
+
+    latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
+    route_drift = route_index_drift_records(records)
+    deferred_sessions = [
+        {
+            "session": str(record.get("session_label") or record.get("session_id") or session_dir_from_record(record).name),
+            "session_id": str(record.get("session_id") or ""),
+            "session_dir": str(session_dir_from_record(record)),
+        }
+        for record in records
+        if str(read_json(session_dir_from_record(record) / "session.manifest.json", {}).get("archive_status") or record.get("archive_status") or "") == "raw_mirrored_index_deferred"
+    ]
+    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime)
+    atlas_state = atlas_index_state(aoa_root, latest_source_mtime)
+    max_raw_mb_text = str(max_raw_bytes / (1024 * 1024)) if max_raw_bytes is not None else None
+    base = ["python3", "scripts/aoa_session_memory.py"]
+    root_args = ["--workspace-root", "<workspace>", "--aoa-root", str(aoa_root)]
+    actions = [
+        maintenance_action(
+            "reindex_route_indexes",
+            reason="missing_or_stale_session_route_indexes",
+            needed=bool(route_drift),
+            command=base
+            + ["reindex-sessions", target, *root_args, "--stale-route-indexes"]
+            + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+            + ["--write-report"],
+        ),
+        maintenance_action(
+            "rebuild_search_index",
+            reason="portable_sqlite_missing_or_stale",
+            needed=bool(search_state.get("needs_refresh")) or bool(route_drift),
+            command=base
+            + ["search-index", "all", *root_args]
+            + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+            + ["--write-report"],
+        ),
+        maintenance_action(
+            "rebuild_agent_atlas",
+            reason="atlas_missing_or_stale",
+            needed=bool(atlas_state.get("needs_refresh")) or bool(route_drift),
+            command=base + ["atlas", "build", "all", *root_args, "--write-report"],
+        ),
+        maintenance_action(
+            "route_readiness",
+            reason="post_maintenance_gate",
+            needed=bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh")),
+            command=base + ["route-readiness", "all", *root_args, "--write-report"],
+        ),
+        maintenance_action(
+            "route_sample_audit",
+            reason="classifier_or_schema_reindex_calibration",
+            needed=sample_audit and bool(route_drift),
+            command=base + ["route-sample-audit", "all", *root_args, "--sample-limit", str(sample_limit), "--max-raw-chars", str(max_raw_chars), "--write-report"],
+        ),
+    ]
+
+    action_results: list[dict[str, Any]] = []
+    if apply:
+        reindex_ran = False
+        if actions[0]["needed"]:
+            result = reindex_sessions(
+                aoa_root=aoa_root,
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+                max_raw_bytes=max_raw_bytes,
+                stale_route_indexes=True,
+                write_report=write_report,
+            )
+            actions[0]["status"] = "applied" if result.get("ok") else "failed"
+            actions[0]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
+            action_results.append(actions[0])
+            reindex_ran = bool(result.get("selected_count"))
+            if not result.get("ok"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if actions[1]["needed"] or reindex_ran:
+            result = search_index_sessions(
+                aoa_root=aoa_root,
+                target="all",
+                max_raw_bytes=max_raw_bytes,
+                rebuild=True,
+                write_report=write_report,
+            )
+            actions[1]["status"] = "applied" if result.get("ok") else "failed"
+            actions[1]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "document_count", "report_json", "report_markdown", "diagnostics")}
+            action_results.append(actions[1])
+            if not result.get("ok"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if actions[2]["needed"] or reindex_ran:
+            result = build_agent_atlas(
+                aoa_root=aoa_root,
+                target="all",
+                clean=True,
+                write_report=write_report,
+            )
+            actions[2]["status"] = "applied" if result.get("ok") else "failed"
+            actions[2]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "axis_count", "entry_count", "report_json", "report_markdown", "diagnostics")}
+            action_results.append(actions[2])
+            if not result.get("ok"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if actions[3]["needed"] or reindex_ran:
+            result = route_layer_readiness(
+                aoa_root=aoa_root,
+                target="all",
+                sample_limit=sample_limit,
+                write_report=write_report,
+            )
+            actions[3]["status"] = "applied" if result.get("ok") else "remaining"
+            actions[3]["result"] = {key: result.get(key) for key in ("ok", "covered_requirement_count", "required_requirement_count", "report_json", "report_markdown", "diagnostics")}
+            action_results.append(actions[3])
+            if not result.get("ok") and result.get("diagnostics"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if actions[4]["needed"]:
+            result = route_sample_audit(
+                aoa_root=aoa_root,
+                target="all",
+                sample_limit=sample_limit,
+                max_raw_chars=max_raw_chars,
+                write_report=write_report,
+            )
+            actions[4]["status"] = "applied" if result.get("ok") else "remaining"
+            actions[4]["result"] = {key: result.get(key) for key in ("ok", "total_sample_count", "sampled_layer_count", "required_layer_count", "report_json", "report_markdown", "diagnostics")}
+            action_results.append(actions[4])
+            if not result.get("ok") and result.get("diagnostics"):
+                diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+
+    for action in actions:
+        if action.get("needed") and not any(item.get("id") == action["id"] for item in action_results):
+            action_results.append(action)
+    action_counts = dict(Counter(str(action.get("status") or "unknown") for action in action_results))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "index_maintenance",
+        "generated_at": now,
+        "ok": not diagnostics and not any(action.get("status") == "failed" for action in action_results),
+        "apply": apply,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "reason": reason,
+        "selected_count": len(records),
+        "latest_source_mtime": latest_source_mtime,
+        "latest_source_paths": latest_source_paths,
+        "route_drift_count": len(route_drift),
+        "route_drift": route_drift,
+        "deferred_session_count": len(deferred_sessions),
+        "deferred_sessions": deferred_sessions[:20],
+        "search_index": search_state,
+        "atlas_index": atlas_state,
+        "action_counts": action_counts,
+        "actions": action_results,
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__index-maintenance"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, index_maintenance_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def index_maintenance_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Index Maintenance",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- reason: `{payload.get('reason')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- route_drift_count: `{payload.get('route_drift_count')}`",
+        f"- deferred_session_count: `{payload.get('deferred_session_count')}`",
+        f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
+        f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
+        "",
+        "## Actions",
+        "",
+        "| action | needed | status | reason |",
+        "| --- | --- | --- | --- |",
+    ]
+    for action in payload.get("actions", []) if isinstance(payload.get("actions"), list) else []:
+        if not isinstance(action, dict):
+            continue
+        lines.append(f"| `{action.get('id')}` | `{action.get('needed')}` | `{action.get('status')}` | `{action.get('reason')}` |")
+    drift = payload.get("route_drift") if isinstance(payload.get("route_drift"), list) else []
+    if drift:
+        lines.extend(["", "## Route Drift", ""])
+        for item in drift[:40]:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('session_label') or item.get('session_id')}`: `{', '.join(str(reason) for reason in item.get('reasons', []) if reason)}`")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
+def index_maintenance_print_payload(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    if full:
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"route_drift", "deferred_sessions"}
+    }
 
 
 def title_repair_candidate(aoa_root: Path, record: dict[str, Any]) -> dict[str, Any]:
@@ -9615,6 +11273,7 @@ def set_session_semantic_name(
 
     ok_to_apply = apply and not diagnostics
     result_status = "planned"
+    maintenance_job: Path | None = None
     if ok_to_apply:
         updated_names: list[dict[str, Any]] = []
         replaced = False
@@ -9638,6 +11297,13 @@ def set_session_semantic_name(
         write_json(manifest_path, manifest)
         update_session_index_identity(session_dir, manifest)
         update_registry(aoa_root, manifest, session_dir)
+        maintenance_job = enqueue_index_maintenance_job(
+            aoa_root,
+            reason="semantic_name_applied",
+            target="all",
+            sample_audit=False,
+            max_raw_mb=16,
+        )
         result_status = "applied"
     elif diagnostics:
         result_status = "diagnostic"
@@ -9655,6 +11321,12 @@ def set_session_semantic_name(
         or manifest.get("session_label"),
         "session_dir": str(session_dir),
         "proposed": proposed,
+        "maintenance_job": str(maintenance_job) if maintenance_job else "",
+        "maintenance_next": (
+            "hook-worker will refresh portable search, atlas, and readiness from the queued maintenance job"
+            if maintenance_job
+            else ""
+        ),
         "diagnostics": diagnostics,
     }
     if write_report:
@@ -9808,7 +11480,7 @@ def path_mentions_from_text(text: str) -> list[str]:
     mentions: list[str] = []
     for match in ABSOLUTE_PATH_RE.finditer(text or ""):
         value = match.group(0).rstrip(".,:;)]}")
-        if value in {"/", "~"}:
+        if value == "~" or not is_indexable_path_mention(value):
             continue
         mentions.append(value)
     return mentions
@@ -9816,12 +11488,24 @@ def path_mentions_from_text(text: str) -> list[str]:
 
 def inferred_owner_root_for_path(path_value: str) -> str | None:
     raw = str(path_value or "").strip()
-    if not raw:
+    if not raw or "\x00" in raw:
         return None
     try:
         expanded = str(Path(raw).expanduser())
-    except RuntimeError:
-        expanded = raw
+    except (OSError, RuntimeError, ValueError):
+        return None
+    expanded_path = Path(expanded)
+    try:
+        expanded_exists = expanded_path.exists()
+    except (OSError, RuntimeError, ValueError):
+        expanded_exists = False
+    if expanded_exists:
+        start = expanded_path if expanded_path.is_dir() else expanded_path.parent
+        for parent in [start, *start.parents]:
+            if (parent / ".git").exists() or (parent / "AGENTS.md").exists():
+                return str(parent)
+            if parent.parent == parent:
+                break
     parts = Path(expanded).parts
     if len(parts) < 3 or parts[0] != "/":
         return None
@@ -9840,6 +11524,39 @@ def inferred_owner_root_for_path(path_value: str) -> str | None:
     return None
 
 
+def work_context_root_for_path(path_value: str) -> str | None:
+    raw = str(path_value or "").strip()
+    if not raw or "\x00" in raw:
+        return None
+    try:
+        expanded = str(Path(raw).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    parts = Path(expanded).parts
+    if len(parts) < 3 or parts[0] != "/":
+        return None
+    if len(parts) >= 6 and parts[:5] == ("/", "home", "dionysus", ".codex", "memories"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 6 and parts[:5] == ("/", "home", "dionysus", ".codex", "sessions"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 4 and parts[:3] == ("/", "srv", "AbyssOS"):
+        child = parts[3]
+        if child == ".aoa":
+            return "/srv/AbyssOS/.aoa"
+        if child == "bundles" and len(parts) >= 5:
+            return str(Path(*parts[:5]))
+        if child and not child.startswith(".") and child not in {"generated", "worktrees"}:
+            return str(Path(*parts[:4]))
+        return "/srv/AbyssOS"
+    if len(parts) >= 5 and parts[:3] == ("/", "srv", "work"):
+        return str(Path(*parts[:4]))
+    if len(parts) >= 6 and parts[:4] == ("/", "srv", "games", "modding"):
+        return str(Path(*parts[:5]))
+    if len(parts) >= 5 and parts[:4] == ("/", "home", "dionysus", "src"):
+        return str(Path(*parts[:5]))
+    return inferred_owner_root_for_path(expanded)
+
+
 def owner_name_from_root(owner_root: str | None) -> str | None:
     if not owner_root:
         return None
@@ -9849,6 +11566,129 @@ def owner_name_from_root(owner_root: str | None) -> str | None:
     if path.name:
         return path.name
     return owner_root
+
+
+def work_context_name_from_root(root: str | None) -> str | None:
+    if not root:
+        return None
+    path = Path(root)
+    raw = str(path)
+    if raw == "/srv/AbyssOS/.aoa":
+        return "aoa-session-memory"
+    if raw == "/home/dionysus/.codex/memories":
+        return "codex-memories"
+    if raw == "/home/dionysus/.codex/sessions":
+        return "codex-transcripts"
+    if raw == "/srv/AbyssOS":
+        return "AbyssOS"
+    return path.name or raw
+
+
+def work_context_family_from_name(name: str | None, root: str | None) -> str:
+    label = str(name or "").lower()
+    root_text = str(root or "").lower()
+    if label in {"aoa-session-memory"} or root_text.endswith("/.aoa"):
+        return "aoa-session-memory"
+    if label in {"codex-memories", "codex-transcripts"} or ".codex/" in root_text:
+        return "codex-memory"
+    if label == "abyssos":
+        return "abyssos-workspace"
+    if label == "agents-of-abyss" or label.startswith("aoa-"):
+        return "aoa"
+    if "tree-of-sophia" in label or "sophia" in label or label in {"tos", "tree-of-sophia"}:
+        return "tree-of-sophia"
+    if label.startswith("abyss") or "abyss" in label:
+        return "abyss"
+    return "external"
+
+
+def work_context_for_session_events(source: dict[str, Any], events: list[RawEvent]) -> dict[str, Any]:
+    scores: Counter[str] = Counter()
+    evidence_by_root: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def add(root: str | None, *, score: int, kind: str, value: Any, ref: str | None = None) -> None:
+        if not root:
+            return
+        scores[root] += score
+        bucket = evidence_by_root[root]
+        if len(bucket) < 12:
+            item: dict[str, Any] = {"kind": kind, "value": short_text(value, max_chars=180), "score": score}
+            if ref:
+                item["ref"] = ref
+            bucket.append(item)
+
+    cwd_value = source.get("cwd") if isinstance(source, dict) else ""
+    if cwd_value:
+        add(work_context_root_for_path(str(cwd_value)), score=20, kind="cwd", value=cwd_value)
+    transcript_path = source.get("transcript_path") if isinstance(source, dict) else ""
+    if transcript_path:
+        add(work_context_root_for_path(str(transcript_path)), score=1, kind="transcript_path", value=transcript_path)
+
+    for event in events:
+        texts: list[str] = [event.title, " ".join(event.tags)]
+        for key in ("command", "tool_name", "path"):
+            value = event.facets.get(key)
+            if value:
+                texts.append(str(value))
+        session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
+        surface = str(session_act.get("memory_surface") or "")
+        if surface == "codex_memories":
+            add("/home/dionysus/.codex/memories", score=5, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
+        elif surface == "codex_transcripts":
+            add("/home/dionysus/.codex/sessions", score=4, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
+        elif surface == "aoa_session_memory":
+            add("/srv/AbyssOS/.aoa", score=5, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
+        for text in texts:
+            for mention in path_mentions_from_text(text):
+                add(work_context_root_for_path(mention), score=4, kind="indexed_path", value=mention, ref=f"raw:line:{event.line_no}")
+
+    if not scores:
+        return {
+            "schema_version": WORK_CONTEXT_SCHEMA_VERSION,
+            "status": "unresolved",
+            "work_root": None,
+            "work_name": None,
+            "work_family": "unknown",
+            "confidence": "none",
+            "score": 0,
+            "evidence": [],
+            "alternates": [],
+        }
+    ranked = scores.most_common()
+    root, score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    if second_score and second_score >= max(5, int(score * 0.75)):
+        status = "ambiguous"
+        confidence = "low"
+    elif score >= 10:
+        status = "resolved"
+        confidence = "high"
+    elif score >= 4:
+        status = "resolved_low_confidence"
+        confidence = "medium"
+    else:
+        status = "weak_signal"
+        confidence = "low"
+    name = work_context_name_from_root(root)
+    return {
+        "schema_version": WORK_CONTEXT_SCHEMA_VERSION,
+        "status": status,
+        "work_root": root,
+        "work_name": name,
+        "work_family": work_context_family_from_name(name, root),
+        "confidence": confidence,
+        "score": score,
+        "evidence": evidence_by_root.get(root, []),
+        "alternates": [
+            {
+                "work_root": item_root,
+                "work_name": work_context_name_from_root(item_root),
+                "work_family": work_context_family_from_name(work_context_name_from_root(item_root), item_root),
+                "score": item_score,
+            }
+            for item_root, item_score in ranked[1:6]
+        ],
+    }
 
 
 def owner_resolution_for_session(
@@ -10070,6 +11910,7 @@ def first_wave_session_profile(
     phase_counts: Counter[str] = Counter()
     actor_counts: Counter[str] = Counter()
     outcome_counts: Counter[str] = Counter()
+    session_act_counts: Counter[str] = Counter()
     missing_indexes: list[str] = []
     diagnostics: list[str] = []
     manual_review_reasons: list[str] = []
@@ -10139,6 +11980,10 @@ def first_wave_session_profile(
                 route_counts[route] += 1
             for tag in tags:
                 tag_counts[tag] += 1
+            facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+            session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+            if session_act.get("kind"):
+                session_act_counts[str(session_act["kind"])] += 1
             mechanics_relevant = (
                 event_type in mechanics_event_types
                 or bool(mechanics_tags.intersection(tags))
@@ -10221,11 +12066,13 @@ def first_wave_session_profile(
         "phase_counts": dict(sorted(phase_counts.items())),
         "actor_counts": dict(sorted(actor_counts.items())),
         "outcome_counts": dict(sorted(outcome_counts.items())),
+        "session_act_counts": dict(sorted(session_act_counts.items())),
         "route_counts": dict(sorted(route_counts.items())),
         "mechanics_signal_counts": dict(sorted(mechanics_signal_counts.items())),
         "tag_counts": dict(sorted(tag_counts.items())),
         "project_grounding": project_grounding,
         "owner_resolution": owner_resolution,
+        "work_context": manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {},
         "raw_exists": raw_exists,
         "missing_index_count": len(missing_indexes),
         "missing_indexes_sample": missing_indexes[:12],
@@ -11831,7 +13678,8 @@ def command_rehydrate(args: argparse.Namespace) -> int:
 
 
 def command_name_session(args: argparse.Namespace) -> int:
-    root = aoa_root_for(Path(args.workspace_root) if args.workspace_root else None, Path(args.aoa_root) if args.aoa_root else None)
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     payload = set_session_semantic_name(
         aoa_root=root,
         target=args.session,
@@ -11849,6 +13697,9 @@ def command_name_session(args: argparse.Namespace) -> int:
         verify_raw_hash=not args.skip_raw_hash_check,
         write_report=args.write_report,
     )
+    if payload.get("maintenance_job") and not args.no_maintenance_worker:
+        launched = launch_hook_worker(workspace_root=explicit_workspace, aoa_root=root)
+        payload["maintenance_worker_launched"] = launched
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -12449,6 +14300,7 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- db_path: `{payload.get('db_path')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
+        f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
         f"- document_count: `{payload.get('document_count')}`",
         f"- session_documents: `{payload.get('session_document_count')}`",
         f"- segment_documents: `{payload.get('segment_document_count')}`",
@@ -12464,11 +14316,13 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- {item}")
     else:
         lines.append("- none")
-    lines.extend(["", "## Sessions", "", "| session | documents | status |", "| --- | ---: | --- |"])
+    lines.extend(["", "## Sessions", "", "| session | documents | status | raw text |", "| --- | ---: | --- | --- |"])
     for item in payload.get("sessions", []) if isinstance(payload.get("sessions"), list) else []:
         if not isinstance(item, dict):
             continue
-        lines.append(f"| `{item.get('session_label')}` | {item.get('document_count', 0)} | `{item.get('status')}` |")
+        lines.append(
+            f"| `{item.get('session_label')}` | {item.get('document_count', 0)} | `{item.get('status')}` | `{item.get('raw_text_status')}` |"
+        )
     return "\n".join(lines)
 
 
@@ -12500,7 +14354,12 @@ def default_search_provider_config() -> dict[str, Any]:
                 "quality_gate": ["abyss-machine", "nervous", "quality-audit", "--json"],
                 "refresh_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--json"],
                 "refresh_index_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--refresh-index", "--json"],
+                "semantic_status_gate": ["abyss-machine", "nervous", "semantic-status", "--json"],
+                "semantic_search_command": ["abyss-machine", "nervous", "semantic-search", "--query", "{query}", "--limit", "{limit}", "--json"],
                 "recall_command": ["abyss-machine", "nervous", "recall", "--mode", "lexical", "--query", "{query}", "--limit", "{limit}", "--json"],
+                "rerank_api_health_url": "http://127.0.0.1:5405/health",
+                "rerank_api_url": "http://127.0.0.1:5405/rerank",
+                "rerank_candidate_limit": 24,
                 "write_policy": "read_only_status_by_default",
                 "host_write_requires_operator_enablement": True,
             },
@@ -12586,6 +14445,62 @@ def run_json_command(command: list[str], *, timeout: int = 30, cwd: Path | None 
     }
 
 
+def run_json_url(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    if not url:
+        return {"ok": False, "status": "invalid_url", "error": "empty url", "url": url}
+    data: bytes | None = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace").strip()
+            status_code = int(getattr(response, "status", 0) or 0)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        return {
+            "ok": False,
+            "status": "http_error",
+            "status_code": exc.code,
+            "url": url,
+            "body": short_text(body, max_chars=1200),
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {"ok": False, "status": "error", "url": url, "error": f"{exc.__class__.__name__}: {exc}"}
+    parsed: Any = None
+    parse_error = ""
+    if body:
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            parse_error = f"{exc.__class__.__name__}: {exc}"
+    if not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "status": "invalid_json",
+            "status_code": status_code,
+            "url": url,
+            "body": short_text(body, max_chars=1200),
+            "parse_error": parse_error,
+        }
+    return {
+        "ok": 200 <= status_code < 300 and bool(parsed.get("ok", True)),
+        "status": "ok" if 200 <= status_code < 300 else "http_error",
+        "status_code": status_code,
+        "url": url,
+        "payload": parsed,
+    }
+
+
 def summary_warning_count(payload: dict[str, Any]) -> int:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     return int_value(summary.get("warnings"), 0)
@@ -12610,6 +14525,74 @@ def compact_gate_result(result: dict[str, Any]) -> dict[str, Any]:
         "fails": summary_fail_count(payload),
         "error": result.get("error"),
         "stderr": result.get("stderr"),
+    }
+
+
+def compact_semantic_status_result(result: dict[str, Any]) -> dict[str, Any]:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    embedding = payload.get("embedding") if isinstance(payload.get("embedding"), dict) else {}
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    count_meta = counts.get("meta") if isinstance(counts.get("meta"), dict) else {}
+    freshness = payload.get("freshness") if isinstance(payload.get("freshness"), dict) else {}
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    notices = payload.get("notices") if isinstance(payload.get("notices"), list) else []
+    ready = bool(result.get("ok")) and bool(payload.get("ready", payload.get("ok", False)))
+    stale = bool(freshness.get("stale"))
+    status = "ready"
+    if not ready:
+        status = str(result.get("status") or "unavailable")
+    elif stale:
+        status = "stale"
+    return {
+        "ok": ready and not stale,
+        "status": status,
+        "returncode": result.get("returncode"),
+        "command": result.get("command"),
+        "schema": payload.get("schema") or payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "model_dir": embedding.get("model_dir"),
+        "model_exists": embedding.get("model_exists"),
+        "device": embedding.get("device"),
+        "dimension": embedding.get("dimension"),
+        "vectors": counts.get("vectors"),
+        "source_chunks": freshness.get("source_chunks") or count_meta.get("source_chunks"),
+        "delta_chunks": freshness.get("delta_chunks"),
+        "partial": freshness.get("partial"),
+        "stale": stale,
+        "freshness": {
+            "source_index_changed": freshness.get("source_index_changed"),
+            "bounded_source_drift": freshness.get("bounded_source_drift"),
+            "stale_by_delta": freshness.get("stale_by_delta"),
+            "stale_by_age": freshness.get("stale_by_age"),
+            "embedding_config_stale": freshness.get("embedding_config_stale"),
+        },
+        "warning_count": len(warnings) + (1 if stale else 0),
+        "notice_count": len(notices),
+        "error": result.get("error"),
+        "stderr": result.get("stderr"),
+    }
+
+
+def compact_rerank_health_result(result: dict[str, Any]) -> dict[str, Any]:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    ok = bool(result.get("ok")) and bool(payload.get("ok", True))
+    return {
+        "ok": ok,
+        "status": "ready" if ok else str(result.get("status") or "unavailable"),
+        "url": result.get("url"),
+        "status_code": result.get("status_code"),
+        "service": payload.get("service"),
+        "model": payload.get("model"),
+        "backend": payload.get("backend"),
+        "device": payload.get("device"),
+        "model_dir": payload.get("model_dir"),
+        "model_dir_exists": payload.get("model_dir_exists"),
+        "max_length": payload.get("max_length"),
+        "batch_size": payload.get("batch_size"),
+        "loaded": payload.get("loaded"),
+        "idle_unload_sec": payload.get("idle_unload_sec"),
+        "fake_mode": payload.get("fake_mode"),
+        "error": result.get("error"),
     }
 
 
@@ -12705,7 +14688,28 @@ def host_provider_status(
     if not quality.get("ok"):
         diagnostics.append("quality_gate_failed")
 
-    warning_count = int(gates["capability_gate"].get("warnings") or 0) + int(gates["quality_gate"].get("warnings") or 0)
+    models: dict[str, Any] = {}
+    model_warning_count = 0
+    semantic_command = provider.get("semantic_status_gate") if isinstance(provider.get("semantic_status_gate"), list) else []
+    if semantic_command:
+        semantic_status = run_json_command([str(part) for part in semantic_command], timeout=timeout)
+        models["embedding"] = compact_semantic_status_result(semantic_status)
+        if not models["embedding"].get("ok"):
+            model_warning_count += 1
+            diagnostics.append(f"embedding_status:{models['embedding'].get('status')}")
+    rerank_health_url = str(provider.get("rerank_api_health_url") or "")
+    if rerank_health_url:
+        rerank_health = run_json_url(rerank_health_url, timeout=min(timeout, 15))
+        models["reranker"] = compact_rerank_health_result(rerank_health)
+        if not models["reranker"].get("ok"):
+            model_warning_count += 1
+            diagnostics.append(f"reranker_status:{models['reranker'].get('status')}")
+
+    warning_count = (
+        int(gates["capability_gate"].get("warnings") or 0)
+        + int(gates["quality_gate"].get("warnings") or 0)
+        + model_warning_count
+    )
     fail_count = int(gates["capability_gate"].get("fails") or 0) + int(gates["quality_gate"].get("fails") or 0)
     if warning_count:
         diagnostics.append("host_backend_has_warnings")
@@ -12727,6 +14731,7 @@ def host_provider_status(
         "warning_count": warning_count,
         "fail_count": fail_count,
         "gates": gates,
+        "models": models,
         "diagnostics": diagnostics,
     }
 
@@ -12829,6 +14834,19 @@ def search_provider_status_markdown(payload: dict[str, Any]) -> str:
             continue
         diagnostics = ", ".join(str(value) for value in item.get("diagnostics", []) if value) if isinstance(item.get("diagnostics"), list) else ""
         lines.append(f"| `{name}` | `{item.get('status')}` | `{item.get('ok')}` | `{item.get('role')}` | {diagnostics or 'none'} |")
+    model_rows: list[str] = []
+    for name, item in providers.items():
+        if not isinstance(item, dict) or not isinstance(item.get("models"), dict):
+            continue
+        for model_name, model in item["models"].items():
+            if not isinstance(model, dict):
+                continue
+            model_rows.append(
+                f"| `{name}` | `{model_name}` | `{model.get('status')}` | `{model.get('ok')}` | `{model.get('model') or model.get('model_dir') or ''}` | `{model.get('device') or ''}` |"
+            )
+    if model_rows:
+        lines.extend(["", "## Local Model Gates", "", "| provider | model gate | status | ok | model | device |", "| --- | --- | --- | --- | --- | --- |"])
+        lines.extend(model_rows)
     lines.extend(["", "## Authority Law", "", str(payload.get("authority_law") or "")])
     return "\n".join(lines)
 
@@ -12851,6 +14869,46 @@ def compact_host_recall_payload(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compact_host_semantic_payload(result: dict[str, Any], *, sample_limit: int = 5) -> dict[str, Any]:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    hits: list[dict[str, Any]] = []
+    for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        hits.append(
+            {
+                "source_id": item.get("source_id"),
+                "document_schema": item.get("document_schema"),
+                "title": item.get("title"),
+                "score": item.get("score") or item.get("semantic_score"),
+                "generated_at": item.get("generated_at"),
+                "indexed_at": item.get("indexed_at"),
+                "snippet": short_text(item.get("snippet") or item.get("body_preview"), max_chars=360),
+            }
+        )
+        if len(hits) >= sample_limit:
+            break
+    embedding_status = payload.get("embedding_status") if isinstance(payload.get("embedding_status"), dict) else {}
+    return {
+        "ok": bool(result.get("ok")),
+        "status": result.get("status"),
+        "command": result.get("command"),
+        "schema": payload.get("schema") or payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "query": payload.get("query"),
+        "result_count": len(payload.get("results", [])) if isinstance(payload.get("results"), list) else 0,
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+        "embedding": {
+            "ok": embedding_status.get("ok"),
+            "dim": embedding_status.get("dim"),
+            "device": embedding_status.get("device"),
+            "model_dir": embedding_status.get("model_dir"),
+        },
+        "hits": hits,
+        "truth_level": "host_semantic_context_only_not_aoa_authority",
+    }
+
+
 def host_context_overlay(
     *,
     config: dict[str, Any],
@@ -12869,6 +14927,131 @@ def host_context_overlay(
     ]
     result = run_json_command(rendered, timeout=timeout)
     return compact_host_recall_payload(result)
+
+
+def host_semantic_overlay(
+    *,
+    config: dict[str, Any],
+    provider_name: str,
+    query: str,
+    limit: int,
+    timeout: int,
+) -> dict[str, Any]:
+    provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
+    command = provider.get("semantic_search_command") if isinstance(provider, dict) else None
+    if not isinstance(command, list):
+        return {"ok": False, "status": "not_supported", "diagnostics": ["provider has no semantic_search_command"]}
+    rendered = [
+        str(part).replace("{query}", query).replace("{limit}", str(max(1, min(limit, 10))))
+        for part in command
+    ]
+    result = run_json_command(rendered, timeout=timeout)
+    return compact_host_semantic_payload(result)
+
+
+def rerank_document_for_search_hit(hit: dict[str, Any]) -> str:
+    parts = [
+        f"title: {hit.get('title') or ''}",
+        f"session: {hit.get('session_label') or ''}",
+        f"event_type: {hit.get('event_type') or ''}",
+        f"conversation_act: {hit.get('conversation_act') or ''}",
+        f"session_act: {hit.get('session_act') or ''}",
+        f"route_layers: {hit.get('route_layers') or ''}",
+        f"route_signals: {hit.get('route_signals') or ''}",
+        f"snippet: {hit.get('snippet') or ''}",
+    ]
+    return short_text("\n".join(part for part in parts if part.strip()), max_chars=2000)
+
+
+def local_rerank_search_results(
+    *,
+    config: dict[str, Any],
+    provider_name: str,
+    query: str,
+    results: list[dict[str, Any]],
+    timeout: int,
+    candidate_limit: int | None = None,
+) -> dict[str, Any]:
+    provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
+    url = str(provider.get("rerank_api_url") or "")
+    if not url:
+        return {"ok": False, "status": "not_supported", "diagnostics": ["provider has no rerank_api_url"], "results": results}
+    if not query.strip():
+        return {"ok": False, "status": "empty_query", "diagnostics": ["rerank requires a non-empty query"], "results": results}
+    configured_limit = int_value(provider.get("rerank_candidate_limit"), 24)
+    effective_limit = max(1, min(candidate_limit or configured_limit or 24, len(results)))
+    candidates = results[:effective_limit]
+    documents = [rerank_document_for_search_hit(hit) for hit in candidates]
+    response = run_json_url(
+        url,
+        method="POST",
+        payload={"query": query, "documents": documents},
+        timeout=min(timeout, 60),
+    )
+    payload = response.get("payload") if isinstance(response.get("payload"), dict) else {}
+    ranked_items = payload.get("results") if isinstance(payload.get("results"), list) else []
+    if not response.get("ok") or not ranked_items:
+        return {
+            "ok": False,
+            "status": response.get("status") or "empty_rerank",
+            "url": url,
+            "diagnostics": [str(response.get("error") or response.get("status") or "rerank failed")],
+            "results": results,
+        }
+    by_index: dict[int, dict[str, Any]] = {}
+    for item in ranked_items:
+        if not isinstance(item, dict):
+            continue
+        idx = int_value(item.get("index"), -1)
+        if 0 <= idx < len(candidates):
+            by_index[idx] = item
+    annotated: list[dict[str, Any]] = []
+    for idx, hit in enumerate(candidates):
+        clone = dict(hit)
+        refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+        if refs:
+            clone["refs"] = dict(refs)
+        item = by_index.get(idx, {})
+        score = item.get("relevance_score")
+        clone["host_rerank"] = {
+            "provider": provider_name,
+            "model": payload.get("model"),
+            "score": score,
+            "raw_logit_diff": item.get("raw_logit_diff"),
+            "original_position": idx + 1,
+            "truth_level": "local_rerank_ordering_not_aoa_authority",
+        }
+        annotated.append(clone)
+    annotated.sort(
+        key=lambda hit: (
+            hit.get("host_rerank", {}).get("score") is None,
+            -(float(hit.get("host_rerank", {}).get("score") or 0.0)),
+            int_value(hit.get("host_rerank", {}).get("original_position"), 999999),
+        )
+    )
+    for idx, hit in enumerate(annotated, start=1):
+        if isinstance(hit.get("host_rerank"), dict):
+            hit["host_rerank"]["reranked_position"] = idx
+    final_results = annotated + results[effective_limit:]
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    return {
+        "ok": True,
+        "status": "applied",
+        "url": url,
+        "model": payload.get("model"),
+        "candidate_count": len(candidates),
+        "returned_count": len(ranked_items),
+        "meta": {
+            "backend": meta.get("backend"),
+            "device": meta.get("device"),
+            "documents": meta.get("documents"),
+            "returned": meta.get("returned"),
+            "total_ms": meta.get("total_ms"),
+            "fake_mode": meta.get("fake_mode"),
+        },
+        "truth_level": "local_rerank_ordering_not_aoa_authority",
+        "results": final_results,
+    }
 
 
 def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connection:
@@ -12913,6 +15096,9 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
             object TEXT,
             outcome TEXT,
             conversation_act TEXT,
+            session_act TEXT,
+            route_layers TEXT,
+            route_signals TEXT,
             tags TEXT,
             raw_ref TEXT,
             raw_block_ref TEXT,
@@ -12930,6 +15116,13 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
         )
         """
     )
+    existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    if "session_act" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN session_act TEXT")
+    if "route_layers" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN route_layers TEXT")
+    if "route_signals" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN route_signals TEXT")
     conn.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts
@@ -12938,6 +15131,9 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_signals ON documents(route_signals)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
     conn.commit()
     return conn
@@ -12972,6 +15168,39 @@ def search_doc_text(parts: list[Any], *, max_chars: int = 4000) -> str:
     text = " ".join(part.strip() for part in (search_json_text(part) for part in parts) if part.strip())
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]
+
+
+def packed_route_values(values: Iterable[str]) -> str:
+    items = sorted({str(value) for value in values if str(value or "").strip()})
+    return "|" + "|".join(items) + "|" if items else ""
+
+
+def route_fields_from_counts(route_counts: dict[str, Any]) -> tuple[str, str]:
+    layers: list[str] = []
+    signals: list[str] = []
+    for layer, keys in route_counts.items() if isinstance(route_counts, dict) else []:
+        if not isinstance(keys, dict):
+            continue
+        layer_text = str(layer)
+        layers.append(layer_text)
+        for key in keys:
+            signals.append(route_signal_token(layer_text, str(key)))
+    return packed_route_values(layers), packed_route_values(signals)
+
+
+def route_fields_from_signals(signals_value: Any) -> tuple[str, str]:
+    layers: list[str] = []
+    signals: list[str] = []
+    for signal in signals_value if isinstance(signals_value, list) else []:
+        if not isinstance(signal, dict):
+            continue
+        layer = str(signal.get("layer") or "")
+        key = str(signal.get("key") or "")
+        if layer:
+            layers.append(layer)
+        if layer and key:
+            signals.append(route_signal_token(layer, key))
+    return packed_route_values(layers), packed_route_values(signals)
 
 
 def event_search_text_limit(event_type: str) -> int:
@@ -13065,7 +15294,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             id, doc_type, session_id, session_label, session_title, session_date,
             cwd, archive_status, distillation_status, review_status, segment_id,
             event_id, event_type, family, phase, actor, action, object, outcome,
-            conversation_act, tags, raw_ref, raw_block_ref, segment_ref,
+            conversation_act, session_act, route_layers, route_signals, tags, raw_ref, raw_block_ref, segment_ref,
             manifest_path, raw_path, segment_index_path, raw_sha256,
             segment_index_sha256, freshness_status, stale_reason, title, body,
             payload_json
@@ -13074,7 +15303,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
             :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
             :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
-            :conversation_act, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+            :conversation_act, :session_act, :route_layers, :route_signals, :tags, :raw_ref, :raw_block_ref, :segment_ref,
             :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
             :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
             :payload_json
@@ -13102,6 +15331,9 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
                 "object",
                 "outcome",
                 "conversation_act",
+                "session_act",
+                "route_layers",
+                "route_signals",
                 "tags",
                 "raw_ref",
                 "raw_block_ref",
@@ -13161,7 +15393,12 @@ def raw_event_search_text_by_line(raw_path: Path | None) -> dict[int, str]:
     return texts
 
 
-def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def search_documents_for_record(
+    aoa_root: Path,
+    record: dict[str, Any],
+    *,
+    max_raw_bytes: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     manifest = read_json(manifest_path, {})
@@ -13181,7 +15418,22 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
     distillation_status = str(manifest.get("distillation_status") or record.get("distillation_status") or "")
     review_status = str(manifest.get("review_status") or record.get("review_status") or "")
     cwd = str(source.get("cwd") or record.get("cwd") or "")
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
+    session_index_payload = read_json(session_dir / SESSION_INDEX_JSON, {})
+    session_route_index_current = isinstance(session_index_payload, dict) and route_signal_index_is_current(session_index_payload)
+    session_route_counts = (
+        session_index_payload.get("route_signal_counts")
+        if session_route_index_current and isinstance(session_index_payload.get("route_signal_counts"), dict)
+        else {}
+    )
+    session_route_layers, session_route_signals = route_fields_from_counts(session_route_counts)
     raw_freshness = search_manifest_freshness(manifest, raw_path)
+    raw_bytes = raw_path.stat().st_size if raw_path and raw_path.exists() else 0
+    raw_text_status = "not_available"
+    if raw_path and raw_path.exists():
+        raw_text_status = "available"
+        if max_raw_bytes is not None and raw_bytes > max_raw_bytes:
+            raw_text_status = "skipped_raw_too_large"
     documents: list[dict[str, Any]] = []
 
     base = {
@@ -13209,10 +15461,12 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
             distillation_status,
             review_status,
             cwd,
+            work_context,
             source.get("transcript_path") if isinstance(source, dict) else "",
             raw.get("source_path"),
             raw.get("indexing_status"),
             raw_blocks.get("index"),
+            session_route_counts,
         ],
         max_chars=3000,
     )
@@ -13226,6 +15480,8 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
             "raw_ref": "",
             "raw_block_ref": "",
             "segment_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+            "route_layers": session_route_layers,
+            "route_signals": session_route_signals,
             "tags": "",
         }
     )
@@ -13244,11 +15500,17 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                 "raw_ref": "",
                 "raw_block_ref": "",
                 "segment_ref": str(incident_path),
+                "route_layers": session_route_layers,
+                "route_signals": session_route_signals,
                 "tags": "incident",
             }
         )
 
-    raw_text_by_line = raw_event_search_text_by_line(raw_path)
+    raw_text_by_line = (
+        {}
+        if raw_text_status == "skipped_raw_too_large"
+        else raw_event_search_text_by_line(raw_path)
+    )
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     for segment in segments:
         if not isinstance(segment, dict):
@@ -13258,7 +15520,14 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
         segment_index = read_json(index_path, {}) if index_path.exists() else {}
         segment_sha = sha256_file(index_path) if index_path.exists() else ""
         segment_freshness = segment_index_freshness(index_path if index_path.exists() else None, segment_sha)
+        segment_route_index_current = isinstance(segment_index, dict) and route_signal_index_is_current(segment_index)
+        if not segment_route_index_current:
+            segment_freshness.setdefault("reasons", []).extend(route_signal_index_stale_reasons(segment_index if isinstance(segment_index, dict) else {}))
+            segment_freshness["status"] = "stale"
         freshness = combine_freshness(raw_freshness, segment_freshness)
+        segment_route_layers, segment_route_signals = route_fields_from_counts(
+            segment_index.get("by_route_layer") if segment_route_index_current and isinstance(segment_index.get("by_route_layer"), dict) else {}
+        )
         source_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
         source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
         segment_body = search_doc_text(
@@ -13270,6 +15539,8 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                 source_block.get("rel"),
                 " ".join((segment_index.get("by_type") or {}).keys()) if isinstance(segment_index.get("by_type"), dict) else "",
                 " ".join((segment_index.get("by_conversation_act") or {}).keys()) if isinstance(segment_index.get("by_conversation_act"), dict) else "",
+                " ".join((segment_index.get("by_session_act") or {}).keys()) if isinstance(segment_index.get("by_session_act"), dict) else "",
+                " ".join((segment_index.get("by_route_signal") or {}).keys()) if segment_route_index_current and isinstance(segment_index.get("by_route_signal"), dict) else "",
             ],
             max_chars=2600,
         )
@@ -13288,6 +15559,8 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                 "title": f"{session_label} segment {segment_id} {segment.get('role') or ''}".strip(),
                 "body": segment_body,
                 "raw_ref": "",
+                "route_layers": segment_route_layers,
+                "route_signals": segment_route_signals,
                 "tags": "segment",
             }
         )
@@ -13297,6 +15570,8 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                 continue
             facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
             conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+            session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+            route_layers, route_signals = route_fields_from_signals(facets.get("route_signals")) if segment_route_index_current else ("", "")
             event_type = str(event.get("type") or "")
             line_no = int_value(event.get("line"))
             raw_text = raw_text_by_line.get(line_no, "")
@@ -13316,6 +15591,11 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                     event.get("outcome"),
                     conversation_act.get("kind"),
                     conversation_act.get("intent"),
+                    session_act.get("kind"),
+                    session_act.get("memory_surface"),
+                    session_act.get("tool_namespace"),
+                    route_layers,
+                    route_signals,
                     command,
                     event.get("raw_ref"),
                     event.get("md_anchor"),
@@ -13337,6 +15617,9 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                     "object": str(event.get("object") or ""),
                     "outcome": str(event.get("outcome") or ""),
                     "conversation_act": str(conversation_act.get("kind") or ""),
+                    "session_act": str(session_act.get("kind") or ""),
+                    "route_layers": route_layers,
+                    "route_signals": route_signals,
                     "tags": tags,
                     "raw_ref": str(event.get("raw_ref") or ""),
                     "raw_block_ref": source_block.get("rel") or "",
@@ -13349,7 +15632,15 @@ def search_documents_for_record(aoa_root: Path, record: dict[str, Any]) -> tuple
                     "body": event_body,
                 }
             )
-    return documents, {"status": "indexed", "session_label": session_label, "document_count": len(documents), "diagnostics": []}
+    return documents, {
+        "status": "indexed",
+        "session_label": session_label,
+        "document_count": len(documents),
+        "raw_text_status": raw_text_status,
+        "raw_bytes": raw_bytes,
+        "max_raw_bytes": max_raw_bytes,
+        "diagnostics": [],
+    }
 
 
 def search_index_sessions(
@@ -13359,6 +15650,7 @@ def search_index_sessions(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    max_raw_bytes: int | None = None,
     rebuild: bool = True,
     write_report: bool = False,
 ) -> dict[str, Any]:
@@ -13379,6 +15671,7 @@ def search_index_sessions(
             "target": target,
             "selected_count": 0,
             "document_count": 0,
+            "max_raw_bytes": max_raw_bytes,
             "db_path": str(db_path),
             "diagnostics": [str(exc)],
             "sessions": [],
@@ -13393,6 +15686,7 @@ def search_index_sessions(
             "target": target,
             "selected_count": 0,
             "document_count": 0,
+            "max_raw_bytes": max_raw_bytes,
             "db_path": str(db_path),
             "diagnostics": ["no sessions selected"],
             "sessions": [],
@@ -13411,7 +15705,7 @@ def search_index_sessions(
         conn.commit()
         for record_index, record in enumerate(records, start=1):
             conn.execute("BEGIN")
-            documents, result = search_documents_for_record(aoa_root, record)
+            documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=max_raw_bytes)
             session_results.append(result)
             if result.get("diagnostics"):
                 diagnostics.extend(str(item) for item in result.get("diagnostics", []))
@@ -13433,6 +15727,7 @@ def search_index_sessions(
             "target": target,
             "selected_count": len(records),
             "document_count": 0,
+            "max_raw_bytes": max_raw_bytes,
             "db_path": str(db_path),
             "diagnostics": [f"sqlite_error:{exc}"],
             "sessions": session_results,
@@ -13450,6 +15745,7 @@ def search_index_sessions(
         "since": since,
         "until": until,
         "limit": limit,
+        "max_raw_bytes": max_raw_bytes,
         "selected_count": len(records),
         "document_count": document_count,
         "session_document_count": counts.get("session", 0),
@@ -13519,6 +15815,9 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
         "action": row["action"],
         "outcome": row["outcome"],
         "conversation_act": row["conversation_act"],
+        "session_act": row["session_act"] if "session_act" in row.keys() else None,
+        "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
+        "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
         "title": row["title"],
         "snippet": short_text(row["body"], max_chars=420),
         "refs": refs,
@@ -13532,6 +15831,9 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
                 "event_type": row["event_type"],
                 "family": row["family"],
                 "conversation_act": row["conversation_act"],
+                "session_act": row["session_act"] if "session_act" in row.keys() else None,
+                "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
+                "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
                 "archive_status": row["archive_status"],
             },
             "why_this_is_not_authority": "Search result routes to raw/segment refs; raw transcript and segment indexes remain stronger evidence.",
@@ -13551,6 +15853,9 @@ def search_sessions(
     limit: int = 20,
     provider: str = "portable_sqlite",
     include_host_context: bool = False,
+    include_semantic_context: bool = False,
+    rerank_local: bool = False,
+    rerank_candidate_limit: int | None = None,
     allow_host_warnings: bool = False,
     host_timeout: int = 45,
     session: str | None = None,
@@ -13559,6 +15864,9 @@ def search_sessions(
     family: str | None = None,
     outcome: str | None = None,
     conversation_act: str | None = None,
+    session_act: str | None = None,
+    route_layer: str | None = None,
+    route_signal: str | None = None,
     archive_status: str | None = None,
     freshness_status: str | None = None,
     date_from: str | None = None,
@@ -13596,6 +15904,8 @@ def search_sessions(
             "provider": {"selected": provider, "status": "portable_sqlite_missing"},
             "diagnostics": ["search index missing; run search-index"],
         }
+    schema_conn = init_search_db(db_path, rebuild=False)
+    schema_conn.close()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     filters: list[str] = []
@@ -13610,12 +15920,23 @@ def search_sessions(
         ("documents.family", family),
         ("documents.outcome", outcome),
         ("documents.conversation_act", conversation_act),
+        ("documents.session_act", session_act),
         ("documents.archive_status", archive_status),
         ("documents.freshness_status", freshness_status),
     ]:
         if value:
             filters.append(f"{column} = ?")
             params.append(value)
+    if route_layer:
+        filters.append("documents.route_layers LIKE ?")
+        params.append(f"%|{route_key_slug(route_layer, fallback=str(route_layer))}|%")
+    if route_signal:
+        normalized_signal = str(route_signal)
+        if ":" in normalized_signal:
+            layer, key = normalized_signal.split(":", 1)
+            normalized_signal = route_signal_token(route_key_slug(layer, fallback=layer), route_key_slug(key, fallback=key))
+        filters.append("documents.route_signals LIKE ?")
+        params.append(f"%|{normalized_signal}|%")
     if date_from:
         filters.append("documents.session_date >= ?")
         params.append(parse_date_arg(date_from))
@@ -13664,14 +15985,25 @@ def search_sessions(
     finally:
         conn.close()
     results = [compact_search_result(row, explain=explain, query=query) for row in rows]
+    accelerator_provider = provider if provider != "portable_sqlite" else "abyss_machine_nervous"
     provider_payload = search_provider_status(
         aoa_root=aoa_root,
         provider_name=provider,
         include_host=provider != "portable_sqlite",
         timeout=host_timeout,
     )
+    accelerator_status: dict[str, Any] | None = None
+    if rerank_local or include_semantic_context:
+        accelerator_status = search_provider_status(
+            aoa_root=aoa_root,
+            provider_name=accelerator_provider,
+            include_host=True,
+            timeout=host_timeout,
+        )
     diagnostics: list[str] = []
     provider_overlay: dict[str, Any] | None = None
+    semantic_overlay: dict[str, Any] | None = None
+    local_rerank: dict[str, Any] | None = None
     if provider != "portable_sqlite":
         selected_status = provider_payload.get("providers", {}).get(provider) if isinstance(provider_payload.get("providers"), dict) else {}
         status = str(selected_status.get("status") if isinstance(selected_status, dict) else "")
@@ -13687,6 +16019,42 @@ def search_sessions(
                 limit=limit,
                 timeout=host_timeout,
             )
+    selected_accelerator = (
+        accelerator_status.get("providers", {}).get(accelerator_provider)
+        if isinstance(accelerator_status, dict) and isinstance(accelerator_status.get("providers"), dict)
+        else {}
+    )
+    accelerator_ok = bool(selected_accelerator.get("ok")) if isinstance(selected_accelerator, dict) else False
+    accelerator_status_name = str(selected_accelerator.get("status") or "") if isinstance(selected_accelerator, dict) else ""
+    if (rerank_local or include_semantic_context) and not accelerator_ok:
+        diagnostics.append(f"local accelerator unavailable: {accelerator_status_name or 'unknown'}")
+    elif (rerank_local or include_semantic_context) and accelerator_status_name == "ready_with_warnings" and not allow_host_warnings:
+        diagnostics.append("local accelerator has warnings; use --allow-host-warnings to include semantic/rerank overlays")
+    else:
+        if include_semantic_context:
+            semantic_overlay = host_semantic_overlay(
+                config=provider_config,
+                provider_name=accelerator_provider,
+                query=query,
+                limit=limit,
+                timeout=host_timeout,
+            )
+            if not semantic_overlay.get("ok"):
+                diagnostics.append(f"semantic overlay unavailable: {semantic_overlay.get('status')}")
+        if rerank_local:
+            rerank_payload = local_rerank_search_results(
+                config=provider_config,
+                provider_name=accelerator_provider,
+                query=query,
+                results=results,
+                timeout=host_timeout,
+                candidate_limit=rerank_candidate_limit,
+            )
+            if rerank_payload.get("ok"):
+                results = rerank_payload.pop("results", results)
+                local_rerank = rerank_payload
+            else:
+                diagnostics.append(f"local rerank unavailable: {rerank_payload.get('status')}")
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_results",
@@ -13702,7 +16070,11 @@ def search_sessions(
             "selected": provider,
             "authoritative_result_provider": "portable_sqlite",
             "status": provider_payload,
+            "accelerator_provider": accelerator_provider if rerank_local or include_semantic_context else None,
+            "accelerator_status": accelerator_status,
             "overlay": provider_overlay,
+            "semantic_overlay": semantic_overlay,
+            "local_rerank": local_rerank,
             "authority_law": provider_config.get("authority_law"),
         },
         "result_count": len(results),
@@ -13854,6 +16226,19 @@ def retrieval_packet_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def prioritize_evidence_hits_for_packet(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def score(hit: dict[str, Any]) -> tuple[int, int, str]:
+        refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+        has_raw = bool(str(refs.get("raw") or "").startswith("raw:line:"))
+        doc_type = str(hit.get("doc_type") or "")
+        event_type = str(hit.get("event_type") or "")
+        doc_rank = {"event": 0, "segment": 1, "session": 2, "incident": 3}.get(doc_type, 4)
+        signal_rank = 0 if event_type in {"USER_INTENT", "DECISION", "OPEN_THREAD", "FINAL_STATE", "VERIFICATION", "ERROR"} else 1
+        return (0 if has_raw else 1, doc_rank, f"{signal_rank}:{hit.get('doc_id') or ''}")
+
+    return sorted(hits, key=score)
+
+
 def retrieval_packet(
     *,
     aoa_root: Path,
@@ -13862,6 +16247,9 @@ def retrieval_packet(
     session: str | None = None,
     provider: str = "portable_sqlite",
     include_host_context: bool = False,
+    include_semantic_context: bool = False,
+    rerank_local: bool = False,
+    rerank_candidate_limit: int | None = None,
     allow_host_warnings: bool = False,
     limit: int = 8,
     event_limit: int = 16,
@@ -13878,6 +16266,9 @@ def retrieval_packet(
         limit=max(1, limit),
         provider=provider,
         include_host_context=include_host_context,
+        include_semantic_context=include_semantic_context,
+        rerank_local=rerank_local,
+        rerank_candidate_limit=rerank_candidate_limit,
         allow_host_warnings=allow_host_warnings,
         explain=True,
     )
@@ -13923,6 +16314,9 @@ def retrieval_packet(
         limit=max(1, limit),
         provider=provider,
         include_host_context=include_host_context,
+        include_semantic_context=include_semantic_context,
+        rerank_local=rerank_local,
+        rerank_candidate_limit=rerank_candidate_limit,
         allow_host_warnings=allow_host_warnings,
         session=selected_label,
         explain=True,
@@ -13939,6 +16333,9 @@ def retrieval_packet(
         next_routes.append(f"python3 scripts/aoa_session_memory.py phase-review-assist {shlex.quote(selected_label)} --aoa-root {shlex.quote(str(aoa_root))} --write-report")
     elif not phase_packet.get("present") and int_value(manifest.get("segment_count")) > 8:
         next_routes.append(f"python3 scripts/aoa_session_memory.py phase-discovery {shlex.quote(selected_label)} --aoa-root {shlex.quote(str(aoa_root))} --write --write-report")
+    evidence_hits = prioritize_evidence_hits_for_packet(
+        session_hits_payload.get("results", []) if isinstance(session_hits_payload.get("results"), list) else []
+    )
     packet = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "retrieval_packet",
@@ -13962,7 +16359,7 @@ def retrieval_packet(
             "raw_path": raw.get("path"),
             "raw_sha256": raw.get("sha256"),
         },
-        "evidence_hits": session_hits_payload.get("results", []) if isinstance(session_hits_payload.get("results"), list) else [],
+        "evidence_hits": evidence_hits,
         "continuation_signals": session_event_signals(manifest, event_types=signal_types, limit=event_limit),
         "phase_discovery": phase_packet,
         "next_routes": next_routes,
@@ -14237,6 +16634,7 @@ def command_reindex_sessions(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
     payload = reindex_sessions(
         aoa_root=root,
         target=args.session,
@@ -14244,9 +16642,34 @@ def command_reindex_sessions(args: argparse.Namespace) -> int:
         until=args.until,
         limit=args.limit,
         dry_run=args.dry_run,
+        max_raw_bytes=max_raw_bytes,
+        stale_route_indexes=args.stale_route_indexes,
         write_report=args.write_report,
     )
     print(json.dumps(reindex_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_index_maintenance(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    payload = maintain_indexes(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        apply=args.apply,
+        max_raw_bytes=max_raw_bytes,
+        sample_audit=args.sample_audit,
+        sample_limit=args.sample_limit,
+        max_raw_chars=args.max_raw_chars,
+        write_report=args.write_report,
+        reason=args.reason,
+    )
+    print(json.dumps(index_maintenance_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -14271,12 +16694,14 @@ def command_search_index(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
     payload = search_index_sessions(
         aoa_root=root,
         target=args.session,
         since=since,
         until=args.until,
         limit=args.limit,
+        max_raw_bytes=max_raw_bytes,
         rebuild=not args.no_rebuild,
         write_report=args.write_report,
     )
@@ -14310,6 +16735,9 @@ def command_search(args: argparse.Namespace) -> int:
         limit=args.limit,
         provider=args.provider,
         include_host_context=args.include_host_context,
+        include_semantic_context=args.include_semantic_context,
+        rerank_local=args.rerank_local,
+        rerank_candidate_limit=args.rerank_candidate_limit,
         allow_host_warnings=args.allow_host_warnings,
         host_timeout=args.host_timeout,
         session=args.session_filter,
@@ -14318,11 +16746,1596 @@ def command_search(args: argparse.Namespace) -> int:
         family=args.family,
         outcome=args.outcome,
         conversation_act=args.conversation_act,
+        session_act=args.session_act,
+        route_layer=args.route_layer,
+        route_signal=args.route_signal,
         archive_status=args.archive_status,
         freshness_status=args.freshness_status,
         date_from=args.date_from,
         date_to=args.date_to,
         explain=args.explain,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def atlas_policy_axes(aoa_root: Path) -> list[str]:
+    policy = read_json(aoa_root / ATLAS_POLICY_PATH, {})
+    axes = policy.get("axes") if isinstance(policy, dict) else None
+    names: list[str] = []
+    if isinstance(axes, list):
+        names = [str(axis.get("name")) for axis in axes if isinstance(axis, dict) and axis.get("name")]
+    if not names:
+        names = DEFAULT_ATLAS_AXES
+    return sorted(dict.fromkeys(names))
+
+
+def clear_generated_atlas(aoa_root: Path, axes: list[str]) -> None:
+    maps_root = aoa_root / ATLAS_ROOT
+    for name in ("INDEX.md", "index.json"):
+        path = maps_root / name
+        if path.exists():
+            path.unlink()
+    for axis in axes:
+        axis_dir = maps_root / axis
+        for name in ("INDEX.md", "index.json"):
+            path = axis_dir / name
+            if path.exists():
+                path.unlink()
+        entries_dir = axis_dir / "entries"
+        if not entries_dir.exists():
+            continue
+        for path in entries_dir.iterdir():
+            if path.name == ".gitkeep":
+                continue
+            if path.is_file() and path.suffix in {".json", ".md"}:
+                path.unlink()
+
+
+def route_signal_evidence_from_segment(
+    segment_index: dict[str, Any],
+    *,
+    layer: str | None = None,
+    key: str | None = None,
+    session_act: str | None = None,
+    conversation_act: str | None = None,
+) -> dict[str, str] | None:
+    event_ids: list[str] = []
+    if layer and key:
+        by_layer = segment_index.get("by_route_layer") if isinstance(segment_index.get("by_route_layer"), dict) else {}
+        by_key = by_layer.get(layer) if isinstance(by_layer.get(layer), dict) else {}
+        event_ids = [str(item) for item in by_key.get(key, [])] if isinstance(by_key.get(key), list) else []
+    elif session_act:
+        by_session_act = segment_index.get("by_session_act") if isinstance(segment_index.get("by_session_act"), dict) else {}
+        event_ids = [str(item) for item in by_session_act.get(session_act, [])] if isinstance(by_session_act.get(session_act), list) else []
+    elif conversation_act:
+        by_conversation_act = segment_index.get("by_conversation_act") if isinstance(segment_index.get("by_conversation_act"), dict) else {}
+        event_ids = [str(item) for item in by_conversation_act.get(conversation_act, [])] if isinstance(by_conversation_act.get(conversation_act), list) else []
+    if not event_ids:
+        return None
+    events = segment_index.get("events") if isinstance(segment_index.get("events"), list) else []
+    wanted = event_ids[0]
+    for event in events:
+        if isinstance(event, dict) and str(event.get("event_id") or "") == wanted:
+            return {
+                "raw_ref": str(event.get("raw_ref") or ""),
+                "segment_ref": str(event.get("md_anchor") or segment_index.get("markdown") or ""),
+                "generated_index_ref": str(segment_index.get("_index_path") or ""),
+            }
+    return None
+
+
+def event_evidence_from_segment_index(segment_index: dict[str, Any], event_id: str) -> dict[str, str] | None:
+    for event in segment_index.get("events", []) if isinstance(segment_index.get("events"), list) else []:
+        if isinstance(event, dict) and str(event.get("event_id") or "") == event_id:
+            return {
+                "raw_ref": str(event.get("raw_ref") or ""),
+                "segment_ref": str(event.get("md_anchor") or segment_index.get("markdown") or ""),
+                "generated_index_ref": str(segment_index.get("_index_path") or ""),
+            }
+    return None
+
+
+def first_id(value: Any) -> str:
+    if isinstance(value, list) and value:
+        return str(value[0])
+    return ""
+
+
+def session_axis_evidence_cache(session_dir: Path, manifest: dict[str, Any]) -> dict[str, dict[str, dict[str, str]]]:
+    cache: dict[str, dict[str, dict[str, str]]] = {
+        "route": {},
+        "session_act": {},
+        "conversation_act": {},
+    }
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict):
+            continue
+        index_path = Path(str(segment.get("index") or ""))
+        if not index_path.exists():
+            continue
+        segment_index = read_json(index_path, {})
+        if not isinstance(segment_index, dict):
+            continue
+        segment_index["_index_path"] = str(index_path)
+        by_route_layer = segment_index.get("by_route_layer") if isinstance(segment_index.get("by_route_layer"), dict) else {}
+        for layer, key_map in by_route_layer.items():
+            if not isinstance(key_map, dict):
+                continue
+            for key, ids in key_map.items():
+                token = route_signal_token(str(layer), str(key))
+                if token in cache["route"]:
+                    continue
+                evidence = event_evidence_from_segment_index(segment_index, first_id(ids))
+                if evidence:
+                    cache["route"][token] = {
+                        "session_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+                        **evidence,
+                    }
+        by_session_act = segment_index.get("by_session_act") if isinstance(segment_index.get("by_session_act"), dict) else {}
+        for act, ids in by_session_act.items():
+            if str(act) in cache["session_act"]:
+                continue
+            evidence = event_evidence_from_segment_index(segment_index, first_id(ids))
+            if evidence:
+                cache["session_act"][str(act)] = {
+                    "session_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+                    **evidence,
+                }
+        by_conversation_act = segment_index.get("by_conversation_act") if isinstance(segment_index.get("by_conversation_act"), dict) else {}
+        for act, ids in by_conversation_act.items():
+            if str(act) in cache["conversation_act"]:
+                continue
+            evidence = event_evidence_from_segment_index(segment_index, first_id(ids))
+            if evidence:
+                cache["conversation_act"][str(act)] = {
+                    "session_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+                    **evidence,
+                }
+    return cache
+
+
+def session_axis_evidence(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    layer: str | None = None,
+    key: str | None = None,
+    session_act: str | None = None,
+    conversation_act: str | None = None,
+) -> dict[str, str]:
+    fallback = {
+        "session_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+        "segment_ref": "",
+        "raw_ref": "",
+        "generated_index_ref": str(session_dir / SESSION_INDEX_JSON),
+    }
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict):
+            continue
+        index_path = Path(str(segment.get("index") or ""))
+        if not index_path.exists():
+            continue
+        segment_index = read_json(index_path, {})
+        if not isinstance(segment_index, dict):
+            continue
+        segment_index["_index_path"] = str(index_path)
+        evidence = route_signal_evidence_from_segment(
+            segment_index,
+            layer=layer,
+            key=key,
+            session_act=session_act,
+            conversation_act=conversation_act,
+        )
+        if evidence:
+            return {**fallback, **evidence}
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
+    for item in work_context.get("evidence", []) if isinstance(work_context.get("evidence"), list) else []:
+        if isinstance(item, dict) and item.get("ref"):
+            fallback["raw_ref"] = str(item["ref"])
+            break
+    return fallback
+
+
+def atlas_entry_markdown(entry: dict[str, Any]) -> str:
+    evidence = entry.get("evidence") if isinstance(entry.get("evidence"), dict) else {}
+    lines = [
+        "---",
+        "aoa_artifact_type: atlas_route_entry",
+        f"schema_version: {entry.get('schema_version')}",
+        f"axis: {entry.get('axis')}",
+        f"route_key: {entry.get('route_key')}",
+        f"truth_status: {entry.get('truth_status')}",
+        "---",
+        "",
+        f"# {entry.get('axis')} / {entry.get('route_key')}",
+        "",
+        f"- session: `{entry.get('session')}`",
+        f"- session_id: `{entry.get('session_id', '')}`",
+        f"- work_context: `{entry.get('work_context', '')}`",
+        f"- work_family: `{entry.get('work_family', '')}`",
+        f"- confidence: `{entry.get('confidence')}`",
+        f"- status: `{entry.get('status')}`",
+        f"- signal_count: `{entry.get('signal_count', '')}`",
+        "",
+        "## Next Route",
+        "",
+        entry.get("next_route", ""),
+        "",
+        "## Evidence",
+        "",
+        f"- session_ref: `{evidence.get('session_ref', '')}`",
+        f"- segment_ref: `{evidence.get('segment_ref', '')}`",
+        f"- raw_ref: `{evidence.get('raw_ref', '')}`",
+        f"- generated_index_ref: `{evidence.get('generated_index_ref', '')}`",
+        "",
+        "## Summary",
+        "",
+        entry.get("summary", ""),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def atlas_entry_filename(route_key: str, session_label: str, suffix: str) -> str:
+    route = route_key_slug(route_key, fallback="route", max_chars=80)
+    label = readable_slug(session_label, fallback="session", max_chars=96)
+    return f"{route}__{label}{suffix}"
+
+
+def add_atlas_candidate(
+    entries: list[dict[str, Any]],
+    *,
+    axis: str,
+    route_key: str,
+    signal_count: int,
+    session_dir: Path,
+    manifest: dict[str, Any],
+    record: dict[str, Any],
+    layer: str | None = None,
+    key: str | None = None,
+    session_act: str | None = None,
+    conversation_act: str | None = None,
+    evidence_cache: dict[str, dict[str, dict[str, str]]] | None = None,
+    confidence: str = "medium",
+) -> None:
+    if not route_key:
+        return
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
+    label = str(display.get("label") or record.get("session_label") or session_dir.name)
+    normalized_key = route_key_slug(route_key, fallback="route")
+    evidence: dict[str, str] | None = None
+    if evidence_cache:
+        if layer and key:
+            evidence = evidence_cache.get("route", {}).get(route_signal_token(layer, key))
+        elif session_act:
+            evidence = evidence_cache.get("session_act", {}).get(session_act)
+        elif conversation_act:
+            evidence = evidence_cache.get("conversation_act", {}).get(conversation_act)
+    if evidence is None:
+        evidence = session_axis_evidence(
+            session_dir,
+            manifest,
+            layer=layer,
+            key=key,
+            session_act=session_act,
+            conversation_act=conversation_act,
+        )
+    entries.append(
+        {
+            "schema_version": ATLAS_SCHEMA_VERSION,
+            "axis": axis,
+            "route_key": normalized_key,
+            "status": "generated",
+            "truth_status": "route_signal_not_reviewed_truth",
+            "session": label,
+            "session_id": str(manifest.get("session_id") or record.get("session_id") or ""),
+            "work_context": str(work_context.get("work_name") or ""),
+            "work_family": str(work_context.get("work_family") or ""),
+            "authority_surface": "",
+            "summary": f"{label}: {axis} -> {normalized_key} ({signal_count} signal(s)).",
+            "confidence": confidence,
+            "next_route": f"Read {session_dir / SESSION_INDEX_JSON}, then follow the evidence refs before treating this route as truth.",
+            "evidence": evidence,
+            "related_axes": [
+                related
+                for related in ["by-work-context", "by-session-act", "by-verification-state", "by-route-next-action"]
+                if related != axis
+            ],
+            "signal_count": signal_count,
+            "route_layer": layer or "",
+            "generated_at": utc_now(),
+        }
+    )
+
+
+def atlas_entries_for_session(aoa_root: Path, record: dict[str, Any], axes: set[str]) -> list[dict[str, Any]]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+    if not isinstance(manifest, dict) or not isinstance(session_index, dict):
+        return []
+    entries: list[dict[str, Any]] = []
+    evidence_cache = session_axis_evidence_cache(session_dir, manifest)
+    route_index_current = route_signal_index_is_current(session_index)
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
+    work_name = str(work_context.get("work_name") or "")
+    work_family = str(work_context.get("work_family") or "")
+    if "by-work-context" in axes and work_name:
+        add_atlas_candidate(entries, axis="by-work-context", route_key=work_name, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence=str(work_context.get("confidence") or "medium"))
+    if "by-repo-family" in axes and work_family:
+        add_atlas_candidate(entries, axis="by-repo-family", route_key=work_family, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence=str(work_context.get("confidence") or "medium"))
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    if "by-time" in axes:
+        date_key = str(display.get("date") or record.get("date") or record.get("session_date") or "")
+        if date_key:
+            add_atlas_candidate(entries, axis="by-time", route_key=date_key, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence="high")
+    for act, count in (session_index.get("session_act_counts") or {}).items() if isinstance(session_index.get("session_act_counts"), dict) else []:
+        if "by-session-act" in axes:
+            add_atlas_candidate(entries, axis="by-session-act", route_key=str(act), signal_count=int_value(count, 1), session_dir=session_dir, manifest=manifest, record=record, session_act=str(act), evidence_cache=evidence_cache, confidence="high")
+    for act, count in (session_index.get("conversation_act_counts") or {}).items() if isinstance(session_index.get("conversation_act_counts"), dict) else []:
+        if "by-conversation-act" in axes:
+            add_atlas_candidate(entries, axis="by-conversation-act", route_key=str(act), signal_count=int_value(count, 1), session_dir=session_dir, manifest=manifest, record=record, conversation_act=str(act), evidence_cache=evidence_cache, confidence="high")
+    route_counts = session_index.get("route_signal_counts") if route_index_current and isinstance(session_index.get("route_signal_counts"), dict) else {}
+    for layer, key_counts in route_counts.items():
+        axis = ROUTE_SIGNAL_LAYER_TO_AXIS.get(str(layer))
+        if not axis or axis not in axes or not isinstance(key_counts, dict):
+            continue
+        ranked_keys = sorted(key_counts.items(), key=lambda item: (int_value(item[1]), str(item[0])), reverse=True)
+        for key, count in ranked_keys[:MAX_ATLAS_ROUTE_KEYS_PER_LAYER]:
+            add_atlas_candidate(
+                entries,
+                axis=axis,
+                route_key=str(key),
+                signal_count=int_value(count, 1),
+                session_dir=session_dir,
+                manifest=manifest,
+                record=record,
+                layer=str(layer),
+                key=str(key),
+                evidence_cache=evidence_cache,
+                confidence="medium",
+            )
+    if "by-review-state" in axes:
+        review_key = str(manifest.get("review_status") or manifest.get("distillation_status") or "raw_archived")
+        add_atlas_candidate(entries, axis="by-review-state", route_key=review_key, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence="medium")
+    if "by-index-health" in axes:
+        archive_status = str(manifest.get("archive_status") or "unknown")
+        index_key = archive_status if route_index_current else "route_signal_classifier_stale"
+        add_atlas_candidate(entries, axis="by-index-health", route_key=index_key, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence="medium")
+    if "by-route-next-action" in axes:
+        archive_status = str(manifest.get("archive_status") or "")
+        next_key = "restore_ready" if archive_status == "indexed" and route_index_current else "repair_or_reindex"
+        add_atlas_candidate(entries, axis="by-route-next-action", route_key=next_key, signal_count=1, session_dir=session_dir, manifest=manifest, record=record, evidence_cache=evidence_cache, confidence="medium")
+    return entries
+
+
+def write_atlas_axis_index(axis_dir: Path, axis: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = {
+        "schema_version": ATLAS_SCHEMA_VERSION,
+        "artifact_type": "atlas_axis_index",
+        "axis": axis,
+        "generated_at": utc_now(),
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+    write_json(axis_dir / "index.json", payload)
+    lines = [
+        f"# {axis}",
+        "",
+        "Generated atlas axis index. Entries are route signals, not reviewed truth.",
+        "",
+        "| route_key | session | confidence | evidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for entry in entries:
+        evidence = entry.get("evidence") if isinstance(entry.get("evidence"), dict) else {}
+        lines.append(
+            f"| `{entry.get('route_key')}` | `{entry.get('session')}` | `{entry.get('confidence')}` | `{evidence.get('raw_ref') or evidence.get('segment_ref') or evidence.get('session_ref')}` |"
+        )
+    write_markdown(axis_dir / "INDEX.md", "\n".join(lines) + "\n")
+    return payload
+
+
+def build_agent_atlas(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    clean: bool = True,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    axes = atlas_policy_axes(aoa_root)
+    axis_set = set(axes)
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": ATLAS_SCHEMA_VERSION,
+            "artifact_type": "agent_atlas",
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "entry_count": 0,
+            "diagnostics": [str(exc)],
+        }
+    maps_root = aoa_root / ATLAS_ROOT
+    maps_root.mkdir(parents=True, exist_ok=True)
+    if clean:
+        clear_generated_atlas(aoa_root, axes)
+    by_axis: dict[str, list[dict[str, Any]]] = {axis: [] for axis in axes}
+    diagnostics: list[str] = []
+    for record in records:
+        try:
+            entries = atlas_entries_for_session(aoa_root, record, axis_set)
+        except Exception as exc:
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:atlas_entry_error:{exc}")
+            continue
+        for entry in entries:
+            by_axis.setdefault(str(entry["axis"]), []).append(entry)
+    written_entries: list[dict[str, Any]] = []
+    axis_summaries: list[dict[str, Any]] = []
+    for axis in axes:
+        axis_dir = maps_root / axis
+        entries_dir = axis_dir / "entries"
+        entries_dir.mkdir(parents=True, exist_ok=True)
+        gitkeep = entries_dir / ".gitkeep"
+        if not gitkeep.exists():
+            gitkeep.write_text("", encoding="utf-8")
+        axis_entries = sorted(by_axis.get(axis, []), key=lambda item: (str(item.get("route_key")), str(item.get("session"))))
+        compact_axis_entries: list[dict[str, Any]] = []
+        for entry in axis_entries:
+            json_name = atlas_entry_filename(str(entry["route_key"]), str(entry["session"]), ".json")
+            md_name = atlas_entry_filename(str(entry["route_key"]), str(entry["session"]), ".md")
+            json_path = entries_dir / json_name
+            md_path = entries_dir / md_name
+            write_json(json_path, entry)
+            write_markdown(md_path, atlas_entry_markdown(entry))
+            compact = {
+                "axis": axis,
+                "route_key": entry.get("route_key"),
+                "session": entry.get("session"),
+                "session_id": entry.get("session_id"),
+                "confidence": entry.get("confidence"),
+                "json": str(json_path),
+                "markdown": str(md_path),
+                "evidence": entry.get("evidence"),
+            }
+            compact_axis_entries.append(compact)
+            written_entries.append(compact)
+        axis_index = write_atlas_axis_index(axis_dir, axis, compact_axis_entries)
+        axis_summaries.append({"axis": axis, "entry_count": axis_index["entry_count"], "index": str(axis_dir / "index.json")})
+    root_payload = {
+        "schema_version": ATLAS_SCHEMA_VERSION,
+        "artifact_type": "agent_atlas_index",
+        "generated_at": now,
+        "axis_count": len(axes),
+        "entry_count": len(written_entries),
+        "axes": axis_summaries,
+    }
+    write_json(maps_root / "index.json", root_payload)
+    lines = [
+        "# Agent Atlas",
+        "",
+        "Generated route index. Use it to choose a first route, then follow evidence refs.",
+        "",
+        "| axis | entries | index |",
+        "| --- | ---: | --- |",
+    ]
+    for axis in axis_summaries:
+        lines.append(f"| `{axis['axis']}` | {axis['entry_count']} | `{axis['index']}` |")
+    write_markdown(maps_root / "INDEX.md", "\n".join(lines) + "\n")
+    payload = {
+        "schema_version": ATLAS_SCHEMA_VERSION,
+        "artifact_type": "agent_atlas",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "target": target,
+        "selected_count": len(records),
+        "axis_count": len(axes),
+        "entry_count": len(written_entries),
+        "root_index": str(maps_root / "index.json"),
+        "root_markdown": str(maps_root / "INDEX.md"),
+        "diagnostics": diagnostics,
+        "axes": axis_summaries,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__agent-atlas"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, atlas_build_report_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def atlas_build_report_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Agent Atlas Build",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- entry_count: `{payload.get('entry_count')}`",
+        "",
+        "## Axes",
+        "",
+        "| axis | entries |",
+        "| --- | ---: |",
+    ]
+    for axis in payload.get("axes", []) if isinstance(payload.get("axes"), list) else []:
+        if isinstance(axis, dict):
+            lines.append(f"| `{axis.get('axis')}` | {axis.get('entry_count')} |")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
+
+
+def atlas_axis_states(aoa_root: Path) -> dict[str, dict[str, Any]]:
+    states: dict[str, dict[str, Any]] = {}
+    maps_root = aoa_root / ATLAS_ROOT
+    for axis in atlas_policy_axes(aoa_root):
+        axis_dir = maps_root / axis
+        index_path = axis_dir / "index.json"
+        index_payload = read_json(index_path, {})
+        entry_count = int_value(index_payload.get("entry_count")) if isinstance(index_payload, dict) else 0
+        states[axis] = {
+            "axis": axis,
+            "source_readme_exists": (axis_dir / "README.md").exists(),
+            "entries_dir_exists": (axis_dir / "entries").is_dir(),
+            "generated_index_exists": index_path.exists(),
+            "entry_count": entry_count,
+            "index": str(index_path),
+        }
+    return states
+
+
+def route_readiness_layer_sample(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    layer: str,
+    key_counts: Counter[str],
+) -> dict[str, Any] | None:
+    cache = session_axis_evidence_cache(session_dir, manifest)
+    for key, count in sorted(key_counts.items(), key=lambda item: (int_value(item[1]), str(item[0])), reverse=True):
+        evidence = cache.get("route", {}).get(route_signal_token(layer, str(key)))
+        if evidence:
+            return {
+                "key": str(key),
+                "count": int_value(count),
+                "session": str(manifest.get("session_label") or session_dir.name),
+                "session_id": str(manifest.get("session_id") or ""),
+                "evidence": evidence,
+            }
+    return None
+
+
+def route_layer_readiness(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    sample_limit: int = 2,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "route_layer_readiness",
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "diagnostics": [str(exc)],
+            "requirements": [],
+            "remaining": [],
+        }
+
+    layer_counts: Counter[str] = Counter()
+    layer_session_counts: Counter[str] = Counter()
+    layer_key_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    layer_samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    diagnostics: list[str] = []
+    missing_session_index = 0
+    non_indexable_session_count = 0
+    non_indexable_samples: list[dict[str, str]] = []
+    stale_route_schema = 0
+    stale_route_classifier = 0
+    indexed_session_count = 0
+    current_route_signal_index_count = 0
+
+    required_layers = {
+        str(layer)
+        for item in ROUTE_READINESS_REQUIREMENTS
+        for layer in item.get("required_layers", [])
+    }
+
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        archive_status = (
+            str(manifest.get("archive_status") or record.get("archive_status") or "")
+            if isinstance(manifest, dict)
+            else str(record.get("archive_status") or "")
+        )
+        session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        if not isinstance(session_index, dict) or not session_index:
+            if archive_status and archive_status != "indexed":
+                non_indexable_session_count += 1
+                if len(non_indexable_samples) < 8:
+                    non_indexable_samples.append(
+                        {
+                            "session": str(record.get("session_label") or record.get("session_id") or session_dir.name),
+                            "archive_status": archive_status,
+                        }
+                    )
+            else:
+                missing_session_index += 1
+                diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:missing_session_index")
+            continue
+        indexed_session_count += 1
+        stale_reasons = route_signal_index_stale_reasons(session_index)
+        if "route_signal_schema_mismatch" in stale_reasons:
+            stale_route_schema += 1
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:route_signal_schema_mismatch")
+        if "route_signal_classifier_mismatch" in stale_reasons:
+            stale_route_classifier += 1
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:route_signal_classifier_mismatch")
+        if stale_reasons:
+            continue
+        current_route_signal_index_count += 1
+        route_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
+        session_layers: set[str] = set()
+        for layer, key_map in route_counts.items():
+            layer_name = str(layer)
+            if not isinstance(key_map, dict):
+                continue
+            total = sum(int_value(count) for count in key_map.values())
+            if total <= 0:
+                continue
+            layer_counts[layer_name] += total
+            session_layers.add(layer_name)
+            for key, count in key_map.items():
+                layer_key_counts[layer_name][str(key)] += int_value(count)
+        for layer_name in session_layers:
+            layer_session_counts[layer_name] += 1
+        if isinstance(manifest, dict) and required_layers:
+            for layer_name in sorted(required_layers & set(route_counts.keys())):
+                if len(layer_samples[layer_name]) >= sample_limit:
+                    continue
+                sample = route_readiness_layer_sample(session_dir, manifest, layer_name, layer_key_counts[layer_name])
+                if sample:
+                    layer_samples[layer_name].append(sample)
+
+    axis_states = atlas_axis_states(aoa_root)
+    root_atlas_index = read_json(aoa_root / ATLAS_ROOT / "index.json", {})
+    root_atlas_entry_count = int_value(root_atlas_index.get("entry_count")) if isinstance(root_atlas_index, dict) else 0
+    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_ready = bool(provider_status.get("ok"))
+
+    requirements: list[dict[str, Any]] = []
+    for item in ROUTE_READINESS_REQUIREMENTS:
+        req_layers = [str(layer) for layer in item.get("required_layers", [])]
+        missing_layers = [layer for layer in req_layers if layer_counts.get(layer, 0) <= 0]
+        layer_payloads: list[dict[str, Any]] = []
+        missing_axes: list[str] = []
+        missing_generated_axes: list[str] = []
+        for layer in req_layers:
+            axis = ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, "")
+            axis_state = axis_states.get(axis, {}) if axis else {}
+            if axis and not axis_state.get("source_readme_exists"):
+                missing_axes.append(axis)
+            if axis and layer_counts.get(layer, 0) > 0 and int_value(axis_state.get("entry_count")) <= 0:
+                missing_generated_axes.append(axis)
+            layer_payloads.append(
+                {
+                    "layer": layer,
+                    "axis": axis,
+                    "signal_count": layer_counts.get(layer, 0),
+                    "session_count": layer_session_counts.get(layer, 0),
+                    "top_keys": [
+                        {"key": str(key), "count": int_value(count)}
+                        for key, count in sorted(
+                            layer_key_counts.get(layer, Counter()).items(),
+                            key=lambda pair: (int_value(pair[1]), str(pair[0])),
+                            reverse=True,
+                        )[:8]
+                    ],
+                    "samples": layer_samples.get(layer, [])[:sample_limit],
+                    "axis_state": axis_state,
+                }
+            )
+        status = "covered"
+        if missing_layers or missing_axes or missing_generated_axes:
+            status = "remaining"
+        requirements.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "status": status,
+                "required_layers": req_layers,
+                "missing_layers": missing_layers,
+                "missing_axes": sorted(set(missing_axes)),
+                "missing_generated_axes": sorted(set(missing_generated_axes)),
+                "layers": layer_payloads,
+            }
+        )
+
+    required_axes = sorted({ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, "") for layer in required_layers if ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer)})
+    missing_source_axes = [axis for axis in required_axes if not axis_states.get(axis, {}).get("source_readme_exists")]
+    empty_generated_axes = [
+        axis
+        for axis in required_axes
+        if axis_states.get(axis, {}).get("generated_index_exists") and int_value(axis_states.get(axis, {}).get("entry_count")) <= 0
+    ]
+    global_gates = [
+        {
+            "name": "session_route_signal_indexes",
+            "status": "covered"
+            if current_route_signal_index_count > 0
+            and missing_session_index == 0
+            and stale_route_schema == 0
+            and stale_route_classifier == 0
+            else "remaining",
+            "evidence": {
+                "indexed_session_count": indexed_session_count,
+                "current_route_signal_index_count": current_route_signal_index_count,
+                "missing_session_index": missing_session_index,
+                "non_indexable_session_count": non_indexable_session_count,
+                "non_indexable_samples": non_indexable_samples,
+                "stale_route_schema": stale_route_schema,
+                "stale_route_classifier": stale_route_classifier,
+                "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+                "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+        },
+        {
+            "name": "source_atlas_axes",
+            "status": "covered" if not missing_source_axes else "remaining",
+            "evidence": {
+                "required_axis_count": len(required_axes),
+                "missing_source_axes": missing_source_axes,
+            },
+        },
+        {
+            "name": "generated_atlas_index",
+            "status": "covered" if root_atlas_entry_count > 0 else "remaining",
+            "evidence": {
+                "root_index": str(aoa_root / ATLAS_ROOT / "index.json"),
+                "root_index_exists": (aoa_root / ATLAS_ROOT / "index.json").exists(),
+                "entry_count": root_atlas_entry_count,
+                "empty_generated_axes": empty_generated_axes,
+            },
+        },
+        {
+            "name": "portable_sqlite_search_index",
+            "status": "covered" if provider_ready else "remaining",
+            "evidence": provider_status,
+        },
+    ]
+    remaining = [req for req in requirements if req["status"] != "covered"]
+    remaining.extend(gate for gate in global_gates if gate["status"] != "covered")
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "route_layer_readiness",
+        "generated_at": now,
+        "ok": not remaining and not diagnostics,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(records),
+        "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+        "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        "required_requirement_count": len(ROUTE_READINESS_REQUIREMENTS),
+        "covered_requirement_count": sum(1 for req in requirements if req["status"] == "covered"),
+        "global_gates": global_gates,
+        "requirements": requirements,
+        "diagnostics": diagnostics,
+        "remaining": remaining,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__route-layer-readiness"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, route_layer_readiness_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def route_layer_readiness_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Route Layer Readiness",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- covered_requirements: `{payload.get('covered_requirement_count')}/{payload.get('required_requirement_count')}`",
+        "",
+        "## Global Gates",
+        "",
+        "| gate | status | evidence |",
+        "| --- | --- | --- |",
+    ]
+    for gate in payload.get("global_gates", []) if isinstance(payload.get("global_gates"), list) else []:
+        if not isinstance(gate, dict):
+            continue
+        evidence = gate.get("evidence") if isinstance(gate.get("evidence"), dict) else {}
+        lines.append(f"| `{gate.get('name')}` | `{gate.get('status')}` | `{short_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True), max_chars=180)}` |")
+    lines.extend(["", "## Requirements", "", "| id | title | status | layers | missing |", "| --- | --- | --- | --- | --- |"])
+    for req in payload.get("requirements", []) if isinstance(payload.get("requirements"), list) else []:
+        if not isinstance(req, dict):
+            continue
+        layer_summary = ", ".join(
+            f"{layer.get('layer')}:{layer.get('signal_count')}"
+            for layer in req.get("layers", [])
+            if isinstance(layer, dict)
+        )
+        missing = ", ".join(str(item) for item in req.get("missing_layers", []) if item)
+        lines.append(f"| `{req.get('id')}` | {req.get('title')} | `{req.get('status')}` | `{layer_summary}` | `{missing}` |")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    stale_route_indexes = payload.get("stale_route_indexes") if isinstance(payload.get("stale_route_indexes"), list) else []
+    if stale_route_indexes:
+        lines.extend(["", "## Stale Route Indexes", ""])
+        for item in stale_route_indexes:
+            if not isinstance(item, dict):
+                continue
+            reasons = ", ".join(str(reason) for reason in item.get("reasons", []) if reason)
+            lines.append(f"- `{item.get('session')}`: `{reasons}`")
+    return "\n".join(lines) + "\n"
+
+
+def route_readiness_required_layers() -> list[str]:
+    layers: list[str] = []
+    seen: set[str] = set()
+    for item in ROUTE_READINESS_REQUIREMENTS:
+        for layer in item.get("required_layers", []):
+            layer_name = str(layer)
+            if layer_name and layer_name not in seen:
+                seen.add(layer_name)
+                layers.append(layer_name)
+    return layers
+
+
+def manifest_raw_path(session_dir: Path, manifest: dict[str, Any]) -> Path:
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_value = raw.get("path") if isinstance(raw, dict) else ""
+    return Path(str(raw_value)) if raw_value else session_dir / "raw" / "session.raw.jsonl"
+
+
+def raw_line_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 360) -> dict[str, Any]:
+    line_no = line_from_raw_ref(raw_ref)
+    if not line_no:
+        return {"status": "missing_raw_ref", "line": None, "text": ""}
+    if not raw_path.is_file():
+        return {"status": "raw_unavailable", "line": line_no, "text": ""}
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for current_line, line in enumerate(handle, start=1):
+            if current_line == line_no:
+                return {
+                    "status": "available",
+                    "line": line_no,
+                    "text": short_text(line.rstrip("\n"), max_chars=max_chars),
+                }
+            if current_line > line_no:
+                break
+    return {"status": "raw_line_not_found", "line": line_no, "text": ""}
+
+
+def route_signal_for_event_record(event: dict[str, Any], layer: str, key: str) -> dict[str, Any]:
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    route_signals = facets.get("route_signals") if isinstance(facets.get("route_signals"), list) else []
+    for signal in route_signals:
+        if not isinstance(signal, dict):
+            continue
+        if str(signal.get("layer") or "") == layer and str(signal.get("key") or "") == key:
+            return signal
+    return {}
+
+
+def route_sample_from_event(
+    *,
+    session_dir: Path,
+    manifest: dict[str, Any],
+    record: dict[str, Any],
+    segment_index: dict[str, Any],
+    event: dict[str, Any],
+    layer: str,
+    key: str,
+    requirement: dict[str, Any],
+    max_raw_chars: int,
+) -> dict[str, Any]:
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
+    signal = route_signal_for_event_record(event, layer, key)
+    raw_ref = str(event.get("raw_ref") or "")
+    raw_preview = raw_line_preview(manifest_raw_path(session_dir, manifest), raw_ref, max_chars=max_raw_chars)
+    evidence = {
+        "session_ref": str(session_dir / SESSION_INDEX_MARKDOWN),
+        "segment_ref": str(event.get("md_anchor") or segment_index.get("markdown") or ""),
+        "raw_ref": raw_ref,
+        "generated_index_ref": str(segment_index.get("_index_path") or ""),
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "route_sample",
+        "requirement_id": str(requirement.get("id") or ""),
+        "requirement_title": str(requirement.get("title") or ""),
+        "layer": layer,
+        "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
+        "key": key,
+        "session": str(display.get("label") or record.get("session_label") or session_dir.name),
+        "session_id": str(manifest.get("session_id") or record.get("session_id") or ""),
+        "work_context": {
+            "work_name": str(work_context.get("work_name") or ""),
+            "work_family": str(work_context.get("work_family") or ""),
+            "confidence": str(work_context.get("confidence") or ""),
+        },
+        "event": {
+            "event_id": str(event.get("event_id") or ""),
+            "type": str(event.get("type") or ""),
+            "title": str(event.get("title") or ""),
+            "outcome": str(event.get("outcome") or ""),
+            "confidence": str(event.get("confidence") or ""),
+            "timestamp": str(event.get("timestamp") or ""),
+            "tags": event.get("tags", []) if isinstance(event.get("tags"), list) else [],
+        },
+        "signal": {
+            "confidence": str(signal.get("confidence") or ""),
+            "source": str(signal.get("source") or ""),
+            "detail": str(signal.get("detail") or ""),
+        },
+        "evidence": evidence,
+        "raw_preview": raw_preview,
+        "review": {
+            "status": "unreviewed",
+            "verdict": "",
+            "reviewer_action": "accept | reject | weaken | split | add_rule",
+            "checklist": [
+                "Does the raw preview support this layer/key?",
+                "Is the classifier confidence appropriate?",
+                "Should this signal be split, weakened, or promoted into a rule change?",
+                "Does the evidence ref route to stronger raw or segment material?",
+            ],
+        },
+    }
+
+
+def route_sample_audit(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    sample_limit: int = DEFAULT_ROUTE_SAMPLE_LIMIT,
+    max_raw_chars: int = 360,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "route_sample_audit",
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "diagnostics": [str(exc)],
+            "requirements": [],
+            "samples": [],
+            "remaining": [],
+        }
+
+    required_layers = route_readiness_required_layers()
+    requirement_by_layer = {
+        str(layer): item
+        for item in ROUTE_READINESS_REQUIREMENTS
+        for layer in item.get("required_layers", [])
+    }
+    layer_key_counts: dict[str, Counter[str]] = {layer: Counter() for layer in required_layers}
+    diagnostics: list[str] = []
+    indexed_records: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
+    stale_route_indexes: list[dict[str, Any]] = []
+    stale_route_schema = 0
+    stale_route_classifier = 0
+
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        if not isinstance(manifest, dict) or not manifest:
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:missing_manifest")
+            continue
+        if not isinstance(session_index, dict) or not session_index:
+            archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "")
+            if archive_status and archive_status != "indexed":
+                continue
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:missing_session_index")
+            continue
+        stale_reasons = route_signal_index_stale_reasons(session_index)
+        if "route_signal_schema_mismatch" in stale_reasons:
+            stale_route_schema += 1
+        if "route_signal_classifier_mismatch" in stale_reasons:
+            stale_route_classifier += 1
+        if stale_reasons:
+            stale_route_indexes.append(
+                {
+                    "session": str(record.get("session_label") or record.get("session_id") or session_dir.name),
+                    "path": str(session_dir),
+                    "reasons": stale_reasons,
+                }
+            )
+            continue
+        indexed_records.append((record, session_dir, manifest))
+        route_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
+        for layer in required_layers:
+            key_counts = route_counts.get(layer) if isinstance(route_counts.get(layer), dict) else {}
+            for key, count in key_counts.items():
+                layer_key_counts[layer][str(key)] += int_value(count)
+
+    samples_by_layer: dict[str, list[dict[str, Any]]] = {layer: [] for layer in required_layers}
+    sampled_tokens_by_layer: dict[str, set[str]] = {layer: set() for layer in required_layers}
+    sample_limit = max(0, int_value(sample_limit, DEFAULT_ROUTE_SAMPLE_LIMIT))
+    max_raw_chars = max(40, int_value(max_raw_chars, 360))
+
+    for record, session_dir, manifest in indexed_records:
+        if sample_limit and all(len(samples_by_layer[layer]) >= sample_limit for layer in required_layers):
+            break
+        for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+            if not isinstance(segment, dict):
+                continue
+            index_path = Path(str(segment.get("index") or ""))
+            if not index_path.exists():
+                diagnostics.append(f"{session_dir.name}:{segment.get('segment_id') or ''}:missing_segment_index")
+                continue
+            segment_index = read_json(index_path, {})
+            if not isinstance(segment_index, dict):
+                diagnostics.append(f"{session_dir.name}:{segment.get('segment_id') or ''}:invalid_segment_index")
+                continue
+            stale_reasons = route_signal_index_stale_reasons(segment_index)
+            if stale_reasons:
+                diagnostics.append(f"{session_dir.name}:{segment.get('segment_id') or ''}:{','.join(stale_reasons)}")
+                continue
+            segment_index["_index_path"] = str(index_path)
+            events = segment_index.get("events") if isinstance(segment_index.get("events"), list) else []
+            event_by_id = {
+                str(event.get("event_id") or ""): event
+                for event in events
+                if isinstance(event, dict) and event.get("event_id")
+            }
+            by_route_layer = segment_index.get("by_route_layer") if isinstance(segment_index.get("by_route_layer"), dict) else {}
+            for layer in required_layers:
+                if sample_limit and len(samples_by_layer[layer]) >= sample_limit:
+                    continue
+                key_map = by_route_layer.get(layer) if isinstance(by_route_layer.get(layer), dict) else {}
+                if not key_map:
+                    continue
+                ranked_keys = sorted(
+                    key_map.keys(),
+                    key=lambda key: (
+                        str(key) in sampled_tokens_by_layer[layer],
+                        -layer_key_counts.get(layer, Counter()).get(str(key), 0),
+                        str(key),
+                    ),
+                )
+                for key in ranked_keys:
+                    if sample_limit and len(samples_by_layer[layer]) >= sample_limit:
+                        break
+                    ids = key_map.get(key)
+                    if not isinstance(ids, list):
+                        continue
+                    for event_id in ids:
+                        token = f"{session_dir.name}:{index_path.name}:{event_id}:{key}"
+                        if token in sampled_tokens_by_layer[layer]:
+                            continue
+                        event = event_by_id.get(str(event_id))
+                        if not event:
+                            continue
+                        sample = route_sample_from_event(
+                            session_dir=session_dir,
+                            manifest=manifest,
+                            record=record,
+                            segment_index=segment_index,
+                            event=event,
+                            layer=layer,
+                            key=str(key),
+                            requirement=requirement_by_layer.get(layer, {}),
+                            max_raw_chars=max_raw_chars,
+                        )
+                        samples_by_layer[layer].append(sample)
+                        sampled_tokens_by_layer[layer].add(token)
+                        break
+
+    requirements: list[dict[str, Any]] = []
+    for item in ROUTE_READINESS_REQUIREMENTS:
+        layers = [str(layer) for layer in item.get("required_layers", [])]
+        layer_payloads = []
+        missing_layers = []
+        under_sampled_layers = []
+        for layer in layers:
+            layer_samples = samples_by_layer.get(layer, [])
+            if not layer_samples:
+                missing_layers.append(layer)
+            if sample_limit and len(layer_samples) < sample_limit:
+                under_sampled_layers.append(layer)
+            layer_payloads.append(
+                {
+                    "layer": layer,
+                    "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
+                    "available_signal_count": sum(layer_key_counts.get(layer, Counter()).values()),
+                    "sample_count": len(layer_samples),
+                    "sample_keys": [sample.get("key") for sample in layer_samples],
+                    "samples": layer_samples,
+                }
+            )
+        status = "covered" if not missing_layers else "remaining"
+        requirements.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "status": status,
+                "required_layers": layers,
+                "missing_layers": missing_layers,
+                "under_sampled_layers": under_sampled_layers,
+                "layers": layer_payloads,
+            }
+        )
+
+    samples = [sample for layer in required_layers for sample in samples_by_layer.get(layer, [])]
+    remaining = [req for req in requirements if req["status"] != "covered"]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "route_sample_audit",
+        "generated_at": now,
+        "ok": not remaining and not diagnostics,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "sample_limit": sample_limit,
+        "max_raw_chars": max_raw_chars,
+        "selected_count": len(records),
+        "indexed_session_count": len(indexed_records),
+        "stale_route_schema": stale_route_schema,
+        "stale_route_classifier": stale_route_classifier,
+        "stale_route_index_count": len(stale_route_indexes),
+        "stale_route_indexes": stale_route_indexes,
+        "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
+        "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        "required_layer_count": len(required_layers),
+        "sampled_layer_count": sum(1 for layer in required_layers if samples_by_layer.get(layer)),
+        "total_sample_count": len(samples),
+        "review_status": "unreviewed",
+        "requirements": requirements,
+        "samples": samples,
+        "diagnostics": diagnostics,
+        "remaining": remaining,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__route-sample-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, route_sample_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def route_sample_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Route Sample Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- indexed_session_count: `{payload.get('indexed_session_count')}`",
+        f"- sampled_layers: `{payload.get('sampled_layer_count')}/{payload.get('required_layer_count')}`",
+        f"- total_sample_count: `{payload.get('total_sample_count')}`",
+        f"- review_status: `{payload.get('review_status')}`",
+        "",
+        "Samples are classifier calibration packets. They are unreviewed until a reviewer records a verdict.",
+        "",
+        "## Requirements",
+        "",
+        "| id | status | layers | samples | missing |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for req in payload.get("requirements", []) if isinstance(payload.get("requirements"), list) else []:
+        if not isinstance(req, dict):
+            continue
+        layers = req.get("layers") if isinstance(req.get("layers"), list) else []
+        layer_names = ", ".join(str(layer.get("layer")) for layer in layers if isinstance(layer, dict))
+        sample_count = sum(int_value(layer.get("sample_count")) for layer in layers if isinstance(layer, dict))
+        missing = ", ".join(str(item) for item in req.get("missing_layers", []) if item)
+        lines.append(f"| `{req.get('id')}` | `{req.get('status')}` | `{layer_names}` | {sample_count} | `{missing}` |")
+    lines.extend(["", "## Samples", ""])
+    for sample in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
+        if not isinstance(sample, dict):
+            continue
+        evidence = sample.get("evidence") if isinstance(sample.get("evidence"), dict) else {}
+        raw_preview = sample.get("raw_preview") if isinstance(sample.get("raw_preview"), dict) else {}
+        signal = sample.get("signal") if isinstance(sample.get("signal"), dict) else {}
+        event = sample.get("event") if isinstance(sample.get("event"), dict) else {}
+        lines.extend(
+            [
+                f"### {sample.get('layer')} / {sample.get('key')}",
+                "",
+                f"- requirement: `{sample.get('requirement_id')}`",
+                f"- session: `{sample.get('session')}`",
+                f"- event: `{event.get('event_id')}` `{event.get('type')}` `{event.get('outcome')}`",
+                f"- signal: confidence=`{signal.get('confidence')}` source=`{signal.get('source')}`",
+                f"- raw_ref: `{evidence.get('raw_ref')}`",
+                f"- segment_ref: `{evidence.get('segment_ref')}`",
+                f"- generated_index_ref: `{evidence.get('generated_index_ref')}`",
+                f"- review_status: `{sample.get('review', {}).get('status') if isinstance(sample.get('review'), dict) else 'unreviewed'}`",
+                "",
+                "```text",
+                str(raw_preview.get("text") or ""),
+                "```",
+                "",
+            ]
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
+def command_route_sample_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = route_sample_audit(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        sample_limit=args.sample_limit,
+        max_raw_chars=args.max_raw_chars,
+        write_report=args.write_report,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"requirements", "samples"}
+        }
+        stdout_payload["requirement_overview"] = [
+            {
+                "id": req.get("id"),
+                "status": req.get("status"),
+                "missing_layers": req.get("missing_layers", []),
+                "under_sampled_layers": req.get("under_sampled_layers", []),
+                "sample_count": sum(
+                    int_value(layer.get("sample_count"))
+                    for layer in req.get("layers", [])
+                    if isinstance(layer, dict)
+                ),
+            }
+            for req in payload.get("requirements", [])
+            if isinstance(req, dict)
+        ]
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+ROUTE_SAMPLE_REVIEW_ACTIONS = {"accept", "reject", "weaken", "split", "add_rule", "skip", "open"}
+
+
+def route_sample_identity(sample: dict[str, Any]) -> str:
+    event = sample.get("event") if isinstance(sample.get("event"), dict) else {}
+    return f"{sample.get('layer')}:{sample.get('key')}:{event.get('event_id')}"
+
+
+def parse_route_sample_verdict(value: str) -> tuple[str, dict[str, Any]]:
+    if "=" not in value:
+        raise ValueError("verdict must use layer:key:event_id=verdict[:action[:note]]")
+    identity, payload = value.split("=", 1)
+    parts = payload.split(":", 2)
+    verdict = parts[0].strip()
+    action = parts[1].strip() if len(parts) > 1 and parts[1].strip() else verdict
+    note = parts[2].strip() if len(parts) > 2 else ""
+    if verdict not in ROUTE_SAMPLE_REVIEW_ACTIONS:
+        raise ValueError(f"unsupported verdict {verdict!r}")
+    if action not in ROUTE_SAMPLE_REVIEW_ACTIONS:
+        raise ValueError(f"unsupported reviewer action {action!r}")
+    return identity.strip(), {
+        "verdict": verdict,
+        "reviewer_action": action,
+        "note": note,
+    }
+
+
+def load_route_sample_verdict_file(path: Path) -> dict[str, dict[str, Any]]:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid verdict file: {path}")
+    raw_items = payload.get("verdicts") or payload.get("reviews") or []
+    if not isinstance(raw_items, list):
+        raise ValueError(f"verdict file must contain verdicts list: {path}")
+    verdicts: dict[str, dict[str, Any]] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        identity = str(item.get("identity") or "").strip()
+        if not identity:
+            layer = str(item.get("layer") or "").strip()
+            key = str(item.get("key") or "").strip()
+            event_id = str(item.get("event_id") or "").strip()
+            identity = f"{layer}:{key}:{event_id}" if layer and key and event_id else ""
+        if not identity:
+            raise ValueError(f"verdict item missing identity: {path}")
+        verdict = str(item.get("verdict") or "").strip()
+        action = str(item.get("reviewer_action") or item.get("action") or verdict).strip()
+        if verdict not in ROUTE_SAMPLE_REVIEW_ACTIONS:
+            raise ValueError(f"unsupported verdict {verdict!r} in {path}")
+        if action not in ROUTE_SAMPLE_REVIEW_ACTIONS:
+            raise ValueError(f"unsupported reviewer action {action!r} in {path}")
+        verdicts[identity] = {
+            "verdict": verdict,
+            "reviewer_action": action,
+            "note": str(item.get("note") or ""),
+        }
+    return verdicts
+
+
+def route_sample_review(
+    *,
+    aoa_root: Path,
+    audit_path: Path,
+    verdict_values: list[str] | None = None,
+    verdict_file: Path | None = None,
+    reviewer: str = "agent",
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    audit = read_json(audit_path, {})
+    if not isinstance(audit, dict) or audit.get("artifact_type") != "route_sample_audit":
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "route_sample_review",
+            "generated_at": now,
+            "ok": False,
+            "audit_path": str(audit_path),
+            "diagnostics": ["audit_path is not a route_sample_audit JSON artifact"],
+            "samples": [],
+            "classifier_feedback": [],
+        }
+
+    diagnostics: list[str] = []
+    verdicts: dict[str, dict[str, Any]] = {}
+    if verdict_file is not None:
+        try:
+            verdicts.update(load_route_sample_verdict_file(verdict_file))
+        except ValueError as exc:
+            diagnostics.append(str(exc))
+    for value in verdict_values or []:
+        try:
+            identity, verdict = parse_route_sample_verdict(value)
+            verdicts[identity] = verdict
+        except ValueError as exc:
+            diagnostics.append(str(exc))
+
+    samples = audit.get("samples") if isinstance(audit.get("samples"), list) else []
+    sample_ids = {
+        route_sample_identity(sample)
+        for sample in samples
+        if isinstance(sample, dict)
+    }
+    for identity in sorted(set(verdicts) - sample_ids):
+        diagnostics.append(f"verdict did not match a sample: {identity}")
+
+    reviewed_samples: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    feedback: list[dict[str, Any]] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        identity = route_sample_identity(sample)
+        verdict = verdicts.get(identity)
+        review_status = "reviewed" if verdict else "open"
+        review = {
+            "status": review_status,
+            "verdict": verdict.get("verdict") if verdict else "open",
+            "reviewer_action": verdict.get("reviewer_action") if verdict else "open",
+            "reviewer": reviewer,
+            "reviewed_at": now if verdict else "",
+            "note": verdict.get("note") if verdict else "",
+        }
+        counts[str(review["verdict"])] += 1
+        reviewed = {
+            "identity": identity,
+            "requirement_id": sample.get("requirement_id"),
+            "layer": sample.get("layer"),
+            "key": sample.get("key"),
+            "session": sample.get("session"),
+            "session_id": sample.get("session_id"),
+            "event": sample.get("event"),
+            "signal": sample.get("signal"),
+            "evidence": sample.get("evidence"),
+            "raw_preview": sample.get("raw_preview"),
+            "review": review,
+        }
+        reviewed_samples.append(reviewed)
+        if verdict and str(verdict.get("reviewer_action")) in {"reject", "weaken", "split", "add_rule"}:
+            feedback.append(
+                {
+                    "identity": identity,
+                    "requirement_id": sample.get("requirement_id"),
+                    "layer": sample.get("layer"),
+                    "key": sample.get("key"),
+                    "session": sample.get("session"),
+                    "action": verdict.get("reviewer_action"),
+                    "verdict": verdict.get("verdict"),
+                    "note": verdict.get("note") or "",
+                    "evidence": sample.get("evidence"),
+                    "signal": sample.get("signal"),
+                }
+            )
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "route_sample_review",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "audit_path": str(audit_path),
+        "audit_generated_at": audit.get("generated_at"),
+        "reviewer": reviewer,
+        "sample_count": len(reviewed_samples),
+        "reviewed_count": sum(1 for sample in reviewed_samples if sample.get("review", {}).get("status") == "reviewed"),
+        "open_count": sum(1 for sample in reviewed_samples if sample.get("review", {}).get("status") == "open"),
+        "verdict_counts": dict(sorted(counts.items())),
+        "classifier_feedback_count": len(feedback),
+        "classifier_feedback": feedback,
+        "samples": reviewed_samples,
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__route-sample-review"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, route_sample_review_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def route_sample_review_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Route Sample Review",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- audit_path: `{payload.get('audit_path')}`",
+        f"- sample_count: `{payload.get('sample_count')}`",
+        f"- reviewed_count: `{payload.get('reviewed_count')}`",
+        f"- open_count: `{payload.get('open_count')}`",
+        f"- classifier_feedback_count: `{payload.get('classifier_feedback_count')}`",
+        "",
+        "## Verdict Counts",
+        "",
+    ]
+    for verdict, count in (payload.get("verdict_counts") or {}).items() if isinstance(payload.get("verdict_counts"), dict) else []:
+        lines.append(f"- `{verdict}`: {count}")
+    feedback = payload.get("classifier_feedback") if isinstance(payload.get("classifier_feedback"), list) else []
+    if feedback:
+        lines.extend(["", "## Classifier Feedback", "", "| identity | action | note | evidence |", "| --- | --- | --- | --- |"])
+        for item in feedback:
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+            lines.append(
+                f"| `{item.get('identity')}` | `{item.get('action')}` | {item.get('note') or ''} | `{evidence.get('raw_ref') or evidence.get('segment_ref') or ''}` |"
+            )
+    lines.extend(["", "## Samples", "", "| identity | verdict | action | note |", "| --- | --- | --- | --- |"])
+    for sample in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
+        if not isinstance(sample, dict):
+            continue
+        review = sample.get("review") if isinstance(sample.get("review"), dict) else {}
+        lines.append(
+            f"| `{sample.get('identity')}` | `{review.get('verdict')}` | `{review.get('reviewer_action')}` | {review.get('note') or ''} |"
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
+def command_route_sample_review(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = route_sample_review(
+        aoa_root=root,
+        audit_path=Path(args.audit),
+        verdict_values=args.verdict or [],
+        verdict_file=Path(args.verdict_file) if args.verdict_file else None,
+        reviewer=args.reviewer,
+        write_report=args.write_report,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"samples"}
+        }
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_route_layer_readiness(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = route_layer_readiness(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        sample_limit=args.sample_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_atlas_build(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = build_agent_atlas(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        clean=not args.no_clean,
+        write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -14338,6 +18351,9 @@ def command_retrieve(args: argparse.Namespace) -> int:
         session=args.session_filter,
         provider=args.provider,
         include_host_context=args.include_host_context,
+        include_semantic_context=args.include_semantic_context,
+        rerank_local=args.rerank_local,
+        rerank_candidate_limit=args.rerank_candidate_limit,
         allow_host_warnings=args.allow_host_warnings,
         limit=args.limit,
         event_limit=args.event_limit,
@@ -15398,6 +19414,7 @@ REQUIRED_ROOT_FILES = [
     "config/batch-distillation-policy.json",
     "config/event-distillation-routes.json",
     "config/event-taxonomy.json",
+    "config/atlas-policy.json",
     "config/naming-golden-set.json",
     "config/naming-policy.json",
     "config/search-providers.json",
@@ -15405,10 +19422,52 @@ REQUIRED_ROOT_FILES = [
     "hooks/README.md",
     "hooks/codex-hooks.user.example.json",
     "schemas/AGENTS.md",
+    "schemas/atlas-route-entry.schema.json",
     "schemas/hook-receipt.schema.json",
     "schemas/incident.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",
+    "maps/AGENTS.md",
+    "maps/START.md",
+    "maps/README.md",
+    "maps/_templates/axis-readme.template.md",
+    "maps/_templates/route-entry.template.md",
+    "maps/by-authority-surface/README.md",
+    "maps/by-conversation-act/README.md",
+    "maps/by-delivery-state/README.md",
+    "maps/by-evidence-provenance/README.md",
+    "maps/by-entity/README.md",
+    "maps/by-external-snapshot/README.md",
+    "maps/by-failure-mode/README.md",
+    "maps/by-freshness/README.md",
+    "maps/by-goal/README.md",
+    "maps/by-hook-health/README.md",
+    "maps/by-index-health/README.md",
+    "maps/by-mcp/README.md",
+    "maps/by-memory-surface/README.md",
+    "maps/by-open-thread/README.md",
+    "maps/by-operator-request/README.md",
+    "maps/by-operator-preference/README.md",
+    "maps/by-owner-route/README.md",
+    "maps/by-path/README.md",
+    "maps/by-phase-topic/README.md",
+    "maps/by-promotion-candidate/README.md",
+    "maps/by-resource-profile/README.md",
+    "maps/by-repo-family/README.md",
+    "maps/by-review-state/README.md",
+    "maps/by-risk/README.md",
+    "maps/by-route-next-action/README.md",
+    "maps/by-runtime-environment/README.md",
+    "maps/by-scope-contract/README.md",
+    "maps/by-session-act/README.md",
+    "maps/by-time/README.md",
+    "maps/by-tool/README.md",
+    "maps/by-verification-state/README.md",
+    "maps/by-work-context/README.md",
+    "maps/by-access-boundary/README.md",
+    "maps/by-confidence/README.md",
+    "maps/by-correlation/README.md",
+    "maps/by-mutation-surface/README.md",
     "scripts/AGENTS.md",
     "scripts/aoa_session_memory.py",
     "sessions/AGENTS.md",
@@ -15739,6 +19798,7 @@ def build_parser() -> argparse.ArgumentParser:
     name_session.add_argument("--apply", action="store_true", help="Write manifest, registry, and session index. Default only plans.")
     name_session.add_argument("--replace", action="store_true", help="Replace an existing semantic name with the same slug.")
     name_session.add_argument("--skip-raw-hash-check", action="store_true", help="Do not recalculate raw sha256 before writing.")
+    name_session.add_argument("--no-maintenance-worker", action="store_true", help="Do not launch the background index-maintenance worker after --apply.")
     name_session.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reports under .aoa/diagnostics.")
     name_session.set_defaults(func=command_name_session)
 
@@ -15965,10 +20025,34 @@ def build_parser() -> argparse.ArgumentParser:
     reindex.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     reindex.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     reindex.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    reindex.add_argument("--max-raw-mb", type=float, help="Skip sessions whose raw JSONL is larger than this many MiB.")
+    reindex.add_argument("--stale-route-indexes", action="store_true", help="Only select reindexable archives whose session route-signal index is missing or stale.")
     reindex.add_argument("--dry-run", action="store_true", help="Only report which archives would be regenerated.")
     reindex.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reindex reports under .aoa/diagnostics.")
     reindex.add_argument("--full", action="store_true", help="Print complete reindex results to stdout.")
     reindex.set_defaults(func=command_reindex_sessions)
+
+    index_maintenance = sub.add_parser(
+        "index-maintenance",
+        aliases=["maintain-index", "auto-index"],
+        help="Plan or apply the automatic route/search/atlas maintenance pass.",
+    )
+    index_maintenance.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    index_maintenance.add_argument("--workspace-root")
+    index_maintenance.add_argument("--aoa-root")
+    index_maintenance.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    index_maintenance.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    index_maintenance.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    index_maintenance.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    index_maintenance.add_argument("--apply", action="store_true", help="Execute planned maintenance actions. Default only plans.")
+    index_maintenance.add_argument("--max-raw-mb", type=float, default=16, help="Skip raw-text extraction/reindexing above this many MiB where supported.")
+    index_maintenance.add_argument("--sample-audit", action="store_true", help="Run route-sample-audit after route-index reindexing.")
+    index_maintenance.add_argument("--sample-limit", type=int, default=DEFAULT_ROUTE_SAMPLE_LIMIT)
+    index_maintenance.add_argument("--max-raw-chars", type=int, default=360)
+    index_maintenance.add_argument("--reason", default="operator_requested")
+    index_maintenance.add_argument("--write-report", action="store_true", help="Write JSON and Markdown maintenance reports under .aoa/diagnostics.")
+    index_maintenance.add_argument("--full", action="store_true", help="Print complete maintenance payload to stdout.")
+    index_maintenance.set_defaults(func=command_index_maintenance)
 
     conversation_audit = sub.add_parser("conversation-act-audit", help="Audit conversation-act classifier coverage from generated segment indexes.")
     conversation_audit.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
@@ -15994,6 +20078,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     search_index.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     search_index.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    search_index.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
     search_index.add_argument("--no-rebuild", action="store_true", help="Append/update into the existing search DB instead of rebuilding it.")
     search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")
     search_index.set_defaults(func=command_search_index)
@@ -16024,6 +20109,9 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=20)
     search.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains the authoritative .aoa route.")
     search.add_argument("--include-host-context", action="store_true", help="For optional host providers, include a compact host context overlay summary.")
+    search.add_argument("--include-semantic-context", action="store_true", help="Include compact local embedding semantic-search context as a non-authoritative host overlay.")
+    search.add_argument("--rerank-local", action="store_true", help="Rerank returned .aoa evidence hits through the optional local reranker without replacing refs.")
+    search.add_argument("--rerank-candidate-limit", type=int, help="Maximum returned .aoa hits to send to the optional local reranker.")
     search.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay even when host quality gates report warnings.")
     search.add_argument("--host-timeout", type=int, default=45)
     search.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
@@ -16032,12 +20120,77 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--family")
     search.add_argument("--outcome")
     search.add_argument("--conversation-act")
+    search.add_argument("--session-act")
+    search.add_argument("--route-layer", help="Filter by generated route-signal layer such as scope_contract.")
+    search.add_argument("--route-signal", help="Filter by generated route signal in layer:key form.")
     search.add_argument("--archive-status")
     search.add_argument("--freshness-status")
     search.add_argument("--date-from", help="Filter sessions on or after YYYY-MM-DD.")
     search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     search.set_defaults(func=command_search)
+
+    atlas = sub.add_parser("atlas", help="Generate the agent atlas route entries from session indexes.")
+    atlas_sub = atlas.add_subparsers(dest="atlas_command", required=True)
+    atlas_build = atlas_sub.add_parser("build", help="Build generated atlas entries and per-axis indexes.")
+    atlas_build.add_argument("session", nargs="?", default="all", help="Session id/label/title or all.")
+    atlas_build.add_argument("--workspace-root")
+    atlas_build.add_argument("--aoa-root")
+    atlas_build.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    atlas_build.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    atlas_build.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    atlas_build.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    atlas_build.add_argument("--no-clean", action="store_true", help="Keep existing generated atlas entries instead of rebuilding clean.")
+    atlas_build.add_argument("--write-report", action="store_true", help="Write JSON and Markdown atlas-build reports under .aoa/diagnostics.")
+    atlas_build.set_defaults(func=command_atlas_build)
+
+    route_readiness = sub.add_parser(
+        "route-readiness",
+        aliases=["route-layer-audit"],
+        help="Audit 22 operational route layers against session indexes, atlas axes, and search readiness.",
+    )
+    route_readiness.add_argument("session", nargs="?", default="all", help="Session id/label/title or all.")
+    route_readiness.add_argument("--workspace-root")
+    route_readiness.add_argument("--aoa-root")
+    route_readiness.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    route_readiness.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    route_readiness.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    route_readiness.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    route_readiness.add_argument("--sample-limit", type=int, default=2, help="Maximum evidence samples per route layer.")
+    route_readiness.add_argument("--write-report", action="store_true", help="Write JSON and Markdown route-readiness reports under .aoa/diagnostics.")
+    route_readiness.set_defaults(func=command_route_layer_readiness)
+
+    route_sample_audit_parser = sub.add_parser(
+        "route-sample-audit",
+        aliases=["route-calibration"],
+        help="Build unreviewed calibration samples for the 22 operational route layers.",
+    )
+    route_sample_audit_parser.add_argument("session", nargs="?", default="all", help="Session id/label/title or all.")
+    route_sample_audit_parser.add_argument("--workspace-root")
+    route_sample_audit_parser.add_argument("--aoa-root")
+    route_sample_audit_parser.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    route_sample_audit_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    route_sample_audit_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    route_sample_audit_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    route_sample_audit_parser.add_argument("--sample-limit", type=int, default=DEFAULT_ROUTE_SAMPLE_LIMIT, help="Maximum unreviewed calibration samples per route layer.")
+    route_sample_audit_parser.add_argument("--max-raw-chars", type=int, default=360, help="Maximum raw preview characters per sampled event.")
+    route_sample_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown route-sample-audit reports under .aoa/diagnostics.")
+    route_sample_audit_parser.add_argument("--full", action="store_true", help="Print complete sample packets to stdout.")
+    route_sample_audit_parser.set_defaults(func=command_route_sample_audit)
+
+    route_sample_review_parser = sub.add_parser(
+        "route-sample-review",
+        help="Record append-only review verdicts for a route-sample-audit packet.",
+    )
+    route_sample_review_parser.add_argument("audit", help="Path to a route-sample-audit JSON artifact.")
+    route_sample_review_parser.add_argument("--workspace-root")
+    route_sample_review_parser.add_argument("--aoa-root")
+    route_sample_review_parser.add_argument("--verdict", action="append", help="Inline verdict: layer:key:event_id=verdict[:action[:note]].")
+    route_sample_review_parser.add_argument("--verdict-file", help="JSON file containing verdicts/reviews list.")
+    route_sample_review_parser.add_argument("--reviewer", default="agent", help="Reviewer label written into the review packet.")
+    route_sample_review_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown route-sample-review reports under .aoa/diagnostics.")
+    route_sample_review_parser.add_argument("--full", action="store_true", help="Print complete reviewed samples to stdout.")
+    route_sample_review_parser.set_defaults(func=command_route_sample_review)
 
     retrieve = sub.add_parser(
         "retrieve",
@@ -16055,6 +20208,9 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--session", dest="session_filter", help="Pin the packet to a session id, label, title, or semantic name fragment.")
     retrieve.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     retrieve.add_argument("--include-host-context", action="store_true", help="For optional host providers, include compact host context overlay summary.")
+    retrieve.add_argument("--include-semantic-context", action="store_true", help="Include compact local embedding semantic-search context as a non-authoritative host overlay.")
+    retrieve.add_argument("--rerank-local", action="store_true", help="Rerank returned .aoa evidence hits through the optional local reranker without replacing refs.")
+    retrieve.add_argument("--rerank-candidate-limit", type=int, help="Maximum returned .aoa hits to send to the optional local reranker.")
     retrieve.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay when host quality gates report warnings.")
     retrieve.add_argument("--limit", type=int, default=8, help="Maximum search hits and phase candidates.")
     retrieve.add_argument("--event-limit", type=int, default=16, help="Maximum continuation signal events from session indexes.")

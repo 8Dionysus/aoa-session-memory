@@ -144,6 +144,17 @@ The index layer answers:
 
 Can we find the material?
 
+The route-signal layer answers:
+
+Which operational contract, surface, entity, verification state, failure mode,
+memory provenance, freshness state, owner route, runtime state, mutation
+surface, correlation, confidence, access boundary, cost profile, or operator
+preference did this event expose?
+
+The atlas layer answers:
+
+Which route should the next agent take first?
+
 The diagnostic layer answers:
 
 Why did preservation fail?
@@ -157,6 +168,41 @@ The skill and automation layers answer:
 What matured into repeatable action?
 
 Do not collapse these layers.
+
+## Agent Atlas
+
+The agent atlas is the convex map above generated session indexes.
+
+It is a source-owned skeleton under `maps/` plus generated route entries derived
+from manifests, segment indexes, route signals, diagnostics, search indexes,
+and reviewed distillation. Its job is to keep the first move cheap for any
+agent: choose a route axis, inspect a short entry, then follow evidence refs
+into the stronger archive layers.
+
+The atlas must stay route-positive:
+
+- by work context
+- by memory surface
+- by authority surface
+- by session act
+- by scope contract
+- by verification state
+- by open thread
+- by entity, path, tool, MCP, hook, and goal
+- by delivery, failure, risk, review, promotion, index health, time, operator
+  request, and next action
+- by evidence provenance, owner route, freshness, runtime environment,
+  mutation surface, correlation, confidence, access boundary, resource profile,
+  and standing operator preference
+
+These axes are allowed to expand. Expansion is correct when a new axis answers
+a distinct route question and reduces the need to load heavy context. Expansion
+is not correct when it creates another place for unreviewed claims to become
+truth.
+
+Atlas entries are maps, not evidence. They must carry session, segment, and raw
+refs when available, and they must never replace raw transcript truth or
+reviewed distillation.
 
 ## First-Wave Conveyor
 
@@ -311,6 +357,22 @@ enough. Each event should also carry universal facets:
 
 This keeps the classifier portable across projects while still allowing later
 layers to ground meaning in a specific workspace.
+
+Above conversation-act classification, the archive also carries a generated
+`session_act` route layer for operational motions that agents should be able to
+query directly: memory reads and citations, Codex-memory access, MCP resource
+reads, goal updates, hook receipts, tool calls, commands, mutations,
+verification, and compaction boundaries. `session_act` is navigation, not
+reviewed truth; every act must keep the raw event ref, tool/correlation
+metadata where available, and confidence.
+
+Session-level indexes should also expose generated `work_context`: the best
+current route signal for which real workspace or repository the session is
+about. This is inferred from `cwd`, grounding files, memory surfaces, and
+indexed path evidence. It should name concrete roots such as
+`aoa-session-memory`, `Agents-of-Abyss`, `aoa-techniques`, `Tree-of-Sophia`, or
+another actual repository when evidence supports it, while staying explicitly
+ambiguous or unresolved when the evidence is weak.
 
 ## Event Metabolism
 

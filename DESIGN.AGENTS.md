@@ -49,6 +49,14 @@ only happen when the earlier layers are already coherent:
 - raw transcript provenance is preserved;
 - compaction intervals and segments are current;
 - segment indexes expose decisions, commands, errors, lessons, and final state;
+- session-act and work-context indexes expose memory, MCP, goals, hooks, tools,
+  and the likely active repository without replacing raw refs;
+- route-signal indexes expose scope contracts, authority surfaces, verification
+  states, failure modes, memory provenance, freshness, owner routes, runtime
+  state, mutation surfaces, access boundaries, and operator preferences as
+  route evidence, not reviewed truth;
+- the agent atlas exposes a small tree of route axes before agents open heavy
+  archive material;
 - manifests, registry records, and archive-local TOC agree;
 - semantic names can carry raw refs and coverage rather than naked aliases;
 - rehydration and review packets can explain why a name is deserved.
@@ -110,10 +118,22 @@ for the next pass.
 
 `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`,
 `SESSION_NAMES.md`, `session-name-index.json`, `session-registry.json`,
-session indexes, segment indexes, reports, and diagnostics are companions.
+session indexes, segment indexes, generated atlas entries, reports, and
+diagnostics are companions.
 
 They route and compress. They do not author truth. They must stay reproducible
 from stronger evidence or explicit review.
+
+### Agent atlas
+
+`maps/` is the source-owned skeleton for the generated atlas.
+
+The root atlas files and axis `README.md` files are authored route shape.
+`maps/by-*/entries/`, per-axis indexes, and root atlas indexes are generated
+route companions. The axis tree may grow as the archive learns new recurring
+route questions, but every entry should keep the same small shape: route key,
+session identity, work context, authority surface, confidence, route layer,
+signal count, next route, and evidence refs.
 
 ### Session-local surfaces
 

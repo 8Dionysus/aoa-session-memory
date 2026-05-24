@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aoa.local/schemas/atlas-route-entry.schema.json",
+  "title": "AoA Session Memory Atlas Route Entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "axis",
+    "route_key",
+    "status",
+    "truth_status",
+    "session",
+    "confidence",
+    "next_route",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "axis": {
+      "type": "string",
+      "pattern": "^by-[a-z0-9-]+$"
+    },
+    "route_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["generated", "stale", "diagnostic", "reviewed"]
+    },
+    "truth_status": {
+      "type": "string",
+      "enum": ["route_signal_not_reviewed_truth", "reviewed_distillation"]
+    },
+    "session": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "work_context": {
+      "type": "string"
+    },
+    "work_family": {
+      "type": "string"
+    },
+    "authority_surface": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "signal_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "route_layer": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low", "none"]
+    },
+    "next_route": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_ref": {
+          "type": "string"
+        },
+        "segment_ref": {
+          "type": "string"
+        },
+        "raw_ref": {
+          "type": "string"
+        },
+        "generated_index_ref": {
+          "type": "string"
+        },
+        "diagnostic_ref": {
+          "type": "string"
+        },
+        "external_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "related_axes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^by-[a-z0-9-]+$"
+      },
+      "uniqueItems": true
+    }
+  }
+}

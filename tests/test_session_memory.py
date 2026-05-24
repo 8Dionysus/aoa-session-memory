@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -302,6 +303,7 @@ def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path
     assert read_event["type"] == "FILE_READ"
     assert read_event["family"] == "workspace_navigation"
     assert read_event["facets"]["command_kind"] == "read"
+    assert "correlation_id" not in records["000001"]
     assert "assumption_signal" not in records["000001"]["tags"]
     assert "final_state_signal" not in records["000001"]["tags"]
     assert "compaction" not in records["000001"]["tags"]
@@ -374,6 +376,1175 @@ def test_segment_index_records_conversation_acts(tmp_path: Path) -> None:
     assert Path(audit["report_markdown"]).exists()
 
 
+def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# aoa-techniques\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-session-acts.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T00:00:00Z", "type": "session_meta", "payload": {"id": "session-acts", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Надо прочитать Codex MEMORY.md и понять goal этой работы"}],
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "read_mcp_resource",
+                    "call_id": "call-mcp",
+                    "arguments": json.dumps({"server": "codex_apps", "uri": "memory://session"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "create_goal",
+                    "call_id": "call-goal",
+                    "arguments": json.dumps({"objective": "classify memory and repo context"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-memory",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "rg -n session /home/dionysus/.codex/memories/MEMORY.md "
+                                f"{repo}/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-memory", "output": "Process exited with code 0\nOutput:\nMEMORY.md:1:session\n"},
+            },
+            {"timestamp": "2026-05-24T00:00:06Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "session-acts",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "session-acts")
+    session_dir = Path(record["path"])
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-compaction.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+
+    assert segment_index["session_act_schema_version"] == module.SESSION_ACT_SCHEMA_VERSION
+    assert records["000002"]["facets"]["session_act"]["kind"] == "memory_request"
+    assert records["000002"]["facets"]["session_act"]["memory_surface"] == "codex_memories"
+    assert records["000003"]["facets"]["session_act"]["kind"] == "mcp_resource_read"
+    assert records["000003"]["facets"]["session_act"]["tool_namespace"] == "mcp"
+    assert records["000004"]["facets"]["session_act"]["kind"] == "goal_created"
+    assert records["000005"]["facets"]["session_act"]["kind"] == "memory_read"
+    assert records["000005"]["facets"]["session_act"]["memory_surface"] == "codex_memories"
+    assert segment_index["by_session_act"]["memory_request"] == ["000002"]
+    assert segment_index["by_session_act"]["mcp_resource_read"] == ["000003"]
+    assert segment_index["by_session_act"]["goal_created"] == ["000004"]
+    assert segment_index["by_session_act"]["memory_read"] == ["000005"]
+    assert session_index["session_act_counts"]["memory_read"] == 1
+    assert session_index["work_context"]["work_name"] == "aoa-techniques"
+    assert session_index["work_context"]["work_family"] == "aoa"
+    assert manifest["work_context"]["work_root"] == str(repo)
+
+    index_payload = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert index_payload["ok"] is True
+    search_payload = module.search_sessions(aoa_root=aoa_root, session_act="memory_read", limit=5)
+    assert search_payload["ok"] is True
+    assert search_payload["results"][0]["session_act"] == "memory_read"
+    assert search_payload["results"][0]["session_label"] == record["session_label"]
+
+
+def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# route\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-route-signals.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-24T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "route-signals", "cwd": str(repo), "model": "gpt-5"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Сначала погрузись. Сейчас только анализ, не трогай файлы, не коммить, "
+                                "без внешних подключений. Отвечай по-русски, preserve before distill, "
+                                "сначала AGENTS/DESIGN."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-read",
+                    "arguments": json.dumps({"cmd": "sed -n '1,120p' AGENTS.md DESIGN.md"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "call-patch",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-test",
+                    "arguments": json.dumps({"cmd": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q tests/test_session_memory.py"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-test", "output": "Process exited with code 0\nOutput:\n3 passed\n"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:06Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-fail",
+                    "output": "Process exited with code 1\nOutput:\npermission denied: raw_unavailable timeout\n",
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:07Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Готово: tests green, bundle exported, not pushed. Осталось открыть PR."}],
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "route-signals",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "route-signals")
+    session_dir = Path(record["path"])
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    records = {event["event_id"]: event for event in segment_index["events"]}
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+
+    assert segment_index["route_signal_schema_version"] == module.ROUTE_SIGNAL_SCHEMA_VERSION
+    assert segment_index["route_signal_classifier_version"] == module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+    assert session_index["route_signal_classifier_version"] == module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+    prompt_signals = {
+        f"{signal['layer']}:{signal['key']}"
+        for signal in records["000002"]["facets"]["route_signals"]
+    }
+    assert "scope_contract:analysis_only" in prompt_signals
+    assert "scope_contract:no_commit" in prompt_signals
+    assert "scope_contract:no_external_connectors" in prompt_signals
+    assert "operator_preference:russian_language" in prompt_signals
+    assert "operator_preference:preserve_before_distill" in prompt_signals
+    assert segment_index["by_route_layer"]["scope_contract"]["analysis_only"] == ["000002"]
+    assert segment_index["by_route_layer"]["operator_preference"]["russian_language"] == ["000002"]
+    assert segment_index["by_route_layer"]["verification_state"]["green_proof"] == ["000006"]
+    assert "permission" in segment_index["by_route_layer"]["failure_mode"]
+    assert module.env_entity_candidate("OPENAI_API_KEY") is True
+    assert module.env_entity_candidate("ADD") is False
+    assert module.env_entity_candidate("CREATE") is False
+    assert session_index["route_signal_counts"]["scope_contract"]["analysis_only"] == 1
+    assert session_index["route_signal_counts"]["delivery_state"]["tests_green"] >= 1
+    assert session_index["route_signal_counts"]["runtime_environment"]["model"] == 1
+
+    index_payload = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert index_payload["ok"] is True
+    search_payload = module.search_sessions(aoa_root=aoa_root, route_layer="scope_contract", route_signal="scope_contract:analysis_only")
+    assert search_payload["ok"] is True
+    assert search_payload["results"][0]["route_signals"]
+
+
+def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
+    task_started = {
+        "timestamp": "2026-05-24T00:00:00Z",
+        "type": "event_msg",
+        "payload": {"type": "task_started", "model_context_window": 400000},
+    }
+    event = module.classify_raw_event(json.dumps(task_started), task_started, 1)
+    signals = {f"{signal['layer']}:{signal['key']}" for signal in event.facets.get("route_signals", [])}
+
+    assert event.event_type == "HOOK_EVENT"
+    assert "authority_surface:source" not in signals
+    assert "mutation_surface:hooks" not in signals
+    assert "index_health:findability_signal" not in signals
+
+    session_meta = {
+        "timestamp": "2026-05-24T00:00:01Z",
+        "type": "session_meta",
+        "payload": {"id": "session-id-is-not-a-tool-correlation", "cwd": "/srv/AbyssOS", "model": "gpt-5"},
+    }
+    session_meta_event = module.classify_raw_event(json.dumps(session_meta), session_meta, 2)
+    session_meta_signals = {f"{signal['layer']}:{signal['key']}" for signal in session_meta_event.facets.get("route_signals", [])}
+
+    assert session_meta_event.event_type == "SESSION_META"
+    assert session_meta_event.correlation_id is None
+    assert "correlation:tool_call_output_link" not in session_meta_signals
+
+    developer_context = {
+        "timestamp": "2026-05-24T00:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "developer",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "Tooling context mentions GitHub, MEMORY.md, skills/foo/SKILL.md, "
+                        "README.md, config/settings.json, scripts/tool.py, and connectors."
+                    ),
+                }
+            ],
+        },
+    }
+    developer_event = module.classify_raw_event(json.dumps(developer_context), developer_context, 3)
+    developer_signals = {f"{signal['layer']}:{signal['key']}" for signal in developer_event.facets.get("route_signals", [])}
+
+    assert developer_event.event_type == "CONTEXT_STATE"
+    assert "authority_surface:source" not in developer_signals
+    assert "authority_surface:external_connector_snapshot" not in developer_signals
+    assert "external_snapshot:github" not in developer_signals
+    assert "memory_provenance:codex_memories" not in developer_signals
+    assert "memory_provenance:memory_general" not in developer_signals
+    assert "memory_provenance:skill_memory" not in developer_signals
+    assert "mutation_surface:docs" not in developer_signals
+    assert "mutation_surface:source_code" not in developer_signals
+
+    project_card = {
+        "timestamp": "2026-05-24T00:00:02.500Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                        "text": (
+                            "# AGENTS.md instructions\n"
+                            "This ecosystem mentions continuity, memory, reflective revision, "
+                            "and growth, but this is route-card prose rather than an archive request."
+                        ),
+                }
+            ],
+        },
+    }
+    project_card_event = module.classify_raw_event(json.dumps(project_card), project_card, 4)
+    project_card_signals = {f"{signal['layer']}:{signal['key']}" for signal in project_card_event.facets.get("route_signals", [])}
+
+    assert project_card_event.event_type == "USER_INTENT"
+    assert "memory_provenance:memory_general" not in project_card_signals
+
+    memory_request = {
+        "timestamp": "2026-05-24T00:00:02.750Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Use memory for this pass and cite memory-derived facts."}],
+        },
+    }
+    memory_request_event = module.classify_raw_event(json.dumps(memory_request), memory_request, 5)
+    memory_request_signals = {f"{signal['layer']}:{signal['key']}" for signal in memory_request_event.facets.get("route_signals", [])}
+
+    assert "memory_provenance:memory_general" in memory_request_signals
+    assert "memory_provenance:cited" in memory_request_signals
+
+    prompt = {
+        "timestamp": "2026-05-24T00:00:03Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Review the hook pack snapshot seed without changing files."}],
+        },
+    }
+    prompt_event = module.classify_raw_event(json.dumps(prompt), prompt, 6)
+    prompt_signals = {f"{signal['layer']}:{signal['key']}" for signal in prompt_event.facets["route_signals"]}
+
+    assert "hook_health:stop" not in prompt_signals
+
+    stop_line_prompt = {
+        "timestamp": "2026-05-24T00:00:04Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Seed mentions recovery-note hooks and Agon stop-lines."}],
+        },
+    }
+    stop_line_event = module.classify_raw_event(json.dumps(stop_line_prompt), stop_line_prompt, 7)
+    stop_line_signals = {f"{signal['layer']}:{signal['key']}" for signal in stop_line_event.facets["route_signals"]}
+
+    assert "hook_health:stop" not in stop_line_signals
+
+    source_output = {
+        "timestamp": "2026-05-24T00:00:04.500Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-source-output",
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py"],
+            "cwd": "/srv/aoa-sdk",
+            "parsed_cmd": [{"type": "read", "cmd": "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py", "path": "src/aoa_sdk/recurrence/rollout.py"}],
+            "aggregated_output": (
+                'notes="Use this when SessionStart, UserPromptSubmit, or Stop recurrence snippets are missing or stale." '
+                'notes="Use this when the session-stop path stops producing review queues."'
+            ),
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    source_output_event = module.classify_raw_event(json.dumps(source_output), source_output, 8)
+    source_output_signals = {f"{signal['layer']}:{signal['key']}" for signal in source_output_event.facets["route_signals"]}
+
+    assert source_output_event.event_type == "COMMAND_OUTPUT"
+    assert "hook_health:stop" not in source_output_signals
+
+    hook_discussion = {
+        "timestamp": "2026-05-24T00:00:04.575Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_message",
+            "message": "Improve hook reports and stop/user_prompt_submit logs after this trace replay.",
+            "phase": "final_answer",
+        },
+    }
+    hook_discussion_event = module.classify_raw_event(json.dumps(hook_discussion), hook_discussion, 9)
+    hook_discussion_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in hook_discussion_event.facets["route_signals"]
+    }
+
+    assert "hook_health:stop" not in hook_discussion_signals
+    assert "hook_health:userpromptsubmit" not in hook_discussion_signals
+
+    local_read_output = {
+        "timestamp": "2026-05-24T00:00:04.650Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-local-read",
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' /srv/8Dionysus/README.md"],
+            "cwd": "/srv",
+            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' /srv/8Dionysus/README.md", "path": "/srv/8Dionysus/README.md"}],
+            "aggregated_output": "This local README mentions GitHub, Gmail, Google Drive, calendar, web search, browser, snapshot, stale risk.",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    local_read_event = module.classify_raw_event(json.dumps(local_read_output), local_read_output, 9)
+    local_read_signals = {f"{signal['layer']}:{signal['key']}" for signal in local_read_event.facets["route_signals"]}
+
+    assert local_read_event.event_type == "COMMAND_OUTPUT"
+    assert "external_snapshot:github" not in local_read_signals
+    assert "external_snapshot:gmail" not in local_read_signals
+    assert "external_snapshot:google_drive" not in local_read_signals
+    assert "external_snapshot:web" not in local_read_signals
+    assert "freshness_drift:external_state_required" not in local_read_signals
+
+    github_connector_call = {
+        "timestamp": "2026-05-24T00:00:04.700Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "github.get_pull_request",
+            "call_id": "call-github",
+            "arguments": json.dumps({"owner": "8Dionysus", "repo": "aoa-session-memory", "pullNumber": 1}),
+        },
+    }
+    github_connector_event = module.classify_raw_event(json.dumps(github_connector_call), github_connector_call, 10)
+    github_connector_signals = {f"{signal['layer']}:{signal['key']}" for signal in github_connector_event.facets["route_signals"]}
+
+    assert "external_snapshot:app_connector" in github_connector_signals
+    assert "external_snapshot:github" in github_connector_signals
+    assert "freshness_drift:external_state_required" in github_connector_signals
+
+    gh_command = {
+        "timestamp": "2026-05-24T00:00:04.800Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call-gh",
+            "arguments": json.dumps({"cmd": "gh pr view 1 --json title,url", "workdir": "/srv/AbyssOS"}),
+        },
+    }
+    gh_command_event = module.classify_raw_event(json.dumps(gh_command), gh_command, 11)
+    gh_command_signals = {f"{signal['layer']}:{signal['key']}" for signal in gh_command_event.facets["route_signals"]}
+
+    assert "external_snapshot:github" in gh_command_signals
+    assert "freshness_drift:external_state_required" in gh_command_signals
+
+    shell_redirect_command = {
+        "timestamp": "2026-05-24T00:00:04.900Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call-redirect",
+            "arguments": json.dumps({"cmd": "rg --files /srv/aoa-sdk 2>/dev/null", "workdir": "/srv"}),
+        },
+    }
+    shell_redirect_event = module.classify_raw_event(json.dumps(shell_redirect_command), shell_redirect_command, 12)
+    shell_redirect_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in shell_redirect_event.facets["route_signals"]
+    }
+
+    assert "path:dev_null" not in shell_redirect_signals
+    assert "path:srv_aoa_sdk" in shell_redirect_signals
+
+    git_ref_output = {
+        "timestamp": "2026-05-24T00:00:04.925Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call-required-check-audit",
+            "output": (
+                "Process exited with code 0\n"
+                "Output:\n"
+                "[info] target_repo=/srv/aoa-sdk\n"
+                "[info] compare_ref=origin/main\n"
+                "[info] merge_base=main/origin/main\n"
+                "[info] diff_range=main...origin/main\n"
+                "[info] name_only_range=origin/main..HEAD\n"
+            ),
+        },
+    }
+    git_ref_event = module.classify_raw_event(json.dumps(git_ref_output), git_ref_output, 13)
+    git_ref_signals = {f"{signal['layer']}:{signal['key']}" for signal in git_ref_event.facets["route_signals"]}
+
+    assert "path:srv_aoa_sdk" in git_ref_signals
+    assert "path:origin_main" not in git_ref_signals
+    assert "path:main_origin_main" not in git_ref_signals
+    assert "path:origin_main_head" not in git_ref_signals
+
+    output = {
+        "timestamp": "2026-05-24T00:00:05Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call-ok",
+            "output": "Process exited with code 0\nOutput:\nREADME.md: mentions failed checks as documentation text\n",
+        },
+    }
+    output_event = module.classify_raw_event(json.dumps(output), output, 12)
+    output_signals = {f"{signal['layer']}:{signal['key']}" for signal in output_event.facets["route_signals"]}
+
+    assert output_event.event_type == "COMMAND_OUTPUT"
+    assert output_event.outcome == "succeeded"
+    assert "failure_mode:generic_failure" not in output_signals
+
+    exit_code_doc_output = {
+        "timestamp": "2026-05-24T00:00:05.075Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-exit-code-doc",
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' scripts/validate_recurrence_manifests.py"],
+            "cwd": "/srv/aoa-sdk",
+            "parsed_cmd": [
+                {
+                    "type": "read",
+                    "cmd": "sed -n '1,220p' scripts/validate_recurrence_manifests.py",
+                    "path": "scripts/validate_recurrence_manifests.py",
+                }
+            ],
+            "aggregated_output": "Use exit code 30 for medium diagnostics. return exit_code",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    exit_code_doc_event = module.classify_raw_event(json.dumps(exit_code_doc_output), exit_code_doc_output, 13)
+    exit_code_doc_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in exit_code_doc_event.facets["route_signals"]
+    }
+
+    assert exit_code_doc_event.event_type == "COMMAND_OUTPUT"
+    assert exit_code_doc_event.outcome == "succeeded"
+    assert "verification_state:failed_or_unverified" not in exit_code_doc_signals
+    assert "failure_mode:generic_failure" not in exit_code_doc_signals
+
+    failed_pytest_output = {
+        "timestamp": "2026-05-24T00:00:05.125Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call-failed-pytest",
+            "output": "Process exited with code 1\nOutput:\nFFF [100%]\n3 failed, 7 passed\n",
+        },
+    }
+    failed_pytest_event = module.classify_raw_event(json.dumps(failed_pytest_output), failed_pytest_output, 13)
+    failed_pytest_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in failed_pytest_event.facets["route_signals"]
+    }
+
+    assert "delivery_state:tests_green" not in failed_pytest_signals
+    assert "verification_state:green_proof" not in failed_pytest_signals
+    assert "verification_state:success_observed" not in failed_pytest_signals
+    assert "verification_state:failed_or_unverified" in failed_pytest_signals
+    assert "failure_mode:test_failure" in failed_pytest_signals
+
+    token_accounting_output = {
+        "timestamp": "2026-05-24T00:00:05.250Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-token-count",
+            "command": ["/usr/bin/zsh", "-lc", "ls -1 /srv"],
+            "cwd": "/srv",
+            "aggregated_output": "Original token count: 838\nOutput:\n/srv/abyss-stack/Configs/config-templates/README.md\n",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    token_accounting_event = module.classify_raw_event(json.dumps(token_accounting_output), token_accounting_output, 13)
+    token_accounting_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in token_accounting_event.facets["route_signals"]
+    }
+
+    assert token_accounting_event.event_type == "COMMAND_OUTPUT"
+    assert "access_boundary:secret_or_privacy_boundary" not in token_accounting_signals
+
+    raw_path_doc_output = {
+        "timestamp": "2026-05-24T00:00:05.375Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-raw-path-doc",
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' docs/versioning.md"],
+            "cwd": "/srv/aoa-sdk",
+            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' docs/versioning.md", "path": "docs/versioning.md"}],
+            "aggregated_output": "Routed reads must not fall back to raw path loads.",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    raw_path_doc_event = module.classify_raw_event(json.dumps(raw_path_doc_output), raw_path_doc_output, 14)
+    raw_path_doc_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in raw_path_doc_event.facets["route_signals"]
+    }
+
+    assert raw_path_doc_event.event_type == "COMMAND_OUTPUT"
+    assert "index_health:findability_signal" not in raw_path_doc_signals
+
+    archive_repair_doc_output = {
+        "timestamp": "2026-05-24T00:00:05.400Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "exec_command_end",
+            "call_id": "call-archive-repair-doc",
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml"],
+            "cwd": "/srv/aoa-playbooks",
+            "parsed_cmd": [
+                {"type": "read", "cmd": "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml", "path": "quests/AOA-PB-Q-0014.yaml"}
+            ],
+            "aggregated_output": "Do not promote one archive repair session into a new playbook family.",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }
+    archive_repair_doc_event = module.classify_raw_event(json.dumps(archive_repair_doc_output), archive_repair_doc_output, 15)
+    archive_repair_doc_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in archive_repair_doc_event.facets["route_signals"]
+    }
+
+    assert "index_health:findability_signal" not in archive_repair_doc_signals
+
+    reindex_command = {
+        "timestamp": "2026-05-24T00:00:05.425Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call-reindex",
+            "arguments": json.dumps(
+                {
+                    "cmd": "python3 scripts/aoa_session_memory.py reindex-sessions all --write-report",
+                    "workdir": "/srv/AbyssOS/.aoa",
+                }
+            ),
+        },
+    }
+    reindex_event = module.classify_raw_event(json.dumps(reindex_command), reindex_command, 16)
+    reindex_signals = {f"{signal['layer']}:{signal['key']}" for signal in reindex_event.facets["route_signals"]}
+
+    assert "index_health:findability_signal" in reindex_signals
+
+    secret_boundary_prompt = {
+        "timestamp": "2026-05-24T00:00:05.500Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Do not export secrets, credentials, or access tokens."}],
+        },
+    }
+    secret_boundary_event = module.classify_raw_event(json.dumps(secret_boundary_prompt), secret_boundary_prompt, 17)
+    secret_boundary_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in secret_boundary_event.facets["route_signals"]
+    }
+
+    assert "access_boundary:secret_or_privacy_boundary" in secret_boundary_signals
+
+    landed_status_prompt = {
+        "timestamp": "2026-05-24T00:00:05.750Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Current landed surface appears only in aoa-sdk."}],
+        },
+    }
+    landed_status_event = module.classify_raw_event(json.dumps(landed_status_prompt), landed_status_prompt, 18)
+    landed_status_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in landed_status_event.facets["route_signals"]
+    }
+
+    assert "operator_preference:landed_slices" not in landed_status_signals
+
+    landed_subagent_status_prompt = {
+        "timestamp": "2026-05-24T00:00:05.875Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "<subagent_notification>\n"
+                        '{"status":{"completed":"Remaining risk must be read as only the cited landed slices."}}\n'
+                        "</subagent_notification>"
+                    ),
+                }
+            ],
+        },
+    }
+    landed_subagent_status_event = module.classify_raw_event(
+        json.dumps(landed_subagent_status_prompt), landed_subagent_status_prompt, 19
+    )
+    landed_subagent_status_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in landed_subagent_status_event.facets["route_signals"]
+    }
+
+    assert "operator_preference:landed_slices" not in landed_subagent_status_signals
+
+    landed_slices_prompt = {
+        "timestamp": "2026-05-24T00:00:06Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Веди это узкими landed-срезами."}],
+        },
+    }
+    landed_slices_event = module.classify_raw_event(json.dumps(landed_slices_prompt), landed_slices_prompt, 20)
+    landed_slices_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in landed_slices_event.facets["route_signals"]
+    }
+
+    assert "operator_preference:landed_slices" in landed_slices_signals
+
+
+def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-null-path.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T00:00:00Z", "type": "session_meta", "payload": {"id": "null-path", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Check /srv/AbyssOS/bad\u0000path before reindex."}],
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "null-path",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "null-path")
+    session_dir = Path(record["path"])
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+
+    assert module.work_context_root_for_path("/srv/AbyssOS/bad\x00path") is None
+    for event in segment_index["events"]:
+        for signal in event["facets"]["route_signals"]:
+            assert "\x00" not in str(signal.get("detail", ""))
+
+
+def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-atlas-build.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T00:00:00Z", "type": "session_meta", "payload": {"id": "atlas-build", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Только анализ, сначала погрузись в AGENTS.md"}]},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-test", "arguments": json.dumps({"cmd": "pytest -q"})},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-test", "output": "Process exited with code 0\nOutput:\n1 passed\n"},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "atlas-build",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    payload = module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    assert payload["ok"] is True
+    assert payload["entry_count"] > 0
+    assert (aoa_root / "maps" / "INDEX.md").exists()
+    scope_entries = sorted((aoa_root / "maps" / "by-scope-contract" / "entries").glob("analysis_only__*.json"))
+    assert scope_entries
+    entry = json.loads(scope_entries[0].read_text(encoding="utf-8"))
+    assert entry["truth_status"] == "route_signal_not_reviewed_truth"
+    assert entry["evidence"]["raw_ref"] == "raw:line:2"
+
+
+def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# route\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    for axis in module.DEFAULT_ATLAS_AXES:
+        axis_dir = aoa_root / "maps" / axis / "entries"
+        axis_dir.mkdir(parents=True, exist_ok=True)
+        (axis_dir / ".gitkeep").write_text("", encoding="utf-8")
+        (axis_dir.parent / "README.md").write_text(f"# {axis}\n", encoding="utf-8")
+    (aoa_root / "maps").mkdir(parents=True, exist_ok=True)
+    (aoa_root / "maps" / "README.md").write_text("# maps\n", encoding="utf-8")
+
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-route-readiness.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-24T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "route-readiness", "cwd": str(repo), "model": "gpt-5", "permission_mode": "danger-full-access"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Сначала погрузись. Сейчас только анализ, не трогай файлы, не коммить, "
+                                "без внешних подключений, потом commit push merge. Отвечай по-русски, "
+                                "preserve before distill, не терять changelog, сначала AGENTS/DESIGN, "
+                                "landed slices. Проверь source generated runtime diagnostics portable bundle "
+                                "local overlay memory external snapshot. Entity path graph repo /srv/AbyssOS/aoa-techniques "
+                                "tests skills hooks MCP issues PRs OPENAI_API_KEY package model. MEMORY.md memory_summary.md "
+                                "rollout_summaries skill memory ad_hoc .aoa/sessions .codex/sessions rollout-xyz "
+                                "read_mcp_resource MCP resource cited skipped memory verified-current unverified memory update memory. "
+                                "GitHub Gmail Google Drive calendar web search browser snapshot stale risk live verified. "
+                                "findability raw segments session_act work_context search freshness manifest segment index search hit reviewed distillation. "
+                                "Hook lifecycle SessionStart UserPromptSubmit PreCompact PostCompact Stop raw unavailable deferred queue worker JSON validity. "
+                                "ambiguous weak signal conflict secret privacy export review packet long command large session cost latency timeout."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "get_goal", "call_id": "call-goal", "arguments": "{}"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "read_mcp_resource", "call_id": "call-mcp", "arguments": json.dumps({"server": "memory", "uri": "memory://route"})},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "github.get_pull_request", "call_id": "call-github", "arguments": json.dumps({"owner": "8Dionysus", "repo": "aoa-session-memory", "pullNumber": 1})},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "apply_patch", "call_id": "call-patch", "arguments": "{}"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:06Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-test", "arguments": json.dumps({"cmd": "pytest -q tests/test_session_memory.py"})},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:07Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-test", "output": "Process exited with code 0\nOutput:\n3 passed\n"},
+            },
+            {
+                "timestamp": "2026-05-24T00:00:08Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-fail",
+                    "output": "Process exited with code 1\nOutput:\npermission denied timeout command not found raw_unavailable schema mismatch dirty generated archive\n",
+                },
+            },
+            {
+                "timestamp": "2026-05-24T00:00:09Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Decision accepted. Assumption recorded. Open question remains; remaining gap is not blocked. "
+                                "Verification pass completed; tests green, bundle exported, local diff, committed, pushed, PR opened, merged. "
+                                "Final closeout follows."
+                            ),
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "route-readiness",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    payload = module.route_layer_readiness(aoa_root=aoa_root, target="all", sample_limit=1, write_report=True)
+
+    assert payload["ok"] is True
+    assert payload["covered_requirement_count"] == len(module.ROUTE_READINESS_REQUIREMENTS)
+    assert {gate["name"]: gate["status"] for gate in payload["global_gates"]} == {
+        "session_route_signal_indexes": "covered",
+        "source_atlas_axes": "covered",
+        "generated_atlas_index": "covered",
+        "portable_sqlite_search_index": "covered",
+    }
+    by_id = {item["id"]: item for item in payload["requirements"]}
+    assert by_id["entity_path_graph"]["status"] == "covered"
+    assert by_id["resource_profile"]["layers"][0]["signal_count"] >= 1
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+    sample_payload = module.route_sample_audit(
+        aoa_root=aoa_root,
+        target="all",
+        sample_limit=1,
+        max_raw_chars=360,
+        write_report=True,
+    )
+
+    assert sample_payload["ok"] is True
+    assert sample_payload["sampled_layer_count"] == sample_payload["required_layer_count"]
+    assert sample_payload["total_sample_count"] >= sample_payload["required_layer_count"]
+    assert sample_payload["review_status"] == "unreviewed"
+    sample_by_layer = {sample["layer"]: sample for sample in sample_payload["samples"]}
+    assert sample_by_layer["scope_contract"]["review"]["status"] == "unreviewed"
+    assert sample_by_layer["scope_contract"]["evidence"]["raw_ref"].startswith("raw:line:")
+    assert sample_by_layer["scope_contract"]["raw_preview"]["status"] == "available"
+    assert "Сначала погрузись" in sample_by_layer["scope_contract"]["raw_preview"]["text"]
+    assert Path(sample_payload["report_json"]).exists()
+    assert Path(sample_payload["report_markdown"]).exists()
+
+    stale_transcript = tmp_path / "rollout-2026-05-24T00-10-00-route-stale.jsonl"
+    write_jsonl(
+        stale_transcript,
+        [
+            {
+                "timestamp": "2026-05-24T00:10:00Z",
+                "type": "session_meta",
+                "payload": {"id": "route-stale", "cwd": str(repo), "model": "gpt-5"},
+            },
+            {
+                "timestamp": "2026-05-24T00:10:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Сначала погрузись. route index and verification map."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "route-stale",
+            "transcript_path": str(stale_transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    stale_record = module.resolve_session_record(aoa_root, "route-stale")
+    stale_session_index_path = module.session_dir_from_record(stale_record) / module.SESSION_INDEX_JSON
+    stale_session_index = json.loads(stale_session_index_path.read_text(encoding="utf-8"))
+    stale_session_index["route_signal_classifier_version"] = module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    stale_session_index_path.write_text(json.dumps(stale_session_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    stale_sample_payload = module.route_sample_audit(
+        aoa_root=aoa_root,
+        target="all",
+        sample_limit=1,
+        max_raw_chars=360,
+        write_report=False,
+    )
+
+    assert stale_sample_payload["ok"] is True
+    assert stale_sample_payload["diagnostics"] == []
+    assert stale_sample_payload["stale_route_classifier"] == 1
+    assert stale_sample_payload["stale_route_index_count"] == 1
+    assert "route_signal_classifier_mismatch" in stale_sample_payload["stale_route_indexes"][0]["reasons"]
+
+    stale_reindex_plan = module.reindex_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        dry_run=True,
+        stale_route_indexes=True,
+    )
+    assert stale_reindex_plan["candidate_selected_count"] == 2
+    assert stale_reindex_plan["selected_count"] == 1
+    assert stale_reindex_plan["counts"] == {"planned": 1}
+
+    stale_reindex_payload = module.reindex_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        stale_route_indexes=True,
+    )
+    assert stale_reindex_payload["ok"] is True
+    assert stale_reindex_payload["selected_count"] == 1
+    assert stale_reindex_payload["counts"] == {"reindexed": 1}
+    refreshed = json.loads(stale_session_index_path.read_text(encoding="utf-8"))
+    assert refreshed["route_signal_classifier_version"] == module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+
+    scope_identity = module.route_sample_identity(sample_by_layer["scope_contract"])
+    authority_identity = module.route_sample_identity(sample_by_layer["authority_surface"])
+    review_payload = module.route_sample_review(
+        aoa_root=aoa_root,
+        audit_path=Path(sample_payload["report_json"]),
+        verdict_values=[
+            f"{scope_identity}=accept:accept:raw prompt supports the scope contract",
+            f"{authority_identity}=reject:weaken:sample is too generic for authority-surface truth",
+        ],
+        reviewer="test-reviewer",
+        write_report=True,
+    )
+
+    assert review_payload["ok"] is True
+    assert review_payload["sample_count"] == sample_payload["total_sample_count"]
+    assert review_payload["reviewed_count"] == 2
+    assert review_payload["open_count"] == sample_payload["total_sample_count"] - 2
+    assert review_payload["verdict_counts"]["accept"] == 1
+    assert review_payload["verdict_counts"]["reject"] == 1
+    assert review_payload["classifier_feedback_count"] == 1
+    assert review_payload["classifier_feedback"][0]["identity"] == authority_identity
+    assert Path(review_payload["report_json"]).exists()
+    assert Path(review_payload["report_markdown"]).exists()
+
+
+def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_name(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    for axis in module.DEFAULT_ATLAS_AXES:
+        axis_dir = aoa_root / "maps" / axis / "entries"
+        axis_dir.mkdir(parents=True, exist_ok=True)
+        (axis_dir / ".gitkeep").write_text("", encoding="utf-8")
+        (axis_dir.parent / "README.md").write_text(f"# {axis}\n", encoding="utf-8")
+    (aoa_root / "maps" / "README.md").write_text("# maps\n", encoding="utf-8")
+
+    transcript = tmp_path / "rollout-2026-05-24T01-00-00-maintenance.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T01:00:00Z", "type": "session_meta", "payload": {"id": "maintenance-session", "cwd": str(repo)}},
+            {"timestamp": "2026-05-24T01:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build the route maintenance controller"}]}},
+            {"timestamp": "2026-05-24T01:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-test", "arguments": json.dumps({"cmd": "pytest -q"})}},
+            {"timestamp": "2026-05-24T01:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-test", "output": "Process exited with code 0\nOutput:\n1 passed\n"}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "maintenance-session",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    db_path = module.search_db_path(aoa_root)
+    atlas_index = aoa_root / module.ATLAS_ROOT / "index.json"
+    os.utime(db_path, (1, 1))
+    os.utime(atlas_index, (1, 1))
+
+    semantic = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="maintenance-session",
+        name="route maintenance automation",
+        scope="session",
+        kind="session_essence",
+        evidence_refs=["raw:line:2"],
+        from_line=1,
+        to_line=4,
+        apply=True,
+        verify_raw_hash=True,
+    )
+
+    assert semantic["status"] == "applied"
+    assert semantic["maintenance_job"]
+
+    plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
+    planned = {action["id"]: action for action in plan["actions"]}
+    assert planned["rebuild_search_index"]["status"] == "planned"
+    assert planned["rebuild_agent_atlas"]["status"] == "planned"
+    assert plan["search_index"]["status"] == "stale"
+    assert plan["atlas_index"]["status"] == "stale"
+
+    worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+
+    assert worker["ok"] is True
+    assert worker["processed"] == 1
+    assert worker["results"][0]["status"] == "maintained_indexes"
+    assert worker["results"][0]["action_counts"]["applied"] >= 2
+    assert worker["results"][0]["action_counts"]["remaining"] == 1
+    assert Path(worker["results"][0]["report_json"]).exists()
+
+    refreshed_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
+    assert refreshed_plan["search_index"]["status"] == "current"
+    assert refreshed_plan["atlas_index"]["status"] == "current"
+    assert refreshed_plan["action_counts"] == {}
+    search = module.search_sessions(aoa_root=aoa_root, query="route maintenance automation")
+    assert search["ok"] is True
+    assert search["result_count"] >= 1
+
+
 def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
@@ -444,6 +1615,12 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
+
+    bounded_indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", max_raw_bytes=1)
+    assert bounded_indexed["ok"] is True
+    assert bounded_indexed["max_raw_bytes"] == 1
+    assert bounded_indexed["event_document_count"] == 6
+    assert any(item.get("raw_text_status") == "skipped_raw_too_large" for item in bounded_indexed["sessions"])
 
     indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", write_report=True)
 
@@ -556,6 +1733,22 @@ def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, mo
             return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "stack", "generated_at": "now", "summary": {"fails": 0, "warnings": 0, "checks": 1}}}
         if command[:3] == ["abyss-machine", "nervous", "quality-audit"]:
             return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "quality", "generated_at": "now", "summary": {"fails": 0, "warnings": 1, "checks": 1}}}
+        if command[:3] == ["abyss-machine", "nervous", "semantic-status"]:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "semantic",
+                    "generated_at": "now",
+                    "ok": True,
+                    "ready": True,
+                    "warnings": [],
+                    "embedding": {"model_dir": "/models/embed", "model_exists": True, "device": "GPU", "dimension": 1024},
+                    "counts": {"vectors": 12},
+                    "freshness": {"stale": False, "source_chunks": 12, "delta_chunks": 0, "partial": False},
+                },
+            }
         if command[:3] == ["abyss-machine", "nervous", "recall"]:
             return {
                 "ok": True,
@@ -572,7 +1765,25 @@ def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, mo
             }
         raise AssertionError(command)
 
+    def fake_run_json_url(url: str, **_kwargs: object) -> dict[str, object]:
+        assert url == "http://127.0.0.1:5405/health"
+        return {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {
+                "ok": True,
+                "service": "rerank-api",
+                "model": "qwen3-reranker-0.6b-int8-ov",
+                "backend": "openvino_qwen3_reranker",
+                "device": "GPU",
+                "model_dir_exists": True,
+                "fake_mode": False,
+            },
+        }
+
     monkeypatch.setattr(module, "run_json_command", fake_run_json_command)
+    monkeypatch.setattr(module, "run_json_url", fake_run_json_url)
 
     guarded = module.search_sessions(
         aoa_root=aoa_root,
@@ -599,6 +1810,123 @@ def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, mo
     assert with_overlay["provider"]["overlay"]["truth_level"] == "host_context_only_not_aoa_authority"
     assert with_overlay["provider"]["overlay"]["evidence_count"] == 1
     assert with_overlay["results"][0]["refs"]["raw"] == "raw:line:2"
+    provider_models = with_overlay["provider"]["status"]["providers"]["abyss_machine_nervous"]["models"]
+    assert provider_models["embedding"]["status"] == "ready"
+    assert provider_models["reranker"]["status"] == "ready"
+
+
+def test_local_semantic_overlay_and_rerank_keep_portable_refs_authoritative(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-local-rerank.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "local-rerank-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "timeout archive map needs a broad cleanup"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "timeout hook failure has the stronger recovery route"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "local-rerank-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    def fake_run_json_command(command: list[str], **_kwargs: object) -> dict[str, object]:
+        if command[:3] == ["abyss-machine", "stack-bridge", "validate"]:
+            return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "stack", "generated_at": "now", "summary": {"fails": 0, "warnings": 0, "checks": 1}}}
+        if command[:3] == ["abyss-machine", "nervous", "quality-audit"]:
+            return {"ok": True, "status": "ok", "command": command, "payload": {"schema": "quality", "generated_at": "now", "summary": {"fails": 0, "warnings": 0, "checks": 1}}}
+        if command[:3] == ["abyss-machine", "nervous", "semantic-status"]:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "semantic",
+                    "generated_at": "now",
+                    "ok": True,
+                    "ready": True,
+                    "warnings": [],
+                    "embedding": {"model_dir": "/models/embed", "model_exists": True, "device": "GPU", "dimension": 1024},
+                    "counts": {"vectors": 2},
+                    "freshness": {"stale": False, "source_chunks": 2, "delta_chunks": 0, "partial": False},
+                },
+            }
+        if command[:3] == ["abyss-machine", "nervous", "semantic-search"]:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "abyss_machine_nervous_semantic_search_v1",
+                    "generated_at": "now",
+                    "query": "timeout",
+                    "results": [{"source_id": "host", "document_schema": "host_fact", "title": "host semantic route", "score": 0.9, "snippet": "host context"}],
+                    "summary": {"results": 1, "semantic_run_id": "semantic-test", "partial": False},
+                    "embedding_status": {"ok": True, "dim": 1024, "device": "GPU", "model_dir": "/models/embed"},
+                },
+            }
+        raise AssertionError(command)
+
+    def fake_run_json_url(url: str, **kwargs: object) -> dict[str, object]:
+        if url.endswith("/health"):
+            return {
+                "ok": True,
+                "status": "ok",
+                "url": url,
+                "payload": {"ok": True, "service": "rerank-api", "model": "reranker", "backend": "test", "device": "GPU"},
+            }
+        if url.endswith("/rerank"):
+            payload = kwargs.get("payload")
+            assert isinstance(payload, dict)
+            assert payload["query"] == "timeout"
+            documents = payload["documents"]
+            assert isinstance(documents, list)
+            return {
+                "ok": True,
+                "status": "ok",
+                "url": url,
+                "payload": {
+                    "model": "reranker",
+                    "results": [
+                        {"index": 0, "relevance_score": 0.1, "raw_logit_diff": -1.0},
+                        {"index": 1, "relevance_score": 0.95, "raw_logit_diff": 2.0},
+                    ],
+                    "meta": {"backend": "test", "device": "GPU", "documents": len(documents), "returned": len(documents), "total_ms": 12.3},
+                },
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(module, "run_json_command", fake_run_json_command)
+    monkeypatch.setattr(module, "run_json_url", fake_run_json_url)
+
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="timeout",
+        doc_type="event",
+        limit=2,
+        include_semantic_context=True,
+        rerank_local=True,
+        explain=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["provider"]["authoritative_result_provider"] == "portable_sqlite"
+    assert payload["provider"]["semantic_overlay"]["truth_level"] == "host_semantic_context_only_not_aoa_authority"
+    assert payload["provider"]["semantic_overlay"]["result_count"] == 1
+    assert payload["provider"]["local_rerank"]["truth_level"] == "local_rerank_ordering_not_aoa_authority"
+    assert payload["results"][0]["host_rerank"]["original_position"] == 2
+    assert payload["results"][0]["host_rerank"]["score"] == 0.95
+    assert payload["results"][0]["refs"]["raw"].startswith("raw:line:")
 
 
 def test_retrieval_packet_routes_continuation_to_refs_and_phase_candidates(tmp_path: Path) -> None:
@@ -993,6 +2321,11 @@ def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path)
     assert manifest["index_schema"]["universal_event_facets"] is True
     assert manifest["raw_blocks"]["blocks"][0]["role"] == "initial-to-latest"
     assert registry["sessions"][0]["raw_blocks"]["block_count"] == 1
+
+    bounded = module.reindex_sessions(aoa_root=aoa_root, target="all", max_raw_bytes=1)
+    assert bounded["counts"] == {"skipped": 1}
+    assert bounded["results"][0]["status"] == "skipped"
+    assert bounded["results"][0]["diagnostics"][0].startswith("raw_too_large:")
 
 
 def test_raw_unavailable_writes_diagnostic(tmp_path: Path) -> None:
@@ -1750,9 +3083,17 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "INSTALL.md").exists()
     assert (aoa_root / "DESIGN.AGENTS.md").exists()
     assert (aoa_root / "config" / "AGENTS.md").exists()
+    assert (aoa_root / "config" / "atlas-policy.json").exists()
     assert (aoa_root / "config" / "search-providers.json").exists()
     assert (aoa_root / "hooks" / "AGENTS.md").exists()
+    assert (aoa_root / "maps" / "AGENTS.md").exists()
+    assert (aoa_root / "maps" / "START.md").exists()
+    assert (aoa_root / "maps" / "by-work-context" / "README.md").exists()
+    assert (aoa_root / "maps" / "by-work-context" / "entries" / ".gitkeep").exists()
+    assert not (aoa_root / "maps" / "INDEX.md").exists()
+    assert not list((aoa_root / "maps" / "by-work-context" / "entries").glob("*.json"))
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
+    assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
     assert (aoa_root / "sessions" / "AGENTS.md").exists()
     assert (aoa_root / "skills" / "AGENTS.md").exists()
@@ -1774,6 +3115,27 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
 
     validation = module.validate_pipeline(workspace_root=workspace, aoa_root=aoa_root)
     assert validation["ok"] is True
+
+
+def test_agent_atlas_policy_matches_source_skeleton() -> None:
+    source_aoa = SCRIPT.parents[1]
+    policy = json.loads((source_aoa / "config" / "atlas-policy.json").read_text(encoding="utf-8"))
+    axis_names = [axis["name"] for axis in policy["axes"]]
+
+    assert policy["entry_contract"]["truth_status"] == "route_signal_not_reviewed_truth"
+    assert "by-work-context" in axis_names
+    assert "by-route-next-action" in axis_names
+    assert "by-evidence-provenance" in axis_names
+    assert "by-operator-preference" in axis_names
+
+    for axis_name in axis_names:
+        axis_dir = source_aoa / "maps" / axis_name
+        assert axis_dir.is_dir()
+        assert (axis_dir / "README.md").exists()
+        assert (axis_dir / "entries" / ".gitkeep").exists()
+
+    schema = json.loads((source_aoa / "schemas" / "atlas-route-entry.schema.json").read_text(encoding="utf-8"))
+    assert schema["properties"]["axis"]["pattern"] == "^by-[a-z0-9-]+$"
 
 
 def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_sessions(

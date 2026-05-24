@@ -17,7 +17,12 @@
     "by_actor": {"type": "object"},
     "by_action": {"type": "object"},
     "by_outcome": {"type": "object"},
-    "by_correlation": {"type": "object"}
+    "by_correlation": {"type": "object"},
+    "by_conversation_act": {"type": "object"},
+    "by_session_act": {"type": "object"},
+    "route_signal_schema_version": {"type": "integer"},
+    "by_route_layer": {"type": "object"},
+    "by_route_signal": {"type": "object"}
   },
   "additionalProperties": true
 }
