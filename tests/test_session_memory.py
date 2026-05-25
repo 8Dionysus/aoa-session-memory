@@ -486,6 +486,60 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
     assert search_payload["results"][0]["session_label"] == record["session_label"]
 
 
+def test_reindex_backfills_work_context_for_existing_archives(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# aoa-techniques\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-work-context-reindex.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T00:00:00Z", "type": "session_meta", "payload": {"id": "work-context-reindex", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-05-24T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь repo routing для aoa-techniques"}]},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "work-context-reindex",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "work-context-reindex")
+    session_dir = Path(record["path"])
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("work_context", None)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    reindexed = module.reindex_session_from_raw(aoa_root, record)
+    assert reindexed["status"] == "reindexed"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    assert manifest["work_context"]["work_name"] == "aoa-techniques"
+    assert manifest["work_context"]["work_family"] == "aoa"
+    assert session_index["work_context"]["work_name"] == "aoa-techniques"
+
+    atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    assert atlas["ok"] is True
+    work_entries = sorted((aoa_root / "maps" / "by-work-context" / "entries").glob("aoa_techniques__*.json"))
+    family_entries = sorted((aoa_root / "maps" / "by-repo-family" / "entries").glob("aoa__*.json"))
+    assert work_entries
+    assert family_entries
+
+
 def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -2559,6 +2613,103 @@ def test_hook_worker_processes_deferred_sync_job(tmp_path: Path, monkeypatch) ->
     assert (session_dir / "segments" / "000__initial-to-latest.index.json").exists()
     assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
     assert list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))
+
+
+def test_hook_worker_skips_fresh_deferred_sync_job(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-fresh.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-fresh"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker freshness guard"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Decision: build once"}]}},
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_START_SYNC", raising=False)
+
+    receipt = module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "session-worker-fresh",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert "background_sync_queued" in receipt["actions"]
+
+    first = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    assert first["ok"] is True
+    assert first["results"][0]["status"] == "synced"
+
+    job_path = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="Stop",
+        event={"session_id": "session-worker-fresh", "transcript_path": str(transcript), "cwd": str(workspace)},
+        session_id="session-worker-fresh",
+        transcript_path=transcript,
+        reason="test_duplicate_fresh_sync",
+    )
+    assert job_path is not None
+
+    second = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__worker-freshness-guard"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert second["ok"] is True
+    assert second["processed"] == 1
+    assert second["results"][0]["status"] == "already_synced"
+    assert second["results"][0]["freshness"]["reason"] == "indexed_archive_matches_transcript_snapshot"
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["latest_event_count"] == 3
+    assert "HookWorker:Stop" in manifest["hooks_seen"]
+    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
+
+
+def test_hook_worker_recovers_orphaned_running_job(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-orphan.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-orphan"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Recover orphaned worker job"}]}},
+        ],
+    )
+    running_dir = aoa_root / module.HOOK_JOBS_ROOT / "running"
+    running_dir.mkdir(parents=True)
+    running_job = running_dir / "orphaned-sync.json"
+    running_job.write_text(
+        json.dumps(
+            {
+                "schema_version": module.SCHEMA_VERSION,
+                "job_type": "hook_sync_transcript",
+                "queued_at": "2026-05-12T00:00:02Z",
+                "event_name": "PreCompact",
+                "session_id": "session-worker-orphan",
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "reason": "test_orphaned_running_job",
+                "event": {"session_id": "session-worker-orphan", "transcript_path": str(transcript), "cwd": str(workspace)},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__recover-orphaned-worker-job"
+
+    assert payload["ok"] is True
+    assert payload["processed"] == 1
+    assert payload["recovered_running"][0]["status"] == "requeued_orphaned_running_job"
+    assert payload["results"][0]["status"] == "synced"
+    assert not list(running_dir.glob("*.json"))
+    assert (session_dir / "session.manifest.json").exists()
 
 
 def test_hook_worker_drains_all_pending_jobs_in_batches(tmp_path: Path) -> None:

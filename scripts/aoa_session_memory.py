@@ -4709,6 +4709,102 @@ def session_source(
     return source
 
 
+def file_snapshot(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def indexed_archive_freshness(
+    aoa_root: Path,
+    *,
+    session_id: str,
+    transcript_path: Path,
+) -> dict[str, Any]:
+    session_dir = session_dir_for_id(aoa_root, session_id)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest.get("session_id"):
+        return {"fresh": False, "reason": "missing_manifest", "session_dir": str(session_dir)}
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    if manifest.get("archive_status") != "indexed" or raw.get("indexing_status") != "indexed":
+        return {"fresh": False, "reason": "archive_not_indexed", "session_dir": str(session_dir)}
+    raw_source_path = str(raw.get("source_path") or source.get("transcript_path") or "")
+    if raw_source_path and raw_source_path != str(transcript_path):
+        return {
+            "fresh": False,
+            "reason": "source_transcript_path_changed",
+            "session_dir": str(session_dir),
+            "raw_source_path": raw_source_path,
+        }
+    raw_path = Path(str(raw.get("path") or session_dir / "raw" / "session.raw.jsonl"))
+    if not raw_path.exists():
+        return {"fresh": False, "reason": "raw_missing", "session_dir": str(session_dir), "raw_path": str(raw_path)}
+    transcript_snapshot = file_snapshot(transcript_path)
+    raw_snapshot = file_snapshot(raw_path)
+    if raw_snapshot["size"] != transcript_snapshot["size"] or int(raw.get("bytes") or -1) != transcript_snapshot["size"]:
+        return {
+            "fresh": False,
+            "reason": "source_size_changed",
+            "session_dir": str(session_dir),
+            "transcript": transcript_snapshot,
+            "raw_snapshot": raw_snapshot,
+            "raw_bytes": raw.get("bytes"),
+        }
+    if raw_snapshot["mtime_ns"] != transcript_snapshot["mtime_ns"]:
+        return {
+            "fresh": False,
+            "reason": "source_mtime_changed",
+            "session_dir": str(session_dir),
+            "transcript": transcript_snapshot,
+            "raw_snapshot": raw_snapshot,
+        }
+    return {
+        "fresh": True,
+        "reason": "indexed_archive_matches_transcript_snapshot",
+        "session_id": manifest.get("session_id"),
+        "session_dir": str(session_dir),
+        "event_count": manifest.get("latest_event_count"),
+        "segment_count": len(manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []),
+        "transcript": transcript_snapshot,
+        "raw_snapshot": raw_snapshot,
+    }
+
+
+def record_indexed_hook_worker_seen(
+    aoa_root: Path,
+    *,
+    session_dir: Path,
+    hook_event_name: str,
+    lock_timeout_sec: float | None = None,
+) -> dict[str, Any]:
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest.get("session_id"):
+        return {"updated": False, "reason": "missing_manifest", "session_dir": str(session_dir)}
+    hooks_seen = list(manifest.get("hooks_seen", []) if isinstance(manifest.get("hooks_seen"), list) else [])
+    added = False
+    if hook_event_name and hook_event_name not in hooks_seen:
+        hooks_seen.append(hook_event_name)
+        manifest["hooks_seen"] = sorted(set(str(item) for item in hooks_seen if item))
+        manifest["updated_at"] = utc_now()
+        write_json(manifest_path, manifest)
+        update_session_index_identity(session_dir, manifest)
+        update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=lock_timeout_sec)
+        added = True
+    return {
+        "updated": added,
+        "reason": "hook_seen_recorded" if added else "hook_seen_already_present",
+        "session_id": manifest.get("session_id"),
+        "session_dir": str(session_dir),
+        "hooks_seen": manifest.get("hooks_seen", []),
+    }
+
+
 def sync_session_from_transcript(
     *,
     aoa_root: Path,
@@ -4721,9 +4817,14 @@ def sync_session_from_transcript(
     session_id = session_id_from(event, transcript_path)
     initial_session_dir = session_dir_for_id(aoa_root, session_id)
     existing = read_json(initial_session_dir / "session.manifest.json", {})
-    events = parse_raw_events(transcript_path)
     hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
     created_at = existing.get("created_at") or now
+    raw_dir = initial_session_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    write_session_agents(initial_session_dir)
+    raw_path = raw_dir / "session.raw.jsonl"
+    shutil.copy2(transcript_path, raw_path)
+    events = parse_raw_events(raw_path)
     display = session_display(
         aoa_root=aoa_root,
         session_dir=initial_session_dir,
@@ -4740,8 +4841,7 @@ def sync_session_from_transcript(
     display["navigation_path"] = str(session_dir)
     session_dir = merge_or_move_session_dir(initial_session_dir, session_dir)
     raw_dir = session_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    write_session_agents(session_dir)
+    raw_path = raw_dir / "session.raw.jsonl"
     existing_source = existing.get("source") if isinstance(existing.get("source"), dict) else {}
     source_payload = session_source(
         event,
@@ -4750,9 +4850,6 @@ def sync_session_from_transcript(
         hook_source=hook_source_metadata(session_dir),
     )
 
-    raw_path = raw_dir / "session.raw.jsonl"
-    shutil.copy2(transcript_path, raw_path)
-    events = parse_raw_events(raw_path)
     raw_hash = sha256_file(raw_path)
     raw_rel = "raw/session.raw.jsonl"
 
@@ -4790,6 +4887,8 @@ def sync_session_from_transcript(
             "path": str(raw_path),
             "source_path": str(transcript_path),
             "bytes": raw_path.stat().st_size,
+            "source_snapshot": file_snapshot(transcript_path),
+            "raw_snapshot": file_snapshot(raw_path),
             "sha256": raw_hash,
             "line_count": len(events),
             "copied_at": now,
@@ -5168,12 +5267,32 @@ def hook_worker_dirs(aoa_root: Path) -> dict[str, Path]:
     }
 
 
+def recover_orphaned_running_hook_jobs(dirs: dict[str, Path]) -> list[dict[str, Any]]:
+    recovered: list[dict[str, Any]] = []
+    running_dir = dirs["running"]
+    pending_dir = dirs["pending"]
+    for running_path in sorted(running_dir.glob("*.json")):
+        pending_path = pending_dir / running_path.name
+        if pending_path.exists():
+            pending_path = pending_dir / f"{compact_stamp()}__recovered__{running_path.name}"
+        running_path.replace(pending_path)
+        recovered.append(
+            {
+                "from": str(running_path),
+                "to": str(pending_path),
+                "status": "requeued_orphaned_running_job",
+            }
+        )
+    return recovered
+
+
 def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int = 5) -> dict[str, Any]:
     dirs = hook_worker_dirs(aoa_root)
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
     lock_path = dirs["root"] / "worker.lock"
     results: list[dict[str, Any]] = []
+    recovered_running: list[dict[str, Any]] = []
     with lock_path.open("w", encoding="utf-8") as lock_handle:
         try:
             fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5185,6 +5304,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                 "processed": 0,
                 "results": [],
             }
+        recovered_running = recover_orphaned_running_hook_jobs(dirs)
         batch_limit = max(0, limit)
         while batch_limit > 0:
             pending_jobs = sorted(dirs["pending"].glob("*.json"))[:batch_limit]
@@ -5238,26 +5358,51 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                         transcript_path = Path(str(transcript_value)).expanduser() if transcript_value else None
                         if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
                             raise FileNotFoundError(str(transcript_path) if transcript_path else "missing transcript_path")
-                        synced = sync_session_from_transcript(
-                            aoa_root=aoa_root,
-                            event={
-                                **event,
-                                "session_id": job.get("session_id") or event.get("session_id"),
-                                "transcript_path": str(transcript_path),
-                                "cwd": job.get("cwd") or event.get("cwd"),
-                                "hook_event_name": f"HookWorker:{job.get('event_name') or 'Unknown'}",
-                            },
+                        worker_hook_event = f"HookWorker:{job.get('event_name') or 'Unknown'}"
+                        worker_session_id = str(job.get("session_id") or event.get("session_id") or session_id_from(event, transcript_path))
+                        freshness = indexed_archive_freshness(
+                            aoa_root,
+                            session_id=worker_session_id,
                             transcript_path=transcript_path,
-                            hook_event_name=f"HookWorker:{job.get('event_name') or 'Unknown'}",
                         )
-                        result = {
-                            "job": str(running_path),
-                            "status": "synced",
-                            "session_id": synced.get("session_id"),
-                            "session_dir": synced.get("session_dir"),
-                            "event_count": synced.get("event_count"),
-                            "segment_count": synced.get("segment_count"),
-                        }
+                        if freshness.get("fresh"):
+                            hook_seen = record_indexed_hook_worker_seen(
+                                aoa_root,
+                                session_dir=Path(str(freshness["session_dir"])),
+                                hook_event_name=worker_hook_event,
+                            )
+                            result = {
+                                "job": str(running_path),
+                                "status": "already_synced",
+                                "session_id": freshness.get("session_id"),
+                                "session_dir": freshness.get("session_dir"),
+                                "event_count": freshness.get("event_count"),
+                                "segment_count": freshness.get("segment_count"),
+                                "freshness": freshness,
+                                "hook_seen": hook_seen,
+                            }
+                        else:
+                            synced = sync_session_from_transcript(
+                                aoa_root=aoa_root,
+                                event={
+                                    **event,
+                                    "session_id": worker_session_id,
+                                    "transcript_path": str(transcript_path),
+                                    "cwd": job.get("cwd") or event.get("cwd"),
+                                    "hook_event_name": worker_hook_event,
+                                },
+                                transcript_path=transcript_path,
+                                hook_event_name=worker_hook_event,
+                            )
+                            result = {
+                                "job": str(running_path),
+                                "status": "synced",
+                                "session_id": synced.get("session_id"),
+                                "session_dir": synced.get("session_dir"),
+                                "event_count": synced.get("event_count"),
+                                "segment_count": synced.get("segment_count"),
+                                "freshness": freshness,
+                            }
                     done_path = dirs["done"] / running_path.name
                     write_json(done_path, {**job, "completed_at": utc_now(), "result": result})
                     running_path.unlink(missing_ok=True)
@@ -5280,6 +5425,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
         "ok": all(result.get("status") != "failed" for result in results),
         "status": "processed",
         "processed": len(results),
+        "recovered_running": recovered_running,
         "results": results,
     }
 
@@ -10389,6 +10535,8 @@ def reindex_session_from_raw(
         manifest["raw"]["indexing_status"] = "indexed"
         manifest["raw"]["blocks_index"] = raw_blocks.get("index")
         manifest["raw"]["compaction_events"] = raw_blocks.get("compaction_events")
+    source_payload = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    manifest["work_context"] = work_context_for_session_events(source_payload, events)
     refresh_semantic_name_anchors(session_dir, manifest)
     write_json(manifest_path, manifest)
     raw_source_path = session_dir / "raw" / RAW_SOURCE_JSON
@@ -11625,6 +11773,11 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
         add(work_context_root_for_path(str(transcript_path)), score=1, kind="transcript_path", value=transcript_path)
 
     for event in events:
+        if event.event_type == "SESSION_META" and isinstance(event.parsed, dict):
+            payload = event.parsed.get("payload") if isinstance(event.parsed.get("payload"), dict) else event.parsed
+            cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
+            if cwd_value:
+                add(work_context_root_for_path(str(cwd_value)), score=18, kind="raw_session_meta_cwd", value=cwd_value, ref=f"raw:line:{event.line_no}")
         texts: list[str] = [event.title, " ".join(event.tags)]
         for key in ("command", "tool_name", "path"):
             value = event.facets.get(key)
