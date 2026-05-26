@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-Date: 2026-05-24
+Date: 2026-05-26
 
 This file maps the current `.aoa` session-memory goal to concrete evidence.
 It is a readiness snapshot for agents, not a substitute for running the gates.
@@ -37,6 +37,8 @@ Build the `.aoa` session-memory mechanism end to end:
 - Batch distillation policy: `config/batch-distillation-policy.json`
 - Portable search route: `search-index`, `search`, runtime `search/`, and
   `skills/aoa-session-search`
+- Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
+  hook, tool, Git/GitHub, entity, and path anchors
 - Automatic index maintenance route: `index-maintenance` / `maintain-index`
   over stale route indexes, portable search freshness, atlas freshness, and
   readiness reports
@@ -74,6 +76,7 @@ python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /pa
 python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
+python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
 python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
@@ -92,7 +95,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `81 passed`
+- `.aoa` tests: `85 passed`
 - `codex-grounding`: `ok=true`, `codex-cli 0.133.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -167,6 +170,36 @@ Last observed result:
   `diagnostics/20260524T144257Z__search-index.json`,
   `diagnostics/20260524T144612Z__agent-atlas.json`, and
   `diagnostics/20260524T144637Z__route-layer-readiness.json`.
+- Latest route-maintenance proof: classifier version
+  `route_signal_classifier_version=10` keeps canonical AoA skill/MCP names as
+  evidence-derived route anchors rather than a hand-authored project registry.
+  It recognizes `aoa-*` / `aoa_*` names, `skills/<name>/SKILL.md` paths, and
+  MCP services such as `mcp/services/<name>` or `*-mcp` across both
+  `by-entity` and `by-mcp` where applicable. `index-maintenance all --apply
+  --write-report --max-raw-mb 1300` selected `197` sessions, refreshed `163`
+  stale route indexes, rebuilt portable search to `930099` documents, rebuilt
+  the atlas to `36` axes and `29771` entries, and reran `route-readiness`
+  with `ok=true`, `covered_requirement_count=22/22`, and
+  `stale_route_classifier=0`. Target probes confirmed
+  `entity:aoa_memo_writeback` in `maps/by-entity` and
+  `entity:aoa_memo_mcp` plus `mcp:aoa_memo_mcp` across search and maps, while
+  derivative labels such as `mcp:aoa_memo_mcp_under_stack_mcp` no longer route
+  as MCP services. Reports:
+  `diagnostics/20260526T031416Z__reindex-sessions.json`,
+  `diagnostics/20260526T033506Z__search-index.json`,
+  `diagnostics/20260526T033900Z__agent-atlas.json`,
+  `diagnostics/20260526T033920Z__route-layer-readiness.json`, and
+  `diagnostics/20260526T033920Z__index-maintenance.json`.
+- Route-trace resolver proof: `trace-route` resolves operational anchors into
+  route candidates and evidence hits without adding a hand-authored registry.
+  Live probes on 2026-05-26 returned `ok=true`, `result_count=8`, and written
+  JSON/Markdown reports for `aoa-memo-writeback`, `aoa-memo-mcp`,
+  `PreCompact`, `exec_command`, and `GitHub`. Reports:
+  `diagnostics/20260526T043625Z__route-trace__aoa-memo-writeback.json`,
+  `diagnostics/20260526T043629Z__route-trace__aoa-memo-mcp.json`,
+  `diagnostics/20260526T043628Z__route-trace__precompact.json`,
+  `diagnostics/20260526T043631Z__route-trace__exec-command.json`, and
+  `diagnostics/20260526T043629Z__route-trace__github.json`.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
@@ -288,6 +321,8 @@ Stress-pass evidence:
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
 | Segment and session indexes expose operational route signals for the 22-layer map | `facets.route_signals`, `by_route_layer`, `by_route_signal`, `route_signal_counts`, route-signal regression tests |
+| Stable AoA skill and MCP service names route agents through canonical map axes | `entity:aoa_memo_writeback`, `entity:aoa_memo_mcp`, `mcp:aoa_memo_mcp`, `maps/by-entity/INDEX.md`, `maps/by-mcp/INDEX.md`, route-signal regression tests |
+| Agents can start from a named operational anchor instead of hand-picking a map axis | `trace-route`, `resolve-anchor`, route-trace regression test, 2026-05-26 live route-trace reports |
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all --max-raw-mb`, reindex report diagnostics, reindex regression test |
 | Secondary route caches repair themselves through a bounded controller | `index-maintenance`, queued `index_maintenance` worker jobs, semantic-name maintenance regression test |
 | Agents can search across many archived sessions without loading bulk raw into active context | `search-index --max-raw-mb`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
@@ -323,10 +358,11 @@ Stress-pass evidence:
 
 Completion-blocking gates in the current local proof surface:
 
-- None for the 22-layer route atlas proof as of the 2026-05-24 v7 reports:
-  `route-readiness` is `ok=true`, all `157` indexable route indexes are
-  current, and the `24` `raw_unavailable`/diagnostic archives are explicitly routed as
-  diagnostic non-indexable sessions.
+- None for the 22-layer route atlas proof as of the 2026-05-26 v10 reports:
+  `route-readiness` is `ok=true`, all `163` current indexable route indexes
+  are current, `stale_route_classifier=0`, and `34` diagnostic/non-indexable
+  archives are explicitly routed as non-indexable evidence rather than route
+  failures.
 
 Maintenance gates:
 

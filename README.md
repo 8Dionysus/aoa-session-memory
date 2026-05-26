@@ -118,10 +118,10 @@ maps/START.md
 
 The atlas is organized by route axes such as work context, memory surface,
 authority surface, session act, verification state, open thread, entity, tool,
-hook health, delivery state, failure mode, risk, review state, evidence
-provenance, owner route, freshness, runtime environment, mutation surface,
-correlation, confidence, access boundary, resource profile, operator
-preference, and next action. Generated entries belong under
+MCP service/resource, hook health, delivery state, failure mode, risk, review
+state, evidence provenance, owner route, freshness, runtime environment,
+mutation surface, correlation, confidence, access boundary, resource profile,
+operator preference, and next action. Generated entries belong under
 `maps/by-*/entries/` and must point back to session, segment, and raw evidence.
 
 Build generated atlas entries from current session indexes:
@@ -445,6 +445,21 @@ python3 scripts/aoa_session_memory.py search \
   --query "hook timed out" \
   --explain
 ```
+
+Resolve an operational anchor into the likely map/search routes before opening
+heavy session material:
+
+```bash
+python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+`trace-route` accepts skill/entity names, MCP service names, hooks, tools,
+Git/GitHub anchors, and path-like anchors. It expands aliases into
+route-signal candidates, queries the portable search index, and writes a
+bounded report with matched routes plus raw/segment/session refs.
 
 Filter by generated session-act routes when the activity shape matters:
 

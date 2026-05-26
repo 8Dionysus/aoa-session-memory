@@ -1167,6 +1167,96 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
 
     assert "operator_preference:landed_slices" in landed_slices_signals
 
+    skill_alias_prompt = {
+        "timestamp": "2026-05-24T00:00:06.250Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Use aoa_memo_writeback and inspect skills/aoa-memo-writeback/SKILL.md.",
+                }
+            ],
+        },
+    }
+    skill_alias_event = module.classify_raw_event(json.dumps(skill_alias_prompt), skill_alias_prompt, 21)
+    skill_alias_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in skill_alias_event.facets["route_signals"]
+    }
+
+    assert "entity:aoa_memo_writeback" in skill_alias_signals
+
+    mcp_service_command = {
+        "timestamp": "2026-05-24T00:00:06.500Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call-mcp-service",
+            "arguments": json.dumps(
+                {
+                    "cmd": "sed -n '1,160p' mcp/services/aoa-memo-mcp/src/aoa_memo_mcp/core.py",
+                    "workdir": "/srv/AbyssOS/aoa-memo",
+                }
+            ),
+        },
+    }
+    mcp_service_event = module.classify_raw_event(json.dumps(mcp_service_command), mcp_service_command, 22)
+    mcp_service_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in mcp_service_event.facets["route_signals"]
+    }
+
+    assert "entity:aoa_memo_mcp" in mcp_service_signals
+    assert "mcp:aoa_memo_mcp" in mcp_service_signals
+
+    mcp_test_command = {
+        "timestamp": "2026-05-24T00:00:06.750Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "call-mcp-test",
+            "arguments": json.dumps(
+                {
+                    "cmd": "pytest mcp/services/aoa-memo-mcp/tests/test_memo_mcp.py::test_smoke_aoa_memo_mcp",
+                    "workdir": "/srv/AbyssOS/aoa-memo",
+                }
+            ),
+        },
+    }
+    mcp_test_event = module.classify_raw_event(json.dumps(mcp_test_command), mcp_test_command, 23)
+    mcp_test_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in mcp_test_event.facets["route_signals"]
+    }
+
+    assert "mcp:aoa_memo_mcp" in mcp_test_signals
+    assert "mcp:test_memo_mcp" not in mcp_test_signals
+    assert "mcp:smoke_aoa_memo_mcp" not in mcp_test_signals
+
+    derived_mcp_phrase = {
+        "timestamp": "2026-05-24T00:00:07.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Observed aoa_memo_mcp_under_stack_mcp and abyss_stack_aoa_memo_mcp labels in generated candidates.",
+                }
+            ],
+        },
+    }
+    derived_mcp_event = module.classify_raw_event(json.dumps(derived_mcp_phrase), derived_mcp_phrase, 24)
+    derived_mcp_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in derived_mcp_event.facets["route_signals"]
+    }
+
+    assert "mcp:aoa_memo_mcp_under_stack_mcp" not in derived_mcp_signals
+    assert "mcp:abyss_stack_aoa_memo_mcp" not in derived_mcp_signals
+
 
 def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -1719,6 +1809,148 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
+
+
+def test_trace_route_resolves_operational_anchors_to_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-memo"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-00-00-trace-route.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "trace-route-session", "cwd": str(repo), "model": "gpt-5"},
+            },
+            {
+                "timestamp": "2026-05-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Debug aoa-memo-writeback skill; inspect skills/aoa-memo-writeback/SKILL.md.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-skill",
+                    "arguments": json.dumps({"cmd": "sed -n '1,120p' skills/aoa-memo-writeback/SKILL.md", "workdir": str(repo)}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-mcp",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": "sed -n '1,160p' mcp/services/aoa-memo-mcp/src/aoa_memo_mcp/core.py",
+                            "workdir": str(repo),
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "PreCompact hook completed; Stop hook queued deferred sync."}],
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:05Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-gh",
+                    "arguments": json.dumps({"cmd": "gh pr create --draft --title trace-route", "workdir": str(repo)}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:06Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "call-patch",
+                    "arguments": "*** Begin Patch\n*** End Patch\n",
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "trace-route-session",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    index_payload = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert index_payload["ok"] is True
+
+    def candidate_tokens(payload: dict[str, Any]) -> set[str]:
+        return {
+            f"{item.get('layer')}:{item.get('key')}"
+            for item in payload.get("route_candidates", [])
+            if isinstance(item, dict) and item.get("key")
+        }
+
+    def matched_tokens(payload: dict[str, Any]) -> set[str]:
+        tokens: set[str] = set()
+        for item in payload.get("results", []):
+            if isinstance(item, dict):
+                tokens.update(str(route) for route in item.get("matched_routes", []))
+        return tokens
+
+    skill_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-memo-writeback", limit=20, per_route_limit=5)
+    assert skill_trace["ok"] is True
+    assert "entity:aoa_memo_writeback" in candidate_tokens(skill_trace)
+    assert "entity:aoa_memo_writeback" in matched_tokens(skill_trace)
+    assert skill_trace["result_count"] >= 1
+
+    mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-memo-mcp", limit=20, per_route_limit=5, write_report=True)
+    assert mcp_trace["ok"] is True
+    assert "mcp:aoa_memo_mcp" in candidate_tokens(mcp_trace)
+    assert "mcp:aoa_memo_mcp" in matched_tokens(mcp_trace)
+    assert Path(mcp_trace["report_json"]).exists()
+    assert Path(mcp_trace["report_markdown"]).exists()
+
+    hook_trace = module.trace_route(aoa_root=aoa_root, anchor="PreCompact", kind="hook", limit=20, per_route_limit=5)
+    assert hook_trace["ok"] is True
+    assert "hook_health:precompact" in candidate_tokens(hook_trace)
+    assert "hook_health:precompact" in matched_tokens(hook_trace)
+
+    tool_trace = module.trace_route(aoa_root=aoa_root, anchor="exec_command", kind="tool", limit=20, per_route_limit=5)
+    assert tool_trace["ok"] is True
+    assert "tool:exec_command" in candidate_tokens(tool_trace)
+    assert "tool:exec_command" in matched_tokens(tool_trace)
+
+    github_trace = module.trace_route(aoa_root=aoa_root, anchor="GitHub", kind="github", limit=20, per_route_limit=5)
+    assert github_trace["ok"] is True
+    assert "external_snapshot:github" in candidate_tokens(github_trace)
+    assert "external_snapshot:github" in matched_tokens(github_trace)
 
 
 def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> None:
