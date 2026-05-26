@@ -64,6 +64,7 @@ Codex hook event
   -> session-registry.json
   -> optional search-index runtime cache
   -> optional provider capability status for host overlays
+  -> trace-route anchor resolver for skill/MCP/hook/tool/GitHub investigations
   -> retrieval packet recipes
   -> agent atlas route entries from generated route signals
   -> index-maintenance drift detector / repair pass
@@ -243,6 +244,27 @@ facets:
   provenance, freshness, owner route, mutation surface, access boundary,
   resource profile, and operator preference
 - per-event `relationships` for sequence and call/output refs
+
+The route-signal classifier also keeps lightweight canonical anchors for
+repeatedly referenced operational names. `aoa-*` and `aoa_*` skill-like names
+route through `by-entity`; names and paths shaped like `*-mcp` or
+`mcp/services/<name>` route through both `by-entity` and `by-mcp`. These are
+still evidence-derived route signals, not a hand-authored project registry.
+
+When an agent needs to debug or study one operational thing, use the resolver
+instead of guessing one axis by hand:
+
+```bash
+python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write-report
+```
+
+`trace-route` expands skill, MCP, hook, tool, Git/GitHub, entity, and path
+anchors into route candidates, queries `search` through `route_layer` and
+`route_signal` filters, and returns raw/segment/session refs. It is an
+investigation entrypoint over existing indexes, not a promoted registry.
 
 The agent should use indexes before opening large Markdown or raw JSONL.
 Naming-readiness data in `SESSION_NAMES.md`, `session-name-index.json`,

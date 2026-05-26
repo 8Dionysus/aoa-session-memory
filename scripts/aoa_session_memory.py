@@ -69,7 +69,7 @@ CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 7
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 10
 ATLAS_SCHEMA_VERSION = 1
 SEARCH_SCHEMA_VERSION = 3
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
@@ -2039,6 +2039,63 @@ def env_entity_candidate(value: str) -> bool:
     return len(token) >= 5
 
 
+NAMED_ENTITY_PATTERN = re.compile(
+    r"\b(?:aoa[-_][a-z0-9][a-z0-9_-]+|abyss[-_][a-z0-9][a-z0-9_-]*|agents-of-abyss|tree-of-sophia|tos|mcp|codex|github|gmail|drive|openai|pytest)\b",
+    flags=re.IGNORECASE,
+)
+ENV_ENTITY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+SKILL_PATH_ENTITY_PATTERN = re.compile(
+    r"(?:^|[\/\s])skills[\/]([a-z0-9][a-z0-9_.-]+)(?:[\/]SKILL\.md\b|[\/\s]|$)",
+    flags=re.IGNORECASE,
+)
+MCP_SERVICE_ENTITY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])((?:aoa|abyss)[-_][a-z0-9]+(?:[-_][a-z0-9]+){0,3}[-_]mcp)(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+MCP_SERVICE_PATH_PATTERN = re.compile(
+    r"(?:^|[\/\s])mcp(?:[\/]services)?[\/]([a-z0-9][a-z0-9.-]*[-_]mcp)(?=$|[\/\s])",
+    flags=re.IGNORECASE,
+)
+
+
+def named_entity_candidates_from_text(text: str) -> set[str]:
+    source = str(text or "")
+    entities = {match.group(0) for match in NAMED_ENTITY_PATTERN.finditer(source)}
+    entities.update(match.group(1) for match in SKILL_PATH_ENTITY_PATTERN.finditer(source))
+    entities.update(match.group(0) for match in ENV_ENTITY_PATTERN.finditer(source) if env_entity_candidate(match.group(0)))
+    return entities
+
+
+def canonical_mcp_service_key(value: str, *, path_source: bool = False) -> str | None:
+    key = route_key_slug(value, fallback="")
+    parts = [part for part in key.split("_") if part]
+    if len(parts) < 2 or parts[-1] != "mcp":
+        return None
+    if "mcp" in parts[:-1]:
+        return None
+    if path_source:
+        return key if len(parts) <= 6 else None
+    if parts[0] == "aoa":
+        return key if len(parts) <= 5 else None
+    if parts[0] == "abyss":
+        return key if len(parts) <= 4 else None
+    return None
+
+
+def mcp_route_candidates_from_texts(texts: list[str]) -> set[str]:
+    source = " ".join(str(text or "") for text in texts)
+    candidates: set[str] = set()
+    for match in MCP_SERVICE_ENTITY_PATTERN.finditer(source):
+        key = canonical_mcp_service_key(match.group(1), path_source=False)
+        if key:
+            candidates.add(key)
+    for match in MCP_SERVICE_PATH_PATTERN.finditer(source):
+        key = canonical_mcp_service_key(match.group(1), path_source=True)
+        if key:
+            candidates.add(key)
+    return candidates
+
+
 def has_secret_or_privacy_boundary(text: str) -> bool:
     lowered = str(text or "").lower()
     if not lowered:
@@ -2450,15 +2507,11 @@ def route_signals_for_event(
         if owner_root:
             add("owner_route", owner_name_from_root(owner_root) or owner_root, confidence="medium", source="path_mention", detail=owner_root)
     entity_text = route_semantic_limited + " " + command
-    named_entity_pattern = re.compile(
-        r"\b(?:aoa-[a-z0-9-]+|abyss[a-z0-9-]*|agents-of-abyss|tree-of-sophia|tos|mcp|codex|github|gmail|drive|openai|pytest)\b",
-        flags=re.IGNORECASE,
-    )
-    env_entity_pattern = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
-    entities = {match.group(0) for match in named_entity_pattern.finditer(entity_text)}
-    entities.update(match.group(0) for match in env_entity_pattern.finditer(entity_text) if env_entity_candidate(match.group(0)))
-    for entity in sorted(entities)[:12]:
+    entities = named_entity_candidates_from_text(entity_text)
+    for entity in sorted(entities)[:16]:
         add("entity", entity, confidence="medium", source="entity_mention", detail=entity)
+    for mcp_route in sorted(mcp_route_candidates_from_texts([entity_text, " ".join(path_candidates)]))[:8]:
+        add("mcp", mcp_route, confidence="medium", source="mcp_service_mention", detail=mcp_route)
 
     if event_type == "SESSION_META" or re.search(r"\b(cwd|branch|dirty|env|os|version|package manager|npm|pip|uv|poetry|cargo)\b", route_text_haystack):
         add("runtime_environment", "environment_state", confidence="medium", source="text")
@@ -16236,6 +16289,365 @@ def search_sessions(
     }
 
 
+TRACE_ROUTE_KINDS = {"auto", "entity", "skill", "mcp", "hook", "tool", "git", "github", "path", "external"}
+
+
+def trace_anchor_aliases(anchor: str) -> list[str]:
+    raw = str(anchor or "").strip()
+    aliases: list[str] = []
+
+    def add_alias(value: str) -> None:
+        text = str(value or "").strip().strip("`'\"")
+        if text and text not in aliases:
+            aliases.append(text)
+
+    add_alias(raw)
+    if not raw:
+        return aliases
+    add_alias(raw.replace("-", "_"))
+    add_alias(raw.replace("_", "-"))
+    slug = route_key_slug(raw, fallback="")
+    if slug:
+        add_alias(slug)
+        add_alias(slug.replace("_", "-"))
+    for match in SKILL_PATH_ENTITY_PATTERN.finditer(raw):
+        add_alias(match.group(1))
+    for match in MCP_SERVICE_PATH_PATTERN.finditer(raw):
+        add_alias(match.group(1))
+    pathish = raw.replace("\\", "/")
+    if "/" in pathish:
+        parts = [part for part in pathish.split("/") if part and part not in {".", ".."}]
+        for part in reversed(parts[-3:]):
+            if part.lower() == "skill.md" and len(parts) >= 2:
+                add_alias(parts[-2])
+            elif part:
+                add_alias(part)
+    for alias in list(aliases):
+        lowered = route_key_slug(alias, fallback="")
+        for suffix in ("_skill", "_hook", "_tool"):
+            if lowered.endswith(suffix):
+                add_alias(lowered[: -len(suffix)])
+    return aliases
+
+
+def infer_trace_route_kinds(anchor: str, explicit_kind: str = "auto") -> list[str]:
+    kind = str(explicit_kind or "auto").strip().lower()
+    if kind != "auto":
+        return [kind]
+    lowered = str(anchor or "").strip().lower()
+    aliases = trace_anchor_aliases(anchor)
+    kinds: list[str] = []
+
+    def add_kind(value: str) -> None:
+        if value not in kinds:
+            kinds.append(value)
+
+    if "skill" in lowered or "skills/" in lowered:
+        add_kind("skill")
+    if "mcp" in lowered or any(canonical_mcp_service_key(alias, path_source="/" in alias) for alias in aliases):
+        add_kind("mcp")
+    hook_names = {route_key_slug(name, fallback=name) for name in HOOK_EVENT_ORDER}
+    if "hook" in lowered or route_key_slug(lowered, fallback="") in hook_names:
+        add_kind("hook")
+    toolish = normalized_tool_name(anchor)
+    if toolish and (
+        toolish in {"exec_command", "write_stdin", "apply_patch", "update_plan", "view_image"}
+        or toolish.startswith("mcp__")
+        or "." in str(anchor)
+    ):
+        add_kind("tool")
+    if lowered in {"git", "gh", "github"} or lowered.startswith("git ") or lowered.startswith("gh ") or "github" in lowered:
+        add_kind("github" if "github" in lowered or lowered == "gh" else "git")
+    if "/" in lowered or lowered.endswith((".md", ".py", ".json", ".toml", ".yaml", ".yml")):
+        add_kind("path")
+    add_kind("entity")
+    return kinds
+
+
+def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str, Any]]:
+    aliases = trace_anchor_aliases(anchor)
+    kinds = infer_trace_route_kinds(anchor, kind)
+    lowered = " ".join(aliases).lower()
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_candidate(layer: str, key: str = "", *, source: str, confidence: str = "medium", detail: str = "") -> None:
+        normalized_layer = route_key_slug(layer, fallback=layer)
+        normalized_key = route_key_slug(key, fallback=key) if key else ""
+        if not normalized_layer:
+            return
+        route_signal = route_signal_token(normalized_layer, normalized_key) if normalized_key else ""
+        token = (normalized_layer, normalized_key, route_signal)
+        if token in seen:
+            return
+        seen.add(token)
+        candidates.append(
+            {
+                "layer": normalized_layer,
+                "key": normalized_key,
+                "route_signal": route_signal,
+                "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(normalized_layer, ""),
+                "source": source,
+                "confidence": confidence,
+                "detail": detail or key or layer,
+            }
+        )
+
+    if any(item in kinds for item in {"skill", "entity", "mcp"}):
+        for alias in aliases:
+            for entity in named_entity_candidates_from_text(alias):
+                add_candidate("entity", entity, source="named_entity_alias", detail=alias)
+            slug = route_key_slug(alias, fallback="")
+            if slug and (slug.startswith("aoa_") or slug.startswith("abyss_") or "skill" in kinds):
+                add_candidate("entity", slug, source="canonical_alias", detail=alias)
+
+    if "mcp" in kinds:
+        add_candidate("mcp", "", source="mcp_layer_hint", confidence="low", detail="generic MCP route layer")
+        for alias in aliases:
+            key = canonical_mcp_service_key(alias, path_source="/" in alias)
+            if key:
+                add_candidate("mcp", key, source="mcp_service_alias", confidence="high", detail=alias)
+                add_candidate("entity", key, source="mcp_service_entity_alias", confidence="high", detail=alias)
+        if any(alias in {"read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates"} for alias in aliases):
+            add_candidate("external_snapshot", "mcp", source="mcp_tool_alias", detail=anchor)
+
+    if "hook" in kinds:
+        add_candidate("hook_health", "", source="hook_layer_hint", confidence="low", detail="generic hook route layer")
+        hook_slug_by_name = {route_key_slug(name, fallback=name): name for name in HOOK_EVENT_ORDER}
+        for alias in aliases:
+            alias_slug = route_key_slug(alias, fallback="")
+            if alias_slug in hook_slug_by_name:
+                add_candidate("hook_health", hook_slug_by_name[alias_slug], source="hook_name_alias", confidence="high", detail=alias)
+        if "raw_unavailable" in lowered or "raw unavailable" in lowered:
+            add_candidate("hook_health", "raw_unavailable", source="hook_health_alias", confidence="high", detail=anchor)
+        if "deferred" in lowered or "queue" in lowered or "worker" in lowered:
+            add_candidate("hook_health", "deferred_sync_or_worker_queue", source="hook_health_alias", confidence="medium", detail=anchor)
+        add_candidate("mutation_surface", "hooks", source="hook_surface_alias", confidence="medium", detail=anchor)
+
+    if "tool" in kinds:
+        add_candidate("tool", "", source="tool_layer_hint", confidence="low", detail="generic tool route layer")
+        for alias in aliases:
+            short = normalized_tool_name(alias)
+            if short:
+                add_candidate("tool", short, source="tool_alias", confidence="high", detail=alias)
+                namespace = tool_namespace_for_name(alias)
+                if namespace and namespace != "unknown":
+                    add_candidate("tool", f"namespace_{namespace}", source="tool_namespace_alias", confidence="medium", detail=alias)
+                mcp_kind = session_act_for_mcp_tool(alias)
+                if mcp_kind:
+                    add_candidate("mcp", mcp_kind, source="mcp_tool_alias", confidence="high", detail=alias)
+
+    if "path" in kinds:
+        for alias in aliases:
+            if "/" in alias or "." in Path(alias).name:
+                add_candidate("path", route_key_slug(alias, fallback="path", max_chars=96), source="path_alias", confidence="medium", detail=alias)
+
+    if any(item in kinds for item in {"git", "github"}):
+        add_candidate("delivery_state", "", source="git_layer_hint", confidence="low", detail="generic delivery route layer")
+        if "status" in lowered or "diff" in lowered:
+            add_candidate("delivery_state", "local_diff", source="git_alias", confidence="medium", detail=anchor)
+        if "commit" in lowered or "committed" in lowered:
+            add_candidate("delivery_state", "committed", source="git_alias", confidence="medium", detail=anchor)
+        if "push" in lowered or "pushed" in lowered:
+            add_candidate("delivery_state", "pushed", source="git_alias", confidence="medium", detail=anchor)
+        if "pr" in lowered or "pull request" in lowered:
+            add_candidate("delivery_state", "pr_opened", source="github_alias", confidence="medium", detail=anchor)
+        if "merge" in lowered or "merged" in lowered:
+            add_candidate("delivery_state", "merged", source="github_alias", confidence="medium", detail=anchor)
+        if "github" in lowered or "gh" in lowered:
+            add_candidate("external_snapshot", "github", source="github_alias", confidence="medium", detail=anchor)
+            add_candidate("entity", "github", source="github_alias", confidence="medium", detail=anchor)
+
+    if "external" in kinds:
+        for key in ("github", "gmail", "google_drive", "google_calendar", "web", "mcp"):
+            if key.replace("_", " ") in lowered or key in lowered:
+                add_candidate("external_snapshot", key, source="external_alias", confidence="medium", detail=anchor)
+
+    return candidates
+
+
+def compact_trace_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "doc_id": result.get("doc_id"),
+        "doc_type": result.get("doc_type"),
+        "session_label": result.get("session_label"),
+        "session_date": result.get("session_date"),
+        "event_type": result.get("event_type"),
+        "conversation_act": result.get("conversation_act"),
+        "session_act": result.get("session_act"),
+        "matched_routes": result.get("matched_routes", []),
+        "title": result.get("title"),
+        "refs": result.get("refs"),
+        "freshness": result.get("freshness"),
+    }
+
+
+def route_trace_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Route Trace",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- anchor: `{payload.get('anchor')}`",
+        f"- kind: `{payload.get('kind')}`",
+        f"- inferred_kinds: `{', '.join(payload.get('inferred_kinds', []))}`",
+        f"- result_count: `{payload.get('result_count')}`",
+        "",
+        "## Route Candidates",
+        "",
+        "| layer | key | confidence | source |",
+        "| --- | --- | --- | --- |",
+    ]
+    for candidate in payload.get("route_candidates", []) if isinstance(payload.get("route_candidates"), list) else []:
+        lines.append(
+            "| `{layer}` | `{key}` | `{confidence}` | `{source}` |".format(
+                layer=candidate.get("layer", ""),
+                key=candidate.get("key", "") or "*",
+                confidence=candidate.get("confidence", ""),
+                source=candidate.get("source", ""),
+            )
+        )
+    lines.extend(["", "## Results", "", "| route | session | event | refs |", "| --- | --- | --- | --- |"])
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        refs = result.get("refs") if isinstance(result.get("refs"), dict) else {}
+        lines.append(
+            "| `{route}` | `{session}` | `{event}` | `{refs}` |".format(
+                route=", ".join(str(item) for item in result.get("matched_routes", [])[:4]),
+                session=result.get("session_label", ""),
+                event=result.get("event_type", ""),
+                refs=refs.get("raw") or refs.get("segment") or refs.get("session") or "",
+            )
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- {item}" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def trace_route(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 40,
+    per_route_limit: int = 12,
+    provider: str = "portable_sqlite",
+    doc_type: str | None = "event",
+    session: str | None = None,
+    explain: bool = True,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    normalized_kind = str(kind or "auto").strip().lower()
+    if normalized_kind not in TRACE_ROUTE_KINDS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "route_trace",
+            "generated_at": now,
+            "ok": False,
+            "anchor": anchor,
+            "kind": kind,
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [f"unknown trace kind: {kind}"],
+        }
+    limit = max(1, int_value(limit, 40))
+    per_route_limit = max(1, int_value(per_route_limit, 12))
+    resolved_doc_type = None if str(doc_type or "").lower() in {"", "all"} else str(doc_type)
+    candidates = trace_route_candidates(anchor, kind=normalized_kind)
+    diagnostics: list[str] = []
+    route_results: list[dict[str, Any]] = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    def merge_results(results: list[dict[str, Any]], matched_route: str) -> None:
+        for item in results:
+            doc_id = str(item.get("doc_id") or "")
+            if not doc_id:
+                continue
+            existing = merged.get(doc_id)
+            if existing is None:
+                existing = dict(item)
+                existing["matched_routes"] = []
+                merged[doc_id] = existing
+            matched = existing.setdefault("matched_routes", [])
+            if isinstance(matched, list) and matched_route and matched_route not in matched:
+                matched.append(matched_route)
+
+    for candidate in candidates:
+        route_signal_value = str(candidate.get("route_signal") or "")
+        route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
+        matched_route = route_signal_value or f"{candidate.get('layer')}:*"
+        payload = search_sessions(
+            aoa_root=aoa_root,
+            query="",
+            limit=per_route_limit,
+            provider=provider,
+            session=session,
+            doc_type=resolved_doc_type,
+            route_layer=route_layer_value,
+            route_signal=route_signal_value or None,
+            explain=explain,
+        )
+        route_results.append(
+            {
+                "candidate": candidate,
+                "ok": payload.get("ok"),
+                "result_count": payload.get("result_count"),
+                "diagnostics": payload.get("diagnostics", []),
+            }
+        )
+        if not payload.get("ok"):
+            diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
+            continue
+        merge_results(payload.get("results", []) if isinstance(payload.get("results"), list) else [], matched_route)
+
+    text_payload = search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        limit=per_route_limit,
+        provider=provider,
+        session=session,
+        doc_type=resolved_doc_type,
+        explain=explain,
+    )
+    if text_payload.get("ok"):
+        merge_results(text_payload.get("results", []) if isinstance(text_payload.get("results"), list) else [], "text")
+    else:
+        diagnostics.extend(str(item) for item in text_payload.get("diagnostics", []))
+
+    results = list(merged.values())[:limit]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "route_trace",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "anchor": anchor,
+        "kind": normalized_kind,
+        "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
+        "aliases": trace_anchor_aliases(anchor),
+        "doc_type": resolved_doc_type or "all",
+        "session": session or "",
+        "route_candidates": candidates,
+        "route_result_summaries": route_results,
+        "text_result_count": text_payload.get("result_count"),
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+        "next_route": "Read result refs in order: raw_ref, segment_ref, session_ref. Search hits are routes, not authority.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__route-trace__{readable_slug(anchor, fallback='anchor', max_chars=80)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, route_trace_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 RETRIEVAL_RECIPE_QUERIES = {
     "continue-session": "final state open thread decision verification",
     "continue-techniques-session": "aoa-techniques techniques continuation open thread final state",
@@ -16909,6 +17321,37 @@ def command_search(args: argparse.Namespace) -> int:
         explain=args.explain,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_trace_route(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = trace_route(
+        aoa_root=root,
+        anchor=args.anchor,
+        kind=args.kind,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        provider=args.provider,
+        doc_type=args.doc_type,
+        session=args.session_filter,
+        explain=args.explain,
+        write_report=args.write_report,
+    )
+    print(
+        json.dumps(
+            bounded_results_print_payload(
+                payload,
+                full=args.full,
+                sample_results=args.sample_results,
+                compact_func=compact_trace_result,
+                note="route trace results are bounded on stdout; pass --full or read the written report for complete refs",
+            ),
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     return 0 if payload.get("ok") else 1
 
 
@@ -20282,6 +20725,26 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     search.set_defaults(func=command_search)
+
+    trace_route_parser = sub.add_parser(
+        "trace-route",
+        aliases=["resolve-anchor", "trace-anchor"],
+        help="Resolve a skill/MCP/hook/tool/git anchor into route candidates and evidence hits.",
+    )
+    trace_route_parser.add_argument("anchor", help="Skill, MCP service, hook, tool, path, Git/GitHub, or entity anchor to trace.")
+    trace_route_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    trace_route_parser.add_argument("--workspace-root")
+    trace_route_parser.add_argument("--aoa-root")
+    trace_route_parser.add_argument("--limit", type=int, default=40, help="Maximum merged results.")
+    trace_route_parser.add_argument("--per-route-limit", type=int, default=12, help="Maximum hits fetched for each inferred route candidate.")
+    trace_route_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
+    trace_route_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    trace_route_parser.add_argument("--doc-type", choices=["all", "session", "segment", "event", "incident"], default="event")
+    trace_route_parser.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
+    trace_route_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown route-trace reports under .aoa/diagnostics.")
+    trace_route_parser.add_argument("--full", action="store_true", help="Print complete results to stdout.")
+    trace_route_parser.add_argument("--sample-results", type=int, default=20, help="Maximum sampled results printed when --full is not set.")
+    trace_route_parser.set_defaults(func=command_trace_route)
 
     atlas = sub.add_parser("atlas", help="Generate the agent atlas route entries from session indexes.")
     atlas_sub = atlas.add_subparsers(dest="atlas_command", required=True)

@@ -92,8 +92,8 @@
     },
     {
       "name": "by-mcp",
-      "route_question": "Which MCP resource, template, root, prompt, or tool was involved?",
-      "source_signals": ["mcp_resource", "mcp_tool", "mcp_template", "tool_name"]
+      "route_question": "Which MCP service, resource, template, root, prompt, or tool was involved?",
+      "source_signals": ["mcp_service", "mcp_resource", "mcp_tool", "mcp_template", "tool_name"]
     },
     {
       "name": "by-hook-health",
