@@ -90,6 +90,10 @@ python3 .aoa/scripts/aoa_session_memory.py codex-compact-probe \
   Codex hook timeout window. Set `AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC=0`
   to disable worker launch, or `AOA_SESSION_MEMORY_HOOK_SYNC_QUEUE=0` to
   disable queueing.
+- If Codex exits before a usable lifecycle hook runs, `sweep-codex-sessions`
+  is the recovery route over `~/.codex/sessions`. It plans missing, stale,
+  deferred, hook-only, and raw-unavailable archives by comparing transcript
+  snapshots with `.aoa` manifests, then syncs them only with `--apply`.
 - Manual sync/import/reindex are recovery and rebuild paths. They must not be
   the normal route for closing a compaction interval after `PostCompact`.
 - Hook registry writes use a short non-blocking lock window. If another

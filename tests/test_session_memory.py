@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -211,6 +213,220 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry_record["raw"]["indexing_status"] == "indexed"
     assert registry_record["raw"]["blocks_index"] == str(session_dir / "raw" / "blocks.index.json")
     assert registry_record["raw_blocks"]["block_count"] == 2
+
+
+def test_token_accounting_records_provider_usage_and_estimates(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-token-accounting.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "token-accounting", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Count the session tokens"}]},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "model": "gpt-5",
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cached_tokens": 2,
+                    "total_tokens": 15,
+                    "context_window_tokens": 100,
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "token-accounting",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "token-accounting")
+    session_dir = Path(record["path"])
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    token_event = next(item for item in segment_index["events"] if item["type"] == "CONTEXT_STATE")
+
+    assert manifest["token_accounting_schema_version"] == module.TOKEN_ACCOUNTING_SCHEMA_VERSION
+    assert manifest["token_accounting"]["generator_version"] == module.TOKEN_ACCOUNTING_GENERATOR_VERSION
+    assert manifest["token_accounting"]["totals_by_basis"]["provider_reported"]["total_tokens"] == 15
+    assert manifest["token_accounting"]["totals_by_basis"]["provider_reported"]["cached_tokens"] == 2
+    assert manifest["token_accounting"]["provider_reported_event_count"] == 1
+    assert manifest["token_accounting"]["estimated_event_count"] >= 1
+    assert session_index["token_accounting"]["totals_by_basis"]["provider_reported"]["input_tokens"] == 10
+    assert segment_index["token_accounting"]["count_by_basis"]["provider_reported"] == 1
+    assert token_event["token_accounting"]["count_basis"] == "provider_reported"
+    assert token_event["token_accounting"]["privacy"]["prompt_text_logged"] is False
+    assert "text" not in token_event["token_accounting"]
+    estimated_events = [
+        item for item in segment_index["events"]
+        if isinstance(item.get("token_accounting"), dict)
+        and item["token_accounting"].get("count_basis") == "estimated"
+    ]
+    assert estimated_events
+    assert all(item["token_accounting"].get("tokenizer_id") == module.TOKEN_ACCOUNTING_ESTIMATOR_ID for item in estimated_events)
+
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
+    manifest.pop("token_accounting", None)
+    manifest.pop("token_accounting_schema_version", None)
+    for segment in manifest["segments"]:
+        segment.pop("token_accounting", None)
+    for block in manifest["raw_blocks"]["blocks"]:
+        block.pop("token_accounting", None)
+    (session_dir / "session.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    session_index.pop("token_accounting", None)
+    session_index.pop("token_accounting_schema_version", None)
+    (session_dir / "session.index.json").write_text(json.dumps(session_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    segment_index.pop("token_accounting", None)
+    (session_dir / "segments" / "000__initial-to-latest.index.json").write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    raw_blocks_index_path = session_dir / "raw" / "blocks.index.json"
+    raw_blocks_index = json.loads(raw_blocks_index_path.read_text(encoding="utf-8"))
+    for block in raw_blocks_index["blocks"]:
+        block.pop("token_accounting", None)
+    raw_blocks_index_path.write_text(json.dumps(raw_blocks_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    maintenance_plan = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="token-accounting",
+        max_raw_bytes=1,
+        token_max_raw_bytes=raw_path.stat().st_size + 1024,
+    )
+    maintenance_actions = {item["id"]: item for item in maintenance_plan["actions"]}
+    assert maintenance_plan["max_raw_bytes"] == 1
+    assert maintenance_plan["token_max_raw_bytes"] == raw_path.stat().st_size + 1024
+    assert maintenance_plan["token_backfill"]["counts"]["planned"] == 1
+    assert maintenance_actions["token_accounting_backfill"]["needed"] is True
+
+    dry_run = module.token_accounting_backfill(aoa_root=aoa_root, target="token-accounting", apply=False)
+    assert dry_run["counts"]["planned"] == 1
+    assert "manifest_missing_token_accounting" in dry_run["results"][0]["diagnostics"]
+    assert "raw_blocks_manifest_missing_token_accounting" in dry_run["results"][0]["diagnostics"]
+
+    applied = module.token_accounting_backfill(aoa_root=aoa_root, target="token-accounting", apply=True)
+    assert applied["counts"]["backfilled"] == 1
+    assert applied["results"][0]["raw_unchanged"] is True
+    assert applied["results"][0]["raw_sha256_before"] == raw_sha_before
+    assert applied["results"][0]["raw_sha256_after"] == raw_sha_before
+    assert applied["results"][0]["after_diagnostics"] == []
+    idempotent = module.token_accounting_backfill(aoa_root=aoa_root, target="token-accounting", apply=False)
+    assert idempotent["counts"]["current"] == 1
+
+    refreshed_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    refreshed_session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    report = module.token_accounting_report(
+        aoa_root=aoa_root,
+        target="token-accounting",
+        include_compaction_deltas=True,
+    )
+    assert refreshed_manifest["token_accounting"]["totals_by_basis"]["provider_reported"]["total_tokens"] == 15
+    assert refreshed_session_index["token_accounting"]["totals_by_basis"]["provider_reported"]["input_tokens"] == 10
+    assert report["sessions"][0]["compaction_deltas"][0]["delta_token_accounting"]["count_by_basis"]["provider_reported"] == 1
+
+    report = module.token_accounting_report(aoa_root=aoa_root, target="latest", include_segments=True)
+    assert report["ok"] is True
+    assert report["aggregate"]["schema"] == module.TOKEN_ACCOUNTING_CONTRACT
+    assert report["aggregate"]["totals_by_basis"]["provider_reported"]["total_tokens"] == 15
+    assert report["sessions"][0]["context_pressure"]["available"] is True
+    assert report["sessions"][0]["segments"]
+    report_json = json.dumps(report, ensure_ascii=False)
+    assert "Count the session tokens" not in report_json
+    assert "Done" not in report_json
+
+
+def test_token_accounting_uses_last_token_usage_not_cumulative_snapshots(tmp_path: Path) -> None:
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-token-count-snapshots.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 10,
+                            "cached_input_tokens": 3,
+                            "output_tokens": 5,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 15,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 10,
+                            "cached_input_tokens": 3,
+                            "output_tokens": 5,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 15,
+                        },
+                        "model_context_window": 100,
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 17,
+                            "cached_input_tokens": 4,
+                            "output_tokens": 13,
+                            "reasoning_output_tokens": 3,
+                            "total_tokens": 30,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 7,
+                            "cached_input_tokens": 1,
+                            "output_tokens": 8,
+                            "reasoning_output_tokens": 1,
+                            "total_tokens": 15,
+                        },
+                        "model_context_window": 100,
+                    },
+                },
+            },
+        ],
+    )
+
+    events = module.parse_raw_events(transcript)
+    summary = module.token_accounting_summary_for_session(events, session_id="token-count-snapshots", include_observations=True)
+    provider = summary["totals_by_basis"]["provider_reported"]
+
+    assert summary["generator_version"] == module.TOKEN_ACCOUNTING_GENERATOR_VERSION
+    assert summary["provider_reported_event_count"] == 2
+    assert summary["count_by_basis"]["provider_reported"] == 2
+    assert provider["input_tokens"] == 17
+    assert provider["output_tokens"] == 13
+    assert provider["cached_tokens"] == 4
+    assert provider["reasoning_tokens"] == 3
+    assert provider["total_tokens"] == 30
+    assert provider["context_tokens"] == 10
+    assert provider["context_window_tokens"] == 100
+    assert all(item["source_kind"] == "codex_last_token_usage" for item in summary["observations"])
+    assert all(item["payload_path"] == "payload.info.last_token_usage" for item in summary["observations"])
 
 
 def test_sync_indexes_copied_snapshot_when_transcript_grows_during_copy(tmp_path: Path, monkeypatch) -> None:
@@ -486,6 +702,59 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
     assert search_payload["results"][0]["session_label"] == record["session_label"]
 
 
+def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-24T00-00-00-incremental-search.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-24T00:00:00Z", "type": "session_meta", "payload": {"id": "incremental-search", "cwd": str(repo)}},
+            {"timestamp": "2026-05-24T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Update only this searchable session"}]}},
+            {"timestamp": "2026-05-24T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Incremental search path ready."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "incremental-search",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, "incremental-search")
+    full = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert full["ok"] is True
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    cursor = conn.execute(
+        "INSERT INTO documents(id, doc_type, session_label, title, body, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+        ("obsolete-doc", "event", record["session_label"], "obsolete", "obsolete stale body", "{}"),
+    )
+    rowid = cursor.lastrowid
+    conn.execute(
+        "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
+        (rowid, "obsolete", "obsolete stale body", record["session_label"], ""),
+    )
+    before_count = conn.execute("SELECT COUNT(*) FROM documents WHERE session_label = ?", (record["session_label"],)).fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    incremental = module.search_index_sessions(aoa_root=aoa_root, target=record["session_label"], rebuild=False)
+    assert incremental["ok"] is True
+    assert incremental["removed_document_count"] == before_count
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = 'obsolete-doc'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM documents_fts WHERE rowid = ?", (rowid,)).fetchone()[0] == 0
+    conn.close()
+
+
 def test_reindex_backfills_work_context_for_existing_archives(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -675,6 +944,538 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     search_payload = module.search_sessions(aoa_root=aoa_root, route_layer="scope_contract", route_signal="scope_contract:analysis_only")
     assert search_payload["ok"] is True
     assert search_payload["results"][0]["route_signals"]
+
+
+def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# graph route\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-00-00-graph-rag.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "graph-rag", "cwd": str(repo), "model": "gpt-5"},
+            },
+            {
+                "timestamp": "2026-05-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Надо отладить MCP aoa-session-memory-mcp и tool exec_command через GraphRAG evidence refs.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-graph",
+                    "arguments": json.dumps({"cmd": "python3 scripts/aoa_session_memory.py graph-build --write"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-graph", "output": "Process exited with code 0\nOutput:\ngraph built\n"},
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "aoa_decisions_search",
+                    "call_id": "call-decision-search",
+                    "arguments": json.dumps({"query": "aoa-decision skill MCP usage"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "call_id": "call-unrelated-tool",
+                    "arguments": json.dumps({"role": "reviewer"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "GraphRAG packet keeps raw_ref and segment_ref."}],
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-rag",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True)
+    streaming_graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    conn.execute("UPDATE meta SET value = ? WHERE key = ?", ("2999-01-01T00:00:00Z", "generated_at"))
+    conn.commit()
+    conn.close()
+
+    assert search_index["ok"] is True
+    assert graph["ok"] is True
+    assert streaming_graph["ok"] is True
+    assert streaming_graph["builder"] == "sqlite_graph_store"
+    assert streaming_graph["nodes_sample"]
+    assert streaming_graph["edges_sample"]
+    assert "nodes" not in streaming_graph
+    assert "edges" not in streaming_graph
+    assert atlas["ok"] is True
+    assert (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert (aoa_root / "graph" / "edges.jsonl").exists()
+    assert (aoa_root / "graph" / "graph.sqlite3").exists()
+    assert json.loads((aoa_root / "graph" / "index.json").read_text(encoding="utf-8"))["builder"] == "sqlite_graph_store"
+    assert graph["node_type_counts"]["event"] >= 1
+    assert graph["node_type_counts"]["raw_ref"] >= 1
+
+    neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=2)
+    timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
+    config_alias_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="mcp_servers.aoa_session_memory", kind="mcp")
+    exact_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="tool")
+    typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
+    query_state = module.graph_store_query_state(aoa_root)
+    cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
+    packet = module.graph_rag_packet(
+        aoa_root=aoa_root,
+        query="aoa-session-memory-mcp",
+        anchor="aoa-session-memory-mcp",
+        limit=4,
+    )
+    explain = module.graph_explain_packet(
+        aoa_root=aoa_root,
+        intent="debug aoa-session-memory-mcp",
+        anchor="aoa-session-memory-mcp",
+        limit=4,
+    )
+    eval_payload = module.graph_eval(aoa_root=aoa_root, limit=3)
+    quality = module.graph_quality_audit(
+        aoa_root=aoa_root,
+        anchors=["mcp:aoa-session-memory-mcp", "tool:exec_command"],
+        limit=3,
+        sample_ref_limit=2,
+        write_report=True,
+    )
+
+    assert neighborhood["ok"] is True
+    assert neighborhood["graph"]["source"] == "sqlite_graph_store"
+    assert neighborhood["evidence_refs"]
+    assert any(item.get("refs", {}).get("raw") for item in neighborhood["evidence_refs"] if isinstance(item, dict))
+    assert timeline["events"]
+    assert config_alias_timeline["events"]
+    assert "aoa_session_memory_mcp" in config_alias_timeline["resolved"]["aliases"]
+    assert config_alias_timeline["resolved"]["resolver_strategy"] == "exact_route_node"
+    assert exact_tool_timeline["resolved"]["start_node_ids"] == ["route:tool:tool:aoa_decisions_search"]
+    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in exact_tool_timeline["events"])
+    assert all(event.get("title") != "Tool call: spawn_agent" for event in exact_tool_timeline["events"])
+    assert not any(
+        item.get("key") == "namespace_tool"
+        for item in exact_tool_timeline["resolved"].get("route_candidates", [])
+        if isinstance(item, dict)
+    )
+    assert "mcp:aoa_decsions_mcp" not in {
+        f"{item.get('layer')}:{item.get('key')}"
+        for item in typo_mcp_trace.get("route_candidates", [])
+        if isinstance(item, dict) and item.get("key")
+    }
+    assert "entity:aoa_decsions_mcp" not in {
+        f"{item.get('layer')}:{item.get('key')}"
+        for item in typo_mcp_trace.get("route_candidates", [])
+        if isinstance(item, dict) and item.get("key")
+    }
+    assert any("unknown_mcp_service_identity:aoa_decsions_mcp" in item for item in typo_mcp_trace["diagnostics"])
+    assert any("did_you_mean:aoa_decisions_mcp" in item for item in typo_mcp_trace["diagnostics"])
+    assert query_state["query_scope"] == "lightweight_store_availability_not_full_dirty_audit"
+    assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
+    assert packet["ok"] is True
+    assert packet["truth_status"] == "rag_graphrag_evidence_packet_not_reviewed_truth"
+    assert packet["evidence_refs"]
+    assert packet["answer_rules"]["status"] in {"needs_review", "evidence_ready"}
+    assert packet["answer_rules"]["important_claim_allowed"] is True
+    assert explain["artifact_type"] == "session_memory_graph_explain_packet"
+    assert explain["evidence_refs"]
+    assert explain["answer_rules"]["graph_rag_synthesis_allowed"] is True
+    assert eval_payload["results"]
+    assert quality["artifact_type"] == "session_memory_graph_quality_audit"
+    assert quality["ok"] is True
+    assert quality["sample_count"] == 2
+    assert quality["ready_for_manual_verdict_count"] == 2
+    assert all(sample["review_status"] == "ready_for_manual_verdict" for sample in quality["samples"])
+    assert all(sample["evidence"]["has_raw_ref"] for sample in quality["samples"])
+    assert any(
+        ref.get("raw_preview", {}).get("status") == "available"
+        for sample in quality["samples"]
+        for ref in sample["evidence"]["sample_refs"]
+    )
+    assert Path(quality["report_json"]).exists()
+    assert Path(quality["report_markdown"]).exists()
+
+    first_identity = module.graph_quality_identity(quality["samples"][0])
+    second_identity = module.graph_quality_identity(quality["samples"][1])
+    review = module.graph_quality_review(
+        aoa_root=aoa_root,
+        audit_path=Path(quality["report_json"]),
+        verdict_values=[
+            f"{first_identity}=accept:accept:anchor evidence is specific",
+            f"{second_identity}=reject:repair_classifier:tool anchor is too broad",
+        ],
+        reviewer="test-reviewer",
+        write_report=True,
+    )
+
+    assert review["artifact_type"] == "session_memory_graph_quality_review"
+    assert review["ok"] is True
+    assert review["sample_count"] == 2
+    assert review["reviewed_count"] == 2
+    assert review["open_count"] == 0
+    assert review["verdict_counts"]["accept"] == 1
+    assert review["verdict_counts"]["reject"] == 1
+    assert review["quality_feedback_count"] == 1
+    assert review["quality_feedback"][0]["action"] == "repair_classifier"
+    assert review["regression_candidate_count"] == 2
+    assert Path(review["report_json"]).exists()
+    assert Path(review["report_markdown"]).exists()
+
+    corpus = module.graph_quality_corpus_from_review(
+        aoa_root=aoa_root,
+        review_paths=[Path(review["report_json"])],
+        write_corpus=True,
+        write_report=True,
+    )
+    corpus_check = module.graph_quality_corpus_check(
+        aoa_root=aoa_root,
+        corpus_path=Path(corpus["corpus_path"]),
+        write_report=True,
+    )
+    gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20, write_report=True)
+    dossier = module.entity_dossier(
+        aoa_root=aoa_root,
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        limit=4,
+        write_report=True,
+    )
+
+    assert corpus["artifact_type"] == "session_memory_graph_quality_regression_corpus"
+    assert corpus["case_count"] == 2
+    assert corpus["polarity_counts"]["positive"] == 1
+    assert corpus["polarity_counts"]["negative"] == 1
+    assert Path(corpus["corpus_path"]).exists()
+    assert Path(corpus["report_json"]).exists()
+    assert corpus_check["artifact_type"] == "session_memory_graph_quality_regression_check"
+    assert corpus_check["failed_count"] == 0
+    assert "stale" in corpus_check["missing_polarities"]
+    assert Path(corpus_check["report_json"]).exists()
+    assert gates["artifact_type"] == "session_memory_graph_freshness_gates"
+    assert gates["refs"]["ok"] is True
+    assert gates["graph_store"]["status"] == "current"
+    assert gates["graph_sidecar"]["status"] == "current"
+    assert gates["graph_sidecar"]["search_vs_graph"] == "search_newer_than_graph"
+    assert Path(gates["report_json"]).exists()
+    assert dossier["artifact_type"] == "session_memory_entity_dossier"
+    assert dossier["ok"] is True
+    assert dossier["strong_refs"]
+    assert dossier["read_first"]
+    assert Path(dossier["report_json"]).exists()
+
+
+def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-10-00-incremental-graph.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-26T00:10:00Z", "type": "session_meta", "payload": {"id": "incremental-graph", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:10:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Debug incremental graph maintenance."}]}},
+            {"timestamp": "2026-05-26T00:10:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Incremental graph refs are preserved."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "incremental-graph",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-26__001__debug-incremental-graph-maintenance"
+    segment_index_path = next((session_dir / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    assert segment_index["events"]
+    old_signal = {"layer": "entity", "key": "alpha_incremental_anchor", "route_signal": "entity:alpha_incremental_anchor"}
+    new_signal = {"layer": "entity", "key": "beta_incremental_anchor", "route_signal": "entity:beta_incremental_anchor"}
+    segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(old_signal)
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+    old_node_id = module.graph_route_node_id("entity", "alpha_incremental_anchor")
+    new_node_id = module.graph_route_node_id("entity", "beta_incremental_anchor")
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 1
+    conn.close()
+
+    segment_index["events"][0]["facets"]["route_signals"] = [
+        signal for signal in segment_index["events"][0]["facets"]["route_signals"]
+        if signal.get("key") != "alpha_incremental_anchor"
+    ] + [new_signal]
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(segment_index_path, None)
+
+    states = module.graph_source_states(aoa_root=aoa_root)
+    assert states["dirty_count"] >= 1
+    assert any(item["status"] == "dirty" and item["source_type"] == "segment" for item in states["states"])
+
+    dirty_gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    assert dirty_gates["graph_store"]["status"] == "dirty"
+    assert dirty_gates["graph_sidecar"]["status"] == "stale"
+    assert dirty_gates["graph_sidecar"]["needs_snapshot_refresh"] is True
+    assert dirty_gates["graph_sidecar"]["needs_offline_graph_build"] is False
+    assert dirty_gates["needs_graph_maintenance"] is True
+    assert dirty_gates["needs_sidecar_export"] is False
+    assert dirty_gates["needs_offline_graph_build"] is False
+
+    maintained = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, write_report=True)
+    assert maintained["ok"] is True
+    assert maintained["selected_count"] >= 1
+    assert Path(maintained["report_json"]).exists()
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 1
+    conn.close()
+
+    gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    assert gates["graph_store"]["status"] == "current"
+    assert gates["graph_sidecar"]["status"] == "stale"
+    assert gates["graph_sidecar"]["needs_snapshot_refresh"] is True
+    assert gates["graph_sidecar"]["needs_offline_graph_build"] is False
+    assert gates["needs_sidecar_export"] is True
+    assert gates["needs_offline_graph_build"] is False
+
+    pruned = module.graph_prune_sidecar(aoa_root=aoa_root, apply=True, write_report=True)
+    assert pruned["ok"] is True
+    assert pruned["freed_bytes"] > 0
+    assert Path(pruned["report_json"]).exists()
+    assert not (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert not (aoa_root / "graph" / "edges.jsonl").exists()
+    assert not (aoa_root / "graph" / "index.json").exists()
+    assert (aoa_root / "graph" / "graph.sqlite3").exists()
+    pruned_gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    assert pruned_gates["graph_store"]["status"] == "current"
+    assert pruned_gates["graph_sidecar"]["status"] == "not_exported"
+    assert pruned_gates["graph_sidecar"]["needs_snapshot_refresh"] is False
+    assert pruned_gates["needs_sidecar_export"] is False
+    assert next(gate for gate in pruned_gates["gates"] if gate["name"] == "graph_sidecar_snapshot")["ok"] is True
+
+    segment_index_path.unlink()
+    record = module.resolve_session_record(aoa_root, "incremental-graph")
+    contributions, diagnostics = module.graph_contributions_for_record(record)
+    assert diagnostics == []
+    blocked_contribution = next(
+        contribution for contribution in contributions
+        if contribution["source"]["source_type"] == "segment"
+    )
+    assert blocked_contribution["source"]["status"] == "blocked"
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        blocked = store.replace_source(blocked_contribution)
+        store.conn.commit()
+    finally:
+        store.close()
+    assert blocked["status"] == "blocked"
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 0
+    conn.close()
+
+
+def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+
+    first_transcript = tmp_path / "rollout-2026-05-26T00-20-00-first-graph-source.jsonl"
+    second_transcript = tmp_path / "rollout-2026-05-26T00-30-00-second-graph-source.jsonl"
+    write_jsonl(
+        first_transcript,
+        [
+            {"timestamp": "2026-05-26T00:20:00Z", "type": "session_meta", "payload": {"id": "first-graph-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:20:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create the first graph source."}]}},
+            {"timestamp": "2026-05-26T00:20:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "First graph source archived."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "first-graph-source",
+            "transcript_path": str(first_transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+
+    write_jsonl(
+        second_transcript,
+        [
+            {"timestamp": "2026-05-26T00:30:00Z", "type": "session_meta", "payload": {"id": "second-graph-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:30:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create the second graph source."}]}},
+            {"timestamp": "2026-05-26T00:30:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Second graph source archived."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "second-graph-source",
+            "transcript_path": str(second_transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    states = module.graph_source_states(aoa_root=aoa_root)
+    assert states["missing_count"] >= 2
+    assert any(item["status"] == "missing" and item["session_id"] == "second-graph-source" for item in states["states"])
+
+    inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10)
+    assert inserted["ok"] is True
+    assert inserted["selected_count"] >= 2
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
+    conn.close()
+
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["sessions"] = [
+        item for item in registry["sessions"]
+        if item.get("session_id") != "second-graph-source"
+    ]
+    registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    orphaned_states = module.graph_source_states(aoa_root=aoa_root)
+    assert orphaned_states["orphaned_count"] >= 2
+    assert any(item["status"] == "orphaned" and item["session_id"] == "second-graph-source" for item in orphaned_states["states"])
+
+    removed = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10)
+    assert removed["ok"] is True
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE source_node = ? OR target_node = ?",
+        ("session:second-graph-source", "session:second-graph-source"),
+    ).fetchone()[0] == 0
+    conn.close()
+
+    final_state = module.graph_store_state(aoa_root=aoa_root)
+    assert final_state["status"] == "current"
+
+
+def test_graph_store_reports_blocked_sources_without_requesting_maintenance(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-40-00-indexed-graph-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-26T00:40:00Z", "type": "session_meta", "payload": {"id": "indexed-graph-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:40:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create an indexed graph source."}]}},
+            {"timestamp": "2026-05-26T00:40:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Indexed graph source archived."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "indexed-graph-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    blocked_dir = aoa_root / "sessions" / "2026-05-26__002__raw-unavailable-graph-source"
+    blocked_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": 1,
+        "session_id": "blocked-graph-source",
+        "session_label": blocked_dir.name,
+        "session_title": "Raw unavailable graph source",
+        "archive_status": "raw_unavailable",
+        "segments": [],
+        "display": {"label": blocked_dir.name, "title": "Raw unavailable graph source", "date": "2026-05-26"},
+    }
+    (blocked_dir / "session.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["sessions"].append(
+        {
+            "session_id": "blocked-graph-source",
+            "session_label": blocked_dir.name,
+            "session_title": "Raw unavailable graph source",
+            "path": str(blocked_dir),
+            "archive_status": "raw_unavailable",
+            "display": manifest["display"],
+        }
+    )
+    registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+    state = module.graph_store_state(aoa_root=aoa_root)
+    assert state["status"] == "current_with_blocked_sources"
+    assert state["needs_maintenance"] is False
+    assert state["needs_full_rebuild"] is False
+    assert state["source_state"]["blocked_count"] == 1
+
+    gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    assert gates["graph_store"]["status"] == "current_with_blocked_sources"
+    assert next(gate for gate in gates["gates"] if gate["name"] == "graph_store_current")["ok"] is True
+    assert gates["needs_graph_maintenance"] is False
 
 
 def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
@@ -1352,7 +2153,7 @@ def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     assert entry["evidence"]["raw_ref"] == "raw:line:2"
 
 
-def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path) -> None:
+def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
     repo.mkdir(parents=True)
@@ -1475,9 +2276,19 @@ def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path) -> N
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     module.search_index_sessions(aoa_root=aoa_root, target="all")
 
+    cache_calls = 0
+    real_evidence_cache = module.session_axis_evidence_cache
+
+    def counted_evidence_cache(session_dir: Path, manifest: dict[str, Any]) -> dict[str, dict[str, dict[str, str]]]:
+        nonlocal cache_calls
+        cache_calls += 1
+        return real_evidence_cache(session_dir, manifest)
+
+    monkeypatch.setattr(module, "session_axis_evidence_cache", counted_evidence_cache)
     payload = module.route_layer_readiness(aoa_root=aoa_root, target="all", sample_limit=1, write_report=True)
 
     assert payload["ok"] is True
+    assert cache_calls == 1
     assert payload["covered_requirement_count"] == len(module.ROUTE_READINESS_REQUIREMENTS)
     assert {gate["name"]: gate["status"] for gate in payload["global_gates"]} == {
         "session_route_signal_indexes": "covered",
@@ -1490,6 +2301,13 @@ def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path) -> N
     assert by_id["resource_profile"]["layers"][0]["signal_count"] >= 1
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+    fast_payload = module.route_layer_readiness(aoa_root=aoa_root, target="all", sample_limit=0, write_report=False)
+    assert fast_payload["ok"] is True
+    assert cache_calls == 1
+    for requirement in fast_payload["requirements"]:
+        for layer in requirement["layers"]:
+            assert layer["samples"] == []
 
     sample_payload = module.route_sample_audit(
         aoa_root=aoa_root,
@@ -1608,6 +2426,43 @@ def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path) -> N
     assert Path(review_payload["report_markdown"]).exists()
 
 
+def test_index_source_mtime_ignores_generated_root_aggregates(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-05-24__freshness"
+    session_dir.mkdir(parents=True)
+    record = {"path": str(session_dir), "session_id": "freshness-session"}
+
+    generated_paths = [
+        aoa_root / module.REGISTRY_NAME,
+        aoa_root / module.SESSION_NAME_INDEX_JSON,
+        aoa_root / module.SESSION_NAME_INDEX_MARKDOWN,
+        aoa_root / module.SESSION_ROOT / module.SESSIONS_INDEX_JSON,
+        aoa_root / module.SESSION_ROOT / module.SESSIONS_INDEX_MARKDOWN,
+    ]
+    for path in generated_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("generated\n", encoding="utf-8")
+        os.utime(path, (200, 200))
+
+    source_paths = [
+        session_dir / "session.manifest.json",
+        session_dir / module.SESSION_INDEX_JSON,
+        session_dir / module.SESSION_INDEX_MARKDOWN,
+    ]
+    for path in source_paths:
+        path.write_text("{}\n" if path.suffix == ".json" else "source\n", encoding="utf-8")
+        os.utime(path, (100, 100))
+
+    newest, newest_paths = module.latest_index_source_mtime(aoa_root, [record])
+    assert newest == 100
+    assert set(newest_paths) == {str(path) for path in source_paths}
+
+    os.utime(session_dir / module.SESSION_INDEX_JSON, (300, 300))
+    newest_after_source_change, newest_source_paths = module.latest_index_source_mtime(aoa_root, [record])
+    assert newest_after_source_change == 300
+    assert newest_source_paths == [str(session_dir / module.SESSION_INDEX_JSON)]
+
+
 def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_name(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -1687,6 +2542,126 @@ def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_nam
     search = module.search_sessions(aoa_root=aoa_root, query="route maintenance automation")
     assert search["ok"] is True
     assert search["result_count"] >= 1
+
+
+def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {"freshness": []}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness"].append(kwargs)
+        return {
+            "ok": True,
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": [],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "route_drift_count": 0,
+            "deferred_session_count": 0,
+            "action_counts": {"applied": 2},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "graph_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["profile"] == "backlog"
+    assert payload["mutates"] is True
+    assert payload["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["backlog"]["graph_batch_limit"]
+    assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["backlog"]["graph_batch_limit"]
+    assert payload["repair_indexes"] is True
+    assert calls["maintenance"]["repair_indexes"] is True
+    assert calls["maintenance"]["reason"] == "auto_maintenance:backlog:timer"
+    assert len(calls["freshness"]) == 2
+    assert payload["resource_launcher"][:3] == ["abyss-machine", "resource", "launch"]
+    assert "aoa_session_memory MCP remains read-only" in payload["mcp_boundary"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_hot_auto_maintenance_defers_index_repair_to_heavier_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": [],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "route_drift_count": 0,
+            "deferred_session_count": 0,
+            "repair_indexes": kwargs["repair_indexes"],
+            "index_repair_needed": True,
+            "action_counts": {"applied": 1, "deferred": 1},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "graph_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+
+    assert payload["repair_indexes"] is False
+    assert payload["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
+    assert calls["maintenance"]["repair_indexes"] is False
+    assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
+
+
+def test_auto_maintenance_skips_when_lock_is_held(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    lock_path = aoa_root / module.DIAGNOSTICS_ROOT / "auto-maintenance.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    def fail_if_called(**_: Any) -> dict[str, Any]:
+        raise AssertionError("freshness or maintenance should not run while lock is held")
+
+    monkeypatch.setattr(module, "graph_freshness_gates", fail_if_called)
+    monkeypatch.setattr(module, "maintain_indexes", fail_if_called)
+
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "skipped_lock_held"
+    assert payload["mutates"] is False
+    assert payload["lock_path"] == str(lock_path)
 
 
 def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> None:
@@ -3721,6 +4696,186 @@ def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
     skipped = module.import_codex_sessions(aoa_root=aoa_root, source_root=source_root, since="2026-05-01")
     assert skipped["ok"] is True
     assert skipped["counts"] == {"skipped_existing": 1}
+
+
+def test_sweep_codex_sessions_repairs_missing_and_stale_transcripts(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    transcript = source_root / "2026" / "05" / "03" / "rollout-2026-05-03T12-00-00-sweep-session.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-05-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "sweep-session", "cwd": str(workspace), "timestamp": "2026-05-03T12:00:00Z"},
+        },
+        {
+            "timestamp": "2026-05-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Sweep the missing Codex transcript"}],
+            },
+        },
+    ]
+    write_jsonl(transcript, rows)
+    old_transcript = source_root / "2026" / "04" / "01" / "rollout-2026-04-01T12-00-00-old-sweep-session.jsonl"
+    write_jsonl(
+        old_transcript,
+        [
+            {
+                "timestamp": "2026-04-01T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "old-sweep-session", "cwd": str(workspace), "timestamp": "2026-04-01T12:00:00Z"},
+            },
+            {
+                "timestamp": "2026-04-01T12:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Old sweep session"}]},
+            },
+        ],
+    )
+
+    dry = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+        write_report=True,
+    )
+
+    assert dry["ok"] is True
+    assert dry["discovered_count"] == 1
+    assert dry["counts"] == {"planned": 1}
+    assert dry["repair_candidate_count"] == 1
+    assert dry["results"][0]["freshness_reason"] == "missing_manifest"
+    assert Path(dry["report_json"]).exists()
+    assert Path(dry["report_markdown"]).exists()
+
+    synced = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+    )
+    assert synced["ok"] is True
+    assert synced["counts"] == {"synced": 1}
+    session_dir = Path(synced["results"][0]["session_dir"])
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["latest_event_count"] == 2
+    assert "CodexSessionSweep" in manifest["hooks_seen"]
+
+    fresh = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+    )
+    assert fresh["counts"] == {"skipped_fresh": 1}
+
+    write_jsonl(
+        transcript,
+        rows
+        + [
+            {
+                "timestamp": "2026-05-03T12:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Sweeper catches stale transcripts."}]},
+            }
+        ],
+    )
+
+    stale = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+    )
+    assert stale["counts"] == {"planned": 1}
+    assert stale["results"][0]["freshness_reason"] == "source_size_changed"
+
+    resynced = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+    )
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert resynced["counts"] == {"synced": 1}
+    assert manifest["latest_event_count"] == 3
+
+
+def test_sweep_codex_sessions_repairs_deferred_stop_archive(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    transcript = source_root / "2026" / "05" / "04" / "rollout-2026-05-04T12-00-00-sweep-deferred.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-04T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "sweep-deferred", "cwd": str(workspace), "timestamp": "2026-05-04T12:00:00Z"},
+            },
+            {
+                "timestamp": "2026-05-04T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Close with deferred Stop archive"}],
+                },
+            },
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", raising=False)
+    monkeypatch.setenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", "0")
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "sweep-deferred",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert "indexing_deferred" in receipt["actions"]
+    assert "background_sync_queued" in receipt["actions"]
+    deferred_dir = module.session_dir_for_id(aoa_root, "sweep-deferred")
+    deferred_manifest = json.loads((deferred_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert deferred_manifest["archive_status"] == "raw_mirrored_index_deferred"
+
+    dry = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+    )
+    assert dry["counts"] == {"planned": 1}
+    assert dry["results"][0]["freshness_reason"] == "archive_not_indexed"
+
+    synced = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+    )
+    session_dir = module.session_dir_for_id(aoa_root, "sweep-deferred")
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    assert synced["counts"] == {"synced": 1}
+    assert manifest["archive_status"] == "indexed"
+    assert manifest["latest_event_count"] == 2
+    assert "CodexSessionSweep" in manifest["hooks_seen"]
 
 
 def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> None:

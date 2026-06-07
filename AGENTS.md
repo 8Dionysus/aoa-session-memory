@@ -20,6 +20,9 @@ recovery and later distillation.
 7. Do not promote experience, patterns, skills, or automation without reviewed
    distillation.
 8. Keep the portable kernel separate from local AoA/Tree of Sophia overlays.
+9. Keep token accounting as count-only generated evidence: provider-reported,
+   exact-tokenizer, and estimated ledgers are separate, and estimates are never
+   promoted to exact counts.
 
 ## Required Read Order
 
@@ -62,6 +65,7 @@ The following paths are generated or runtime-owned:
 - `session-registry.json`
 - `session-name-index.json`
 - `SESSION_NAMES.md`
+- token-accounting reports under `diagnostics/`
 - `maps/by-*/entries/*.md`
 - `maps/by-*/entries/*.json`
 - `maps/by-*/INDEX.md`
@@ -69,6 +73,7 @@ The following paths are generated or runtime-owned:
 - `maps/INDEX.md`
 - `maps/index.json`
 - `search/`
+- `graph/`
 - `diagnostics/`
 
 Agents may regenerate these files from raw session evidence. Do not manually
@@ -88,6 +93,8 @@ Session archive directory names must follow `NAMING.md`. Keep the Codex UUID as
 - Do not write secrets into portable exports.
 - Do not treat summaries as source truth.
 - Do not delete raw session evidence as cleanup.
+- Do not expose prompt text, raw text, session titles, transcript paths, or raw
+  paths through token-accounting projections.
 - Do not make this directory the authority for AoA doctrine, Tree of Sophia
   meaning, or repository ownership.
 - Do not let hooks block Codex work unless an operator explicitly enables a

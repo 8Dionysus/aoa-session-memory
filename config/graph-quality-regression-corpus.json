@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_memory_graph_quality_regression_corpus",
+  "corpus_schema_version": 1,
+  "generated_at": "source-owned",
+  "ok": true,
+  "mutates": false,
+  "truth_status": "reviewed_graph_quality_controls_not_memory_truth",
+  "source_reviews": [],
+  "required_polarities": [
+    "negative",
+    "positive",
+    "stale",
+    "weak",
+    "wrong_anchor"
+  ],
+  "polarity_counts": {
+    "negative": 1,
+    "positive": 1,
+    "stale": 1,
+    "weak": 1,
+    "wrong_anchor": 1
+  },
+  "missing_polarities": [],
+  "case_count": 5,
+  "cases": [
+    {
+      "id": "mcp_access_plane_positive",
+      "polarity": "positive",
+      "anchor": "aoa-session-memory-mcp",
+      "kind": "mcp",
+      "role": "mcp",
+      "expected": {
+        "route_type": "mcp",
+        "freshness_expectation": {
+          "status": "bounded_current",
+          "acceptable_statuses": [
+            "bounded_current",
+            "ephemeral_current",
+            "fresh"
+          ]
+        },
+        "expected_refs": {
+          "has_raw_ref": true,
+          "has_segment_ref": true,
+          "has_session_ref": true,
+          "min_evidence_ref_count": 1
+        },
+        "review_verdict": "accept"
+      },
+      "note": "Positive control: MCP access-plane route should return raw, segment, and session refs before synthesis."
+    },
+    {
+      "id": "memo_writeback_skill_weak",
+      "polarity": "weak",
+      "anchor": "aoa-memo-writeback",
+      "kind": "skill",
+      "role": "skill",
+      "expected": {
+        "route_type": "skill",
+        "freshness_expectation": {
+          "status": "bounded_current",
+          "acceptable_statuses": [
+            "bounded_current",
+            "ephemeral_current",
+            "fresh"
+          ]
+        },
+        "expected_refs": {
+          "has_raw_ref": true,
+          "has_segment_ref": true,
+          "has_session_ref": true,
+          "min_evidence_ref_count": 1
+        },
+        "review_verdict": "weak"
+      },
+      "note": "Weak control: the route may exist but should stay review-gated until writeback-specific contrast is strong."
+    },
+    {
+      "id": "nonexistent_anchor_negative",
+      "polarity": "negative",
+      "anchor": "aoa-session-memory-negative-control-never-promote",
+      "kind": "entity",
+      "role": "entity",
+      "expected": {
+        "route_type": "entity",
+        "freshness_expectation": {
+          "status": "bounded_current",
+          "acceptable_statuses": [
+            "bounded_current",
+            "ephemeral_current",
+            "fresh"
+          ]
+        },
+        "expected_refs": {
+          "has_raw_ref": false,
+          "has_segment_ref": false,
+          "has_session_ref": false,
+          "min_evidence_ref_count": 0
+        },
+        "review_verdict": "reject"
+      },
+      "note": "Negative control: a fabricated anchor must not become a confident GraphRAG claim."
+    },
+    {
+      "id": "graph_sidecar_stale_fixture",
+      "polarity": "stale",
+      "anchor": "aoa-session-memory-mcp",
+      "kind": "mcp",
+      "role": "mcp",
+      "live_check": "fixture_required",
+      "expected": {
+        "route_type": "mcp",
+        "freshness_expectation": {
+          "status": "stale_graph_sidecar",
+          "acceptable_statuses": [
+            "stale_graph_sidecar",
+            "stale"
+          ]
+        },
+        "expected_refs": {
+          "has_raw_ref": true,
+          "has_segment_ref": true,
+          "has_session_ref": true,
+          "min_evidence_ref_count": 1
+        },
+        "review_verdict": "stale"
+      },
+      "note": "Fixture control: used when graph sidecar is deliberately older than search/session sources."
+    },
+    {
+      "id": "wrong_anchor_fixture",
+      "polarity": "wrong_anchor",
+      "anchor": "aoa-session-memory-mcp-as-skill",
+      "kind": "skill",
+      "role": "skill",
+      "live_check": "fixture_required",
+      "expected": {
+        "route_type": "skill",
+        "freshness_expectation": {
+          "status": "bounded_current",
+          "acceptable_statuses": [
+            "bounded_current",
+            "ephemeral_current",
+            "fresh"
+          ]
+        },
+        "expected_refs": {
+          "has_raw_ref": false,
+          "has_segment_ref": false,
+          "has_session_ref": false,
+          "min_evidence_ref_count": 0
+        },
+        "review_verdict": "wrong_anchor"
+      },
+      "note": "Fixture control: an MCP service should not be accepted when requested as the wrong route type."
+    }
+  ],
+  "diagnostics": []
+}
