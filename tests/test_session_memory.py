@@ -738,6 +738,10 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     )
     rowid = cursor.lastrowid
     conn.execute(
+        "INSERT INTO document_routes(doc_rowid, doc_id, layer, key, route_signal) VALUES (?, ?, ?, ?, ?)",
+        (rowid, "obsolete-doc", "entity", "obsolete", "entity:obsolete"),
+    )
+    conn.execute(
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
         (rowid, "obsolete", "obsolete stale body", record["session_label"], ""),
     )
@@ -752,6 +756,7 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = 'obsolete-doc'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM documents_fts WHERE rowid = ?", (rowid,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM document_routes WHERE doc_id = 'obsolete-doc'").fetchone()[0] == 0
     conn.close()
 
 
@@ -941,6 +946,13 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
 
     index_payload = module.search_index_sessions(aoa_root=aoa_root, target="all")
     assert index_payload["ok"] is True
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] > 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM document_routes WHERE layer = ? AND key = ?",
+        ("scope_contract", "analysis_only"),
+    ).fetchone()[0] > 0
+    conn.close()
     search_payload = module.search_sessions(aoa_root=aoa_root, route_layer="scope_contract", route_signal="scope_contract:analysis_only")
     assert search_payload["ok"] is True
     assert search_payload["results"][0]["route_signals"]
@@ -998,6 +1010,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
                     "name": "aoa_decisions_search",
                     "call_id": "call-decision-search",
                     "arguments": json.dumps({"query": "aoa-decision skill MCP usage"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.150Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-decision-search",
+                    "output": json.dumps({"ok": True, "refs": ["docs/decisions/README.md"]}),
                 },
             },
             {
@@ -1062,6 +1083,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
     config_alias_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="mcp_servers.aoa_session_memory", kind="mcp")
     exact_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="tool")
+    usage_audit = module.entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
     cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
@@ -1097,6 +1126,21 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert exact_tool_timeline["resolved"]["start_node_ids"] == ["route:tool:tool:aoa_decisions_search"]
     assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in exact_tool_timeline["events"])
     assert all(event.get("title") != "Tool call: spawn_agent" for event in exact_tool_timeline["events"])
+    assert usage_audit["artifact_type"] == "session_memory_entity_usage_audit"
+    assert usage_audit["ok"] is True
+    assert usage_audit["usage_event_count"] >= 1
+    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in usage_audit["usage_events"])
+    assert all(event.get("title") != "Tool call: spawn_agent" for event in usage_audit["usage_events"])
+    assert usage_audit["consequence_event_count"] >= 1
+    assert any(
+        item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
+        for item in usage_audit["document_refs"]
+    )
+    assert usage_audit["quality"]["search_route_index_count"] > 0
+    assert usage_audit["quality"]["fresh_event_count"] >= usage_audit["usage_event_count"]
+    assert usage_audit["quality"]["stale_event_count"] == 0
+    assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
+    assert usage_audit["sessions"][0]["stale_event_count"] == 0
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])

@@ -77,7 +77,7 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 3
+SEARCH_SCHEMA_VERSION = 4
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
@@ -1902,6 +1902,26 @@ def session_act_for_mcp_tool(tool_name: str) -> str | None:
     return None
 
 
+def mcp_service_key_for_tool_name(tool_name: str) -> str | None:
+    short = normalized_tool_name(tool_name)
+    if not short:
+        return None
+    if short.startswith("mcp__"):
+        parts = [part for part in short.split("__") if part]
+        if len(parts) >= 2:
+            service_key = parts[1]
+            if not service_key.endswith("_mcp"):
+                service_key = f"{service_key}_mcp"
+            key = canonical_mcp_service_key(service_key, path_source=False)
+            if key:
+                return key
+    for service_key in sorted(CANONICAL_MCP_SERVICE_KEYS):
+        service_prefix = service_key.removesuffix("_mcp")
+        if short == service_prefix or short.startswith(f"{service_prefix}_"):
+            return service_key
+    return None
+
+
 def memory_surface_from_text(text: str) -> str | None:
     lowered = str(text or "").lower()
     if not lowered:
@@ -2570,6 +2590,10 @@ def route_signals_for_event(
         mcp_kind = session_act_for_mcp_tool(tool_name)
         if mcp_kind:
             add("mcp", mcp_kind, confidence="high", source="mcp_tool")
+        mcp_service_key = mcp_service_key_for_tool_name(tool_name)
+        if mcp_service_key:
+            add("mcp", mcp_service_key, confidence="high", source="mcp_tool_service")
+            add("entity", mcp_service_key, confidence="high", source="mcp_tool_service")
     external_keys: set[str] = set()
     external_source = " ".join([tool_name.lower(), command_lower])
     if tool_namespace == "app_connector":
@@ -12291,6 +12315,8 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         conn.row_factory = sqlite3.Row
         metadata = search_index_metadata(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
+        route_count = int(conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0])
+        route_doc_count = int(conn.execute("SELECT COUNT(DISTINCT doc_rowid) FROM document_routes").fetchone()[0])
         conn.close()
     except sqlite3.Error as exc:
         return {
@@ -12308,6 +12334,8 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         reasons.append("search_schema_mismatch")
     if document_count <= 0:
         reasons.append("search_index_empty")
+    if document_count > 0 and route_count <= 0:
+        reasons.append("search_route_index_empty")
     if latest_source_mtime > 0 and db_mtime < latest_source_mtime:
         reasons.append("source_newer_than_search_index")
     status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
@@ -12321,6 +12349,8 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": document_count,
         "document_counts": counts,
+        "route_index_count": route_count,
+        "route_index_document_count": route_doc_count,
         "reasons": reasons,
         "diagnostics": [],
     }
@@ -16695,6 +16725,8 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
+        route_count = int(conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0])
+        route_doc_count = int(conn.execute("SELECT COUNT(DISTINCT doc_rowid) FROM document_routes").fetchone()[0])
         conn.close()
     except sqlite3.Error as exc:
         return {
@@ -16713,6 +16745,8 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         "search_schema_version": metadata.get("schema_version"),
         "document_count": total,
         "document_counts": counts,
+        "route_index_count": route_count,
+        "route_index_document_count": route_doc_count,
         "diagnostics": [] if total > 0 else ["search index has no documents"],
     }
 
@@ -17198,6 +17232,19 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_rowid INTEGER NOT NULL,
+            doc_id TEXT NOT NULL,
+            layer TEXT NOT NULL,
+            key TEXT NOT NULL,
+            route_signal TEXT NOT NULL,
+            UNIQUE(doc_id, layer, key)
+        )
+        """
+    )
     existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
     if "session_act" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN session_act TEXT")
@@ -17217,12 +17264,16 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_signals ON documents(route_signals)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_signal ON document_routes(route_signal, doc_rowid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_layer_key ON document_routes(layer, key, doc_rowid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, doc_id)")
     conn.commit()
     return conn
 
 
 def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM documents_fts")
+    conn.execute("DELETE FROM document_routes")
     conn.execute("DELETE FROM documents")
     conn.execute("DELETE FROM meta")
 
@@ -17243,10 +17294,13 @@ def delete_search_documents_for_session(
         values.append(session_id)
     if not clauses:
         return 0
-    rows = conn.execute(f"SELECT rowid FROM documents WHERE {' OR '.join(clauses)}", values).fetchall()
+    rows = conn.execute(f"SELECT rowid, id FROM documents WHERE {' OR '.join(clauses)}", values).fetchall()
     rowids = [int(row[0]) for row in rows]
     if not rowids:
         return 0
+    doc_ids = [str(row[1]) for row in rows if row[1]]
+    conn.executemany("DELETE FROM document_routes WHERE doc_rowid = ?", [(rowid,) for rowid in rowids])
+    conn.executemany("DELETE FROM document_routes WHERE doc_id = ?", [(doc_id,) for doc_id in doc_ids])
     conn.executemany("DELETE FROM documents_fts WHERE rowid = ?", [(rowid,) for rowid in rowids])
     conn.executemany("DELETE FROM documents WHERE rowid = ?", [(rowid,) for rowid in rowids])
     return len(rowids)
@@ -17308,6 +17362,53 @@ def route_fields_from_signals(signals_value: Any) -> tuple[str, str]:
         if layer and key:
             signals.append(route_signal_token(layer, key))
     return packed_route_values(layers), packed_route_values(signals)
+
+
+def unpacked_route_values(value: Any) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for token in str(value or "").strip("|").split("|"):
+        normalized = token.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+    return items
+
+
+def document_route_entries(route_layers: Any, route_signals: Any) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for signal in unpacked_route_values(route_signals):
+        if ":" not in signal:
+            continue
+        layer, key = signal.split(":", 1)
+        normalized_layer = route_key_slug(layer, fallback="")
+        normalized_key = route_key_slug(key, fallback="")
+        if not normalized_layer or not normalized_key:
+            continue
+        token = (normalized_layer, normalized_key)
+        if token in seen:
+            continue
+        seen.add(token)
+        entries.append(
+            {
+                "layer": normalized_layer,
+                "key": normalized_key,
+                "route_signal": route_signal_token(normalized_layer, normalized_key),
+            }
+        )
+    if not entries:
+        for layer in unpacked_route_values(route_layers):
+            normalized_layer = route_key_slug(layer, fallback="")
+            if not normalized_layer:
+                continue
+            token = (normalized_layer, "")
+            if token in seen:
+                continue
+            seen.add(token)
+            entries.append({"layer": normalized_layer, "key": "", "route_signal": f"{normalized_layer}:"})
+    return entries
 
 
 def event_search_text_limit(event_type: str) -> int:
@@ -17463,6 +17564,26 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
         (rowid, doc.get("title") or "", doc.get("body") or "", doc.get("session_label") or "", doc.get("session_title") or ""),
     )
+    route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
+    if route_entries:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO document_routes (
+                doc_rowid, doc_id, layer, key, route_signal
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    rowid,
+                    str(doc.get("id") or ""),
+                    entry["layer"],
+                    entry["key"],
+                    entry["route_signal"],
+                )
+                for entry in route_entries
+            ],
+        )
 
 
 def session_semantic_names_text(manifest: dict[str, Any]) -> str:
@@ -18025,6 +18146,8 @@ def search_sessions(
     conn.row_factory = sqlite3.Row
     filters: list[str] = []
     params: list[Any] = []
+    route_filters: list[str] = []
+    route_params: list[Any] = []
     if session:
         filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
         like = f"%{session}%"
@@ -18043,15 +18166,15 @@ def search_sessions(
             filters.append(f"{column} = ?")
             params.append(value)
     if route_layer:
-        filters.append("documents.route_layers LIKE ?")
-        params.append(f"%|{route_key_slug(route_layer, fallback=str(route_layer))}|%")
+        route_filters.append("layer = ?")
+        route_params.append(route_key_slug(route_layer, fallback=str(route_layer)))
     if route_signal:
         normalized_signal = str(route_signal)
         if ":" in normalized_signal:
             layer, key = normalized_signal.split(":", 1)
             normalized_signal = route_signal_token(route_key_slug(layer, fallback=layer), route_key_slug(key, fallback=key))
-        filters.append("documents.route_signals LIKE ?")
-        params.append(f"%|{normalized_signal}|%")
+        route_filters.append("route_signal = ?")
+        route_params.append(normalized_signal)
     if date_from:
         filters.append("documents.session_date >= ?")
         params.append(parse_date_arg(date_from))
@@ -18059,15 +18182,20 @@ def search_sessions(
         filters.append("documents.session_date <= ?")
         params.append(parse_date_arg(date_to))
     where = " AND ".join(filters)
+    route_join = ""
+    if route_filters:
+        route_where = " AND ".join(route_filters)
+        route_join = f" JOIN (SELECT DISTINCT doc_rowid FROM document_routes WHERE {route_where}) AS route_filter ON route_filter.doc_rowid = documents.rowid"
     fts_query = fts_query_from_user(query)
     try:
         if fts_query:
             sql = (
                 "SELECT documents.*, bm25(documents_fts) AS rank "
-                "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid "
+                "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid"
+                f"{route_join} "
                 "WHERE documents_fts MATCH ?"
             )
-            query_params: list[Any] = [fts_query]
+            query_params: list[Any] = [fts_query, *route_params]
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
@@ -18075,8 +18203,8 @@ def search_sessions(
             query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
-            sql = "SELECT documents.*, 0.0 AS rank FROM documents"
-            query_params = list(params)
+            sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
+            query_params = [*route_params, *params]
             if where:
                 sql += " WHERE " + where
             sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
@@ -23546,6 +23674,530 @@ def entity_dossier_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+ENTITY_USAGE_ENTRYPOINT_TYPES = {"USER_INTENT", "ASSISTANT_PLAN"}
+ENTITY_USAGE_DIRECT_TYPES = {"TOOL_CALL", "COMMAND", "FILE_READ", "FILE_WRITE", "DIFF"}
+ENTITY_USAGE_RESULT_TYPES = {"TOOL_OUTPUT", "COMMAND_OUTPUT", "VERIFICATION", "ERROR"}
+ENTITY_USAGE_OUTCOME_TYPES = {"ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "CHECKPOINT", "FINAL_STATE", "PROCESS_LESSON"}
+ENTITY_USAGE_CONSEQUENCE_TYPES = ENTITY_USAGE_RESULT_TYPES | ENTITY_USAGE_OUTCOME_TYPES
+ENTITY_USAGE_DOCUMENT_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_@+.-])(?:[~/A-Za-z0-9_@+.-]+/)+[A-Za-z0-9_@+.-]+\.(?:md|py|json|toml|ya?ml|txt|sh|mjs|ts|tsx|js|jsx|rs|go|java|rb|sql)",
+    flags=re.IGNORECASE,
+)
+
+
+def entity_usage_event_role(event_type: str, conversation_act: str = "", session_act: str = "") -> str:
+    event_type = str(event_type or "")
+    conversation_act = str(conversation_act or "")
+    session_act = str(session_act or "")
+    if event_type in ENTITY_USAGE_DIRECT_TYPES:
+        return "usage"
+    if event_type in ENTITY_USAGE_RESULT_TYPES:
+        return "result"
+    if event_type in ENTITY_USAGE_OUTCOME_TYPES:
+        return "outcome"
+    if event_type in ENTITY_USAGE_ENTRYPOINT_TYPES:
+        return "entrypoint"
+    if "request" in conversation_act or "request" in session_act:
+        return "entrypoint"
+    return "context"
+
+
+def event_refs_from_hit(hit: dict[str, Any]) -> dict[str, str]:
+    refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+    return {
+        "session": str(refs.get("session") or ""),
+        "segment": str(refs.get("segment") or ""),
+        "segment_index": str(refs.get("segment_index") or ""),
+        "raw": str(refs.get("raw") or ""),
+        "raw_block": str(refs.get("raw_block") or ""),
+    }
+
+
+def compact_usage_event_from_search_hit(hit: dict[str, Any], *, role: str | None = None, source: str = "search") -> dict[str, Any]:
+    resolved_role = role or entity_usage_event_role(
+        str(hit.get("event_type") or ""),
+        str(hit.get("conversation_act") or ""),
+        str(hit.get("session_act") or ""),
+    )
+    return {
+        "doc_id": hit.get("doc_id"),
+        "source": source,
+        "role": resolved_role,
+        "session_id": hit.get("session_id"),
+        "session_label": hit.get("session_label"),
+        "session_date": hit.get("session_date"),
+        "segment_id": hit.get("segment_id"),
+        "event_id": hit.get("event_id"),
+        "event_type": hit.get("event_type"),
+        "family": hit.get("family"),
+        "phase": hit.get("phase"),
+        "actor": hit.get("actor"),
+        "action": hit.get("action"),
+        "outcome": hit.get("outcome"),
+        "conversation_act": hit.get("conversation_act"),
+        "session_act": hit.get("session_act"),
+        "matched_routes": hit.get("matched_routes", []),
+        "route_signals": hit.get("route_signals"),
+        "title": hit.get("title"),
+        "snippet": hit.get("snippet"),
+        "refs": event_refs_from_hit(hit),
+        "freshness": hit.get("freshness"),
+    }
+
+
+def compact_usage_event_from_segment_event(
+    event: dict[str, Any],
+    *,
+    hit: dict[str, Any],
+    role: str,
+    source: str,
+    source_doc_id: str,
+    distance: int,
+    relation: str,
+) -> dict[str, Any]:
+    hit_refs = event_refs_from_hit(hit)
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+    route_signals = graph_route_signals_from_event(event)
+    segment_ref = str(event.get("md_anchor") or hit_refs.get("segment") or "")
+    raw_ref = str(event.get("raw_ref") or "")
+    return {
+        "doc_id": f"event:{hit.get('session_id')}:{hit.get('segment_id')}:{event.get('event_id')}",
+        "source": source,
+        "source_doc_id": source_doc_id,
+        "distance": distance,
+        "relation": relation,
+        "role": role,
+        "session_id": hit.get("session_id"),
+        "session_label": hit.get("session_label"),
+        "session_date": hit.get("session_date"),
+        "segment_id": hit.get("segment_id"),
+        "event_id": event.get("event_id"),
+        "event_type": event.get("type"),
+        "family": event.get("family"),
+        "phase": event.get("phase"),
+        "actor": event.get("actor"),
+        "action": event.get("action"),
+        "outcome": event.get("outcome"),
+        "conversation_act": conversation_act.get("kind"),
+        "session_act": session_act.get("kind"),
+        "route_signals": [signal.get("route_signal") for signal in route_signals if isinstance(signal, dict)],
+        "title": event.get("title"),
+        "refs": {
+            "session": hit_refs.get("session", ""),
+            "segment": segment_ref,
+            "segment_index": hit_refs.get("segment_index", ""),
+            "raw": raw_ref,
+            "raw_block": hit_refs.get("raw_block", ""),
+        },
+        "freshness": hit.get("freshness"),
+    }
+
+
+def raw_preview_for_usage_event(event: dict[str, Any], *, max_chars: int = 600) -> dict[str, Any]:
+    refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    raw_ref = str(refs.get("raw") or "")
+    manifest_ref = str(refs.get("session") or "")
+    if not raw_ref or not manifest_ref:
+        return {"status": "missing_raw_or_session_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
+    manifest_path = Path(manifest_ref)
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {"status": "session_manifest_unavailable", "line": line_from_raw_ref(raw_ref), "text": ""}
+    return raw_line_preview(manifest_raw_path(manifest_path.parent, manifest), raw_ref, max_chars=max_chars)
+
+
+def document_path_mentions(text: Any, *, limit: int = 20) -> list[str]:
+    seen: set[str] = set()
+    paths: list[str] = []
+    for match in ENTITY_USAGE_DOCUMENT_PATH_PATTERN.finditer(str(text or "")):
+        value = match.group(0).strip("`'\".,:;)")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        paths.append(value)
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+def entity_usage_document_refs(events: list[dict[str, Any]], *, limit: int = 60) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(kind: str, value: str, event: dict[str, Any], *, role: str, detail: str = "") -> None:
+        if not value:
+            return
+        token = (kind, value, str(event.get("doc_id") or event.get("event_id") or ""))
+        if token in seen:
+            return
+        seen.add(token)
+        refs.append(
+            {
+                "kind": kind,
+                "value": value,
+                "role": role,
+                "detail": detail,
+                "session_label": event.get("session_label"),
+                "event_id": event.get("event_id"),
+                "event_type": event.get("event_type"),
+                "source_doc_id": event.get("doc_id"),
+            }
+        )
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        role = str(event.get("role") or "context")
+        event_refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+        for kind, key in [
+            ("session_manifest", "session"),
+            ("segment_markdown", "segment"),
+            ("segment_index", "segment_index"),
+            ("raw_block", "raw_block"),
+            ("raw_line", "raw"),
+        ]:
+            add(kind, str(event_refs.get(key) or ""), event, role=role)
+        preview = raw_preview_for_usage_event(event)
+        search_text = " ".join(
+            str(part or "")
+            for part in [
+                event.get("title"),
+                event.get("snippet"),
+                preview.get("text") if isinstance(preview, dict) and preview.get("status") == "available" else "",
+            ]
+        )
+        for path in document_path_mentions(search_text):
+            add("mentioned_path", path, event, role=role)
+        if len(refs) >= limit:
+            break
+    return refs[:limit]
+
+
+def segment_events_for_hit(hit: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = event_refs_from_hit(hit)
+    index_path = Path(str(refs.get("segment_index") or ""))
+    if not index_path.exists():
+        return []
+    segment_index = read_json(index_path, {})
+    if not isinstance(segment_index, dict):
+        return []
+    return [event for event in segment_index.get("events", []) if isinstance(event, dict)]
+
+
+def consequence_events_for_usage_hit(hit: dict[str, Any], *, window: int = 8) -> list[dict[str, Any]]:
+    usage_event_id = str(hit.get("event_id") or "")
+    if not usage_event_id:
+        return []
+    events = segment_events_for_hit(hit)
+    if not events:
+        return []
+    index_by_id = {str(event.get("event_id") or ""): idx for idx, event in enumerate(events)}
+    start = index_by_id.get(usage_event_id)
+    if start is None:
+        return []
+    usage_event = events[start]
+    usage_correlation = str(usage_event.get("correlation_id") or "")
+    selected: list[dict[str, Any]] = []
+    max_distance = max(1, min(int_value(window, 8), 24))
+    for distance, event in enumerate(events[start + 1 : start + 1 + max_distance], start=1):
+        event_type = str(event.get("type") or "")
+        correlation = str(event.get("correlation_id") or "")
+        relation = "next_relevant_event"
+        if usage_correlation and correlation == usage_correlation:
+            relation = "same_correlation_id"
+        elif event_type not in ENTITY_USAGE_CONSEQUENCE_TYPES:
+            continue
+        role = entity_usage_event_role(event_type)
+        selected.append(
+            compact_usage_event_from_segment_event(
+                event,
+                hit=hit,
+                role=role if role != "context" else "consequence",
+                source="segment_neighbor",
+                source_doc_id=str(hit.get("doc_id") or ""),
+                distance=distance,
+                relation=relation,
+            )
+        )
+        if len(selected) >= max_distance:
+            break
+    return selected
+
+
+def merge_usage_hit(target: dict[str, dict[str, Any]], hit: dict[str, Any], matched_route: str) -> None:
+    doc_id = str(hit.get("doc_id") or "")
+    if not doc_id:
+        return
+    existing = target.get(doc_id)
+    if existing is None:
+        existing = dict(hit)
+        existing["matched_routes"] = []
+        target[doc_id] = existing
+    matched = existing.setdefault("matched_routes", [])
+    if isinstance(matched, list) and matched_route and matched_route not in matched:
+        matched.append(matched_route)
+
+
+def entity_usage_event_freshness_status(event: dict[str, Any]) -> str:
+    freshness = event.get("freshness") if isinstance(event.get("freshness"), dict) else {}
+    return str(freshness.get("status") or "unverifiable")
+
+
+def entity_usage_freshness_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for event in events:
+        if isinstance(event, dict):
+            counts[entity_usage_event_freshness_status(event)] += 1
+    return dict(sorted(counts.items()))
+
+
+def entity_usage_sessions_summary(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for event in events:
+        label = str(event.get("session_label") or event.get("session_id") or "unknown")
+        summary = summaries.setdefault(
+            label,
+            {
+                "session_label": label,
+                "session_id": event.get("session_id"),
+                "session_date": event.get("session_date"),
+                "entrypoint_event_count": 0,
+                "usage_event_count": 0,
+                "result_event_count": 0,
+                "outcome_event_count": 0,
+                "context_event_count": 0,
+                "fresh_event_count": 0,
+                "stale_event_count": 0,
+                "unverifiable_event_count": 0,
+                "freshness_counts": {},
+                "event_refs": [],
+            },
+        )
+        role = str(event.get("role") or "context")
+        key = f"{role}_event_count" if role in {"entrypoint", "usage", "result", "outcome"} else "context_event_count"
+        summary[key] = int_value(summary.get(key)) + 1
+        freshness_status = entity_usage_event_freshness_status(event)
+        freshness_key = f"{freshness_status}_event_count" if freshness_status in {"fresh", "stale", "unverifiable"} else "unverifiable_event_count"
+        summary[freshness_key] = int_value(summary.get(freshness_key)) + 1
+        freshness_counts = summary.setdefault("freshness_counts", {})
+        if isinstance(freshness_counts, dict):
+            freshness_counts[freshness_status] = int_value(freshness_counts.get(freshness_status)) + 1
+        refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+        ref_value = refs.get("raw") or refs.get("segment") or refs.get("session")
+        if ref_value and ref_value not in summary["event_refs"] and len(summary["event_refs"]) < 6:
+            summary["event_refs"].append(ref_value)
+    return sorted(summaries.values(), key=lambda item: (str(item.get("session_date") or ""), str(item.get("session_label") or "")), reverse=True)
+
+
+def entity_usage_audit(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 20,
+    per_route_limit: int = 20,
+    consequence_window: int = 8,
+    document_limit: int = 60,
+    provider: str = "portable_sqlite",
+    session: str | None = None,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    normalized_kind = str(kind or "auto").strip().lower()
+    if normalized_kind not in TRACE_ROUTE_KINDS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            "kind": kind,
+            "diagnostics": [f"unknown trace kind: {kind}"],
+        }
+    limit = max(1, min(int_value(limit, 20), 200))
+    per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
+    diagnostics = trace_identity_diagnostics(anchor, kind=normalized_kind)
+    candidates = trace_route_candidates(anchor, kind=normalized_kind)
+    lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
+    merged: dict[str, dict[str, Any]] = {}
+    route_result_summaries: list[dict[str, Any]] = []
+
+    for candidate in lookup_candidates:
+        route_signal_value = str(candidate.get("route_signal") or "")
+        route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
+        matched_route = route_signal_value or f"{candidate.get('layer')}:*"
+        payload = search_sessions(
+            aoa_root=aoa_root,
+            query="",
+            limit=per_route_limit,
+            provider=provider,
+            session=session,
+            doc_type="event",
+            route_layer=route_layer_value,
+            route_signal=route_signal_value or None,
+            explain=True,
+        )
+        route_result_summaries.append(
+            {
+                "candidate": candidate,
+                "ok": payload.get("ok"),
+                "result_count": payload.get("result_count"),
+                "diagnostics": payload.get("diagnostics", []),
+            }
+        )
+        if not payload.get("ok"):
+            diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
+            continue
+        for hit in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+            if isinstance(hit, dict):
+                merge_usage_hit(merged, hit, matched_route)
+
+    skip_text_search = bool(diagnostics) and not lookup_candidates
+    text_result_count = 0
+    if not skip_text_search:
+        text_payload = search_sessions(
+            aoa_root=aoa_root,
+            query=anchor,
+            limit=per_route_limit,
+            provider=provider,
+            session=session,
+            doc_type="event",
+            explain=True,
+        )
+        text_result_count = int_value(text_payload.get("result_count"))
+        if text_payload.get("ok"):
+            for hit in text_payload.get("results", []) if isinstance(text_payload.get("results"), list) else []:
+                if isinstance(hit, dict):
+                    merge_usage_hit(merged, hit, "text")
+        elif text_payload.get("diagnostics"):
+            diagnostics.extend(str(item) for item in text_payload.get("diagnostics", []))
+
+    hits = list(merged.values())[:limit]
+    events = [compact_usage_event_from_search_hit(hit) for hit in hits]
+    entrypoint_events = [event for event in events if event.get("role") == "entrypoint"]
+    usage_events = [event for event in events if event.get("role") == "usage"]
+    result_events = [event for event in events if event.get("role") == "result"]
+    outcome_events = [event for event in events if event.get("role") == "outcome"]
+    context_events = [event for event in events if event.get("role") == "context"]
+    consequence_events: list[dict[str, Any]] = []
+    seen_consequences: set[str] = set()
+    for hit, event in zip(hits, events):
+        if event.get("role") != "usage":
+            continue
+        for consequence in consequence_events_for_usage_hit(hit, window=consequence_window):
+            consequence_id = str(consequence.get("doc_id") or "")
+            if consequence_id and consequence_id in seen_consequences:
+                continue
+            if consequence_id:
+                seen_consequences.add(consequence_id)
+            consequence_events.append(consequence)
+    all_events_for_docs = [*usage_events, *result_events, *outcome_events, *entrypoint_events, *context_events, *consequence_events]
+    freshness_counts = entity_usage_freshness_counts(all_events_for_docs)
+    document_refs = entity_usage_document_refs(all_events_for_docs, limit=document_limit)
+    sessions = entity_usage_sessions_summary(all_events_for_docs)
+    provider_status = search_provider_status(aoa_root=aoa_root, provider_name=provider)
+    provider_payload = provider_status.get("providers", {}).get(provider) if isinstance(provider_status.get("providers"), dict) else {}
+    quality = {
+        "direct_usage_present": bool(usage_events),
+        "consequence_present": bool(consequence_events or result_events or outcome_events),
+        "document_refs_present": bool(document_refs),
+        "route_candidate_count": len(lookup_candidates),
+        "route_result_count": len(hits),
+        "text_result_count": text_result_count,
+        "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
+        "freshness_counts": freshness_counts,
+        "fresh_event_count": int_value(freshness_counts.get("fresh")),
+        "stale_event_count": int_value(freshness_counts.get("stale")),
+        "unverifiable_event_count": int_value(freshness_counts.get("unverifiable")),
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_entity_usage_audit",
+        "generated_at": now,
+        "ok": bool(hits) and not any(str(item).startswith("unknown_mcp_service_identity:") for item in diagnostics),
+        "mutates": False,
+        "truth_status": "session_memory_entity_usage_routes_to_evidence_not_reviewed_truth",
+        "anchor": anchor,
+        "kind": normalized_kind,
+        "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
+        "aliases": trace_anchor_aliases(anchor),
+        "session": session or "",
+        "route_candidates": lookup_candidates,
+        "route_result_summaries": route_result_summaries,
+        "event_count": len(events),
+        "entrypoint_event_count": len(entrypoint_events),
+        "usage_event_count": len(usage_events),
+        "result_event_count": len(result_events),
+        "outcome_event_count": len(outcome_events),
+        "context_event_count": len(context_events),
+        "consequence_event_count": len(consequence_events),
+        "entrypoint_events": entrypoint_events,
+        "usage_events": usage_events,
+        "result_events": result_events,
+        "outcome_events": outcome_events,
+        "context_events": context_events,
+        "consequence_events": consequence_events,
+        "document_refs": document_refs,
+        "sessions": sessions,
+        "quality": quality,
+        "provider": provider_status,
+        "diagnostics": diagnostics,
+        "next_route": "Use raw/segment/session refs to verify claims; this packet is an evidence route, not promoted truth.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__entity-usage-audit__{route_key_slug(anchor, fallback='anchor', max_chars=80)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, entity_usage_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def entity_usage_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Entity Usage Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- anchor: `{payload.get('anchor')}`",
+        f"- kind: `{payload.get('kind')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- usage_events: `{payload.get('usage_event_count')}`",
+        f"- consequence_events: `{payload.get('consequence_event_count')}`",
+        f"- document_refs: `{len(payload.get('document_refs', []) if isinstance(payload.get('document_refs'), list) else [])}`",
+        "",
+        "## Usage Events",
+        "",
+    ]
+    for event in payload.get("usage_events", []) if isinstance(payload.get("usage_events"), list) else []:
+        if isinstance(event, dict):
+            refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+            lines.append(f"- `{event.get('event_type')}` `{event.get('title')}` `{refs.get('raw') or refs.get('segment') or ''}`")
+    lines.extend(["", "## Consequences", ""])
+    for event in payload.get("consequence_events", []) if isinstance(payload.get("consequence_events"), list) else []:
+        if isinstance(event, dict):
+            refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+            lines.append(f"- `{event.get('event_type')}` `{event.get('relation')}` `{event.get('title')}` `{refs.get('raw') or refs.get('segment') or ''}`")
+    docs = payload.get("document_refs") if isinstance(payload.get("document_refs"), list) else []
+    if docs:
+        lines.extend(["", "## Document Refs", ""])
+        for item in docs[:30]:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('kind')}` `{item.get('value')}`")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
 def command_graph_quality_corpus(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -23599,6 +24251,33 @@ def command_entity_dossier(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"where_seen", "strong_refs", "weak_refs"}}
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_entity_usage_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = entity_usage_audit(
+        aoa_root=root,
+        anchor=args.anchor,
+        kind=args.kind,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        consequence_window=args.consequence_window,
+        document_limit=args.document_limit,
+        provider=args.provider,
+        session=args.session_filter,
+        write_report=args.write_report,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"entrypoint_events", "context_events"}
+        }
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -28335,6 +29014,25 @@ def build_parser() -> argparse.ArgumentParser:
     entity_dossier_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity dossier reports under .aoa/diagnostics.")
     entity_dossier_parser.add_argument("--full", action="store_true", help="Print full dossier refs.")
     entity_dossier_parser.set_defaults(func=command_entity_dossier)
+
+    entity_usage_parser = sub.add_parser(
+        "entity-usage-audit",
+        aliases=["usage-audit", "entity-event-audit"],
+        help="Trace an entity anchor to usage events, consequences, and document refs without loading bulk raw.",
+    )
+    entity_usage_parser.add_argument("anchor", help="Entity anchor to audit.")
+    entity_usage_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    entity_usage_parser.add_argument("--workspace-root")
+    entity_usage_parser.add_argument("--aoa-root")
+    entity_usage_parser.add_argument("--limit", type=int, default=20, help="Maximum merged direct evidence hits.")
+    entity_usage_parser.add_argument("--per-route-limit", type=int, default=20, help="Maximum hits fetched for each inferred route candidate.")
+    entity_usage_parser.add_argument("--consequence-window", type=int, default=8, help="Maximum following events inspected after each direct usage event.")
+    entity_usage_parser.add_argument("--document-limit", type=int, default=60, help="Maximum evidence and mentioned document refs.")
+    entity_usage_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
+    entity_usage_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage audit reports under .aoa/diagnostics.")
+    entity_usage_parser.add_argument("--full", action="store_true", help="Print complete event buckets.")
+    entity_usage_parser.set_defaults(func=command_entity_usage_audit)
 
     atlas = sub.add_parser("atlas", help="Generate the agent atlas route entries from session indexes.")
     atlas_sub = atlas.add_subparsers(dest="atlas_command", required=True)
