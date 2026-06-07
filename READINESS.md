@@ -39,9 +39,22 @@ Build the `.aoa` session-memory mechanism end to end:
   `skills/aoa-session-search`
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors
+- Incremental graph store, sidecar snapshots, and GraphRAG packets:
+  `graph-build`, `graph-maintenance`, `graph-neighborhood`,
+  `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`,
+  `graphrag-packet`, `graph-explain-packet`, `graph-eval`, and
+  `graph-quality-audit` / `graph-quality-review`
+- Pre-GraphRAG trust layer: source-owned
+  `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
+  `graph-freshness-check`, `entity-dossier`, and GraphRAG packet
+  `answer_rules`
 - Automatic index maintenance route: `index-maintenance` / `maintain-index`
   over stale route indexes, portable search freshness, atlas freshness, and
   readiness reports
+- Resource-gated unattended maintenance route: `auto-maintenance` /
+  `maintain-auto` profiles `hot` (`probe`, graph-only/deferred index repair),
+  `backlog` (`medium`, recent index+graph repair), and `deep` (`heavy`, full
+  repair); MCP remains read-only and plan-only
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata
@@ -71,14 +84,25 @@ python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
+python3 scripts/aoa_session_memory.py sweep-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 7 --min-age-sec 60 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
-python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --write-report
+python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --token-max-raw-mb 512 --write-report
 python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
 python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
 python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py graph-build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write --force-large-export
+python3 scripts/aoa_session_memory.py graph-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --batch-limit 3 --write-report
+python3 scripts/aoa_session_memory.py graphrag-packet --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "aoa-session-memory-mcp" --anchor aoa-session-memory-mcp
+python3 scripts/aoa_session_memory.py graph-explain-packet "debug aoa-session-memory-mcp" --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --anchor aoa-session-memory-mcp
+python3 scripts/aoa_session_memory.py graph-eval --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py graph-quality-audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py graph-quality-review /path/to/workspace/.aoa/diagnostics/<stamp>__graph-quality-audit.json --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --verdict mcp_access_plane=accept:accept:"good MCP evidence route" --write-report
+python3 scripts/aoa_session_memory.py graph-quality-corpus check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py graph-freshness-check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-sample-audit all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --sample-limit 1 --write-report
 python3 scripts/aoa_session_memory.py route-sample-review /path/to/workspace/.aoa/diagnostics/<stamp>__route-sample-audit.json --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
@@ -200,6 +224,69 @@ Last observed result:
   `diagnostics/20260526T043628Z__route-trace__precompact.json`,
   `diagnostics/20260526T043631Z__route-trace__exec-command.json`, and
   `diagnostics/20260526T043629Z__route-trace__github.json`.
+- Graph quality proof: `graph-quality-audit --limit 3 --sample-ref-limit 1
+  --write-report` sampled `9` stable operational anchors across MCPs, skills,
+  hooks, tools, and path routes. It returned `ok=true`,
+  `ready_for_manual_verdict_count=9/9`, no quality flags, raw and segment refs
+  for every sample, and `bounded_current` freshness. Report:
+  `diagnostics/20260526T144640Z__graph-quality-audit.json`.
+- Graph quality review proof: `graph-quality-review` over the 2026-05-26
+  audit accepted `mcp_access_plane` and marked `memo_writeback_skill` as
+  `weak` with `expand_anchor_set` feedback. It returned `ok=true`,
+  `reviewed_count=2`, `open_count=7`, `quality_feedback_count=1`, and
+  `regression_candidate_count=2`; it wrote only diagnostics and did not mutate
+  indexes or raw evidence. Report:
+  `diagnostics/20260526T150119Z__graph-quality-review.json`.
+- Pre-GraphRAG trust proof: expanded `graph-quality-audit` sampled `21`
+  anchors across MCP, skill, hook, tool, goal, failure, decision, and path
+  routes. `20/21` were ready for manual verdict; the stack MCP path control
+  had no evidence refs and was correctly rejected in review. The review
+  returned `reviewed_count=21`, `open_count=0`, verdict counts
+  `accept=13`, `weak=6`, `wrong_anchor=1`, `reject=1`, and
+  `regression_candidate_count=21`. A follow-up stale-control review over a
+  fresh 21-anchor audit marked `mcp_access_plane` as `stale` because
+  `graph-freshness-check` reported `source_newer_than_graph_sidecar`; bounded
+  refs stayed usable, but full sidecar synthesis is blocked until rebuild. The
+  source-owned regression corpus at `config/graph-quality-regression-corpus.json`
+  covers positive, weak, negative, stale, and wrong-anchor controls;
+  `graph-quality-corpus check` returned `ok=true`, `case_count=5`,
+  `passed_count=5`, and `skipped_count=2` for fixture-required
+  stale/wrong-anchor controls. An
+  `entity-dossier aoa-session-memory-mcp --kind mcp` report returned
+  `ok=true` with strong raw/segment/session refs and related MCP/path routes.
+  `graph-freshness-check` correctly reported refs alive while distinguishing
+  map/search drift, graph drift, and offline graph-build need. The full live
+  `graph-build all --write --force-large-export` now succeeds through the
+  SQLite accumulator path: `198` sessions, `2055446` nodes, `10280862` edges,
+  `graph/nodes.jsonl` about `3.8 GB`, `graph/edges.jsonl` about `11.4 GB`,
+  elapsed `41:07`, and peak RSS about `700 MB`. Follow-up
+  `index-maintenance all --apply` refreshed search to `961944` documents,
+  atlas to `29867` entries, and route-readiness to `22/22`. On the live
+  archive, later gates may still report `source_newer_than_*` when active
+  session indexes move after the rebuild; that is treated as live-churn
+  telemetry, not as permission to synthesize without refs. Reports:
+  `diagnostics/20260526T153341Z__graph-quality-audit.json`,
+  `diagnostics/20260526T153404Z__graph-quality-review.json`,
+  `diagnostics/20260526T155941Z__graph-quality-corpus-check.json`,
+  `diagnostics/20260526T153442Z__entity-dossier__aoa_session_memory_mcp.json`,
+  `diagnostics/20260526T155843Z__graph-freshness-gates.json`,
+  `diagnostics/20260526T154418Z__index-maintenance.json`,
+  `diagnostics/20260526T171244Z__graph-freshness-gates.json`,
+  `diagnostics/20260526T171518Z__graph-freshness-gates.json`,
+  `diagnostics/20260526T172359Z__graph-quality-audit.json`, and
+  `diagnostics/20260526T172446Z__graph-quality-review.json`.
+- Incremental graph-maintenance proof: `graph/graph.sqlite3` is now the live
+  graph store, with per-session/per-segment graph sources, source hashes,
+  node/edge contributions, and aggregate nodes/edges. `graph-maintenance`
+  detects clean, dirty, missing, blocked, and orphaned sources, replaces dirty
+  source contributions transactionally, and treats `nodes.jsonl` /
+  `edges.jsonl` as optional export snapshots. `graph-prune-sidecar` can remove
+  those generated snapshots while keeping `graph.sqlite3` as the live graph
+  store. Full forced rebuilds stream contributions into the store and may
+  reclaim old generated sidecars before fresh export. `graph-freshness-check`
+  now distinguishes graph store freshness, optional sidecar snapshot state,
+  sidecar export/prune need, graph maintenance need, and full offline rebuild
+  need.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
@@ -324,10 +411,15 @@ Stress-pass evidence:
 | Stable AoA skill and MCP service names route agents through canonical map axes | `entity:aoa_memo_writeback`, `entity:aoa_memo_mcp`, `mcp:aoa_memo_mcp`, `maps/by-entity/INDEX.md`, `maps/by-mcp/INDEX.md`, route-signal regression tests |
 | Agents can start from a named operational anchor instead of hand-picking a map axis | `trace-route`, `resolve-anchor`, route-trace regression test, 2026-05-26 live route-trace reports |
 | Preserved raw archives can be regenerated after taxonomy/classifier changes | `reindex-sessions all --max-raw-mb`, reindex report diagnostics, reindex regression test |
-| Secondary route caches repair themselves through a bounded controller | `index-maintenance`, queued `index_maintenance` worker jobs, semantic-name maintenance regression test |
+| Secondary route caches repair themselves through a bounded controller | `index-maintenance`, queued `index_maintenance` worker jobs, `auto-maintenance`, semantic-name maintenance regression test |
 | Agents can search across many archived sessions without loading bulk raw into active context | `search-index --max-raw-mb`, `search --explain`, `search/aoa-search.sqlite3`, search-index regression test, 2026-05-17 live search report |
 | Agents can query route layers directly | `search --route-layer`, `search --route-signal`, SQLite route-signal columns |
 | The source atlas skeleton can be turned into generated entries and indexes | `atlas build`, `maps/by-*/entries/*.json`, `maps/by-*/INDEX.md`, atlas-build regression test |
+| Agents can maintain graph state incrementally by session/segment contribution | `graph/graph.sqlite3`, `graph-maintenance`, graph source states, dirty-source replacement regression test |
+| Agents can expand operational anchors through graph neighborhoods without losing evidence refs | `graph-build`, `graph-maintenance`, `graph-prune-sidecar`, `graph-neighborhood`, `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`, graph sidecar regression test |
+| GraphRAG packets combine lexical entrypoints, graph expansion, cooccurrence, refs, and freshness without promoting claims | `graphrag-packet`, `graph-eval`, graph/GraphRAG regression test |
+| Graph/RAG quality can be sampled before trusting an operational anchor route | `graph-quality-audit`, raw preview refs, freshness flags, graph quality regression test, 2026-05-26 live 9-anchor sample |
+| Graph/RAG quality verdicts can produce feedback and regression candidates without mutating evidence | `graph-quality-review`, verdict/action counts, quality feedback, regression candidates, graph quality review regression test |
 | The full 22-layer operational skeleton can be audited as one readiness gate | `route-readiness`, source atlas axes, generated atlas index, portable SQLite provider, route-readiness regression test |
 | Route-signal classifier quality can be manually sampled without opening bulk raw | `route-sample-audit`, reviewed calibration packets, raw previews, route-sample regression test |
 | Route-signal sample verdicts can become durable classifier feedback without mutating evidence | `route-sample-review`, append-only review diagnostics, classifier feedback list, route-sample review regression test |
@@ -344,6 +436,8 @@ Stress-pass evidence:
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
 | User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
 | Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |
+| Missed close/no-hook and stale Codex transcripts can be found without trusting active context | `sweep-codex-sessions`, `indexed_archive_freshness`, sweep report diagnostics, tests |
+| Session token accounting remains count-only and separates provider, exact tokenizer, and estimated ledgers | `token-accounting`, `token-accounting-backfill`, token accounting regression test, host `aoa-summary` bridge self-test |
 | Live hooks match expected commands | `doctor --check-live-hooks` |
 | Native Codex hook trust is inspectable and repairable | `codex-hooks-status`, app-server `hooks/list` and `config/batchWrite` |
 | Local Codex compact/hook contract is grounded | `codex-grounding`, local `codex-cli 0.133.0`, project config |
@@ -378,6 +472,10 @@ Maintenance gates:
 - Re-run `codex-grounding` and `codex-hooks-status` when the local Codex CLI
   version changes.
 - Re-run `codex-compact-probe --trust-hooks` after changing hook commands.
+- Re-run `token-accounting all --since-days 7`, `token-accounting-backfill`
+  dry-run, and host `abyss-machine ai token-accounting aoa-summary --json`
+  after changing token observation, generated ledgers, or the host planning
+  bridge.
 - Static `hooks/codex-hooks.user.example.json` uses neutral placeholder paths;
   live hooks must still be generated by `hooks-config` or `install`.
 

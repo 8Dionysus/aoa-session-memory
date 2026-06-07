@@ -16,6 +16,9 @@ or naming semantics by themselves.
   It includes route-signal projections such as `by_route_layer` and
   `by_route_signal`.
 - `session.manifest.schema.json` describes session archive manifests.
+- `token-accounting.schema.json` describes count-only token observations and
+  aggregate ledgers. Provider-reported, exact-tokenizer, and estimated counts
+  are separate ledgers.
 
 ## Rules
 

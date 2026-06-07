@@ -12,8 +12,10 @@ raw transcript jsonl
   -> segment indexes
   -> universal event facets and relationships
   -> route-signal indexes for operational layers
+  -> token-accounting summaries
   -> session index
   -> agent atlas route entries
+  -> graph sidecar and GraphRAG packets
   -> diagnostics
   -> later reviewed distillation
 ```
@@ -58,6 +60,12 @@ recovery and rebuild paths. Set `AOA_SESSION_MEMORY_FULL_COMPACT_SYNC=1` or
 `AOA_SESSION_MEMORY_FULL_STOP_SYNC=1` only for deliberate debugging, not for
 normal long-session hooks. `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES` controls
 the default Stop full-sync threshold.
+
+If Codex closes without emitting a usable lifecycle hook,
+`sweep-codex-sessions` is the recovery net over `~/.codex/sessions`: it
+compares transcript snapshots against `.aoa` manifests and syncs only missing,
+stale, deferred, hook-only, or raw-unavailable archives when run with
+`--apply`.
 
 ## Session Shape
 
@@ -106,6 +114,31 @@ The operational route lives in `PIPELINE.md`.
 
 Current readiness and unfinished gates live in `READINESS.md`.
 
+## Token Accounting
+
+Generated session ledgers carry count-only token summaries. Provider usage
+metadata is marked `provider_reported`; local tokenizer counts, when available,
+must be marked `exact_tokenizer`; heuristic counts are `estimated`. These
+ledgers stay separate, and estimated counts are never promoted to exact usage
+facts.
+
+Use:
+
+```bash
+python3 scripts/aoa_session_memory.py token-accounting all --since-days 7
+python3 scripts/aoa_session_memory.py token-accounting-backfill all --since-days 7 --max-raw-mb 16
+python3 scripts/aoa_session_memory.py index-maintenance all --since-days 7 --apply --token-max-raw-mb 512
+```
+
+`token-accounting` prefers generated ledgers and, when a generated ledger is
+missing, may compute from preserved raw without persisting changes. Backfill is
+the route that refreshes generated ledgers. `index-maintenance` includes token
+backfill as its first repair action; `--token-max-raw-mb` lets large raw
+sessions receive count-only ledgers without raising the raw-text extraction
+limit used by search indexing. Host consumers such as
+`abyss-machine ai token-accounting aoa-summary --json` must use only generated
+summaries and must not read raw transcripts or mutate `.aoa`.
+
 ## Agent Atlas
 
 `maps/` is the source-owned skeleton for the generated agent atlas.
@@ -132,6 +165,100 @@ python3 scripts/aoa_session_memory.py atlas build all \
   --aoa-root /path/to/workspace/.aoa \
   --write-report
 ```
+
+## Graph Store And Sidecar
+
+`graph/` is generated from session indexes, segment indexes, route signals,
+event relationships, and raw refs. The live graph surface is
+`graph/graph.sqlite3`: it stores session/segment graph sources, source hashes,
+node/edge contributions, aggregate nodes/edges, and evidence refs. It exists so
+agents can ask for a bounded neighborhood, timeline, shortest path,
+cooccurrence packet, or GraphRAG packet for stable anchors such as skills,
+MCPs, hooks, tools, paths, goals, failures, and decisions.
+
+Build it after route indexes/search/atlas are refreshed:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-build all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --force-large-export
+```
+
+Normal growth should use incremental maintenance instead of a full rebuild:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-maintenance all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --batch-limit 3 \
+  --write-report
+```
+
+Each session or segment contributes its own graph slice. When a source changes,
+`graph-maintenance` deletes that source's old contribution and inserts the new
+one in one SQLite transaction, then refreshes touched aggregate nodes and
+edges. Foreground hooks only enqueue/background graph work; they do not run
+heavy graph maintenance inline. Automated graph maintenance uses a very small
+batch by default because one dirty historical session can touch thousands of
+edges.
+
+`graph/nodes.jsonl`, `graph/edges.jsonl`, and `graph/index.json` are optional
+snapshot exports from the graph store, not the live mutable database. On large
+live archives these files can be multi-GB and should not be retained just for
+interactive work. Remove them after proof/export with:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-prune-sidecar \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --write-report
+```
+
+`graph-freshness-check` treats a fully absent sidecar as `not_exported`, which
+is acceptable when `graph.sqlite3` remains available. Partial, invalid, or
+stale sidecars are still reported so stale snapshot data is not mistaken for
+current truth. If the gate reports `needs_offline_graph_build`, verify host
+disk/time budget before running a full `graph-build all --write
+--force-large-export`.
+
+Query examples:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --depth 2
+python3 scripts/aoa_session_memory.py graphrag-packet --query aoa-session-memory-mcp --anchor aoa-session-memory-mcp
+python3 scripts/aoa_session_memory.py graph-eval
+python3 scripts/aoa_session_memory.py graph-quality-audit --write-report
+python3 scripts/aoa_session_memory.py graph-quality-review diagnostics/<stamp>__graph-quality-audit.json \
+  --verdict mcp_access_plane=accept:accept:"good MCP evidence route" \
+  --write-report
+python3 scripts/aoa_session_memory.py graph-maintenance all --apply --write-report
+python3 scripts/aoa_session_memory.py graph-quality-corpus check --write-report
+python3 scripts/aoa_session_memory.py graph-freshness-check --write-report
+python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --write-report
+```
+
+The graph is a route companion, not reviewed memory. Its packets must carry
+raw/segment/session refs before an agent relies on them. `graph-quality-audit`
+checks representative MCP, skill, hook, tool, path, goal, failure, and decision
+anchors for those refs,
+freshness, and manual-verdict readiness. Its default mode uses graph
+neighborhoods plus lexical refs; pass `--full-graphrag` only for slower
+offline inspection. `graph-quality-review` records verdicts over that audit and
+emits quality feedback plus regression-candidate anchors; it does not mutate
+raw evidence, route indexes, or reviewed memory. `graph-quality-corpus` turns
+reviewed candidates into a versioned machine-readable regression corpus under
+`config/graph-quality-regression-corpus.json` and can check that corpus against
+current graph/search evidence. `graph-freshness-check` answers whether maps,
+search, the graph store, optional sidecar snapshots, and evidence refs are
+fresh enough for GraphRAG-style synthesis, and whether `index-maintenance`,
+`graph-maintenance`, sidecar export/prune, or offline `graph-build` is needed.
+`entity-dossier` builds a human card for one stable anchor with strong refs,
+weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
+questions, and a read-first route.
 
 Audit whether the 22 operational route layers are currently covered by
 session route indexes, source atlas axes, generated atlas entries, and the
@@ -170,6 +297,24 @@ python3 scripts/aoa_session_memory.py index-maintenance all \
 search/atlas drift, and deferred raw mirrors. `name-session --apply` queues
 this maintenance route so semantic name changes do not leave search or atlas
 surfaces behind the `session_id` bridge.
+
+For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
+maintenance controller with freshness gates, a lock, and bounded graph batches:
+
+```bash
+python3 scripts/aoa_session_memory.py auto-maintenance hot \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --write-report
+```
+
+Profiles are `hot` (`probe`, recent graph batch, defers search/atlas repair),
+`backlog` (`medium`, recent index and graph repair), and `deep` (`heavy`, full
+archive repair). Host timers should run them through `abyss-machine resource
+launch --kind indexing --unattended --success-on-block` so heavier work uses
+the machine resource layer instead of hooks or MCP reads.
+`aoa_session_memory` MCP remains read-only and plan-only.
 
 ## Portable Route
 
@@ -247,6 +392,20 @@ python3 scripts/aoa_session_memory.py import-codex-sessions \
   --dry-run \
   --write-report
 ```
+
+Sweep recent Codex JSONL sessions for missed close/no-hook or stale archives:
+
+```bash
+python3 scripts/aoa_session_memory.py sweep-codex-sessions \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --since-days 7 \
+  --min-age-sec 60 \
+  --dry-run \
+  --write-report
+```
+
+The sweep is dry-run by default. Use `--apply` to sync planned candidates.
 
 Build a first-wave conveyor before applying batch distillation:
 
@@ -492,6 +651,11 @@ phase/topic, delivery, findability, evidence provenance, owner route,
 freshness, runtime environment, mutation surface, correlation, confidence,
 access boundary, resource profile, and operator preference. It reports gaps
 without turning generated route signals into reviewed truth.
+
+For frequent status probes and MCP health checks, use a fast coverage gate with
+`--sample-limit 0`. Evidence-bearing samples are intentionally reserved for
+explicit audit or calibration routes so interactive status remains cheap as the
+archive grows.
 
 For classifier calibration, generate bounded review samples:
 

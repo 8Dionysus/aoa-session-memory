@@ -17,6 +17,8 @@ review lanes. They are machine-readable route law, not generated reports.
 - `batch-distillation-policy.json` controls first-wave batch review routing.
 - `atlas-policy.json` defines the source skeleton and generated-entry contract
   for the agent-facing atlas under `maps/`.
+- `graph-quality-regression-corpus.json` defines source-owned graph-quality
+  regression controls for pre-GraphRAG trust gates.
 - `naming-golden-set.json` defines portable naming-quality examples for
   mass naming wave regression checks.
 - `search-providers.json` defines the portable SQLite default, optional host
