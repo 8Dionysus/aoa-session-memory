@@ -738,8 +738,13 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     )
     rowid = cursor.lastrowid
     conn.execute(
-        "INSERT INTO document_routes(doc_rowid, doc_id, layer, key, route_signal) VALUES (?, ?, ?, ?, ?)",
-        (rowid, "obsolete-doc", "entity", "obsolete", "entity:obsolete"),
+        "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("entity", "obsolete", "entity:obsolete"),
+    )
+    route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", ("entity:obsolete",)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+        (rowid, route_id),
     )
     conn.execute(
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
@@ -756,7 +761,7 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = 'obsolete-doc'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM documents_fts WHERE rowid = ?", (rowid,)).fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM document_routes WHERE doc_id = 'obsolete-doc'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM document_routes WHERE doc_rowid = ?", (rowid,)).fetchone()[0] == 0
     conn.close()
 
 
@@ -949,13 +954,28 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] > 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM document_routes WHERE layer = ? AND key = ?",
+        """
+        SELECT COUNT(*)
+        FROM document_routes JOIN route_terms ON route_terms.id = document_routes.route_id
+        WHERE route_terms.layer = ? AND route_terms.key = ?
+        """,
         ("scope_contract", "analysis_only"),
     ).fetchone()[0] > 0
     conn.close()
     search_payload = module.search_sessions(aoa_root=aoa_root, route_layer="scope_contract", route_signal="scope_contract:analysis_only")
     assert search_payload["ok"] is True
     assert search_payload["results"][0]["route_signals"]
+    text_route_payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="preserve",
+        route_layer="scope_contract",
+        route_signal="scope_contract:analysis_only",
+        explain=True,
+    )
+    assert text_route_payload["ok"] is True
+    assert text_route_payload["results"]
+    provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert provider["providers"]["portable_sqlite"]["route_term_count"] > 0
 
 
 def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Path) -> None:
@@ -1091,6 +1111,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         per_route_limit=8,
         consequence_window=4,
     )
+    scenario_audit = module.entity_usage_scenario_audit(
+        aoa_root=aoa_root,
+        sample_size=2,
+        seed="fixture-usage-scenario",
+        layers=["mcp", "tool"],
+        limit=4,
+        per_route_limit=4,
+        consequence_window=4,
+        raw_preview_limit=2,
+    )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
     cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
@@ -1141,6 +1171,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert usage_audit["quality"]["stale_event_count"] == 0
     assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
     assert usage_audit["sessions"][0]["stale_event_count"] == 0
+    assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
+    assert scenario_audit["ok"] is True
+    assert scenario_audit["quality"]["sample_count"] == 2
+    assert scenario_audit["quality"]["failed_count"] == 0
+    assert scenario_audit["quality"]["raw_preview_counts"].get("available", 0) >= 1
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])
