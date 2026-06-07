@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import queue
+import random
 import re
 import shlex
 import shutil
@@ -33,6 +34,7 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 
 SCHEMA_VERSION = 1
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
+SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
@@ -77,7 +79,7 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 4
+SEARCH_SCHEMA_VERSION = 5
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
@@ -12315,8 +12317,7 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         conn.row_factory = sqlite3.Row
         metadata = search_index_metadata(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
-        route_count = int(conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0])
-        route_doc_count = int(conn.execute("SELECT COUNT(DISTINCT doc_rowid) FROM document_routes").fetchone()[0])
+        route_counts = search_route_storage_counts(conn)
         conn.close()
     except sqlite3.Error as exc:
         return {
@@ -12328,6 +12329,8 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
     schema_version = str(metadata.get("schema_version") or "")
     counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
     document_count = sum(counts.values())
+    route_count = route_counts["route_index_count"]
+    route_term_count = route_counts["route_term_count"]
     db_mtime = path_mtime(db_path)
     reasons: list[str] = []
     if schema_version != str(SEARCH_SCHEMA_VERSION):
@@ -12336,6 +12339,8 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         reasons.append("search_index_empty")
     if document_count > 0 and route_count <= 0:
         reasons.append("search_route_index_empty")
+    if route_count > 0 and route_term_count <= 0:
+        reasons.append("search_route_terms_empty")
     if latest_source_mtime > 0 and db_mtime < latest_source_mtime:
         reasons.append("source_newer_than_search_index")
     status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
@@ -12349,8 +12354,7 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float) -> dic
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": document_count,
         "document_counts": counts,
-        "route_index_count": route_count,
-        "route_index_document_count": route_doc_count,
+        **route_counts,
         "reasons": reasons,
         "diagnostics": [],
     }
@@ -16725,8 +16729,7 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
-        route_count = int(conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0])
-        route_doc_count = int(conn.execute("SELECT COUNT(DISTINCT doc_rowid) FROM document_routes").fetchone()[0])
+        route_counts = search_route_storage_counts(conn)
         conn.close()
     except sqlite3.Error as exc:
         return {
@@ -16736,18 +16739,30 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
             "db_path": str(db_path),
             "diagnostics": [f"sqlite_error:{exc}"],
         }
+    schema_version = str(metadata.get("schema_version") or "")
+    diagnostics: list[str] = []
+    if total <= 0:
+        diagnostics.append("search index has no documents")
+    if schema_version != str(SEARCH_SCHEMA_VERSION):
+        diagnostics.append("search_schema_mismatch")
+    if total > 0 and int_value(route_counts.get("route_index_count")) <= 0:
+        diagnostics.append("search_route_index_empty")
+    if int_value(route_counts.get("route_index_count")) > 0 and int_value(route_counts.get("route_term_count")) <= 0:
+        diagnostics.append("search_route_terms_empty")
+    ok = total > 0 and not diagnostics
+    status = "ready" if ok else ("empty" if total <= 0 else "stale")
     return {
         "provider": "portable_sqlite",
-        "ok": total > 0,
-        "status": "ready" if total > 0 else "empty",
+        "ok": ok,
+        "status": status,
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
-        "search_schema_version": metadata.get("schema_version"),
+        "search_schema_version": schema_version,
+        "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": total,
         "document_counts": counts,
-        "route_index_count": route_count,
-        "route_index_document_count": route_doc_count,
-        "diagnostics": [] if total > 0 else ["search index has no documents"],
+        **route_counts,
+        "diagnostics": diagnostics,
     }
 
 
@@ -17232,16 +17247,38 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
         )
         """
     )
+    existing_route_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(document_routes)").fetchall()}
+    existing_term_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(route_terms)").fetchall()}
+    if existing_route_columns and not {"doc_rowid", "route_id"}.issubset(existing_route_columns):
+        conn.execute("DROP TABLE IF EXISTS document_routes")
+        conn.execute("DROP TABLE IF EXISTS route_terms")
+        SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+        existing_route_columns = set()
+        existing_term_columns = set()
+    if existing_term_columns and not {"layer", "key", "route_signal"}.issubset(existing_term_columns):
+        conn.execute("DROP TABLE IF EXISTS document_routes")
+        conn.execute("DROP TABLE IF EXISTS route_terms")
+        SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+        existing_route_columns = set()
+        existing_term_columns = set()
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS document_routes (
+        CREATE TABLE IF NOT EXISTS route_terms (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_rowid INTEGER NOT NULL,
-            doc_id TEXT NOT NULL,
             layer TEXT NOT NULL,
             key TEXT NOT NULL,
             route_signal TEXT NOT NULL,
-            UNIQUE(doc_id, layer, key)
+            UNIQUE(layer, key),
+            UNIQUE(route_signal)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_routes (
+            doc_rowid INTEGER NOT NULL,
+            route_id INTEGER NOT NULL,
+            UNIQUE(doc_rowid, route_id)
         )
         """
     )
@@ -17264,9 +17301,10 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_signals ON documents(route_signals)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_signal ON document_routes(route_signal, doc_rowid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_layer_key ON document_routes(layer, key, doc_rowid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, doc_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, route_id)")
     conn.commit()
     return conn
 
@@ -17274,8 +17312,10 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
 def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM documents_fts")
     conn.execute("DELETE FROM document_routes")
+    conn.execute("DELETE FROM route_terms")
     conn.execute("DELETE FROM documents")
     conn.execute("DELETE FROM meta")
+    SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
 
 
 def delete_search_documents_for_session(
@@ -17294,13 +17334,11 @@ def delete_search_documents_for_session(
         values.append(session_id)
     if not clauses:
         return 0
-    rows = conn.execute(f"SELECT rowid, id FROM documents WHERE {' OR '.join(clauses)}", values).fetchall()
+    rows = conn.execute(f"SELECT rowid FROM documents WHERE {' OR '.join(clauses)}", values).fetchall()
     rowids = [int(row[0]) for row in rows]
     if not rowids:
         return 0
-    doc_ids = [str(row[1]) for row in rows if row[1]]
     conn.executemany("DELETE FROM document_routes WHERE doc_rowid = ?", [(rowid,) for rowid in rowids])
-    conn.executemany("DELETE FROM document_routes WHERE doc_id = ?", [(doc_id,) for doc_id in doc_ids])
     conn.executemany("DELETE FROM documents_fts WHERE rowid = ?", [(rowid,) for rowid in rowids])
     conn.executemany("DELETE FROM documents WHERE rowid = ?", [(rowid,) for rowid in rowids])
     return len(rowids)
@@ -17409,6 +17447,26 @@ def document_route_entries(route_layers: Any, route_signals: Any) -> list[dict[s
             seen.add(token)
             entries.append({"layer": normalized_layer, "key": "", "route_signal": f"{normalized_layer}:"})
     return entries
+
+
+def route_term_id(conn: sqlite3.Connection, entry: dict[str, str]) -> int:
+    layer = str(entry.get("layer") or "")
+    key = str(entry.get("key") or "")
+    route_signal = str(entry.get("route_signal") or route_signal_token(layer, key))
+    cache = SEARCH_ROUTE_TERM_CACHE.setdefault(id(conn), {})
+    token = (layer, key)
+    cached = cache.get(token)
+    if cached is not None:
+        return cached
+    conn.execute(
+        "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        (layer, key, route_signal),
+    )
+    row = conn.execute("SELECT id FROM route_terms WHERE layer = ? AND key = ?", (layer, key)).fetchone()
+    route_id = int(row[0]) if row else 0
+    if route_id:
+        cache[token] = route_id
+    return route_id
 
 
 def event_search_text_limit(event_type: str) -> int:
@@ -17566,23 +17624,15 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
     )
     route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
     if route_entries:
+        postings = [(rowid, route_term_id(conn, entry)) for entry in route_entries]
         conn.executemany(
             """
             INSERT OR IGNORE INTO document_routes (
-                doc_rowid, doc_id, layer, key, route_signal
+                doc_rowid, route_id
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?)
             """,
-            [
-                (
-                    rowid,
-                    str(doc.get("id") or ""),
-                    entry["layer"],
-                    entry["key"],
-                    entry["route_signal"],
-                )
-                for entry in route_entries
-            ],
+            [(doc_rowid, route_id_value) for doc_rowid, route_id_value in postings if route_id_value],
         )
 
 
@@ -18082,6 +18132,27 @@ def search_index_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
     return {str(row["key"]): row["value"] for row in rows}
 
 
+def sqlite_table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1", (name,)).fetchone()
+    return row is not None
+
+
+def search_route_storage_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    route_count = 0
+    route_doc_count = 0
+    route_term_count = 0
+    if sqlite_table_exists(conn, "document_routes"):
+        route_count = int(conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0])
+        route_doc_count = int(conn.execute("SELECT COUNT(DISTINCT doc_rowid) FROM document_routes").fetchone()[0])
+    if sqlite_table_exists(conn, "route_terms"):
+        route_term_count = int(conn.execute("SELECT COUNT(*) FROM route_terms").fetchone()[0])
+    return {
+        "route_index_count": route_count,
+        "route_index_document_count": route_doc_count,
+        "route_term_count": route_term_count,
+    }
+
+
 def search_sessions(
     *,
     aoa_root: Path,
@@ -18166,14 +18237,14 @@ def search_sessions(
             filters.append(f"{column} = ?")
             params.append(value)
     if route_layer:
-        route_filters.append("layer = ?")
+        route_filters.append("route_terms.layer = ?")
         route_params.append(route_key_slug(route_layer, fallback=str(route_layer)))
     if route_signal:
         normalized_signal = str(route_signal)
         if ":" in normalized_signal:
             layer, key = normalized_signal.split(":", 1)
             normalized_signal = route_signal_token(route_key_slug(layer, fallback=layer), route_key_slug(key, fallback=key))
-        route_filters.append("route_signal = ?")
+        route_filters.append("route_terms.route_signal = ?")
         route_params.append(normalized_signal)
     if date_from:
         filters.append("documents.session_date >= ?")
@@ -18185,7 +18256,13 @@ def search_sessions(
     route_join = ""
     if route_filters:
         route_where = " AND ".join(route_filters)
-        route_join = f" JOIN (SELECT DISTINCT doc_rowid FROM document_routes WHERE {route_where}) AS route_filter ON route_filter.doc_rowid = documents.rowid"
+        route_join = (
+            " JOIN ("
+            "SELECT DISTINCT document_routes.doc_rowid "
+            "FROM document_routes JOIN route_terms ON route_terms.id = document_routes.route_id "
+            f"WHERE {route_where}"
+            ") AS route_filter ON route_filter.doc_rowid = documents.rowid"
+        )
     fts_query = fts_query_from_user(query)
     try:
         if fts_query:
@@ -18195,7 +18272,7 @@ def search_sessions(
                 f"{route_join} "
                 "WHERE documents_fts MATCH ?"
             )
-            query_params: list[Any] = [fts_query, *route_params]
+            query_params: list[Any] = [*route_params, fts_query]
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
@@ -24108,6 +24185,7 @@ def entity_usage_audit(
         "route_result_count": len(hits),
         "text_result_count": text_result_count,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
+        "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
         "freshness_counts": freshness_counts,
         "fresh_event_count": int_value(freshness_counts.get("fresh")),
         "stale_event_count": int_value(freshness_counts.get("stale")),
@@ -24198,6 +24276,301 @@ def entity_usage_audit_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+ENTITY_USAGE_SCENARIO_LAYER_KIND = {
+    "entity": "entity",
+    "mcp": "mcp",
+    "tool": "tool",
+    "hook_health": "hook",
+    "path": "path",
+    "goal": "goal",
+    "failure_mode": "failure",
+    "decision_thread": "decision",
+    "external_snapshot": "external",
+    "delivery_state": "git",
+}
+ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS = tuple(sorted(ENTITY_USAGE_SCENARIO_LAYER_KIND))
+
+
+def entity_usage_scenario_anchor(layer: str, key: str) -> str:
+    if layer == "mcp":
+        return key.replace("_", "-")
+    return key
+
+
+def entity_usage_scenario_candidates(
+    *,
+    aoa_root: Path,
+    layers: list[str] | None = None,
+    sample_size: int = 8,
+    seed: str = "entity-usage-scenario-audit",
+    min_postings: int = 1,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    diagnostics: list[str] = []
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return [], ["search_index_missing"]
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        metadata = search_index_metadata(conn)
+        if str(metadata.get("schema_version") or "") != str(SEARCH_SCHEMA_VERSION):
+            diagnostics.append("search_schema_mismatch")
+        if not sqlite_table_exists(conn, "route_terms") or not sqlite_table_exists(conn, "document_routes"):
+            return [], diagnostics + ["search_route_terms_missing"]
+        selected_layers = [route_key_slug(layer, fallback=layer) for layer in (layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS))]
+        selected_layers = [layer for layer in selected_layers if layer]
+        placeholders = ",".join("?" for _ in selected_layers)
+        rows = conn.execute(
+            f"""
+            SELECT
+              route_terms.id AS route_id,
+              route_terms.layer AS layer,
+              route_terms.key AS key,
+              route_terms.route_signal AS route_signal,
+              COUNT(document_routes.doc_rowid) AS posting_count,
+              COUNT(DISTINCT document_routes.doc_rowid) AS document_count
+            FROM route_terms
+            JOIN document_routes ON document_routes.route_id = route_terms.id
+            WHERE route_terms.key <> ''
+              AND route_terms.layer IN ({placeholders})
+            GROUP BY route_terms.id
+            HAVING posting_count >= ?
+            """,
+            [*selected_layers, max(1, int_value(min_postings, 1))],
+        ).fetchall()
+    except sqlite3.Error as exc:
+        conn.close()
+        return [], diagnostics + [f"sqlite_error:{exc}"]
+    finally:
+        conn.close()
+    candidates = [
+        {
+            "route_id": int(row["route_id"]),
+            "layer": str(row["layer"]),
+            "key": str(row["key"]),
+            "kind": ENTITY_USAGE_SCENARIO_LAYER_KIND.get(str(row["layer"]), "auto"),
+            "anchor": entity_usage_scenario_anchor(str(row["layer"]), str(row["key"])),
+            "route_signal": str(row["route_signal"]),
+            "posting_count": int(row["posting_count"]),
+            "document_count": int(row["document_count"]),
+        }
+        for row in rows
+        if not str(row["key"] or "").startswith("namespace_")
+    ]
+    rng = random.Random(str(seed))
+    requested = max(1, min(int_value(sample_size, 8), 50))
+    by_layer: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        by_layer[str(candidate.get("layer") or "")].append(candidate)
+    for items in by_layer.values():
+        rng.shuffle(items)
+    layer_order = sorted(by_layer)
+    rng.shuffle(layer_order)
+    selected: list[dict[str, Any]] = []
+    seen_route_ids: set[int] = set()
+    for layer in layer_order:
+        items = by_layer.get(layer) or []
+        if not items:
+            continue
+        candidate = items[0]
+        route_id = int_value(candidate.get("route_id"))
+        if route_id not in seen_route_ids:
+            selected.append(candidate)
+            seen_route_ids.add(route_id)
+        if len(selected) >= requested:
+            return selected, diagnostics
+    remaining = [candidate for candidate in candidates if int_value(candidate.get("route_id")) not in seen_route_ids]
+    rng.shuffle(remaining)
+    selected.extend(remaining[: max(0, requested - len(selected))])
+    return selected, diagnostics
+
+
+def entity_usage_raw_preview_counts(events: list[dict[str, Any]], *, limit: int = 3) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    checked = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        preview = raw_preview_for_usage_event(event, max_chars=240)
+        counts[str(preview.get("status") or "unknown")] += 1
+        checked += 1
+        if checked >= max(0, limit):
+            break
+    return dict(sorted(counts.items()))
+
+
+def entity_usage_scenario_audit(
+    *,
+    aoa_root: Path,
+    sample_size: int = 8,
+    seed: str = "entity-usage-scenario-audit",
+    layers: list[str] | None = None,
+    min_postings: int = 1,
+    limit: int = 8,
+    per_route_limit: int = 8,
+    consequence_window: int = 4,
+    document_limit: int = 24,
+    raw_preview_limit: int = 3,
+    write_report: bool = False,
+    full: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    candidates, diagnostics = entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=layers,
+        sample_size=sample_size,
+        seed=seed,
+        min_postings=min_postings,
+    )
+    samples: list[dict[str, Any]] = []
+    status_counts: Counter[str] = Counter()
+    freshness_counts: Counter[str] = Counter()
+    raw_preview_totals: Counter[str] = Counter()
+    for candidate in candidates:
+        audit = entity_usage_audit(
+            aoa_root=aoa_root,
+            anchor=str(candidate["anchor"]),
+            kind=str(candidate["kind"]),
+            limit=limit,
+            per_route_limit=per_route_limit,
+            consequence_window=consequence_window,
+            document_limit=document_limit,
+        )
+        quality = audit.get("quality") if isinstance(audit.get("quality"), dict) else {}
+        event_buckets: list[dict[str, Any]] = []
+        for bucket_name in ["usage_events", "consequence_events", "result_events", "outcome_events", "entrypoint_events", "context_events"]:
+            bucket = audit.get(bucket_name) if isinstance(audit.get(bucket_name), list) else []
+            event_buckets.extend(event for event in bucket if isinstance(event, dict))
+        usage_events = audit.get("usage_events") if isinstance(audit.get("usage_events"), list) else []
+        consequence_events = audit.get("consequence_events") if isinstance(audit.get("consequence_events"), list) else []
+        preview_counts = entity_usage_raw_preview_counts(event_buckets, limit=raw_preview_limit)
+        raw_preview_totals.update(preview_counts)
+        sample_freshness = quality.get("freshness_counts") if isinstance(quality.get("freshness_counts"), dict) else {}
+        for key, value in sample_freshness.items():
+            freshness_counts[str(key)] += int_value(value)
+        failure_reasons: list[str] = []
+        if not audit.get("ok"):
+            failure_reasons.append("audit_not_ok")
+        if int_value(audit.get("event_count")) <= 0:
+            failure_reasons.append("no_events")
+        if not audit.get("document_refs"):
+            failure_reasons.append("no_document_refs")
+        if raw_preview_limit > 0 and int_value(preview_counts.get("available")) <= 0:
+            failure_reasons.append("raw_preview_unavailable")
+        status = "passed" if not failure_reasons else "failed"
+        if status == "passed" and int_value(audit.get("usage_event_count")) <= 0:
+            status = "warn"
+            failure_reasons.append("no_usage_events")
+        if status == "passed" and int_value(audit.get("consequence_event_count")) <= 0:
+            status = "warn"
+            failure_reasons.append("no_consequence_events")
+        status_counts[status] += 1
+        sample = {
+            "status": status,
+            "failure_reasons": failure_reasons,
+            "candidate": candidate,
+            "audit_ok": audit.get("ok"),
+            "event_count": audit.get("event_count"),
+            "usage_event_count": audit.get("usage_event_count"),
+            "consequence_event_count": audit.get("consequence_event_count"),
+            "document_ref_count": len(audit.get("document_refs", []) if isinstance(audit.get("document_refs"), list) else []),
+            "freshness_counts": sample_freshness,
+            "raw_preview_counts": preview_counts,
+            "first_usage": (usage_events[0] if usage_events else {}),
+            "diagnostics": audit.get("diagnostics", []),
+        }
+        if full:
+            sample["audit"] = audit
+        samples.append(sample)
+    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_payload = provider_status.get("providers", {}).get("portable_sqlite") if isinstance(provider_status.get("providers"), dict) else {}
+    quality = {
+        "sample_count": len(samples),
+        "passed_count": status_counts.get("passed", 0),
+        "warn_count": status_counts.get("warn", 0),
+        "failed_count": status_counts.get("failed", 0),
+        "freshness_counts": dict(sorted(freshness_counts.items())),
+        "raw_preview_counts": dict(sorted(raw_preview_totals.items())),
+        "search_schema_version": provider_payload.get("search_schema_version") if isinstance(provider_payload, dict) else None,
+        "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
+        "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_entity_usage_scenario_audit",
+        "generated_at": now,
+        "ok": bool(samples) and status_counts.get("failed", 0) == 0 and not any(str(item).startswith("sqlite_error:") for item in diagnostics),
+        "mutates": False,
+        "truth_status": "randomized_live_scenario_audit_not_reviewed_truth",
+        "seed": seed,
+        "sample_size": sample_size,
+        "layers": layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS),
+        "min_postings": min_postings,
+        "quality": quality,
+        "samples": samples,
+        "provider": provider_status,
+        "diagnostics": diagnostics,
+        "next_route": "Open failed or warning sample raw/segment refs before trusting retrieval quality; rerun with the same seed for reproduction.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__entity-usage-scenario-audit__{route_key_slug(seed, fallback='seed', max_chars=60)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, entity_usage_scenario_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    lines = [
+        "# Entity Usage Scenario Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- seed: `{payload.get('seed')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- samples: `{quality.get('sample_count')}`",
+        f"- passed: `{quality.get('passed_count')}`",
+        f"- warn: `{quality.get('warn_count')}`",
+        f"- failed: `{quality.get('failed_count')}`",
+        f"- route_terms: `{quality.get('search_route_term_count')}`",
+        f"- route_postings: `{quality.get('search_route_index_count')}`",
+        "",
+        "## Samples",
+        "",
+        "| status | kind | anchor | route | usage | consequences | refs | raw previews | reasons |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for sample in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
+        if not isinstance(sample, dict):
+            continue
+        candidate = sample.get("candidate") if isinstance(sample.get("candidate"), dict) else {}
+        previews = sample.get("raw_preview_counts") if isinstance(sample.get("raw_preview_counts"), dict) else {}
+        lines.append(
+            "| `{status}` | `{kind}` | `{anchor}` | `{route}` | `{usage}` | `{conseq}` | `{refs}` | `{previews}` | {reasons} |".format(
+                status=sample.get("status"),
+                kind=candidate.get("kind"),
+                anchor=markdown_cell(candidate.get("anchor")),
+                route=markdown_cell(candidate.get("route_signal")),
+                usage=sample.get("usage_event_count"),
+                conseq=sample.get("consequence_event_count"),
+                refs=sample.get("document_ref_count"),
+                previews=markdown_cell(json.dumps(previews, ensure_ascii=False, sort_keys=True)),
+                reasons=markdown_cell(", ".join(str(item) for item in sample.get("failure_reasons", []) if item)),
+            )
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
 def command_graph_quality_corpus(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -24278,6 +24651,28 @@ def command_entity_usage_audit(args: argparse.Namespace) -> int:
             for key, value in payload.items()
             if key not in {"entrypoint_events", "context_events"}
         }
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_entity_usage_scenario_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = entity_usage_scenario_audit(
+        aoa_root=root,
+        sample_size=args.sample_size,
+        seed=args.seed,
+        layers=args.layer or None,
+        min_postings=args.min_postings,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        consequence_window=args.consequence_window,
+        document_limit=args.document_limit,
+        raw_preview_limit=args.raw_preview_limit,
+        write_report=args.write_report,
+        full=args.full,
+    )
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"provider"}}
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -29033,6 +29428,26 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage audit reports under .aoa/diagnostics.")
     entity_usage_parser.add_argument("--full", action="store_true", help="Print complete event buckets.")
     entity_usage_parser.set_defaults(func=command_entity_usage_audit)
+
+    entity_usage_scenario = sub.add_parser(
+        "entity-usage-scenario-audit",
+        aliases=["usage-scenario-audit", "random-usage-audit"],
+        help="Run a seeded random live scenario over real route terms and entity usage packets.",
+    )
+    entity_usage_scenario.add_argument("--workspace-root")
+    entity_usage_scenario.add_argument("--aoa-root")
+    entity_usage_scenario.add_argument("--seed", default="entity-usage-scenario-audit")
+    entity_usage_scenario.add_argument("--sample-size", type=int, default=8)
+    entity_usage_scenario.add_argument("--layer", action="append", help="Repeatable route layer to sample. Defaults to entity/MCP/tool/hook/path/goal/failure/decision/external/delivery layers.")
+    entity_usage_scenario.add_argument("--min-postings", type=int, default=1, help="Minimum route postings for sampled route terms.")
+    entity_usage_scenario.add_argument("--limit", type=int, default=8, help="Maximum merged direct evidence hits per sampled anchor.")
+    entity_usage_scenario.add_argument("--per-route-limit", type=int, default=8, help="Maximum hits fetched per route candidate.")
+    entity_usage_scenario.add_argument("--consequence-window", type=int, default=4)
+    entity_usage_scenario.add_argument("--document-limit", type=int, default=24)
+    entity_usage_scenario.add_argument("--raw-preview-limit", type=int, default=3, help="Maximum raw refs spot-checked per sampled anchor.")
+    entity_usage_scenario.add_argument("--write-report", action="store_true", help="Write JSON and Markdown scenario audit reports under .aoa/diagnostics.")
+    entity_usage_scenario.add_argument("--full", action="store_true", help="Print nested entity usage packets for every sample.")
+    entity_usage_scenario.set_defaults(func=command_entity_usage_scenario_audit)
 
     atlas = sub.add_parser("atlas", help="Generate the agent atlas route entries from session indexes.")
     atlas_sub = atlas.add_subparsers(dest="atlas_command", required=True)
