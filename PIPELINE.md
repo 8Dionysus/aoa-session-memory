@@ -69,6 +69,8 @@ Codex hook event
   -> optional search-index runtime cache
   -> optional provider capability status for host overlays
   -> trace-route anchor resolver for skill/MCP/hook/tool/GitHub investigations
+  -> entity usage audit and neighborhood windows for real skills, MCPs,
+     hooks, tools, and recurring agent-work entities
   -> retrieval packet recipes
   -> agent atlas route entries from generated route signals
   -> incremental graph store and generated sidecar snapshots
@@ -156,6 +158,30 @@ abyss-machine ai token-accounting aoa-summary --json
 
 That command is a read-only planning projection owned by `abyss-machine`; it
 does not own `.aoa` raw, manifests, indexes, or registry truth.
+
+## Entity Usage Retrieval Route
+
+Use `entity-usage-audit` when the agent needs a compact cross-session packet
+for how a skill, MCP, hook, tool, API, script, validator, test, graph, memory
+surface, or other recurring entity appears in archived work.
+
+Use `entity-usage-neighborhood` when the agent needs the local before/after
+event window around direct usage. Its `--limit` means "how many usage windows
+to open", not "how few search hits to inspect". The command may use a wider
+bounded internal harvest so direct usage is not hidden behind entrypoint,
+result, or text-only matches. The payload exposes `requested_usage_limit`,
+`audit_limit`, `audit_per_route_limit`, and candidate usage counts so the
+agent can judge the cost and quality of the route.
+
+Usage payloads keep route signals bounded: they include a route-signal sample,
+`route_signal_count`, and `route_signals_truncated`. Follow the returned
+`segment_index` and raw refs for the full route-signal set or exact evidence.
+This keeps MCP-sized packets fast without making the packet the authority.
+
+Hooks are a special case. A generic usage audit for a hook often returns
+receipt/result evidence rather than direct "usage" events. For hook health,
+start with hook receipt routes and use entity usage audit as surrounding
+session evidence.
 
 ### PostCompact
 
