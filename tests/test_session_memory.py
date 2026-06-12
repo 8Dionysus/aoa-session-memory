@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -765,6 +766,58 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     conn.close()
 
 
+def test_atlas_no_clean_updates_selected_session_without_losing_other_entries(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    first_transcript = tmp_path / "rollout-2026-06-01T00-00-00-alpha-atlas.jsonl"
+    second_transcript = tmp_path / "rollout-2026-06-01T00-05-00-beta-atlas.jsonl"
+    write_jsonl(
+        first_transcript,
+        [
+            {"timestamp": "2026-06-01T00:00:00Z", "type": "session_meta", "payload": {"id": "atlas-alpha", "cwd": str(repo)}},
+            {"timestamp": "2026-06-01T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Alpha atlas incremental session"}]}},
+        ],
+    )
+    write_jsonl(
+        second_transcript,
+        [
+            {"timestamp": "2026-06-01T00:05:00Z", "type": "session_meta", "payload": {"id": "atlas-beta", "cwd": str(repo)}},
+            {"timestamp": "2026-06-01T00:05:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Beta atlas preserved session"}]}},
+        ],
+    )
+    for session_id, transcript in (("atlas-alpha", first_transcript), ("atlas-beta", second_transcript)):
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    alpha = module.resolve_session_record(aoa_root, "atlas-alpha")
+    beta = module.resolve_session_record(aoa_root, "atlas-beta")
+    full = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
+    assert full["ok"] is True
+    before_count = full["entry_count"]
+    by_time_before = module.read_json(aoa_root / "maps" / "by-time" / "index.json", {})
+    assert any(entry.get("session") == beta["session_label"] for entry in by_time_before["entries"])
+
+    incremental = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=False, selected_records=[alpha])
+
+    assert incremental["ok"] is True
+    assert incremental["selected_count"] == 1
+    assert incremental["entry_count"] == before_count
+    by_time_after = module.read_json(aoa_root / "maps" / "by-time" / "index.json", {})
+    assert any(entry.get("session") == alpha["session_label"] for entry in by_time_after["entries"])
+    assert any(entry.get("session") == beta["session_label"] for entry in by_time_after["entries"])
+
+
 def test_reindex_backfills_work_context_for_existing_archives(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -1098,6 +1151,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert json.loads((aoa_root / "graph" / "index.json").read_text(encoding="utf-8"))["builder"] == "sqlite_graph_store"
     assert graph["node_type_counts"]["event"] >= 1
     assert graph["node_type_counts"]["raw_ref"] >= 1
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    aggregate_edge = json.loads(conn.execute("SELECT payload_json FROM edges LIMIT 1").fetchone()[0])
+    aggregate_node = json.loads(conn.execute("SELECT payload_json FROM nodes LIMIT 1").fetchone()[0])
+    conn.close()
+    assert aggregate_edge["aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
+    assert aggregate_edge["evidence_refs_compacted"] is True
+    assert "evidence_refs" not in aggregate_edge
+    assert aggregate_node["aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
 
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=2)
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
@@ -1111,6 +1172,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         per_route_limit=8,
         consequence_window=4,
     )
+    usage_neighborhood = module.entity_usage_neighborhood(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=2,
+        per_route_limit=8,
+        before=1,
+        after=4,
+        raw_preview_chars=500,
+    )
     scenario_audit = module.entity_usage_scenario_audit(
         aoa_root=aoa_root,
         sample_size=2,
@@ -1123,6 +1194,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
+    storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
     cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
     packet = module.graph_rag_packet(
         aoa_root=aoa_root,
@@ -1171,6 +1243,20 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert usage_audit["quality"]["stale_event_count"] == 0
     assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
     assert usage_audit["sessions"][0]["stale_event_count"] == 0
+    assert usage_neighborhood["artifact_type"] == "session_memory_entity_usage_neighborhood"
+    assert usage_neighborhood["ok"] is True
+    assert usage_neighborhood["quality"]["usage_neighborhood_present"] is True
+    assert usage_neighborhood["quality"]["consequence_present"] is True
+    assert usage_neighborhood["quality"]["raw_preview_available"] is True
+    first_neighborhood = usage_neighborhood["neighborhoods"][0]
+    assert first_neighborhood["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
+    assert first_neighborhood["source_usage_event"]["raw_preview"]["status"] == "available"
+    assert any(event.get("relation") == "same_correlation_id" for event in first_neighborhood["consequence_events"])
+    assert any(event.get("event_type") == "ASSISTANT_MESSAGE" for event in first_neighborhood["consequence_events"])
+    assert any(
+        item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
+        for item in usage_neighborhood["document_refs"]
+    )
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
     assert scenario_audit["quality"]["sample_count"] == 2
@@ -1194,6 +1280,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert any("unknown_mcp_service_identity:aoa_decsions_mcp" in item for item in typo_mcp_trace["diagnostics"])
     assert any("did_you_mean:aoa_decisions_mcp" in item for item in typo_mcp_trace["diagnostics"])
     assert query_state["query_scope"] == "lightweight_store_availability_not_full_dirty_audit"
+    assert query_state["metadata"]["graph_store_aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
+    assert storage["artifact_type"] == "session_memory_storage_audit"
+    assert storage["ok"] is True
+    assert storage["graph_store"]["ok"] is True
+    assert storage["graph_store"]["table_sizes"]
+    assert storage["sessions"]["raw_block_duplication_candidate_bytes"] >= 0
+    assert any(item.get("id") == "graph_compact_aggregate_payload" for item in storage["recommendations"])
+    assert Path(storage["report_json"]).exists()
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
     assert packet["ok"] is True
     assert packet["truth_status"] == "rag_graphrag_evidence_packet_not_reviewed_truth"
@@ -1402,7 +1496,7 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
-def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(tmp_path: Path) -> None:
+def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
@@ -1456,11 +1550,39 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert states["missing_count"] >= 2
     assert any(item["status"] == "missing" and item["session_id"] == "second-graph-source" for item in states["states"])
 
-    inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10)
+    contribution_calls: list[str] = []
+    original_graph_contributions_for_record = module.graph_contributions_for_record
+
+    def counted_graph_contributions_for_record(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        contribution_calls.append(str(record.get("session_id") or Path(str(record.get("path") or "")).name))
+        return original_graph_contributions_for_record(record)
+
+    monkeypatch.setattr(module, "graph_contributions_for_record", counted_graph_contributions_for_record)
+    inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, refresh_chunk_size=2)
     assert inserted["ok"] is True
     assert inserted["selected_count"] >= 2
+    assert inserted["refresh_chunk_size"] == 2
+    assert contribution_calls.count("second-graph-source") == 1
+    assert inserted["maintenance_detail"]["refresh_chunk_size"] == 2
+    assert inserted["maintenance_detail"]["replacement_group_count"] == 1
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] >= 1
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
+    conn.close()
+
+    scoped_states = module.graph_source_states(aoa_root=aoa_root, target="second-graph-source")
+    assert scoped_states["orphaned_count"] == 0
+    assert scoped_states["out_of_scope_existing_count"] >= 2
+    assert scoped_states["orphan_scope"] == "selected_sessions"
+    scoped_maintenance = module.graph_maintenance(aoa_root=aoa_root, target="second-graph-source", apply=True, batch_limit=10)
+    assert scoped_maintenance["ok"] is True
+    assert scoped_maintenance["selected_count"] == 0
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("first-graph-source",)).fetchone()[0] >= 2
     assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
     conn.close()
 
@@ -1476,8 +1598,11 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert orphaned_states["orphaned_count"] >= 2
     assert any(item["status"] == "orphaned" and item["session_id"] == "second-graph-source" for item in orphaned_states["states"])
 
-    removed = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10)
+    removed = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, refresh_chunk_size=2)
     assert removed["ok"] is True
+    assert removed["maintenance_detail"]["refresh_chunk_size"] == 2
+    assert removed["maintenance_detail"]["removed_node_refresh"]["requested_count"] >= 1
+    assert removed["maintenance_detail"]["removed_edge_refresh"]["requested_count"] >= 1
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 0
@@ -1489,6 +1614,73 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
 
     final_state = module.graph_store_state(aoa_root=aoa_root)
     assert final_state["status"] == "current"
+
+
+def test_graph_build_store_only_rebuilds_sqlite_without_sidecar(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-35-00-store-only-graph.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-26T00:35:00Z", "type": "session_meta", "payload": {"id": "store-only-graph", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:35:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find aoa-session-memory-mcp with store-only graph."}]}},
+            {"timestamp": "2026-05-26T00:35:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The aoa-session-memory-mcp route is in the SQLite graph store."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "store-only-graph",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    full = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert full["ok"] is True
+    assert (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert (aoa_root / "graph" / "edges.jsonl").exists()
+
+    store_only = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+
+    assert store_only["ok"] is True
+    assert store_only["sidecar_exported"] is False
+    assert store_only["atomic_store_rebuild"] is True
+    assert store_only["in_place_rebuild"] is False
+    assert store_only["sidecar_removed"]
+    assert (aoa_root / "graph" / "graph.sqlite3").exists()
+    assert not (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert not (aoa_root / "graph" / "edges.jsonl").exists()
+    assert not (aoa_root / "graph" / "index.json").exists()
+    sidecar_state = module.graph_sidecar_state(aoa_root)
+    assert sidecar_state["status"] == "not_exported"
+    neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=1)
+    assert neighborhood["ok"] is True
+    assert neighborhood["graph"]["source"] == "sqlite_graph_store"
+
+    in_place = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+        atomic_store_rebuild=False,
+    )
+    assert in_place["ok"] is True
+    assert in_place["atomic_store_rebuild"] is False
+    assert in_place["in_place_rebuild"] is True
+    assert not (aoa_root / "graph" / "nodes.jsonl").exists()
 
 
 def test_graph_store_reports_blocked_sources_without_requesting_maintenance(tmp_path: Path) -> None:
@@ -2067,6 +2259,142 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     }
 
     assert "entity:aoa_memo_writeback" in skill_alias_signals
+    assert "skill:aoa_memo_writeback" in skill_alias_signals
+
+    operational_entity_prompt = {
+        "timestamp": "2026-05-24T00:00:06.375Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "Use skill aoa-decision and skills/aoa-session-search/SKILL.md. "
+                        "Audit aoa-session-memory-mcp, UserPromptSubmit hook, exec_command tool, "
+                        "OpenAI Responses API, plugin://gmail@openai-curated, Codex sub-agent, "
+                        "scripts/validate_stack.py validator, tests/test_session_memory.py with pytest, "
+                        "inspect-ai eval in evals/session-quality.yaml, git commit and gh pr, "
+                        "playbooks/session-audit.md playbook, techniques/entity-routing.md technique, "
+                        "mechanics/route-maintenance.md mechanic, GraphRAG graph nodes, "
+                        "imagegen skill, and aoa-session-memory memory."
+                    ),
+                }
+            ],
+        },
+    }
+    operational_entity_event = module.classify_raw_event(json.dumps(operational_entity_prompt), operational_entity_prompt, 21)
+    operational_entity_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in operational_entity_event.facets["route_signals"]
+    }
+
+    assert "skill:aoa_decision" in operational_entity_signals
+    assert "skill:aoa_session_search" in operational_entity_signals
+    assert "skill:imagegen" in operational_entity_signals
+    assert "mcp:aoa_session_memory_mcp" in operational_entity_signals
+    assert "hook:userpromptsubmit" in operational_entity_signals
+    assert "tool:exec_command" in operational_entity_signals
+    assert "api:openai_responses" in operational_entity_signals
+    assert "plugin:gmail_openai_curated" in operational_entity_signals
+    assert "agent:sub_agent" in operational_entity_signals
+    assert "script:validate_stack" in operational_entity_signals
+    assert "validator:validate_stack" in operational_entity_signals
+    assert "test:test_session_memory" in operational_entity_signals
+    assert "test:pytest" in operational_entity_signals
+    assert "eval:inspect_ai" in operational_entity_signals
+    assert "eval:session_quality" in operational_entity_signals
+    assert "git:git" in operational_entity_signals
+    assert "git:gh" in operational_entity_signals
+    assert "git:commit" in operational_entity_signals
+    assert "git:pull_request" in operational_entity_signals
+    assert "playbook:session_audit" in operational_entity_signals
+    assert "technique:entity_routing" in operational_entity_signals
+    assert "mechanic:route_maintenance" in operational_entity_signals
+    assert "graph:graphrag" in operational_entity_signals
+    assert "memory:aoa_session_memory" in operational_entity_signals
+
+    operational_noise_prompt = {
+        "timestamp": "2026-05-24T00:00:06.250Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": (
+                        "This plugin and including plugin are generic prose, not plugin identities. "
+                        "Do not index skills/AGENTS.md or exec_command skill as skills. "
+                        "Do not index skill is, skill when, core skill, guard skill, or github.com skill. "
+                        "Do not index Use this skill when: or This skill is: from SKILL.md prose. "
+                        "Do not index metadata fields like aoa_source_skill_path: skills/aoa-decision/SKILL.md "
+                        "or skills\\n  aoa_technique_dependencies: as skills. "
+                        "Nested path skills/core/engineering/aoa-source-of-truth-check/SKILL.md is the skill, not core. "
+                        "Traceback path aoa_sdk/skills/detector.py:307 is code, not a skill. "
+                        "Diagnostic tags route_signal:skill:detector_py_307 and skill:discovery_py_206 are code locations, not skills. "
+                        "Diagnostic signal dumps like skill:core:operational_entity_heuristic:core are route metadata, not skills. "
+                        "Paths like aoa-skills/checkpoint-note.json and aoa-skills/post-commit-report.json are files, not skills. "
+                        "Metadata values high_risk, codex_facing, host_visible, explicit_only, and technique id AOA-T-0102 are not skills. "
+                        "Profile values public_safe, layer_request, self_contained, two_stage, phase_aware, workspace_visible, repo_local, and upstream_owned are not skills. "
+                        "Repo or eval names aoa_evals, aoa_stats, and gemma4_e2b_eval_readiness are not skills. "
+                        "Do not index README.md:10:4 plugin, AGENTS.md:194_these plugin, connectivity-report.js plugin, "
+                        "aoa-local-plugin-pack.zip plugin, 2158 plugin, or catalog-first plugin as plugins. "
+                        "Do not index truncated plugin URIs like plugin://gmail@op or plugin://gmail@open as plugins. "
+                        "Keep openai-developers plugin and skills/aoa-decision/SKILL.md."
+                    ),
+                }
+            ],
+        },
+    }
+    operational_noise_event = module.classify_raw_event(json.dumps(operational_noise_prompt), operational_noise_prompt, 22)
+    operational_noise_signals = {
+        f"{signal['layer']}:{signal['key']}" for signal in operational_noise_event.facets["route_signals"]
+    }
+
+    assert "plugin:this" not in operational_noise_signals
+    assert "plugin:including" not in operational_noise_signals
+    assert "plugin:readme_md_10_4" not in operational_noise_signals
+    assert "plugin:agents_md_194_these" not in operational_noise_signals
+    assert "plugin:connectivity_report_js" not in operational_noise_signals
+    assert "plugin:aoa_local_plugin_pack_zip" not in operational_noise_signals
+    assert "plugin:2158" not in operational_noise_signals
+    assert "plugin:catalog_first" not in operational_noise_signals
+    assert "plugin:gmail_op" not in operational_noise_signals
+    assert "plugin:gmail_open" not in operational_noise_signals
+    assert "skill:agents_md" not in operational_noise_signals
+    assert "skill:exec_command" not in operational_noise_signals
+    assert "skill:is" not in operational_noise_signals
+    assert "skill:when" not in operational_noise_signals
+    assert "skill:core" not in operational_noise_signals
+    assert "skill:guard" not in operational_noise_signals
+    assert "skill:github_com" not in operational_noise_signals
+    assert "skill:aoa_source_skill_path" not in operational_noise_signals
+    assert "skill:aoa_technique_dependencies" not in operational_noise_signals
+    assert "skill:detector_py_307" not in operational_noise_signals
+    assert "skill:discovery_py_206" not in operational_noise_signals
+    assert "skill:core_operational_entity_heuristic_core" not in operational_noise_signals
+    assert "skill:checkpoint_note_json" not in operational_noise_signals
+    assert "skill:post_commit_report_json" not in operational_noise_signals
+    assert "skill:high_risk" not in operational_noise_signals
+    assert "skill:codex_facing" not in operational_noise_signals
+    assert "skill:host_visible" not in operational_noise_signals
+    assert "skill:explicit_only" not in operational_noise_signals
+    assert "skill:aoa_t_0102" not in operational_noise_signals
+    assert "skill:public_safe" not in operational_noise_signals
+    assert "skill:layer_request" not in operational_noise_signals
+    assert "skill:self_contained" not in operational_noise_signals
+    assert "skill:two_stage" not in operational_noise_signals
+    assert "skill:phase_aware" not in operational_noise_signals
+    assert "skill:workspace_visible" not in operational_noise_signals
+    assert "skill:repo_local" not in operational_noise_signals
+    assert "skill:upstream_owned" not in operational_noise_signals
+    assert "skill:aoa_evals" not in operational_noise_signals
+    assert "skill:aoa_stats" not in operational_noise_signals
+    assert "skill:gemma4_e2b_eval_readiness" not in operational_noise_signals
+    assert "plugin:openai_developers" in operational_noise_signals
+    assert "skill:aoa_decision" in operational_noise_signals
+    assert "skill:aoa_source_of_truth_check" in operational_noise_signals
 
     mcp_service_command = {
         "timestamp": "2026-05-24T00:00:06.500Z",
@@ -2136,6 +2464,35 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
 
     assert "mcp:aoa_memo_mcp_under_stack_mcp" not in derived_mcp_signals
     assert "mcp:abyss_stack_aoa_memo_mcp" not in derived_mcp_signals
+
+
+def test_route_classifier_bounds_large_tool_outputs_and_keeps_tail_signals() -> None:
+    large_output = (
+        "Process exited with code 0\n"
+        "Output:\n"
+        + ("noise " * 250_000)
+        + "\n301 passed\nOpenAI Responses API tail marker\n"
+    )
+    record = {
+        "timestamp": "2026-05-24T00:00:07.250Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call-large-output",
+            "output": large_output,
+        },
+    }
+
+    started = time.perf_counter()
+    event = module.classify_raw_event(json.dumps(record), record, 25)
+    elapsed = time.perf_counter() - started
+    signals = {f"{signal['layer']}:{signal['key']}" for signal in event.facets["route_signals"]}
+
+    assert elapsed < 2.0
+    assert event.event_type == "VERIFICATION"
+    assert event.outcome == "succeeded"
+    assert "delivery_state:tests_green" in signals
+    assert "api:openai_responses" in signals
 
 
 def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
@@ -2232,7 +2589,7 @@ def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     assert entry["evidence"]["raw_ref"] == "raw:line:2"
 
 
-def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path, monkeypatch: Any) -> None:
+def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
     repo.mkdir(parents=True)
@@ -2271,6 +2628,11 @@ def test_route_layer_readiness_audits_22_operational_layers(tmp_path: Path, monk
                                 "landed slices. Проверь source generated runtime diagnostics portable bundle "
                                 "local overlay memory external snapshot. Entity path graph repo /srv/AbyssOS/aoa-techniques "
                                 "tests skills hooks MCP issues PRs OPENAI_API_KEY package model. MEMORY.md memory_summary.md "
+                                "Use skill aoa-decision and skills/aoa-session-search/SKILL.md. "
+                                "OpenAI Responses API plugin://gmail@openai-curated Codex sub-agent "
+                                "scripts/validate_stack.py validator tests/test_session_memory.py pytest GraphRAG graph nodes. "
+                                "inspect-ai eval evals/session-quality.yaml git commit gh pr playbooks/session-audit.md "
+                                "techniques/entity-routing.md mechanics/route-maintenance.md. "
                                 "rollout_summaries skill memory ad_hoc .aoa/sessions .codex/sessions rollout-xyz "
                                 "read_mcp_resource MCP resource cited skipped memory verified-current unverified memory update memory. "
                                 "GitHub Gmail Google Drive calendar web search browser snapshot stale risk live verified. "
@@ -2623,6 +2985,81 @@ def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_nam
     assert search["result_count"] >= 1
 
 
+def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcripts = []
+    for session_id, minute, text in [
+        ("dirty-alpha", 0, "Alpha dirty fingerprint session"),
+        ("clean-beta", 5, "Beta clean fingerprint session"),
+    ]:
+        transcript = tmp_path / f"rollout-2026-06-02T00-{minute:02d}-00-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": f"2026-06-02T00:{minute:02d}:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo)}},
+                {"timestamp": f"2026-06-02T00:{minute:02d}:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}},
+                {"timestamp": f"2026-06-02T00:{minute:02d}:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Fingerprint route indexed."}]}},
+            ],
+        )
+        transcripts.append((session_id, transcript))
+    for session_id, transcript in transcripts:
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    budgeted = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=False, budget_seconds=0.000001)
+    assert budgeted["processed_count"] == 1
+    assert budgeted["remaining_count"] == 1
+    assert budgeted["budget_exhausted"] is True
+    clean_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
+    assert clean_plan["search_dirty_session_count"] == 0
+    assert clean_plan["atlas_dirty_session_count"] == 0
+
+    semantic = module.set_session_semantic_name(
+        aoa_root=aoa_root,
+        target="dirty-alpha",
+        name="dirty fingerprint route",
+        scope="session",
+        kind="session_essence",
+        evidence_refs=["raw:line:2"],
+        from_line=1,
+        to_line=3,
+        apply=True,
+        verify_raw_hash=True,
+    )
+    assert semantic["status"] == "applied"
+
+    dirty_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
+    assert dirty_plan["search_dirty_session_count"] == 1
+    assert dirty_plan["atlas_dirty_session_count"] == 1
+    assert dirty_plan["search_dirty_sessions"][0]["session_id"] == "dirty-alpha"
+    assert dirty_plan["atlas_dirty_sessions"][0]["session_id"] == "dirty-alpha"
+
+    applied = module.maintain_indexes(aoa_root=aoa_root, target="all", apply=True, graph_batch_limit=10)
+    actions = {action["id"]: action for action in applied["actions"]}
+    assert actions["rebuild_search_index"]["result"]["selected_count"] == 1
+    assert actions["rebuild_agent_atlas"]["result"]["selected_count"] == 1
+
+    refreshed = module.maintain_indexes(aoa_root=aoa_root, target="all")
+    assert refreshed["search_dirty_session_count"] == 0
+    assert refreshed["atlas_dirty_session_count"] == 0
+    assert refreshed["search_index"]["status"] == "current"
+    assert refreshed["atlas_index"]["status"] == "current"
+
+
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -2785,7 +3222,16 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
             {
                 "timestamp": "2026-05-12T00:00:05Z",
                 "type": "response_item",
-                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "План: сверю search-index по raw refs"}]},
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                            {
+                                "type": "output_text",
+                                "text": "План: сверю search-index по raw refs " + ("длинный-контекст " * 45) + "compressed_body_tail_anchor",
+                            }
+                    ],
+                },
             },
         ],
     )
@@ -2828,6 +3274,15 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert indexed["incident_document_count"] >= 1
     assert Path(indexed["db_path"]).exists()
     assert Path(indexed["report_json"]).exists()
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    body_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
+    preview_len, compressed_count = conn.execute(
+        "SELECT MAX(LENGTH(body)), COUNT(*) FROM documents JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid"
+    ).fetchone()
+    conn.close()
+    assert body_meta == module.SEARCH_BODY_STORAGE_MODE
+    assert preview_len <= module.SEARCH_BODY_PREVIEW_CHARS
+    assert compressed_count == indexed["document_count"]
 
     hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert hook_results["ok"] is True
@@ -2839,6 +3294,10 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert hook_hit["refs"]["raw_block"] == "raw/blocks/000__initial-to-latest.raw.jsonl"
     assert hook_hit["freshness"]["status"] == "fresh"
     assert hook_hit["explain"]["why_this_is_not_authority"]
+
+    tail_results = module.search_sessions(aoa_root=aoa_root, query="compressed_body_tail_anchor", explain=True)
+    assert tail_results["ok"] is True
+    assert tail_results["result_count"] >= 1
 
     correction_results = module.search_sessions(
         aoa_root=aoa_root,
@@ -3998,7 +4457,7 @@ def test_hook_worker_recovers_orphaned_running_job(tmp_path: Path) -> None:
     assert (session_dir / "session.manifest.json").exists()
 
 
-def test_hook_worker_drains_all_pending_jobs_in_batches(tmp_path: Path) -> None:
+def test_hook_worker_respects_job_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
 
@@ -4033,9 +4492,46 @@ def test_hook_worker_drains_all_pending_jobs_in_batches(tmp_path: Path) -> None:
     payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=2)
 
     assert payload["ok"] is True
-    assert payload["processed"] == 7
+    assert payload["processed"] == 2
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))) == 5
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 2
+
+
+def test_hook_worker_defers_sync_jobs_over_raw_budget(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-huge.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-huge"}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Huge worker budget"}]},
+            },
+        ],
+    )
+    monkeypatch.setenv("AOA_SESSION_MEMORY_HOOK_WORKER_MAX_RAW_BYTES", "1")
+    job_path = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="SessionStart",
+        event={"session_id": "session-worker-huge", "transcript_path": str(transcript), "cwd": str(workspace)},
+        session_id="session-worker-huge",
+        transcript_path=transcript,
+        reason="test_worker_budget",
+    )
+    assert job_path is not None
+
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+
+    assert payload["ok"] is True
+    assert payload["processed"] == 1
+    assert payload["results"][0]["status"] == "deferred_over_worker_budget"
+    assert payload["results"][0]["transcript_bytes"] > payload["results"][0]["max_raw_bytes"]
+    assert not (aoa_root / "sessions" / "session-worker-huge" / "session.manifest.json").exists()
     assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
-    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 7
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 1
 
 
 def test_hook_registry_lock_contention_defers_registry_update(tmp_path: Path) -> None:
