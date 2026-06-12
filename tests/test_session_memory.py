@@ -1182,6 +1182,24 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         after=4,
         raw_preview_chars=500,
     )
+    narrow_usage_audit = module.entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+    narrow_usage_neighborhood = module.entity_usage_neighborhood(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=1,
+        before=1,
+        after=4,
+        raw_preview_chars=500,
+    )
     scenario_audit = module.entity_usage_scenario_audit(
         aoa_root=aoa_root,
         sample_size=2,
@@ -1243,6 +1261,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert usage_audit["quality"]["stale_event_count"] == 0
     assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
     assert usage_audit["sessions"][0]["stale_event_count"] == 0
+    assert narrow_usage_audit["ok"] is True
+    assert narrow_usage_audit["event_count"] == 1
+    assert narrow_usage_audit["usage_event_count"] == 1
+    assert narrow_usage_audit["usage_events"][0]["title"] == "Tool call: aoa_decisions_search"
+    assert narrow_usage_audit["quality"]["candidate_usage_event_count"] >= 1
     assert usage_neighborhood["artifact_type"] == "session_memory_entity_usage_neighborhood"
     assert usage_neighborhood["ok"] is True
     assert usage_neighborhood["quality"]["usage_neighborhood_present"] is True
@@ -1251,12 +1274,21 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     first_neighborhood = usage_neighborhood["neighborhoods"][0]
     assert first_neighborhood["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
     assert first_neighborhood["source_usage_event"]["raw_preview"]["status"] == "available"
+    assert isinstance(first_neighborhood["source_usage_event"]["route_signals"], list)
+    assert first_neighborhood["source_usage_event"]["route_signal_count"] >= len(first_neighborhood["source_usage_event"]["route_signals"])
     assert any(event.get("relation") == "same_correlation_id" for event in first_neighborhood["consequence_events"])
     assert any(event.get("event_type") == "ASSISTANT_MESSAGE" for event in first_neighborhood["consequence_events"])
     assert any(
         item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
         for item in usage_neighborhood["document_refs"]
     )
+    assert narrow_usage_neighborhood["ok"] is True
+    assert narrow_usage_neighborhood["quality"]["requested_usage_limit"] == 1
+    assert narrow_usage_neighborhood["quality"]["audit_per_route_limit"] > 1
+    assert narrow_usage_neighborhood["quality"]["usage_neighborhood_present"] is True
+    assert narrow_usage_neighborhood["quality"]["raw_preview_available"] is True
+    assert narrow_usage_neighborhood["source_audit"]["usage_event_count"] >= 1
+    assert narrow_usage_neighborhood["neighborhoods"][0]["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
     assert scenario_audit["quality"]["sample_count"] == 2

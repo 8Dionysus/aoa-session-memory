@@ -26699,6 +26699,14 @@ ENTITY_USAGE_DIRECT_TYPES = {"TOOL_CALL", "COMMAND", "FILE_READ", "FILE_WRITE", 
 ENTITY_USAGE_RESULT_TYPES = {"TOOL_OUTPUT", "COMMAND_OUTPUT", "VERIFICATION", "ERROR"}
 ENTITY_USAGE_OUTCOME_TYPES = {"ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "CHECKPOINT", "FINAL_STATE", "PROCESS_LESSON"}
 ENTITY_USAGE_CONSEQUENCE_TYPES = ENTITY_USAGE_RESULT_TYPES | ENTITY_USAGE_OUTCOME_TYPES
+ENTITY_USAGE_ROLE_PRIORITY = {
+    "usage": 0,
+    "result": 1,
+    "outcome": 2,
+    "entrypoint": 3,
+    "context": 4,
+}
+ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT = 24
 ENTITY_USAGE_DOCUMENT_PATH_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_@+.-])(?:[~/A-Za-z0-9_@+.-]+/)+[A-Za-z0-9_@+.-]+\.(?:md|py|json|toml|ya?ml|txt|sh|mjs|ts|tsx|js|jsx|rs|go|java|rb|sql)",
     flags=re.IGNORECASE,
@@ -26722,6 +26730,38 @@ def entity_usage_event_role(event_type: str, conversation_act: str = "", session
     return "context"
 
 
+def compact_usage_route_signals(value: Any, *, limit: int = ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT) -> tuple[list[str], int]:
+    signals: list[str] = []
+    if isinstance(value, str):
+        signals = [item for item in value.split("|") if item]
+    elif isinstance(value, list):
+        signals = [str(item) for item in value if item]
+    elif isinstance(value, tuple):
+        signals = [str(item) for item in value if item]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for signal in signals:
+        if signal in seen:
+            continue
+        seen.add(signal)
+        unique.append(signal)
+    bounded_limit = max(0, min(int_value(limit, ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT), 200))
+    return unique[:bounded_limit], len(unique)
+
+
+def entity_usage_hit_sort_key(hit: dict[str, Any], event: dict[str, Any], original_index: int) -> tuple[int, int, int, int]:
+    matched_routes = hit.get("matched_routes") if isinstance(hit.get("matched_routes"), list) else []
+    text_only_rank = 1 if matched_routes and all(str(item) == "text" for item in matched_routes) else 0
+    freshness_status = entity_usage_event_freshness_status(event)
+    freshness_rank = 0 if freshness_status == "fresh" else (1 if freshness_status == "stale" else 2)
+    return (
+        ENTITY_USAGE_ROLE_PRIORITY.get(str(event.get("role") or "context"), 99),
+        text_only_rank,
+        freshness_rank,
+        original_index,
+    )
+
+
 def event_refs_from_hit(hit: dict[str, Any]) -> dict[str, str]:
     refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
     return {
@@ -26739,6 +26779,7 @@ def compact_usage_event_from_search_hit(hit: dict[str, Any], *, role: str | None
         str(hit.get("conversation_act") or ""),
         str(hit.get("session_act") or ""),
     )
+    route_signals, route_signal_count = compact_usage_route_signals(hit.get("route_signals"))
     return {
         "doc_id": hit.get("doc_id"),
         "source": source,
@@ -26757,7 +26798,9 @@ def compact_usage_event_from_search_hit(hit: dict[str, Any], *, role: str | None
         "conversation_act": hit.get("conversation_act"),
         "session_act": hit.get("session_act"),
         "matched_routes": hit.get("matched_routes", []),
-        "route_signals": hit.get("route_signals"),
+        "route_signals": route_signals,
+        "route_signal_count": route_signal_count,
+        "route_signals_truncated": route_signal_count > len(route_signals),
         "title": hit.get("title"),
         "snippet": hit.get("snippet"),
         "refs": event_refs_from_hit(hit),
@@ -26780,6 +26823,9 @@ def compact_usage_event_from_segment_event(
     conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
     session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
     route_signals = graph_route_signals_from_event(event)
+    route_signal_values, route_signal_count = compact_usage_route_signals(
+        [signal.get("route_signal") for signal in route_signals if isinstance(signal, dict)]
+    )
     segment_ref = str(event.get("md_anchor") or hit_refs.get("segment") or "")
     raw_ref = str(event.get("raw_ref") or "")
     return {
@@ -26802,7 +26848,9 @@ def compact_usage_event_from_segment_event(
         "outcome": event.get("outcome"),
         "conversation_act": conversation_act.get("kind"),
         "session_act": session_act.get("kind"),
-        "route_signals": [signal.get("route_signal") for signal in route_signals if isinstance(signal, dict)],
+        "route_signals": route_signal_values,
+        "route_signal_count": route_signal_count,
+        "route_signals_truncated": route_signal_count > len(route_signal_values),
         "title": event.get("title"),
         "refs": {
             "session": hit_refs.get("session", ""),
@@ -27222,8 +27270,15 @@ def entity_usage_audit(
         elif text_payload.get("diagnostics"):
             diagnostics.extend(str(item) for item in text_payload.get("diagnostics", []))
 
-    hits = list(merged.values())[:limit]
-    events = [compact_usage_event_from_search_hit(hit) for hit in hits]
+    ranked_pairs = sorted(
+        (
+            (hit, compact_usage_event_from_search_hit(hit), original_index)
+            for original_index, hit in enumerate(merged.values())
+        ),
+        key=lambda item: entity_usage_hit_sort_key(item[0], item[1], item[2]),
+    )
+    hits = [hit for hit, _event, _original_index in ranked_pairs[:limit]]
+    events = [event for _hit, event, _original_index in ranked_pairs[:limit]]
     entrypoint_events = [event for event in events if event.get("role") == "entrypoint"]
     usage_events = [event for event in events if event.get("role") == "usage"]
     result_events = [event for event in events if event.get("role") == "result"]
@@ -27253,6 +27308,8 @@ def entity_usage_audit(
         "document_refs_present": bool(document_refs),
         "route_candidate_count": len(lookup_candidates),
         "route_result_count": len(hits),
+        "candidate_event_count": len(ranked_pairs),
+        "candidate_usage_event_count": sum(1 for _hit, event, _original_index in ranked_pairs if event.get("role") == "usage"),
         "text_result_count": text_result_count,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
@@ -27363,12 +27420,15 @@ def entity_usage_neighborhood(
 ) -> dict[str, Any]:
     now = utc_now()
     limit = max(1, min(int_value(limit, 6), 40))
+    audit_limit = max(limit, min(200, max(limit * 4, limit + 8, 12)))
+    audit_per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
+    audit_per_route_limit = max(audit_per_route_limit, min(100, max(limit * 3, 12)))
     audit = entity_usage_audit(
         aoa_root=aoa_root,
         anchor=anchor,
         kind=kind,
-        limit=max(limit, 1),
-        per_route_limit=per_route_limit,
+        limit=audit_limit,
+        per_route_limit=audit_per_route_limit,
         consequence_window=max(after, 1),
         document_limit=document_limit,
         provider=provider,
@@ -27418,6 +27478,11 @@ def entity_usage_neighborhood(
         "raw_preview_counts": dict(sorted(raw_preview_counts.items())),
         "audit_usage_event_count": audit.get("usage_event_count"),
         "audit_route_candidate_count": (audit.get("quality") or {}).get("route_candidate_count") if isinstance(audit.get("quality"), dict) else None,
+        "requested_usage_limit": limit,
+        "audit_limit": audit_limit,
+        "audit_per_route_limit": audit_per_route_limit,
+        "audit_candidate_event_count": (audit.get("quality") or {}).get("candidate_event_count") if isinstance(audit.get("quality"), dict) else None,
+        "audit_candidate_usage_event_count": (audit.get("quality") or {}).get("candidate_usage_event_count") if isinstance(audit.get("quality"), dict) else None,
     }
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -27440,6 +27505,9 @@ def entity_usage_neighborhood(
             "usage_event_count": audit.get("usage_event_count"),
             "consequence_event_count": audit.get("consequence_event_count"),
             "text_result_count": (audit.get("quality") or {}).get("text_result_count") if isinstance(audit.get("quality"), dict) else None,
+            "requested_usage_limit": limit,
+            "audit_limit": audit_limit,
+            "audit_per_route_limit": audit_per_route_limit,
             "freshness_counts": (audit.get("quality") or {}).get("freshness_counts") if isinstance(audit.get("quality"), dict) else {},
         },
         "quality": quality,
