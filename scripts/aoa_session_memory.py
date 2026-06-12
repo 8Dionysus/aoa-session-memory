@@ -25,7 +25,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 try:
     import tomllib
@@ -14451,6 +14451,16 @@ def maintenance_lock_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / "auto-maintenance.lock"
 
 
+def run_with_maintenance_lock(aoa_root: Path, callback: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    lock_path = maintenance_lock_path(aoa_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        payload = callback()
+        payload["maintenance_lock_path"] = str(lock_path)
+        return payload
+
+
 def auto_maintenance(
     *,
     workspace_root: Path,
@@ -28157,26 +28167,30 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
     token_max_raw_bytes = int(args.token_max_raw_mb * 1024 * 1024) if args.token_max_raw_mb is not None else None
-    payload = maintain_indexes(
-        aoa_root=root,
-        target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        apply=args.apply,
-        max_raw_bytes=max_raw_bytes,
-        token_max_raw_bytes=token_max_raw_bytes,
-        sample_audit=args.sample_audit,
-        sample_limit=args.sample_limit,
-        max_raw_chars=args.max_raw_chars,
-        graph_batch_limit=args.graph_batch_limit,
-        graph_refresh_chunk_size=args.graph_refresh_chunk_size,
-        repair_indexes=not args.skip_index_repair,
-        write_report=args.write_report,
-        reason=args.reason,
-        budget_seconds=args.budget_seconds,
-        progress_every=args.progress_every,
-    )
+
+    def run_maintenance() -> dict[str, Any]:
+        return maintain_indexes(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            apply=args.apply,
+            max_raw_bytes=max_raw_bytes,
+            token_max_raw_bytes=token_max_raw_bytes,
+            sample_audit=args.sample_audit,
+            sample_limit=args.sample_limit,
+            max_raw_chars=args.max_raw_chars,
+            graph_batch_limit=args.graph_batch_limit,
+            graph_refresh_chunk_size=args.graph_refresh_chunk_size,
+            repair_indexes=not args.skip_index_repair,
+            write_report=args.write_report,
+            reason=args.reason,
+            budget_seconds=args.budget_seconds,
+            progress_every=args.progress_every,
+        )
+
+    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply else run_maintenance()
     print(json.dumps(index_maintenance_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -28237,11 +28251,8 @@ def command_search_index(args: argparse.Namespace) -> int:
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
-    lock_path = maintenance_lock_path(root)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        payload = search_index_sessions(
+    def run_search_index() -> dict[str, Any]:
+        return search_index_sessions(
             aoa_root=root,
             target=args.session,
             since=since,
@@ -28253,7 +28264,8 @@ def command_search_index(args: argparse.Namespace) -> int:
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
         )
-        payload["maintenance_lock_path"] = str(lock_path)
+
+    payload = run_with_maintenance_lock(root, run_search_index)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -28385,19 +28397,22 @@ def command_graph_build(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 1
-    payload = build_session_graph(
-        aoa_root=root,
-        target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        write=args.write,
-        include_rows=args.full,
-        reclaim_existing_sidecar=bool(args.write and not args.store_only and args.force_large_export and args.session == "all" and args.limit is None),
-        export_sidecar=not args.store_only,
-        atomic_store_rebuild=not args.in_place,
-        progress_every=args.progress_every,
-    )
+    def run_build() -> dict[str, Any]:
+        return build_session_graph(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            write=args.write,
+            include_rows=args.full,
+            reclaim_existing_sidecar=bool(args.write and not args.store_only and args.force_large_export and args.session == "all" and args.limit is None),
+            export_sidecar=not args.store_only,
+            atomic_store_rebuild=not args.in_place,
+            progress_every=args.progress_every,
+        )
+
+    payload = run_with_maintenance_lock(root, run_build) if args.write else run_build()
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -28406,19 +28421,22 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
-    payload = graph_maintenance(
-        aoa_root=root,
-        target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        apply=args.apply,
-        batch_limit=args.batch_limit,
-        refresh_chunk_size=args.refresh_chunk_size,
-        export_sidecar=args.export_sidecar,
-        write_report=args.write_report,
-        reason="operator_requested",
-    )
+    def run_maintenance() -> dict[str, Any]:
+        return graph_maintenance(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            apply=args.apply,
+            batch_limit=args.batch_limit,
+            refresh_chunk_size=args.refresh_chunk_size,
+            export_sidecar=args.export_sidecar,
+            write_report=args.write_report,
+            reason="operator_requested",
+        )
+
+    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply or args.export_sidecar else run_maintenance()
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -30363,15 +30381,19 @@ def command_atlas_build(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
-    payload = build_agent_atlas(
-        aoa_root=root,
-        target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        clean=not args.no_clean,
-        write_report=args.write_report,
-    )
+
+    def run_build() -> dict[str, Any]:
+        return build_agent_atlas(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            clean=not args.no_clean,
+            write_report=args.write_report,
+        )
+
+    payload = run_with_maintenance_lock(root, run_build)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
