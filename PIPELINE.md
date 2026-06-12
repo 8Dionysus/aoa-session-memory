@@ -74,7 +74,7 @@ Codex hook event
   -> incremental graph store and generated sidecar snapshots
   -> graph-quality audit/review/corpus and entity dossier trust gates
   -> graph freshness gates over maps/search/graph/refs
-  -> index-maintenance drift detector / repair pass
+  -> index-maintenance per-session fingerprint drift detector / repair pass
   -> rehydrate packet
   -> later reviewed distillation
   -> pattern / skill / automation candidate
@@ -140,9 +140,15 @@ The route must not persist prompt text, raw text, tokenizer stdout, or token
 ids. Backfill may refresh generated ledgers from preserved raw inside `.aoa`;
 external host consumers must consume generated summaries only. `index-maintenance`
 plans token-ledger backfill before search, atlas, readiness, and graph
-maintenance. Use `--token-max-raw-mb` for large token-ledger repairs without
-raising the separate raw-text extraction limit used by search indexing. The
-host bridge command is:
+maintenance. It uses per-session projection fingerprints for search/atlas
+freshness so changed sessions can be updated without forcing a full rebuild.
+Partial atlas updates merge existing compact axis indexes instead of reparsing
+every generated entry artifact. Scoped graph maintenance ignores graph sources
+outside the selected session set and only prunes orphaned rows in the full
+archive scope or inside explicitly selected sessions.
+Use `--budget-seconds` for bounded maintenance and `--token-max-raw-mb` for
+large token-ledger repairs without raising the separate raw-text extraction
+limit used by search indexing. The host bridge command is:
 
 ```bash
 abyss-machine ai token-accounting aoa-summary --json
@@ -223,6 +229,27 @@ The preservation layer must also write raw interval blocks:
 `reindex-sessions` may rebuild the same artifacts from `raw/session.raw.jsonl`,
 but it is not the normal collection path.
 
+## Storage Weight Rule
+
+The archive may compact generated route stores, but it must preserve raw
+evidence and stable refs.
+
+- Graph aggregate `nodes` and `edges` may store compact evidence refs because
+  `node_contribs` and `edge_contribs` remain the full per-source evidence
+  store. Graph packets must hydrate bounded refs from contribution rows before
+  an agent relies on them.
+- Search may keep full body text in FTS and compressed `document_bodies` while
+  `documents.body` stores only a hot preview. Query recall must still use full
+  text, and selected snippets may hydrate from compressed body storage.
+- Raw interval blocks are preserved evidence today. Do not remove block payloads
+  just because `raw/session.raw.jsonl` also exists. Any cleanup first needs an
+  offset/compressed raw-block reader and validation that segment/raw refs still
+  resolve.
+
+Use `storage-audit` to measure current weight and reclaim candidates. It is a
+read-only gate; actual shrinkage of graph/search stores requires controlled
+rebuilds, not blind `VACUUM` or file deletion.
+
 Real Codex raw transcripts may express a compaction boundary as:
 
 - top-level `{"type": "compacted", ...}`
@@ -267,12 +294,16 @@ python3 scripts/aoa_session_memory.py index-maintenance all \
   --write-report
 ```
 
-It detects stale or missing route indexes, source-newer-than-search drift,
-source-newer-than-atlas drift, and deferred raw mirrors. With `--apply`, it
-reindexes only stale route indexes, rebuilds portable SQLite search when
-needed, rebuilds the atlas when needed, and records a route-readiness report.
-Use `--sample-audit` when a route schema or classifier change requires a new
-manual calibration packet. Sample verdicts still require explicit review.
+It detects stale or missing route indexes, per-session source-fingerprint
+drift for portable SQLite search, per-session source-fingerprint drift for the
+atlas, and deferred raw mirrors. With `--apply`, it reindexes only stale route
+indexes, updates only dirty search/atlas sessions when schemas are compatible,
+falls back to full rebuild only for missing/corrupt/schema-mismatched stores,
+and records a route-readiness report. Its graph action exposes
+`--graph-batch-limit` for source count and `--graph-refresh-chunk-size` for
+aggregate node/edge recomputation chunks. Use `--sample-audit` when a route
+schema or classifier change requires a new manual calibration packet. Sample
+verdicts still require explicit review.
 
 For recurring unattended work, use the session-memory auto route above the same
 controller:
@@ -290,12 +321,13 @@ python3 scripts/aoa_session_memory.py auto-maintenance hot \
 maintenance pass, and delegates actual route/search/atlas/graph work to
 `index-maintenance`. Its profiles are:
 
-- `hot`: two-day recent window, probe resource route, graph backlog batch only;
-  search/atlas/route-index repair is reported and deferred.
+- `hot`: two-day recent window, probe resource route, graph backlog batch only
+  with small aggregate refresh chunks; search/atlas/route-index repair is
+  reported and deferred.
 - `backlog`: wider recent archive window, medium resource route, search/atlas
-  repair, and larger graph backlog batch.
+  repair, larger graph backlog batch, and medium aggregate refresh chunks.
 - `deep`: full archive, heavy resource route, full repair and
-  calibration-capable batch.
+  calibration-capable batch with larger aggregate refresh chunks.
 
 Host timers should launch this command through `abyss-machine resource launch`
 with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
@@ -519,17 +551,44 @@ For normal growth, use the incremental maintenance route:
 python3 scripts/aoa_session_memory.py graph-maintenance all \
   --apply \
   --batch-limit 3 \
+  --refresh-chunk-size 64 \
   --write-report
 ```
 
 Each session and segment is a graph source. Dirty sources are replaced
 transactionally: old node/edge contributions for that source are removed, new
 contributions are inserted, and only touched aggregate nodes/edges are
-refreshed. Automated maintenance keeps the batch intentionally small; large
-historical sessions can still be expensive even without a full rebuild. Full
-`graph-build all --write --force-large-export` remains the fallback for schema
-changes, corruption, excessive dirty backlog, invariant failure, or large
-historical imports.
+refreshed. Incremental maintenance groups selected dirty/missing sources by
+session and refreshes aggregate nodes/edges through streamed SQLite cursors.
+`--refresh-chunk-size` caps the touched node/edge id set per aggregate refresh
+query; the report's `maintenance_detail` records requested ids, chunks, rows,
+and missing aggregates. Automated maintenance keeps both source batches and
+refresh chunks intentionally bounded; large historical sessions can still be
+expensive without a full rebuild because a few source slices may touch many
+aggregate edges. `--batch-limit` is a source-count bound, not a strict cost
+bound. Full `graph-build all --write --force-large-export` remains the fallback
+for schema changes, corruption, excessive dirty backlog, invariant failure, or
+large historical imports.
+
+When the live archive is large and sidecar snapshots are not needed, prefer a
+store-only rebuild to avoid multi-GB `nodes.jsonl` / `edges.jsonl` exports and
+unnecessary peak disk pressure:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-build all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write \
+  --store-only \
+  --in-place \
+  --progress-every 10
+```
+
+Use `--in-place` only with `--store-only`. It is appropriate for the live
+generated graph store when raw/search/atlas evidence is already preserved and
+there is not enough disk headroom to hold both the old and rebuilt SQLite
+stores. Store-only rebuild removes stale sidecar snapshots and reports the
+sidecar state as `not_exported`.
 
 Generated snapshot files live under `graph/nodes.jsonl`,
 `graph/edges.jsonl`, and `graph/index.json` only when explicitly exported.
