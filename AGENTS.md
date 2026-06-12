@@ -72,6 +72,7 @@ The following paths are generated or runtime-owned:
 - `maps/by-*/index.json`
 - `maps/INDEX.md`
 - `maps/index.json`
+- `maps/index-state.json`
 - `search/`
 - `graph/`
 - `diagnostics/`
