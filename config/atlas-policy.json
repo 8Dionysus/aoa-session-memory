@@ -96,9 +96,84 @@
       "source_signals": ["mcp_service", "mcp_resource", "mcp_tool", "mcp_template", "tool_name"]
     },
     {
+      "name": "by-skill",
+      "route_question": "Which Codex skill or local skill route was mentioned, selected, or used?",
+      "source_signals": ["skill_name", "skill_path", "skill_invocation", "route_signal.skill"]
+    },
+    {
+      "name": "by-hook",
+      "route_question": "Which hook lifecycle event or hook route was involved?",
+      "source_signals": ["hook_event", "hook_context", "route_signal.hook"]
+    },
+    {
       "name": "by-hook-health",
       "route_question": "What hook lifecycle or health signal appeared?",
       "source_signals": ["hook_event", "raw_availability", "deferred_sync", "worker_queue"]
+    },
+    {
+      "name": "by-api",
+      "route_question": "Which API surface, protocol, SDK API, or remote API was involved?",
+      "source_signals": ["api_name", "protocol", "sdk_api", "route_signal.api"]
+    },
+    {
+      "name": "by-plugin",
+      "route_question": "Which Codex plugin, connector plugin, or plugin-owned surface appeared?",
+      "source_signals": ["plugin_name", "connector", "plugin_path", "route_signal.plugin"]
+    },
+    {
+      "name": "by-agent",
+      "route_question": "Which agent, sub-agent, agent role, or agent route was involved?",
+      "source_signals": ["agent_name", "subagent", "agent_role", "route_signal.agent"]
+    },
+    {
+      "name": "by-script",
+      "route_question": "Which script or executable project helper was used or discussed?",
+      "source_signals": ["script_path", "script_name", "command", "route_signal.script"]
+    },
+    {
+      "name": "by-validator",
+      "route_question": "Which validator or validation lane was used or discussed?",
+      "source_signals": ["validator_name", "validation_command", "route_signal.validator"]
+    },
+    {
+      "name": "by-test",
+      "route_question": "Which test file, test framework, or test lane was used or discussed?",
+      "source_signals": ["test_path", "test_framework", "test_command", "route_signal.test"]
+    },
+    {
+      "name": "by-eval",
+      "route_question": "Which eval, eval harness, or proof/evaluation surface was involved?",
+      "source_signals": ["eval_name", "eval_framework", "proof_surface", "route_signal.eval"]
+    },
+    {
+      "name": "by-git",
+      "route_question": "Which git/GitHub operation or delivery event was involved?",
+      "source_signals": ["git_command", "github_action", "pull_request", "route_signal.git"]
+    },
+    {
+      "name": "by-playbook",
+      "route_question": "Which playbook, runbook, or procedural route was involved?",
+      "source_signals": ["playbook_name", "runbook_path", "procedure", "route_signal.playbook"]
+    },
+    {
+      "name": "by-technique",
+      "route_question": "Which technique, method, or reusable working pattern was involved?",
+      "source_signals": ["technique_name", "method", "pattern", "route_signal.technique"]
+    },
+    {
+      "name": "by-mechanic",
+      "route_question": "Which mechanic, automation mechanism, or reusable system mechanism was involved?",
+      "source_signals": ["mechanic_name", "mechanics_path", "automation_mechanism", "route_signal.mechanic"]
+    },
+    {
+      "name": "by-graph",
+      "route_question": "Which graph, node, edge, GraphRAG, or graph maintenance surface was involved?",
+      "source_signals": ["graph_name", "node", "edge", "graphrag", "route_signal.graph"]
+    },
+    {
+      "name": "by-memory-entity",
+      "route_question": "Which concrete memory entity, memory index, or memory retrieval surface appeared?",
+      "source_signals": ["memory_entity", "memory_index", "retrieval_route", "route_signal.memory"]
     },
     {
       "name": "by-goal",

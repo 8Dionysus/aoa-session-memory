@@ -10,6 +10,7 @@ session-registry.json
 SESSION_NAMES.md
 session-name-index.json
 search/
+maps/index-state.json
 
 # Legacy archive root from the first prototype. Migration should empty it.
 codex-sessions/
