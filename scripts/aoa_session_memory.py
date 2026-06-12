@@ -14447,6 +14447,10 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
     return compact
 
 
+def maintenance_lock_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / "auto-maintenance.lock"
+
+
 def auto_maintenance(
     *,
     workspace_root: Path,
@@ -14498,7 +14502,7 @@ def auto_maintenance(
     effective_timeout_sec = int_value(settings["timeout_sec"], 0)
     effective_budget_seconds = budget_seconds if budget_seconds is not None else (float(effective_timeout_sec) if effective_timeout_sec > 0 else None)
     diagnostics: list[str] = []
-    lock_path = aoa_root / DIAGNOSTICS_ROOT / "auto-maintenance.lock"
+    lock_path = maintenance_lock_path(aoa_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     resource_launcher = auto_maintenance_resource_launcher(
         profile=profile,
@@ -19992,18 +19996,22 @@ def search_sessions(
         params.append(parse_date_arg(date_to))
     where = " AND ".join(filters)
     route_join = ""
-    if route_filters:
-        route_where = " AND ".join(route_filters)
-        route_join = (
-            " JOIN ("
-            "SELECT DISTINCT document_routes.doc_rowid "
-            "FROM document_routes JOIN route_terms ON route_terms.id = document_routes.route_id "
-            f"WHERE {route_where}"
-            ") AS route_filter ON route_filter.doc_rowid = documents.rowid"
-        )
+    route_where = " AND ".join(route_filters)
     fts_query = fts_query_from_user(query)
     try:
         body_overrides: dict[int, str] = {}
+        if route_where:
+            conn.execute("CREATE TEMP TABLE search_route_filter(doc_rowid INTEGER PRIMARY KEY)")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO search_route_filter(doc_rowid)
+                SELECT document_routes.doc_rowid
+                FROM document_routes JOIN route_terms ON route_terms.id = document_routes.route_id
+                WHERE """
+                + route_where,
+                route_params,
+            )
+            route_join = " JOIN search_route_filter AS route_filter ON route_filter.doc_rowid = documents.rowid"
         if fts_query:
             sql = (
                 "SELECT documents.*, bm25(documents_fts) AS rank "
@@ -20011,7 +20019,7 @@ def search_sessions(
                 f"{route_join} "
                 "WHERE documents_fts MATCH ?"
             )
-            query_params: list[Any] = [*route_params, fts_query]
+            query_params: list[Any] = [fts_query]
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
@@ -20020,7 +20028,7 @@ def search_sessions(
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
-            query_params = [*route_params, *params]
+            query_params = [*params]
             if where:
                 sql += " WHERE " + where
             sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
@@ -28229,18 +28237,23 @@ def command_search_index(args: argparse.Namespace) -> int:
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
-    payload = search_index_sessions(
-        aoa_root=root,
-        target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        max_raw_bytes=max_raw_bytes,
-        rebuild=not args.no_rebuild,
-        write_report=args.write_report,
-        budget_seconds=args.budget_seconds,
-        progress_every=args.progress_every,
-    )
+    lock_path = maintenance_lock_path(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        payload = search_index_sessions(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            max_raw_bytes=max_raw_bytes,
+            rebuild=not args.no_rebuild,
+            write_report=args.write_report,
+            budget_seconds=args.budget_seconds,
+            progress_every=args.progress_every,
+        )
+        payload["maintenance_lock_path"] = str(lock_path)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
