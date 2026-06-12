@@ -3180,6 +3180,127 @@ def test_auto_maintenance_skips_when_lock_is_held(tmp_path: Path, monkeypatch: A
     assert payload["lock_path"] == str(lock_path)
 
 
+def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, dict[str, Any]] = {}
+
+    def fake_graph_build(**kwargs: Any) -> dict[str, Any]:
+        calls["graph_build"] = kwargs
+        return {"ok": True, "artifact_type": "session_memory_graph_index"}
+
+    def fake_graph_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["graph_maintenance"] = kwargs
+        return {"ok": True, "artifact_type": "session_memory_graph_maintenance"}
+
+    def fake_index_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["index_maintenance"] = kwargs
+        return {
+            "ok": True,
+            "artifact_type": "index_maintenance",
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "diagnostics": [],
+        }
+
+    def fake_atlas_build(**kwargs: Any) -> dict[str, Any]:
+        calls["atlas_build"] = kwargs
+        return {"ok": True, "artifact_type": "session_memory_agent_atlas"}
+
+    monkeypatch.setattr(module, "build_session_graph", fake_graph_build)
+    monkeypatch.setattr(module, "graph_maintenance", fake_graph_maintenance)
+    monkeypatch.setattr(module, "maintain_indexes", fake_index_maintenance)
+    monkeypatch.setattr(module, "build_agent_atlas", fake_atlas_build)
+
+    build_args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        since=None,
+        since_days=None,
+        in_place=True,
+        store_only=True,
+        write=True,
+        session="all",
+        until=None,
+        limit=1,
+        force_large_export=False,
+        full=False,
+        progress_every=0,
+    )
+    assert module.command_graph_build(build_args) == 0
+    build_payload = json.loads(capsys.readouterr().out)
+
+    maintenance_args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        since=None,
+        since_days=None,
+        session="all",
+        until=None,
+        limit=None,
+        apply=True,
+        batch_limit=1,
+        refresh_chunk_size=8,
+        export_sidecar=False,
+        write_report=False,
+    )
+    assert module.command_graph_maintenance(maintenance_args) == 0
+    maintenance_payload = json.loads(capsys.readouterr().out)
+
+    index_args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        since=None,
+        since_days=None,
+        session="all",
+        until=None,
+        limit=None,
+        apply=True,
+        max_raw_mb=16,
+        token_max_raw_mb=None,
+        sample_audit=False,
+        sample_limit=10,
+        max_raw_chars=360,
+        graph_batch_limit=1,
+        graph_refresh_chunk_size=8,
+        skip_index_repair=False,
+        budget_seconds=None,
+        progress_every=0,
+        reason="test",
+        write_report=False,
+        full=False,
+    )
+    assert module.command_index_maintenance(index_args) == 0
+    index_payload = json.loads(capsys.readouterr().out)
+
+    atlas_args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        since=None,
+        since_days=None,
+        session="all",
+        until=None,
+        limit=None,
+        no_clean=False,
+        write_report=False,
+    )
+    assert module.command_atlas_build(atlas_args) == 0
+    atlas_payload = json.loads(capsys.readouterr().out)
+
+    assert build_payload["maintenance_lock_path"] == str(module.maintenance_lock_path(aoa_root))
+    assert maintenance_payload["maintenance_lock_path"] == str(module.maintenance_lock_path(aoa_root))
+    assert index_payload["maintenance_lock_path"] == str(module.maintenance_lock_path(aoa_root))
+    assert atlas_payload["maintenance_lock_path"] == str(module.maintenance_lock_path(aoa_root))
+    assert calls["graph_build"]["write"] is True
+    assert calls["graph_build"]["export_sidecar"] is False
+    assert calls["graph_build"]["atomic_store_rebuild"] is False
+    assert calls["graph_maintenance"]["apply"] is True
+    assert calls["index_maintenance"]["apply"] is True
+    assert calls["atlas_build"]["clean"] is True
+
+
 def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
