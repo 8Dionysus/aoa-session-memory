@@ -3276,12 +3276,17 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert Path(indexed["report_json"]).exists()
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     body_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
+    payload_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_payload_storage_mode",)).fetchone()[0]
     preview_len, compressed_count = conn.execute(
         "SELECT MAX(LENGTH(body)), COUNT(*) FROM documents JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid"
     ).fetchone()
+    route_preview_len, payload_len = conn.execute("SELECT MAX(LENGTH(route_signals)), MAX(LENGTH(payload_json)) FROM documents").fetchone()
     conn.close()
     assert body_meta == module.SEARCH_BODY_STORAGE_MODE
+    assert payload_meta == module.SEARCH_PAYLOAD_STORAGE_MODE
     assert preview_len <= module.SEARCH_BODY_PREVIEW_CHARS
+    assert route_preview_len <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert payload_len < 1000
     assert compressed_count == indexed["document_count"]
 
     hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
@@ -3322,6 +3327,59 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
+
+
+def test_search_document_storage_compacts_payloads_without_losing_route_postings(tmp_path: Path) -> None:
+    conn = module.init_search_db(tmp_path / "search" / module.SEARCH_DB_NAME, rebuild=True)
+    route_signals = module.packed_route_values(module.route_signal_token("tool", f"live-tool-{index}") for index in range(500))
+    target_route_signal = module.route_signal_token(
+        module.route_key_slug("tool", fallback=""),
+        module.route_key_slug("live-tool-499", fallback=""),
+    )
+    module.insert_search_document(
+        conn,
+        {
+            "id": "stress-doc",
+            "doc_type": "event",
+            "session_id": "session-stress",
+            "session_label": "2026-06-12__001__route-stress",
+            "session_title": "Route stress",
+            "session_date": "2026-06-12",
+            "event_id": "000001",
+            "event_type": "TOOL_CALL",
+            "route_layers": module.packed_route_values(["tool"]),
+            "route_signals": route_signals,
+            "title": "huge route signal payload",
+            "body": "route posting body",
+            "raw_text_status": "indexed",
+        },
+    )
+    conn.commit()
+
+    stored = conn.execute("SELECT route_signals, payload_json FROM documents WHERE id = ?", ("stress-doc",)).fetchone()
+    assert stored is not None
+    stored_route_signals = stored["route_signals"]
+    payload = json.loads(stored["payload_json"])
+
+    assert len(stored_route_signals) <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert target_route_signal not in stored_route_signals
+    assert "route_signals" not in payload
+    assert payload == {"raw_text_status": "indexed"}
+    assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] == 500
+    assert (
+        conn.execute(
+            """
+            SELECT 1
+            FROM document_routes
+            JOIN route_terms ON route_terms.id = document_routes.route_id
+            WHERE route_terms.route_signal = ?
+            LIMIT 1
+            """,
+            (target_route_signal,),
+        ).fetchone()
+        is not None
+    )
+    conn.close()
 
 
 def test_trace_route_resolves_operational_anchors_to_evidence(tmp_path: Path) -> None:

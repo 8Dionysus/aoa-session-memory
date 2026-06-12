@@ -80,11 +80,14 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 5
+SEARCH_SCHEMA_VERSION = 6
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
 SEARCH_BODY_PREVIEW_CHARS = 700
+SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
+SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 1200
+SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 4000
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
 ATLAS_PROJECTION_STATE_JSON = "index-state.json"
@@ -17971,6 +17974,10 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- ok: `{payload.get('ok')}`",
         f"- target: `{payload.get('target')}`",
         f"- db_path: `{payload.get('db_path')}`",
+        f"- search_body_storage_mode: `{payload.get('search_body_storage_mode')}`",
+        f"- search_payload_storage_mode: `{payload.get('search_payload_storage_mode')}`",
+        f"- search_route_layers_preview_chars: `{payload.get('search_route_layers_preview_chars')}`",
+        f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
         f"- document_count: `{payload.get('document_count')}`",
@@ -18880,7 +18887,6 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_signals ON documents(route_signals)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)")
@@ -19034,6 +19040,24 @@ def document_route_entries(route_layers: Any, route_signals: Any) -> list[dict[s
     return entries
 
 
+def bounded_packed_route_values(value: Any, *, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    tokens = unpacked_route_values(text)
+    if not tokens:
+        return bounded_storage_text(text, max_chars=max_chars)
+    kept: list[str] = []
+    for token in tokens:
+        candidate = "|" + "|".join([*kept, token]) + "|"
+        if len(candidate) > max_chars:
+            break
+        kept.append(token)
+    if not kept:
+        return bounded_storage_text(text, max_chars=max_chars)
+    return "|" + "|".join(kept) + "|"
+
+
 def route_term_id(conn: sqlite3.Connection, entry: dict[str, str]) -> int:
     layer = str(entry.get("layer") or "")
     key = str(entry.get("key") or "")
@@ -19130,17 +19154,60 @@ def combine_freshness(*items: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "reasons": reasons, **combined}
 
 
+SEARCH_DOCUMENT_COLUMN_KEYS = frozenset(
+    {
+        "id",
+        "doc_type",
+        "session_id",
+        "session_label",
+        "session_title",
+        "session_date",
+        "cwd",
+        "archive_status",
+        "distillation_status",
+        "review_status",
+        "segment_id",
+        "event_id",
+        "event_type",
+        "family",
+        "phase",
+        "actor",
+        "action",
+        "object",
+        "outcome",
+        "conversation_act",
+        "session_act",
+        "route_layers",
+        "route_signals",
+        "tags",
+        "raw_ref",
+        "raw_block_ref",
+        "segment_ref",
+        "manifest_path",
+        "raw_path",
+        "segment_index_path",
+        "raw_sha256",
+        "segment_index_sha256",
+        "freshness_status",
+        "stale_reason",
+        "title",
+        "body",
+        "payload_json",
+    }
+)
+
+
 def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(doc)
-    payload.pop("body", None)
-    payload.pop("payload_json", None)
-    return payload
+    return {key: value for key, value in doc.items() if key not in SEARCH_DOCUMENT_COLUMN_KEYS}
 
 
 def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> None:
     payload = search_doc_payload(doc)
     full_body = str(doc.get("body") or "")
     body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
+    route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
+    route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
+    route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
     cursor = conn.execute(
         """
         INSERT INTO documents (
@@ -19185,8 +19252,6 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
                 "outcome",
                 "conversation_act",
                 "session_act",
-                "route_layers",
-                "route_signals",
                 "tags",
                 "raw_ref",
                 "raw_block_ref",
@@ -19201,6 +19266,8 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
                 "title",
                 "body",
             ]},
+            "route_layers": route_layers_preview,
+            "route_signals": route_signals_preview,
             "body": body_preview,
             "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
         },
@@ -19215,7 +19282,6 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
         "INSERT OR REPLACE INTO document_bodies(doc_rowid, body_zlib, body_sha256, body_chars) VALUES (?, ?, ?, ?)",
         (rowid, sqlite3.Binary(zlib.compress(body_bytes, level=6)), hashlib.sha256(body_bytes).hexdigest(), len(full_body)),
     )
-    route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
     if route_entries:
         postings = [(rowid, route_term_id(conn, entry)) for entry in route_entries]
         conn.executemany(
@@ -19586,6 +19652,18 @@ def search_index_sessions(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_body_storage_mode", SEARCH_BODY_STORAGE_MODE if rebuild else f"{SEARCH_BODY_STORAGE_MODE}_mixed"),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_payload_storage_mode", SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_route_layers_preview_chars", str(SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_route_signals_preview_chars", str(SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)),
+        )
         conn.commit()
         for record_index, record in enumerate(records, start=1):
             if deadline is not None and record_index > 1 and time.monotonic() >= deadline:
@@ -19655,6 +19733,9 @@ def search_index_sessions(
         "artifact_type": "search_index",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
         "search_body_storage_mode": SEARCH_BODY_STORAGE_MODE if rebuild else f"{SEARCH_BODY_STORAGE_MODE}_mixed",
+        "search_payload_storage_mode": SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed",
+        "search_route_layers_preview_chars": SEARCH_ROUTE_LAYERS_PREVIEW_CHARS,
+        "search_route_signals_preview_chars": SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS,
         "generated_at": now,
         "ok": document_count > 0 and not diagnostics and not (rebuild and budget_exhausted),
         "target": target,
@@ -23265,11 +23346,6 @@ def storage_audit(
     }
     graph_compactable_bytes = table_sizes.get("nodes", 0) + table_sizes.get("edges", 0)
     graph_compactable_measured = bool(table_sizes)
-    search_table_sizes = {
-        item.get("name"): int_value(item.get("size_bytes"))
-        for item in search_store.get("table_sizes", []) if isinstance(item, dict)
-    }
-    search_compactable_measured = bool(search_table_sizes)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_storage_audit",
@@ -23304,13 +23380,13 @@ def storage_audit(
                 "next_route": "add raw-block offset/compression reader before removing duplicated raw block payloads",
             },
             {
-                "id": "search_body_store_v2",
+                "id": "search_hot_store_v3",
                 "status": "implemented_for_new_rebuilds",
-                "quality_tradeoff": "none_expected; FTS keeps full text, hot documents keep bounded preview, selected hits hydrate full body snippets from compressed storage",
-                "estimated_reclaimable_bytes": search_table_sizes.get("documents", 0),
-                "estimated_reclaimable_human": human_size(search_table_sizes.get("documents", 0)) if search_compactable_measured else "requires --deep-dbstat",
-                "estimate_status": "measured_dbstat" if search_compactable_measured else "requires_deep_dbstat",
-                "next_route": "run search-index all --write-report when ready for a controlled live search rebuild",
+                "quality_tradeoff": "none_expected; FTS keeps searchable text, compressed bodies hydrate snippets, full route postings stay normalized while hot rows keep bounded route previews and compact payload deltas",
+                "estimated_reclaimable_bytes": 0,
+                "estimated_reclaimable_human": "0 B",
+                "estimate_status": "implemented_residual_not_estimated",
+                "next_route": "use --deep-dbstat to inspect residual search table weight before planning any further search-store compaction",
             },
         ],
         "stop_line": "Do not delete raw evidence. Prefer compact generated stores, offset refs, and rebuildable caches.",
