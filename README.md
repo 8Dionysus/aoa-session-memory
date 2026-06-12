@@ -186,6 +186,24 @@ python3 scripts/aoa_session_memory.py graph-build all \
   --force-large-export
 ```
 
+For large live archives, use store-only mode when interactive graph queries
+only need `graph/graph.sqlite3` and not exported sidecar snapshots:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-build all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write \
+  --store-only \
+  --in-place \
+  --progress-every 10
+```
+
+`--in-place` is valid only with `--store-only`. This route keeps raw/search/atlas
+evidence as the recovery surface, avoids writing multi-GB snapshots, and
+removes stale sidecar exports so freshness reports `not_exported` instead of
+trusting old snapshot data.
+
 Normal growth should use incremental maintenance instead of a full rebuild:
 
 ```bash
@@ -194,16 +212,30 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --aoa-root /path/to/workspace/.aoa \
   --apply \
   --batch-limit 3 \
+  --refresh-chunk-size 64 \
   --write-report
 ```
 
 Each session or segment contributes its own graph slice. When a source changes,
 `graph-maintenance` deletes that source's old contribution and inserts the new
-one in one SQLite transaction, then refreshes touched aggregate nodes and
-edges. Foreground hooks only enqueue/background graph work; they do not run
-heavy graph maintenance inline. Automated graph maintenance uses a very small
-batch by default because one dirty historical session can touch thousands of
-edges.
+one in one SQLite transaction. Maintenance groups dirty/missing sources by
+session and refreshes touched aggregate nodes/edges in batches, so a large
+session is not reparsed once per source. Aggregate node/edge refresh is streamed
+from SQLite and chunked by `--refresh-chunk-size`; reports include
+`maintenance_detail` stats for requested ids, chunks, rows, and missing
+aggregates. Foreground hooks only enqueue/background graph work; they do not run
+heavy graph maintenance inline. Automated graph maintenance uses small source
+batches and profile-level refresh chunks because one dirty historical session
+can touch thousands of edges.
+
+Aggregate `nodes` and `edges` in `graph.sqlite3` use compact evidence
+references on new full rebuilds and on sources touched by incremental
+maintenance. Full per-source evidence remains in `node_contribs` and
+`edge_contribs`. Bounded graph reads hydrate refs from contribution rows on
+demand, so agents still receive raw/segment/session refs without storing the
+same evidence arrays twice in the aggregate tables. Existing live stores remain
+mixed until a controlled `graph-build all --write --store-only --in-place`
+rebuild or enough source maintenance has refreshed the touched aggregates.
 
 `graph/nodes.jsonl`, `graph/edges.jsonl`, and `graph/index.json` are optional
 snapshot exports from the graph store, not the live mutable database. On large
@@ -309,12 +341,39 @@ python3 scripts/aoa_session_memory.py auto-maintenance hot \
   --write-report
 ```
 
-Profiles are `hot` (`probe`, recent graph batch, defers search/atlas repair),
-`backlog` (`medium`, recent index and graph repair), and `deep` (`heavy`, full
-archive repair). Host timers should run them through `abyss-machine resource
+Profiles are `hot` (`probe`, recent graph batch, defers search/atlas repair,
+small refresh chunks), `backlog` (`medium`, recent index and graph repair,
+medium refresh chunks), and `deep` (`heavy`, full archive repair, larger
+refresh chunks). Host timers should run them through `abyss-machine resource
 launch --kind indexing --unattended --success-on-block` so heavier work uses
 the machine resource layer instead of hooks or MCP reads.
 `aoa_session_memory` MCP remains read-only and plan-only.
+
+## Storage Audit
+
+Use `storage-audit` before large rebuilds, cleanup, or host storage work:
+
+```bash
+python3 scripts/aoa_session_memory.py storage-audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+Add `--deep-dbstat --row-counts` only when the machine has time for heavier
+SQLite inspection. The command is read-only. It reports top-level `.aoa`
+weight, session raw/block/segment buckets, SQLite page and freelist state, and
+optional per-table sizes.
+
+The current safe storage route is:
+
+- Graph store: aggregate node/edge payloads keep compact refs; packet reads
+  hydrate evidence from contribution rows.
+- Search store: new search rebuilds keep full text in FTS and compressed
+  `document_bodies`, while `documents.body` keeps only a bounded hot preview.
+- Raw blocks: do not delete duplicated raw blocks yet. They need an
+  offset/compressed-block reader route first so segment and raw refs remain
+  stable before any cleanup.
 
 ## Portable Route
 

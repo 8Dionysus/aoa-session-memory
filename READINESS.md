@@ -44,13 +44,24 @@ Build the `.aoa` session-memory mechanism end to end:
   `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`,
   `graphrag-packet`, `graph-explain-packet`, `graph-eval`, and
   `graph-quality-audit` / `graph-quality-review`
+- Large-archive graph maintenance controls: store-only / in-place
+  `graph-build`, progress heartbeat, optional sidecar export, grouped
+  dirty/missing source repair by session, streamed aggregate refresh, and
+  profile-level refresh chunk sizes
+- Storage weight controls: `storage-audit`, compact graph aggregate payloads
+  with evidence hydration from contribution rows, and search body storage with
+  full-text FTS plus compressed selected-hit hydration
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
   `graph-freshness-check`, `entity-dossier`, and GraphRAG packet
   `answer_rules`
 - Automatic index maintenance route: `index-maintenance` / `maintain-index`
-  over stale route indexes, portable search freshness, atlas freshness, and
-  readiness reports
+  over stale route indexes, per-session search/atlas projection fingerprints,
+  bounded budgets, portable search freshness, atlas freshness, and readiness
+  reports
+- Partial atlas maintenance merges compact generated axis indexes, and scoped
+  graph maintenance ignores out-of-scope graph sources instead of treating
+  every non-selected row as an orphan
 - Resource-gated unattended maintenance route: `auto-maintenance` /
   `maintain-auto` profiles `hot` (`probe`, graph-only/deferred index repair),
   `backlog` (`medium`, recent index+graph repair), and `deep` (`heavy`, full
@@ -103,6 +114,7 @@ python3 scripts/aoa_session_memory.py graph-quality-review /path/to/workspace/.a
 python3 scripts/aoa_session_memory.py graph-quality-corpus check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py graph-freshness-check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py storage-audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-sample-audit all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --sample-limit 1 --write-report
 python3 scripts/aoa_session_memory.py route-sample-review /path/to/workspace/.aoa/diagnostics/<stamp>__route-sample-audit.json --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
@@ -287,6 +299,42 @@ Last observed result:
   now distinguishes graph store freshness, optional sidecar snapshot state,
   sidecar export/prune need, graph maintenance need, and full offline rebuild
   need.
+- 2026-06-11 large live graph proof: full store-only in-place
+  `graph-build all --write --store-only --in-place --progress-every 10`
+  rebuilt the live graph store across `258` session records, `3865` graph
+  sources, `3048448` aggregate nodes, and `18807612` aggregate edges in
+  `33:26`, with `sidecar_exported=false` and peak RSS about `2.6 GB`. A
+  follow-up active-session repair showed the old maintenance loop was
+  reparsing one large session once per dirty source; grouped maintenance now
+  repairs selected sources by session and streamed-refreshes touched aggregates
+  in explicit chunks.
+  The real follow-up repair selected `150` live dirty/missing sources across
+  `2` groups, refreshed `88168` nodes and `457254` edges in `251.58s`, then
+  targeted `index-maintenance` refreshed the active session search projection
+  from `2615` to `4026` docs, updated `343` atlas entries, removed `678`
+  stale atlas artifacts, returned route-readiness `23/23`, and repaired `32`
+  graph sources. Final maintenance dry-check returned `dirty=0`, `missing=0`,
+  `orphaned=0`, `clean=3817`, and `blocked=55`; freshness refs were `alive`
+  with `broken_count=0`. The sidecar state remains intentionally
+  `not_exported` for the live archive.
+- 2026-06-11 chunked graph-maintenance proof: targeted live
+  `graph-maintenance 019eb82b-96a2-7fb1-a918-d29aa9c57507 --apply
+  --batch-limit 3 --refresh-chunk-size 16 --write-report` updated `3`
+  sources in one replacement group, refreshed `609` aggregate nodes and
+  `1908` aggregate edges, and reported streamed refresh stats of `39`
+  node chunks, `120` edge chunks, `291978` node contribution rows, and `1908`
+  edge contribution rows. A second targeted pass reported the selected
+  session clean with `dirty=0`, `missing=0`, and `remaining_count=0`.
+- 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
+  --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
+  are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite
+  freelists are tiny (`11.6 MiB` graph, `1.3 MiB` search), so plain `VACUUM`
+  is not the answer. Measured reclaim candidates are compact graph aggregate
+  payloads `31.7 GiB`, search body storage v2 `8.8 GiB`, and raw-block
+  duplication `6.1 GiB`. Graph/search compaction is implemented for controlled
+  rebuilds and touched sources; raw-block cleanup remains a planned safe route
+  until offset/compressed raw-block readers preserve stable refs. Report:
+  `diagnostics/20260611T231448Z__storage-audit.json`.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps
