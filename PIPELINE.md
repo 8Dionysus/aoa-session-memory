@@ -583,10 +583,14 @@ and missing aggregates. Automated maintenance keeps both source batches and
 refresh chunks intentionally bounded; large historical sessions can still be
 expensive without a full rebuild because a few source slices may touch many
 aggregate edges. `--batch-limit` is a source-count bound, not a strict cost
-bound. `index-maintenance` and `auto-maintenance` also use
-`graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; when a planned
-replacement would refresh too many aggregate ids, it is reported under
-`budget_deferred_sources` for a narrower or heavier pass. Full
+bound. Incremental maintenance plans exact old-plus-new refresh cost, sorts
+actionable sources cheap-first, and isolates individually oversized sources so
+one historical session does not block smaller repairs. `index-maintenance` and
+`auto-maintenance` also use `graph_max_refresh_nodes` /
+`graph_max_refresh_edges` guards; individually oversized sources are reported
+under `oversized_sources`, while sources that fit alone but not the current
+combined pass are reported under `budget_deferred_sources` for a narrower or
+heavier pass. Full
 `graph-build all --write --force-large-export` remains the fallback
 for schema changes, corruption, excessive dirty backlog, invariant failure, or
 large historical imports.

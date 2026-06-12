@@ -1453,10 +1453,10 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     )
     assert deferred["ok"] is True
     assert deferred["selected_count"] == 0
-    assert deferred["budget_deferred_source_count"] >= 1
+    assert deferred["oversized_source_count"] >= 1
     assert deferred["remaining_count"] >= 1
-    assert deferred["maintenance_detail"]["budget_deferred_source_count"] >= 1
-    assert any(item["status"] == "deferred_refresh_budget" for item in deferred["results"])
+    assert deferred["maintenance_detail"]["oversized_source_count"] >= 1
+    assert any(item["status"] == "oversized_refresh_budget" for item in deferred["results"])
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 1
     conn.close()
@@ -1511,6 +1511,106 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert blocked["status"] == "blocked"
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 0
+    conn.close()
+
+
+def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    heavy_transcript = tmp_path / "rollout-2026-05-26T00-11-00-heavy-graph-source.jsonl"
+    light_transcript = tmp_path / "rollout-2026-05-26T00-12-00-light-graph-source.jsonl"
+    for session_id, transcript, prompt in (
+        ("heavy-graph-source", heavy_transcript, "Create the heavy graph source."),
+        ("light-graph-source", light_transcript, "Create the light graph source."),
+    ):
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": "2026-05-26T00:11:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo), "model": "gpt-5"}},
+                {"timestamp": "2026-05-26T00:11:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}},
+                {"timestamp": "2026-05-26T00:11:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Graph source archived."}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+    heavy_record = module.resolve_session_record(aoa_root, "heavy-graph-source")
+    light_record = module.resolve_session_record(aoa_root, "light-graph-source")
+    heavy_segment_index_path = next((Path(heavy_record["path"]) / "segments").glob("*.index.json"))
+    light_segment_index_path = next((Path(light_record["path"]) / "segments").glob("*.index.json"))
+    heavy_segment_index = json.loads(heavy_segment_index_path.read_text(encoding="utf-8"))
+    light_segment_index = json.loads(light_segment_index_path.read_text(encoding="utf-8"))
+    heavy_segment_id = str(heavy_segment_index["segment_id"])
+    light_segment_id = str(light_segment_index["segment_id"])
+    heavy_source_key = module.graph_source_key("segment", "heavy-graph-source", heavy_segment_id)
+    light_source_key = module.graph_source_key("segment", "light-graph-source", light_segment_id)
+    heavy_signals = [
+        {"layer": "entity", "key": f"heavy_cost_anchor_{index}", "route_signal": f"entity:heavy_cost_anchor_{index}"}
+        for index in range(80)
+    ]
+    light_signal = {"layer": "entity", "key": "light_cost_anchor", "route_signal": "entity:light_cost_anchor"}
+    heavy_segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).extend(heavy_signals)
+    light_segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(light_signal)
+    heavy_segment_index_path.write_text(json.dumps(heavy_segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    light_segment_index_path.write_text(json.dumps(light_segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(heavy_segment_index_path, None)
+    os.utime(light_segment_index_path, None)
+
+    contributions_by_key: dict[str, dict[str, Any]] = {}
+    for record in (heavy_record, light_record):
+        contributions, diagnostics = module.graph_contributions_for_record(record)
+        assert diagnostics == []
+        for contribution in contributions:
+            source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
+            contributions_by_key[str(source.get("source_key") or "")] = contribution
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        heavy_old_nodes, heavy_old_edges = store.source_contribution_ids(heavy_source_key)
+        light_old_nodes, light_old_edges = store.source_contribution_ids(light_source_key)
+    finally:
+        store.close()
+    heavy_new_nodes, heavy_new_edges = module.graph_contribution_id_sets(contributions_by_key[heavy_source_key])
+    light_new_nodes, light_new_edges = module.graph_contribution_id_sets(contributions_by_key[light_source_key])
+    heavy_node_cost = len(heavy_old_nodes | heavy_new_nodes)
+    heavy_edge_cost = len(heavy_old_edges | heavy_new_edges)
+    light_node_cost = len(light_old_nodes | light_new_nodes)
+    light_edge_cost = len(light_old_edges | light_new_edges)
+    assert heavy_node_cost > light_node_cost or heavy_edge_cost > light_edge_cost
+
+    maintained = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        batch_limit=1,
+        max_refresh_nodes=light_node_cost,
+        max_refresh_edges=light_edge_cost,
+        write_report=True,
+    )
+
+    assert maintained["ok"] is True
+    assert maintained["selected_count"] == 1
+    assert maintained["selected"][0]["source_key"] == light_source_key
+    assert maintained["oversized_source_count"] >= 1
+    assert heavy_source_key in maintained["maintenance_detail"]["oversized_sources"]
+    assert light_source_key in maintained["maintenance_detail"]["selected_sources"]
+    assert maintained["maintenance_detail"]["selection_strategy"] == "cheap_first_exact_refresh_cost"
+    assert any(item["source_key"] == light_source_key and item["status"] == "updated" for item in maintained["results"])
+    assert not any(item["source_key"] == heavy_source_key and item["status"] == "updated" for item in maintained["results"])
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "light_cost_anchor"),)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
     conn.close()
 
 
@@ -3158,6 +3258,10 @@ def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_p
     assert dirty_plan["atlas_dirty_session_count"] == 1
     assert dirty_plan["search_dirty_sessions"][0]["session_id"] == "dirty-alpha"
     assert dirty_plan["atlas_dirty_sessions"][0]["session_id"] == "dirty-alpha"
+    dirty_actions = {action["id"]: action for action in dirty_plan["actions"]}
+    graph_command = dirty_actions["graph_maintenance"]["command"]
+    assert "--max-refresh-nodes" in graph_command
+    assert "--max-refresh-edges" in graph_command
 
     applied = module.maintain_indexes(aoa_root=aoa_root, target="all", apply=True, graph_batch_limit=10)
     actions = {action["id"]: action for action in applied["actions"]}

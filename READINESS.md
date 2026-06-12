@@ -329,6 +329,14 @@ Last observed result:
   node chunks, `120` edge chunks, `291978` node contribution rows, and `1908`
   edge contribution rows. A second targeted pass reported the selected
   session clean with `dirty=0`, `missing=0`, and `remaining_count=0`.
+- 2026-06-12 cost-aware graph-maintenance proof: incremental maintenance now
+  plans exact old-plus-new aggregate node/edge refresh cost, sorts actionable
+  sources cheap-first, reports individually oversized sources under
+  `oversized_sources`, and keeps current-pass budget overflow under
+  `budget_deferred_sources`. Regression coverage includes the case where a
+  heavy first dirty source is skipped while a later cheap source is applied.
+  Source `.aoa` and the standalone bundle passed py_compile, `107` pytest
+  tests, `validate`, and `doctor`; the standalone portable audit also passed.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

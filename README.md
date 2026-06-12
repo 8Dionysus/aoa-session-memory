@@ -226,9 +226,13 @@ from SQLite and chunked by `--refresh-chunk-size`; reports include
 aggregates. Foreground hooks only enqueue/background graph work; they do not run
 heavy graph maintenance inline. Automated graph maintenance uses small source
 batches and profile-level refresh chunks because one dirty historical session
-can touch thousands of edges. `index-maintenance` and `auto-maintenance` also
-use `graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; when a planned
-replacement would refresh too many aggregate ids, it is reported under
+can touch thousands of edges. Maintenance plans exact old-plus-new aggregate
+node/edge refresh cost before mutating, sorts actionable sources cheap-first,
+and then selects only sources that fit the current batch and refresh budgets.
+`index-maintenance` and `auto-maintenance` also use
+`graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; individually
+oversized sources are reported under `oversized_sources`, while sources that
+fit alone but not the current combined pass are reported under
 `budget_deferred_sources` for a narrower or heavier pass.
 
 Aggregate `nodes` and `edges` in `graph.sqlite3` use compact evidence
