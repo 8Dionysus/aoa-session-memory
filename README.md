@@ -226,7 +226,10 @@ from SQLite and chunked by `--refresh-chunk-size`; reports include
 aggregates. Foreground hooks only enqueue/background graph work; they do not run
 heavy graph maintenance inline. Automated graph maintenance uses small source
 batches and profile-level refresh chunks because one dirty historical session
-can touch thousands of edges.
+can touch thousands of edges. `index-maintenance` and `auto-maintenance` also
+use `graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; when a planned
+replacement would refresh too many aggregate ids, it is reported under
+`budget_deferred_sources` for a narrower or heavier pass.
 
 Aggregate `nodes` and `edges` in `graph.sqlite3` use compact evidence
 references on new full rebuilds and on sources touched by incremental
@@ -256,6 +259,11 @@ stale sidecars are still reported so stale snapshot data is not mistaken for
 current truth. If the gate reports `needs_offline_graph_build`, verify host
 disk/time budget before running a full `graph-build all --write
 --force-large-export`.
+
+For live-churn checks, keep the strict default as full truth and use
+`graph-freshness-check --stable --quiet-seconds 120` only when the operator
+wants a quiescent-subset gate. Stable mode reports recent writes under
+`deferred_live_sessions`; those sessions are visible but not checked.
 
 Query examples:
 
@@ -288,6 +296,9 @@ current graph/search evidence. `graph-freshness-check` answers whether maps,
 search, the graph store, optional sidecar snapshots, and evidence refs are
 fresh enough for GraphRAG-style synthesis, and whether `index-maintenance`,
 `graph-maintenance`, sidecar export/prune, or offline `graph-build` is needed.
+During active writes, `--stable` reports `truth_status`, `checked_count`, and
+`deferred_live_sessions` so agents do not confuse a stable subset with a strict
+archive-wide gate.
 `entity-dossier` builds a human card for one stable anchor with strong refs,
 weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
 questions, and a read-first route.

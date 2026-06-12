@@ -47,14 +47,17 @@ Build the `.aoa` session-memory mechanism end to end:
 - Large-archive graph maintenance controls: store-only / in-place
   `graph-build`, progress heartbeat, optional sidecar export, grouped
   dirty/missing source repair by session, streamed aggregate refresh, and
-  profile-level refresh chunk sizes
+  profile-level refresh chunk sizes plus aggregate refresh budget guards for
+  `index-maintenance` / `auto-maintenance`
 - Storage weight controls: `storage-audit`, compact graph aggregate payloads
   with evidence hydration from contribution rows, and search body storage with
   full-text FTS plus compressed selected-hit hydration
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
   `graph-freshness-check`, `entity-dossier`, and GraphRAG packet
-  `answer_rules`
+  `answer_rules`; `graph-freshness-check --stable` provides an explicit
+  quiescent-subset gate for live archives and reports recent writes as
+  `deferred_live_sessions` instead of hiding them
 - Automatic index maintenance route: `index-maintenance` / `maintain-index`
   over stale route indexes, per-session search/atlas projection fingerprints,
   bounded budgets, portable search freshness, atlas freshness, and readiness
@@ -113,6 +116,7 @@ python3 scripts/aoa_session_memory.py graph-quality-audit --workspace-root /path
 python3 scripts/aoa_session_memory.py graph-quality-review /path/to/workspace/.aoa/diagnostics/<stamp>__graph-quality-audit.json --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --verdict mcp_access_plane=accept:accept:"good MCP evidence route" --write-report
 python3 scripts/aoa_session_memory.py graph-quality-corpus check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py graph-freshness-check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
+python3 scripts/aoa_session_memory.py graph-freshness-check --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --stable --quiet-seconds 120 --write-report
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py storage-audit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py route-readiness all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report

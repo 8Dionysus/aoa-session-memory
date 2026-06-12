@@ -101,6 +101,8 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
+GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
+GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
 CLASSIFIER_TEXT_HEAD_CHARS = 12000
 CLASSIFIER_TEXT_TAIL_CHARS = 6000
 CLASSIFIER_TEXT_MAX_CHARS = CLASSIFIER_TEXT_HEAD_CHARS + CLASSIFIER_TEXT_TAIL_CHARS + 128
@@ -116,6 +118,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "token_max_raw_mb": 512,
         "graph_batch_limit": 10,
         "graph_refresh_chunk_size": 32,
+        "graph_max_refresh_nodes": 20000,
+        "graph_max_refresh_edges": 60000,
         "ref_sample_limit": 200,
         "sample_audit": False,
         "repair_indexes": False,
@@ -130,6 +134,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "token_max_raw_mb": 512,
         "graph_batch_limit": 100,
         "graph_refresh_chunk_size": 64,
+        "graph_max_refresh_nodes": 80000,
+        "graph_max_refresh_edges": 250000,
         "ref_sample_limit": 400,
         "sample_audit": False,
         "repair_indexes": True,
@@ -144,6 +150,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "token_max_raw_mb": 512,
         "graph_batch_limit": 250,
         "graph_refresh_chunk_size": 128,
+        "graph_max_refresh_nodes": 200000,
+        "graph_max_refresh_edges": 750000,
         "ref_sample_limit": 1000,
         "sample_audit": True,
         "repair_indexes": True,
@@ -13521,6 +13529,51 @@ def projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[d
     return [session_projection_fingerprint(record) for record in records]
 
 
+def projection_quiescence_split(
+    records: list[dict[str, Any]],
+    *,
+    quiet_seconds: float,
+    now_ts: float | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    quiet_seconds = max(0.0, float(quiet_seconds))
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - quiet_seconds
+    fingerprints = projection_fingerprints_for_records(records)
+    stable_records: list[dict[str, Any]] = []
+    stable_fingerprints: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for record, fingerprint in zip(records, fingerprints):
+        latest = float(fingerprint.get("latest_source_mtime") or 0.0)
+        age_seconds = max(0.0, now_value - latest) if latest > 0 else None
+        if quiet_seconds > 0 and latest > threshold:
+            deferred.append(
+                {
+                    "session_id": fingerprint.get("session_id"),
+                    "session_label": fingerprint.get("session_label"),
+                    "session_dir": fingerprint.get("session_dir"),
+                    "latest_source_mtime": latest,
+                    "age_seconds": age_seconds,
+                    "quiet_seconds": quiet_seconds,
+                    "source_paths": fingerprint.get("source_paths", [])[:8],
+                    "reasons": ["recent_live_write"],
+                }
+            )
+            continue
+        stable_records.append(record)
+        stable_fingerprints.append(fingerprint)
+    summary = {
+        "enabled": True,
+        "mode": "stable_quiescent_subset",
+        "quiet_seconds": quiet_seconds,
+        "now_ts": now_value,
+        "threshold_mtime": threshold,
+        "selected_count": len(records),
+        "checked_count": len(stable_records),
+        "deferred_live_session_count": len(deferred),
+    }
+    return stable_records, stable_fingerprints, deferred, summary
+
+
 def records_by_session_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -13675,7 +13728,12 @@ def upsert_search_session_state(
     )
 
 
-def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float, records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def sqlite_search_index_state(
+    aoa_root: Path,
+    latest_source_mtime: float,
+    records: list[dict[str, Any]] | None = None,
+    projection_fingerprints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return {
@@ -13690,7 +13748,7 @@ def sqlite_search_index_state(aoa_root: Path, latest_source_mtime: float, record
         metadata = search_index_metadata(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         route_counts = search_route_storage_counts(conn)
-        selected_fingerprints = projection_fingerprints_for_records(records or [])
+        selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
         indexed_session_states = sqlite_search_session_states(conn)
         conn.close()
     except sqlite3.Error as exc:
@@ -13772,7 +13830,12 @@ def atlas_dirty_projection_states(aoa_root: Path, fingerprints: list[dict[str, A
     return dirty
 
 
-def atlas_index_state(aoa_root: Path, latest_source_mtime: float, records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def atlas_index_state(
+    aoa_root: Path,
+    latest_source_mtime: float,
+    records: list[dict[str, Any]] | None = None,
+    projection_fingerprints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     index_path = aoa_root / ATLAS_ROOT / "index.json"
     payload = read_json(index_path, {})
     if not index_path.exists():
@@ -13791,7 +13854,7 @@ def atlas_index_state(aoa_root: Path, latest_source_mtime: float, records: list[
         }
     entry_count = int_value(payload.get("entry_count"))
     index_mtime = path_mtime(index_path)
-    selected_fingerprints = projection_fingerprints_for_records(records or [])
+    selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
     dirty_sessions = atlas_dirty_projection_states(aoa_root, selected_fingerprints) if records is not None else []
     reasons: list[str] = []
     if int_value(payload.get("schema_version")) != ATLAS_SCHEMA_VERSION:
@@ -13846,6 +13909,8 @@ def maintain_indexes(
     max_raw_chars: int = 360,
     graph_batch_limit: int = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
     graph_refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+    graph_max_refresh_nodes: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES,
+    graph_max_refresh_edges: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES,
     repair_indexes: bool = True,
     write_report: bool = False,
     reason: str = "operator_requested",
@@ -13900,6 +13965,8 @@ def maintain_indexes(
     graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
     effective_graph_batch_limit = max(1, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(1, min(int_value(graph_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
+    effective_graph_max_refresh_nodes = None if graph_max_refresh_nodes is None or int_value(graph_max_refresh_nodes) <= 0 else int_value(graph_max_refresh_nodes)
+    effective_graph_max_refresh_edges = None if graph_max_refresh_edges is None or int_value(graph_max_refresh_edges) <= 0 else int_value(graph_max_refresh_edges)
     index_repair_needed = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh")) or token_backfill_needed
     max_raw_mb_text = str(max_raw_bytes / (1024 * 1024)) if max_raw_bytes is not None else None
     token_max_raw_mb_text = str(effective_token_max_raw_bytes / (1024 * 1024)) if effective_token_max_raw_bytes is not None else None
@@ -14148,6 +14215,8 @@ def maintain_indexes(
                     apply=True,
                     batch_limit=effective_graph_batch_limit,
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
+                    max_refresh_nodes=effective_graph_max_refresh_nodes,
+                    max_refresh_edges=effective_graph_max_refresh_edges,
                     write_report=write_report,
                     reason="index_maintenance",
                 )
@@ -14197,6 +14266,8 @@ def maintain_indexes(
         "token_max_raw_bytes": effective_token_max_raw_bytes,
         "graph_batch_limit": effective_graph_batch_limit,
         "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
+        "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
+        "graph_max_refresh_edges": effective_graph_max_refresh_edges,
         "budget_seconds": budget_seconds,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "budget_exhausted": budget_exhausted,
@@ -14373,6 +14444,8 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
         f"- graph_batch_limit: `{payload.get('graph_batch_limit')}`",
+        f"- graph_max_refresh_nodes: `{payload.get('graph_max_refresh_nodes')}`",
+        f"- graph_max_refresh_edges: `{payload.get('graph_max_refresh_edges')}`",
         f"- progress_every: `{payload.get('progress_every')}`",
         f"- before_ok: `{before.get('ok')}`",
         f"- after_ok: `{after.get('ok')}`",
@@ -14436,6 +14509,8 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "search_dirty_session_count",
                 "atlas_dirty_session_count",
                 "deferred_session_count",
+                "graph_max_refresh_nodes",
+                "graph_max_refresh_edges",
                 "budget_seconds",
                 "budget_exhausted",
                 "action_counts",
@@ -14476,6 +14551,8 @@ def auto_maintenance(
     token_max_raw_bytes: int | None = None,
     graph_batch_limit: int | None = None,
     graph_refresh_chunk_size: int | None = None,
+    graph_max_refresh_nodes: int | None = None,
+    graph_max_refresh_edges: int | None = None,
     ref_sample_limit: int | None = None,
     sample_audit: bool | None = None,
     repair_indexes: bool | None = None,
@@ -14504,6 +14581,10 @@ def auto_maintenance(
             1000,
         ),
     )
+    effective_graph_max_refresh_nodes = graph_max_refresh_nodes if graph_max_refresh_nodes is not None else settings.get("graph_max_refresh_nodes")
+    effective_graph_max_refresh_edges = graph_max_refresh_edges if graph_max_refresh_edges is not None else settings.get("graph_max_refresh_edges")
+    effective_graph_max_refresh_nodes = None if effective_graph_max_refresh_nodes is None or int_value(effective_graph_max_refresh_nodes) <= 0 else int_value(effective_graph_max_refresh_nodes)
+    effective_graph_max_refresh_edges = None if effective_graph_max_refresh_edges is None or int_value(effective_graph_max_refresh_edges) <= 0 else int_value(effective_graph_max_refresh_edges)
     effective_ref_sample_limit = max(1, int_value(ref_sample_limit if ref_sample_limit is not None else settings["ref_sample_limit"], 200))
     effective_sample_audit = bool(settings["sample_audit"] if sample_audit is None else sample_audit)
     effective_repair_indexes = bool(settings["repair_indexes"] if repair_indexes is None else repair_indexes)
@@ -14548,6 +14629,8 @@ def auto_maintenance(
                         "token_max_raw_bytes": effective_token_max_raw_bytes,
                         "graph_batch_limit": effective_graph_batch_limit,
                         "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
+                        "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
+                        "graph_max_refresh_edges": effective_graph_max_refresh_edges,
                         "ref_sample_limit": effective_ref_sample_limit,
                         "lock_path": str(lock_path),
                         "resource_launcher": resource_launcher,
@@ -14577,6 +14660,8 @@ def auto_maintenance(
             sample_audit=effective_sample_audit,
             graph_batch_limit=effective_graph_batch_limit,
             graph_refresh_chunk_size=effective_graph_refresh_chunk_size,
+            graph_max_refresh_nodes=effective_graph_max_refresh_nodes,
+            graph_max_refresh_edges=effective_graph_max_refresh_edges,
             repair_indexes=effective_repair_indexes,
             write_report=write_report,
             reason=f"auto_maintenance:{profile}:{reason}",
@@ -14620,6 +14705,8 @@ def auto_maintenance(
             "token_max_raw_bytes": effective_token_max_raw_bytes,
             "graph_batch_limit": effective_graph_batch_limit,
             "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
+            "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
+            "graph_max_refresh_edges": effective_graph_max_refresh_edges,
             "ref_sample_limit": effective_ref_sample_limit,
             "sample_audit": effective_sample_audit,
             "progress_every": progress_every,
@@ -22682,8 +22769,13 @@ def graph_source_candidates(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    records, diagnostics = graph_session_records(aoa_root, target=target, since=since, until=until, limit=limit)
+    if selected_records is not None:
+        records = selected_records
+        diagnostics: list[str] = []
+    else:
+        records, diagnostics = graph_session_records(aoa_root, target=target, since=since, until=until, limit=limit)
     candidates: list[dict[str, Any]] = []
     for record in records:
         record_candidates, record_diagnostics = graph_source_candidates_for_record(record)
@@ -22713,14 +22805,27 @@ def graph_source_states(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    selected_records: list[dict[str, Any]] | None = None,
+    selected_records_global: bool | None = None,
 ) -> dict[str, Any]:
-    records, candidates, diagnostics = graph_source_candidates(aoa_root, target=target, since=since, until=until, limit=limit)
+    records, candidates, diagnostics = graph_source_candidates(
+        aoa_root,
+        target=target,
+        since=since,
+        until=until,
+        limit=limit,
+        selected_records=selected_records,
+    )
     existing, existing_diagnostics = graph_store_existing_sources(aoa_root)
     diagnostics.extend(existing_diagnostics if existing_diagnostics != ["graph_store_missing"] else [])
     states: list[dict[str, Any]] = []
     candidate_keys = {str(item.get("source_key") or "") for item in candidates}
     selected_session_ids = {str(record.get("session_id") or "") for record in records if record.get("session_id")}
-    global_selection = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
+    global_selection = (
+        bool(selected_records_global)
+        if selected_records is not None
+        else graph_selection_is_global(target=target, since=since, until=until, limit=limit)
+    )
     out_of_scope_existing_count = 0
     for candidate in candidates:
         source_key = str(candidate.get("source_key") or "")
@@ -22790,6 +22895,7 @@ def graph_source_states(
         "ok": not diagnostics,
         "mutates": False,
         "target": target,
+        "selection_scope": "global" if global_selection else "selected_sessions",
         "selected_session_count": len(records),
         "source_count": len(candidates),
         "existing_source_count": len(existing),
@@ -22812,6 +22918,8 @@ def graph_store_state(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    selected_records: list[dict[str, Any]] | None = None,
+    selected_records_global: bool | None = None,
 ) -> dict[str, Any]:
     paths = graph_paths(aoa_root)
     if not paths["store"].exists():
@@ -22835,7 +22943,15 @@ def graph_store_state(
             "db_path": str(paths["store"]),
             "diagnostics": [f"graph_store_sqlite_error:{exc}"],
         }
-    source_states = graph_source_states(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+    source_states = graph_source_states(
+        aoa_root=aoa_root,
+        target=target,
+        since=since,
+        until=until,
+        limit=limit,
+        selected_records=selected_records,
+        selected_records_global=selected_records_global,
+    )
     status_counts = source_states.get("status_counts") if isinstance(source_states.get("status_counts"), dict) else {}
     reasons: list[str] = []
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
@@ -22881,6 +22997,7 @@ def graph_store_state(
                 "orphaned_count",
                 "out_of_scope_existing_count",
                 "orphan_scope",
+                "selection_scope",
             )
         },
         "reasons": reasons,
@@ -22917,6 +23034,8 @@ def graph_maintenance(
     apply: bool = False,
     batch_limit: int = GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT,
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+    max_refresh_nodes: int | None = None,
+    max_refresh_edges: int | None = None,
     export_sidecar: bool = False,
     write_report: bool = False,
     reason: str = "operator_requested",
@@ -22930,10 +23049,17 @@ def graph_maintenance(
     ]
     batch_limit = max(1, min(int_value(batch_limit, GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT), 500))
     refresh_chunk_size = max(1, min(int_value(refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
+    max_refresh_nodes = None if max_refresh_nodes is None or int_value(max_refresh_nodes) <= 0 else int_value(max_refresh_nodes)
+    max_refresh_edges = None if max_refresh_edges is None or int_value(max_refresh_edges) <= 0 else int_value(max_refresh_edges)
     selected = actionable[:batch_limit]
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     results: list[dict[str, Any]] = []
-    maintenance_detail: dict[str, Any] = {"refresh_chunk_size": refresh_chunk_size}
+    maintenance_detail: dict[str, Any] = {
+        "refresh_chunk_size": refresh_chunk_size,
+        "max_refresh_nodes": max_refresh_nodes,
+        "max_refresh_edges": max_refresh_edges,
+    }
+    budget_deferred_source_keys: list[str] = []
     if apply and selected:
         store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
         try:
@@ -22992,6 +23118,57 @@ def graph_maintenance(
                     replacements.append(contribution)
 
             if replacements:
+                if max_refresh_nodes is not None or max_refresh_edges is not None:
+                    accepted_replacements: list[dict[str, Any]] = []
+                    planned_node_ids: set[str] = set()
+                    planned_edge_ids: set[str] = set()
+                    for contribution in replacements:
+                        source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
+                        source_key = str(source.get("source_key") or "")
+                        new_node_ids = {str(node.get("id") or "") for node in contribution.get("nodes", []) if isinstance(node, dict) and node.get("id")}
+                        new_edge_ids = {str(edge.get("id") or "") for edge in contribution.get("edges", []) if isinstance(edge, dict) and edge.get("id")}
+                        old_node_ids = {
+                            str(row["node_id"])
+                            for row in store.conn.execute("SELECT node_id FROM node_contribs WHERE source_key = ?", (source_key,)).fetchall()
+                        }
+                        old_edge_ids = {
+                            str(row["edge_id"])
+                            for row in store.conn.execute("SELECT edge_id FROM edge_contribs WHERE source_key = ?", (source_key,)).fetchall()
+                        }
+                        next_node_ids = planned_node_ids | new_node_ids | old_node_ids
+                        next_edge_ids = planned_edge_ids | new_edge_ids | old_edge_ids
+                        over_node_budget = max_refresh_nodes is not None and len(next_node_ids) > max_refresh_nodes
+                        over_edge_budget = max_refresh_edges is not None and len(next_edge_ids) > max_refresh_edges
+                        if over_node_budget or over_edge_budget:
+                            budget_deferred_source_keys.append(source_key)
+                            results.append(
+                                {
+                                    "source_key": source_key,
+                                    "status": "deferred_refresh_budget",
+                                    "planned_refresh_node_count": len(next_node_ids),
+                                    "planned_refresh_edge_count": len(next_edge_ids),
+                                    "max_refresh_nodes": max_refresh_nodes,
+                                    "max_refresh_edges": max_refresh_edges,
+                                }
+                            )
+                            continue
+                        accepted_replacements.append(contribution)
+                        planned_node_ids = next_node_ids
+                        planned_edge_ids = next_edge_ids
+                    replacements = accepted_replacements
+                    maintenance_detail["planned_refresh_node_count"] = len(planned_node_ids)
+                    maintenance_detail["planned_refresh_edge_count"] = len(planned_edge_ids)
+                    maintenance_detail["budget_deferred_source_count"] = len(budget_deferred_source_keys)
+                    maintenance_detail["budget_deferred_sources"] = budget_deferred_source_keys[:40]
+                accepted_source_keys = {
+                    str((contribution.get("source") if isinstance(contribution.get("source"), dict) else {}).get("source_key") or "")
+                    for contribution in replacements
+                }
+                selected = [
+                    state for state in selected
+                    if str(state.get("source_key") or "") in set(orphaned_source_keys) | accepted_source_keys
+                ]
+            if replacements:
                 replaced = store.replace_sources(replacements)
                 results.extend(replaced.get("results", []))
                 maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
@@ -23021,6 +23198,8 @@ def graph_maintenance(
         "limit": limit,
         "batch_limit": batch_limit,
         "refresh_chunk_size": refresh_chunk_size,
+        "max_refresh_nodes": max_refresh_nodes,
+        "max_refresh_edges": max_refresh_edges,
         "reason": reason,
         "source_state": {
             key: states_payload.get(key)
@@ -23038,6 +23217,7 @@ def graph_maintenance(
         },
         "selected_count": len(selected),
         "remaining_count": max(0, len(actionable) - len(selected)),
+        "budget_deferred_source_count": len(budget_deferred_source_keys),
         "selected": selected,
         "results": results,
         "maintenance_detail": maintenance_detail,
@@ -23069,8 +23249,11 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- batch_limit: `{payload.get('batch_limit')}`",
         f"- refresh_chunk_size: `{payload.get('refresh_chunk_size')}`",
+        f"- max_refresh_nodes: `{payload.get('max_refresh_nodes')}`",
+        f"- max_refresh_edges: `{payload.get('max_refresh_edges')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- remaining_count: `{payload.get('remaining_count')}`",
+        f"- budget_deferred_source_count: `{payload.get('budget_deferred_source_count')}`",
         f"- status_counts: `{state.get('status_counts')}`",
         "",
         "## Selected Sources",
@@ -23089,6 +23272,9 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 "## Maintenance Detail",
                 "",
                 f"- refresh_chunk_size: `{detail.get('refresh_chunk_size')}`",
+                f"- max_refresh_nodes: `{detail.get('max_refresh_nodes')}`",
+                f"- max_refresh_edges: `{detail.get('max_refresh_edges')}`",
+                f"- budget_deferred_sources: `{json.dumps(detail.get('budget_deferred_sources', []), ensure_ascii=False)}`",
                 f"- replaced_node_refresh: `{json.dumps(detail.get('replaced_node_refresh', {}), ensure_ascii=False)}`",
                 f"- replaced_edge_refresh: `{json.dumps(detail.get('replaced_edge_refresh', {}), ensure_ascii=False)}`",
                 f"- removed_node_refresh: `{json.dumps(detail.get('removed_node_refresh', {}), ensure_ascii=False)}`",
@@ -25985,6 +26171,8 @@ def graph_freshness_gates(
     until: str | None = None,
     limit: int | None = None,
     ref_sample_limit: int = 200,
+    stable_quiet_seconds: float | None = None,
+    now_ts: float | None = None,
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
@@ -26000,16 +26188,45 @@ def graph_freshness_gates(
             "diagnostics": [str(exc)],
             "gates": [],
         }
-    latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
-    latest_graph_mtime, latest_graph_paths = latest_graph_source_mtime(aoa_root, records)
-    route_drift = route_index_drift_records(records)
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records)
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
-    store_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+    selected_latest_source_mtime, selected_latest_source_paths = latest_index_source_mtime(aoa_root, records)
+    selected_latest_graph_mtime, selected_latest_graph_paths = latest_graph_source_mtime(aoa_root, records)
+    stable_mode = stable_quiet_seconds is not None
+    gate_records = records
+    gate_projection_fingerprints: list[dict[str, Any]] | None = None
+    deferred_live_sessions: list[dict[str, Any]] = []
+    quiescence: dict[str, Any] = {
+        "enabled": False,
+        "mode": "strict_full_selection",
+        "selected_count": len(records),
+        "checked_count": len(records),
+        "deferred_live_session_count": 0,
+    }
+    if stable_mode:
+        gate_records, gate_projection_fingerprints, deferred_live_sessions, quiescence = projection_quiescence_split(
+            records,
+            quiet_seconds=stable_quiet_seconds if stable_quiet_seconds is not None else 0.0,
+            now_ts=now_ts,
+        )
+    latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, gate_records)
+    latest_graph_mtime, latest_graph_paths = latest_graph_source_mtime(aoa_root, gate_records)
+    route_drift = route_index_drift_records(gate_records)
+    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
+    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
+    global_selection = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
+    graph_selection_global = global_selection and not deferred_live_sessions
+    store_state = graph_store_state(
+        aoa_root=aoa_root,
+        target=target,
+        since=since,
+        until=until,
+        limit=limit,
+        selected_records=gate_records if stable_mode else None,
+        selected_records_global=graph_selection_global if stable_mode else None,
+    )
     graph_state = graph_sidecar_state(
         aoa_root,
         latest_source_mtime=latest_graph_mtime,
-        expected_session_count=len(records) if graph_selection_is_global(target=target, since=since, until=until, limit=limit) else None,
+        expected_session_count=len(gate_records) if graph_selection_global else None,
     )
     refs_state = evidence_ref_integrity_state(aoa_root, sample_limit=ref_sample_limit)
     graph_store_current_statuses = {"current", "current_with_blocked_sources"}
@@ -26018,7 +26235,31 @@ def graph_freshness_gates(
     needs_sidecar_export = bool(graph_state.get("needs_snapshot_refresh")) and store_state.get("status") in graph_store_current_statuses
     needs_graph_build = bool(store_state.get("needs_full_rebuild"))
     sidecar_gate_ok = graph_state.get("status") in {"current", "not_exported"}
-    gates = [
+    gates = []
+    if stable_mode:
+        gates.append(
+            {
+                "name": "quiescent_session_subset",
+                "ok": len(gate_records) > 0 or not records,
+                "state": {
+                    "selected_count": len(records),
+                    "checked_count": len(gate_records),
+                    "deferred_live_session_count": len(deferred_live_sessions),
+                    "quiet_seconds": quiescence.get("quiet_seconds"),
+                },
+            }
+        )
+        gates.append(
+            {
+                "name": "live_sessions_deferred",
+                "ok": True,
+                "state": {
+                    "deferred_live_session_count": len(deferred_live_sessions),
+                    "note": "recently changed sessions are reported but not checked by stable mode",
+                },
+            }
+        )
+    gates.extend([
         {"name": "map_fresh", "ok": not route_drift and atlas_state.get("status") == "current", "state": {"route_drift_count": len(route_drift), "atlas_status": atlas_state.get("status")}},
         {"name": "search_fresh", "ok": search_state.get("status") == "current", "state": search_state},
         {"name": "graph_store_current", "ok": store_state.get("status") in graph_store_current_statuses, "state": store_state},
@@ -26028,15 +26269,24 @@ def graph_freshness_gates(
         {"name": "graph_maintenance_needed", "ok": not needs_graph_maintenance, "state": {"needed": needs_graph_maintenance}},
         {"name": "sidecar_export_needed", "ok": not needs_sidecar_export, "state": {"needed": needs_sidecar_export}},
         {"name": "offline_graph_build_needed", "ok": not needs_graph_build, "state": {"needed": needs_graph_build}},
-    ]
+    ])
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_freshness_gates",
         "generated_at": now,
         "ok": not diagnostics and all(bool(gate.get("ok")) for gate in gates),
         "mutates": False,
+        "truth_status": "stable_quiescent_subset_gate_deferred_live_sessions_are_not_checked" if stable_mode else "strict_full_selection_freshness_gate",
         "target": target,
         "selected_count": len(records),
+        "checked_count": len(gate_records),
+        "deferred_live_session_count": len(deferred_live_sessions),
+        "quiescence": quiescence,
+        "deferred_live_sessions": deferred_live_sessions[:40],
+        "selected_latest_source_mtime": selected_latest_source_mtime,
+        "selected_latest_source_paths": selected_latest_source_paths,
+        "selected_latest_graph_source_mtime": selected_latest_graph_mtime,
+        "selected_latest_graph_source_paths": selected_latest_graph_paths,
         "latest_source_mtime": latest_source_mtime,
         "latest_source_paths": latest_source_paths,
         "latest_graph_source_mtime": latest_graph_mtime,
@@ -26055,7 +26305,7 @@ def graph_freshness_gates(
         "search_vs_graph": graph_state.get("search_vs_graph"),
         "gates": gates,
         "diagnostics": diagnostics,
-        "next_route": "Run index-maintenance when map/search/atlas gates fail; run graph-maintenance for dirty graph sources; export sidecar snapshots only for offline/debug/publication needs; run offline graph-build for schema/corruption recovery; inspect broken refs before synthesis.",
+        "next_route": "Use strict mode for full truth; use --stable only as a quiescent subset gate during live writes. Run index-maintenance when map/search/atlas gates fail; run graph-maintenance for dirty graph sources; export sidecar snapshots only for offline/debug/publication needs; run offline graph-build for schema/corruption recovery; inspect broken refs before synthesis.",
     }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
@@ -26076,7 +26326,10 @@ def graph_freshness_gates_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- ok: `{payload.get('ok')}`",
+        f"- truth_status: `{payload.get('truth_status')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
+        f"- checked_count: `{payload.get('checked_count')}`",
+        f"- deferred_live_session_count: `{payload.get('deferred_live_session_count')}`",
         f"- search_vs_graph: `{payload.get('search_vs_graph')}`",
         f"- needs_index_maintenance: `{payload.get('needs_index_maintenance')}`",
         f"- needs_graph_maintenance: `{payload.get('needs_graph_maintenance')}`",
@@ -26089,6 +26342,20 @@ def graph_freshness_gates_markdown(payload: dict[str, Any]) -> str:
     for gate in payload.get("gates", []) if isinstance(payload.get("gates"), list) else []:
         if isinstance(gate, dict):
             lines.append(f"| `{gate.get('name')}` | `{gate.get('ok')}` | `{short_text(json.dumps(gate.get('state', {}), ensure_ascii=False, sort_keys=True), max_chars=220)}` |")
+    quiescence = payload.get("quiescence") if isinstance(payload.get("quiescence"), dict) else {}
+    if quiescence.get("enabled"):
+        lines.extend(["", "## Quiescence", ""])
+        lines.append(f"- quiet_seconds: `{quiescence.get('quiet_seconds')}`")
+        lines.append(f"- checked_count: `{quiescence.get('checked_count')}`")
+        lines.append(f"- deferred_live_session_count: `{quiescence.get('deferred_live_session_count')}`")
+        deferred = payload.get("deferred_live_sessions") if isinstance(payload.get("deferred_live_sessions"), list) else []
+        if deferred:
+            lines.extend(["", "| session | age_seconds | reasons |", "| --- | --- | --- |"])
+            for item in deferred[:20]:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| `{item.get('session_label') or item.get('session_id')}` | `{item.get('age_seconds')}` | `{', '.join(str(reason) for reason in item.get('reasons', []) if reason)}` |"
+                    )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
@@ -27415,6 +27682,7 @@ def command_graph_freshness_gates(args: argparse.Namespace) -> int:
         until=args.until,
         limit=args.limit,
         ref_sample_limit=args.ref_sample_limit,
+        stable_quiet_seconds=args.quiet_seconds if args.stable else None,
         write_report=args.write_report,
     )
     stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"route_drift"}}
@@ -28183,6 +28451,8 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             max_raw_chars=args.max_raw_chars,
             graph_batch_limit=args.graph_batch_limit,
             graph_refresh_chunk_size=args.graph_refresh_chunk_size,
+            graph_max_refresh_nodes=getattr(args, "graph_max_refresh_nodes", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES),
+            graph_max_refresh_edges=getattr(args, "graph_max_refresh_edges", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES),
             repair_indexes=not args.skip_index_repair,
             write_report=args.write_report,
             reason=args.reason,
@@ -28216,6 +28486,8 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
         token_max_raw_bytes=token_max_raw_bytes,
         graph_batch_limit=args.graph_batch_limit,
         graph_refresh_chunk_size=args.graph_refresh_chunk_size,
+        graph_max_refresh_nodes=getattr(args, "graph_max_refresh_nodes", None),
+        graph_max_refresh_edges=getattr(args, "graph_max_refresh_edges", None),
         ref_sample_limit=args.ref_sample_limit,
         sample_audit=False if args.no_sample_audit else (True if args.sample_audit else None),
         repair_indexes=args.repair_indexes,
@@ -28431,6 +28703,8 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             apply=args.apply,
             batch_limit=args.batch_limit,
             refresh_chunk_size=args.refresh_chunk_size,
+            max_refresh_nodes=getattr(args, "max_refresh_nodes", None),
+            max_refresh_edges=getattr(args, "max_refresh_edges", None),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             reason="operator_requested",
@@ -32181,6 +32455,8 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--max-raw-chars", type=int, default=360)
     index_maintenance.add_argument("--graph-batch-limit", type=int, default=GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT, help="Maximum dirty graph sources to process during the graph maintenance action.")
     index_maintenance.add_argument("--graph-refresh-chunk-size", type=int, default=GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE, help="Aggregate refresh IN-list chunk size used by the graph maintenance action.")
+    index_maintenance.add_argument("--graph-max-refresh-nodes", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES, help="Defer graph source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
+    index_maintenance.add_argument("--graph-max-refresh-edges", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES, help="Defer graph source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
     index_maintenance.add_argument("--skip-index-repair", action="store_true", help="Only run graph maintenance and defer search/atlas/route-index repair to a heavier profile.")
     index_maintenance.add_argument("--budget-seconds", type=float, help="Stop applying maintenance after this wall-clock budget; never interrupts a session transaction.")
     index_maintenance.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
@@ -32207,6 +32483,8 @@ def build_parser() -> argparse.ArgumentParser:
     auto_maintenance_parser.add_argument("--token-max-raw-mb", type=float, help="Override profile raw limit for token-ledger backfill.")
     auto_maintenance_parser.add_argument("--graph-batch-limit", type=int, help="Override profile dirty graph source batch size.")
     auto_maintenance_parser.add_argument("--graph-refresh-chunk-size", type=int, help="Override profile aggregate refresh chunk size for graph maintenance.")
+    auto_maintenance_parser.add_argument("--graph-max-refresh-nodes", type=int, help="Override profile graph aggregate node refresh guard; <=0 disables the guard.")
+    auto_maintenance_parser.add_argument("--graph-max-refresh-edges", type=int, help="Override profile graph aggregate edge refresh guard; <=0 disables the guard.")
     auto_maintenance_parser.add_argument("--ref-sample-limit", type=int, help="Override profile freshness ref sample limit.")
     repair_group = auto_maintenance_parser.add_mutually_exclusive_group()
     repair_group.add_argument("--repair-indexes", dest="repair_indexes", action="store_true", default=None, help="Override profile and allow search/atlas/route-index repair.")
@@ -32364,6 +32642,8 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     graph_maintenance_parser.add_argument("--batch-limit", type=int, default=GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT, help="Maximum dirty graph sources to process in this pass.")
     graph_maintenance_parser.add_argument("--refresh-chunk-size", type=int, default=GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE, help="Aggregate refresh IN-list chunk size for node/edge recomputation.")
+    graph_maintenance_parser.add_argument("--max-refresh-nodes", type=int, help="Defer source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
+    graph_maintenance_parser.add_argument("--max-refresh-edges", type=int, help="Defer source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--write-report", action="store_true", help="Write graph maintenance reports under .aoa/diagnostics.")
@@ -32529,6 +32809,8 @@ def build_parser() -> argparse.ArgumentParser:
     graph_freshness_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     graph_freshness_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     graph_freshness_parser.add_argument("--ref-sample-limit", type=int, default=200)
+    graph_freshness_parser.add_argument("--stable", action="store_true", help="Check only sessions quiet for --quiet-seconds and report recent live writes as deferred.")
+    graph_freshness_parser.add_argument("--quiet-seconds", type=float, default=120.0, help="Minimum source quiet period used by --stable.")
     graph_freshness_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown freshness gate reports under .aoa/diagnostics.")
     graph_freshness_parser.add_argument("--full", action="store_true", help="Print route drift and detailed gate state.")
     graph_freshness_parser.set_defaults(func=command_graph_freshness_gates)

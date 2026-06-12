@@ -1443,6 +1443,24 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert dirty_gates["needs_sidecar_export"] is False
     assert dirty_gates["needs_offline_graph_build"] is False
 
+    deferred = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        batch_limit=10,
+        max_refresh_nodes=1,
+        max_refresh_edges=1,
+        write_report=True,
+    )
+    assert deferred["ok"] is True
+    assert deferred["selected_count"] == 0
+    assert deferred["budget_deferred_source_count"] >= 1
+    assert deferred["remaining_count"] >= 1
+    assert deferred["maintenance_detail"]["budget_deferred_source_count"] >= 1
+    assert any(item["status"] == "deferred_refresh_budget" for item in deferred["results"])
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 1
+    conn.close()
+
     maintained = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, write_report=True)
     assert maintained["ok"] is True
     assert maintained["selected_count"] >= 1
@@ -1494,6 +1512,99 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 0
     conn.close()
+
+
+def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    stable_transcript = tmp_path / "rollout-2026-06-11T00-00-00-stable-quiescence-source.jsonl"
+    live_transcript = tmp_path / "rollout-2026-06-11T00-05-00-live-quiescence-source.jsonl"
+    write_jsonl(
+        stable_transcript,
+        [
+            {"timestamp": "2026-06-11T00:00:00Z", "type": "session_meta", "payload": {"id": "stable-quiescence-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-11T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build stable quiescent graph freshness evidence."}]}},
+            {"timestamp": "2026-06-11T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Stable source is indexed."}]}},
+        ],
+    )
+    write_jsonl(
+        live_transcript,
+        [
+            {"timestamp": "2026-06-11T00:05:00Z", "type": "session_meta", "payload": {"id": "live-quiescence-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-11T00:05:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build live quiescent graph freshness evidence."}]}},
+            {"timestamp": "2026-06-11T00:05:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Live source is indexed."}]}},
+        ],
+    )
+    for session_id, transcript in (("stable-quiescence-source", stable_transcript), ("live-quiescence-source", live_transcript)):
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    stable_record = module.resolve_session_record(aoa_root, "stable-quiescence-source")
+    live_record = module.resolve_session_record(aoa_root, "live-quiescence-source")
+    old_ts = time.time() - 7200
+    for record in (stable_record, live_record):
+        for source_path in module.index_source_paths_for_record(record):
+            if source_path.exists():
+                os.utime(source_path, (old_ts, old_ts))
+        raw_path = Path(record["path"]) / "raw" / "session.raw.jsonl"
+        if raw_path.exists():
+            os.utime(raw_path, (old_ts, old_ts))
+
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+    baseline = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    assert baseline["ok"] is True
+
+    live_segment_index_path = next((Path(live_record["path"]) / "segments").glob("*.index.json"))
+    live_segment_index = json.loads(live_segment_index_path.read_text(encoding="utf-8"))
+    live_segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(
+        {"layer": "entity", "key": "live_quiescence_anchor", "route_signal": "entity:live_quiescence_anchor"}
+    )
+    live_segment_index_path.write_text(json.dumps(live_segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(live_segment_index_path, None)
+
+    strict = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
+    stable = module.graph_freshness_gates(
+        aoa_root=aoa_root,
+        ref_sample_limit=20,
+        stable_quiet_seconds=60,
+        now_ts=time.time(),
+    )
+
+    assert strict["ok"] is False
+    assert strict["truth_status"] == "strict_full_selection_freshness_gate"
+    assert strict["search_index"]["dirty_session_count"] == 1
+    assert strict["graph_store"]["status"] == "dirty"
+    assert strict["needs_index_maintenance"] is True
+    assert strict["needs_graph_maintenance"] is True
+    assert stable["ok"] is True
+    assert stable["truth_status"] == "stable_quiescent_subset_gate_deferred_live_sessions_are_not_checked"
+    assert stable["selected_count"] == 2
+    assert stable["checked_count"] == 1
+    assert stable["deferred_live_session_count"] == 1
+    assert stable["quiescence"]["checked_count"] == 1
+    assert stable["deferred_live_sessions"][0]["session_id"] == "live-quiescence-source"
+    assert stable["search_index"]["status"] == "current"
+    assert stable["atlas_index"]["status"] == "current"
+    assert stable["graph_store"]["status"] == "current"
+    assert stable["graph_store"]["source_state"]["selection_scope"] == "selected_sessions"
+    assert stable["needs_index_maintenance"] is False
+    assert stable["needs_graph_maintenance"] is False
+    assert stable["latest_source_mtime"] < stable["selected_latest_source_mtime"]
+    assert next(gate for gate in stable["gates"] if gate["name"] == "quiescent_session_subset")["ok"] is True
+    assert next(gate for gate in stable["gates"] if gate["name"] == "live_sessions_deferred")["state"]["deferred_live_session_count"] == 1
 
 
 def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(tmp_path: Path, monkeypatch: Any) -> None:

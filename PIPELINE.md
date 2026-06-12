@@ -351,6 +351,23 @@ raw, segment, and session refs. If refs are missing, weak, stale, or
 unreviewed, the packet must say `insufficient_evidence`, `weak_route`, `stale`,
 or `needs_review` instead of presenting synthesis as truth.
 
+On a live archive where hooks or active sessions may rewrite session sources
+during the check, use the explicit quiescent-subset route:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-freshness-check all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --stable \
+  --quiet-seconds 120 \
+  --write-report
+```
+
+The default command remains strict full-selection truth. `--stable` checks only
+sessions whose projection sources have been quiet for the selected window and
+reports recent live writes under `deferred_live_sessions`; deferred sessions
+are visible but not treated as checked.
+
 Segment indexes must keep both the legacy event map and the universal event
 facets:
 
@@ -566,7 +583,11 @@ and missing aggregates. Automated maintenance keeps both source batches and
 refresh chunks intentionally bounded; large historical sessions can still be
 expensive without a full rebuild because a few source slices may touch many
 aggregate edges. `--batch-limit` is a source-count bound, not a strict cost
-bound. Full `graph-build all --write --force-large-export` remains the fallback
+bound. `index-maintenance` and `auto-maintenance` also use
+`graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; when a planned
+replacement would refresh too many aggregate ids, it is reported under
+`budget_deferred_sources` for a narrower or heavier pass. Full
+`graph-build all --write --force-large-export` remains the fallback
 for schema changes, corruption, excessive dirty backlog, invariant failure, or
 large historical imports.
 
