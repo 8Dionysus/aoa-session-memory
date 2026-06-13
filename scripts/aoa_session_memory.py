@@ -19344,9 +19344,11 @@ def agent_event_audit(
 
     route_stream_noise = sum(int(item.get("stream_copy_result_count") or 0) for item in route_probes)
     route_failures = [item for item in route_probes if not item.get("ok")]
+    stream_pair_retrieval_guard_ok = bool(route_probes) and not route_stream_noise and not route_failures
+    stream_pair_requires_guard = bool(stream_pair_count and not stream_pair_retrieval_guard_ok)
     weak_spots = {
         "taxonomy_gap": ["eligible assistant/reasoning events without agent_event facets"] if missing_agent_event_count else [],
-        "classifier_gap": ["stream/canonical neighbor pairs exist in generated indexes and require canonical-first retrieval"] if stream_pair_count else [],
+        "classifier_gap": ["stream/canonical neighbor pairs exist but canonical-first route probes did not prove retrieval safety"] if stream_pair_requires_guard else [],
         "index_gap": ["segment by_agent_event counts differ from event facets"] if index_gap_count else [],
         "search_mcp_surface_gap": [],
         "task_episode_gap": ["zero-count task episodes from operator-only or interrupted prompts"] if zero_episode_count else [],
@@ -19357,7 +19359,7 @@ def agent_event_audit(
         weak_spots["search_mcp_surface_gap"].append("one or more route probes failed")
     finding_count = (
         missing_agent_event_count
-        + stream_pair_count
+        + (stream_pair_count if stream_pair_requires_guard else 0)
         + index_gap_count
         + zero_episode_count
         + route_stream_noise
@@ -19382,6 +19384,7 @@ def agent_event_audit(
         "eligible_agent_event_count": eligible_count,
         "missing_eligible_agent_event": missing_agent_event_count,
         "stream_canonical_neighbor_pair_count": stream_pair_count,
+        "stream_canonical_retrieval_guard_ok": stream_pair_retrieval_guard_ok,
         "index_gap_count": index_gap_count,
         "task_episode_count": task_episode_count,
         "zero_count_task_episode_count": zero_episode_count,
@@ -21550,6 +21553,17 @@ def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tupl
     text = str(session).strip()
     if not text:
         return None, None
+    if text.lower() == "latest":
+        try:
+            record = resolve_session_record(aoa_root, text)
+        except ValueError:
+            record = {}
+        label = str(record.get("session_label") or "")
+        session_id = str(record.get("session_id") or "")
+        if label:
+            return "documents.session_label", label
+        if session_id:
+            return "documents.session_id", session_id
     if (aoa_root / "sessions" / text).is_dir():
         return "documents.session_label", text
     if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text):
@@ -21994,6 +22008,159 @@ def merge_search_results_by_doc_id(payloads: list[dict[str, Any]], *, limit: int
     return list(merged.values())[: max(1, limit)], diagnostics
 
 
+def search_agent_event_documents(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    limit: int = 20,
+    provider: str = "portable_sqlite",
+    session: str | None = None,
+    task_episode_id: str | None = None,
+    agent_events: list[str] | None = None,
+    explain: bool = False,
+    include_stream_copies: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
+    if not classes:
+        classes = AGENT_RESPONSE_ROUTE_CLASSES
+    effective_limit = max(1, limit)
+    provider_config = search_provider_config(aoa_root)
+    configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
+    if provider not in configured_providers:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "normalized_query": "",
+            "result_count": 0,
+            "results": [],
+            "provider": {"selected": provider, "status": "unknown_provider"},
+            "diagnostics": [f"unknown search provider: {provider}"],
+        }
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "normalized_query": "",
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "provider": {"selected": provider, "status": "portable_sqlite_missing"},
+            "diagnostics": ["search index missing; run search-index"],
+        }
+
+    schema_conn = init_search_db(db_path, rebuild=False)
+    schema_conn.close()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    filters = ["documents.doc_type = ?"]
+    params: list[Any] = ["event"]
+    exact_column, exact_value = exact_session_filter_for_search(aoa_root, session)
+    if session:
+        if exact_column and exact_value:
+            filters.append(f"{exact_column} = ?")
+            params.append(exact_value)
+        else:
+            filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
+            like = f"%{session}%"
+            params.extend([session, like, like])
+    placeholders = ", ".join("?" for _ in classes)
+    filters.append(f"documents.agent_event IN ({placeholders})")
+    params.extend(classes)
+    if task_episode_id:
+        filters.append("documents.task_episode_id = ?")
+        params.append(task_episode_id)
+    if not include_stream_copies:
+        filters.append("COALESCE(documents.tags, '') NOT LIKE ?")
+        params.append("%agent_event_source:event_msg_stream%")
+    where = " AND ".join(filters)
+    fts_query = fts_query_from_user(query)
+    try:
+        if fts_query:
+            sql = (
+                "SELECT documents.*, bm25(documents_fts) AS rank, "
+                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank "
+                "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid "
+                "WHERE documents_fts MATCH ? AND "
+                + where
+                + " ORDER BY rank, source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            )
+            rows = conn.execute(sql, [fts_query, *params, effective_limit]).fetchall()
+        else:
+            sql = (
+                "SELECT documents.*, 0.0 AS rank, "
+                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank "
+                "FROM documents WHERE "
+                + where
+                + " ORDER BY source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            )
+            rows = conn.execute(sql, [*params, effective_limit]).fetchall()
+        metadata = search_index_metadata(conn)
+        body_overrides = search_document_bodies_for_rows(conn, rows)
+    except sqlite3.Error as exc:
+        conn.close()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "query": query,
+            "normalized_query": fts_query,
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [f"sqlite_error:{exc}"],
+        }
+    finally:
+        conn.close()
+
+    provider_payload = (
+        search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
+        if provider == "portable_sqlite"
+        else search_provider_status(aoa_root=aoa_root, provider_name=provider, include_host=True)
+    )
+    results = [
+        compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
+        for row in rows
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": True,
+        "query": query,
+        "normalized_query": fts_query,
+        "db_path": str(db_path),
+        "index_generated_at": metadata.get("generated_at"),
+        "aoa_root": str(aoa_root),
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "portable_sqlite",
+            "status": provider_payload,
+            "accelerator_provider": None,
+            "accelerator_status": None,
+            "overlay": None,
+            "semantic_overlay": None,
+            "local_rerank": None,
+            "authority_law": provider_config.get("authority_law"),
+        },
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": [],
+    }
+
+
 def agent_event_route_search(
     *,
     aoa_root: Path,
@@ -22010,41 +22177,34 @@ def agent_event_route_search(
     classes = [item for item in (agent_events or []) if item]
     if not classes:
         classes = AGENT_RESPONSE_ROUTE_CLASSES
-    query_limit = limit if include_stream_copies else max(limit * 4, limit + 10)
-    payloads = [
-        search_sessions(
-            aoa_root=aoa_root,
-            query=query,
-            limit=query_limit,
-            provider=provider,
-            session=session,
-            doc_type="event",
-            agent_event=agent_class,
-            task_episode_id=task_episode_id,
-            explain=explain,
-        )
-        for agent_class in classes
-    ]
-    results, diagnostics = merge_search_results_by_doc_id(payloads, limit=query_limit)
-    if not include_stream_copies:
-        results = [result for result in results if result.get("agent_event_source") != "event_msg_stream"]
-    results = results[: max(1, limit)]
+    route_payload = search_agent_event_documents(
+        aoa_root=aoa_root,
+        query=query,
+        limit=limit,
+        provider=provider,
+        session=session,
+        task_episode_id=task_episode_id,
+        agent_events=classes,
+        explain=explain,
+        include_stream_copies=include_stream_copies,
+    )
+    results = route_payload.get("results") if isinstance(route_payload.get("results"), list) else []
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "agent_event_route_results",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
         "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
         "generated_at": now,
-        "ok": all(payload.get("ok") for payload in payloads),
+        "ok": bool(route_payload.get("ok")),
         "query": query,
         "session": session or "",
         "task_episode_id": task_episode_id or "",
         "agent_events": classes,
         "include_stream_copies": include_stream_copies,
-        "provider": payloads[0].get("provider") if payloads else {},
+        "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
         "result_count": len(results),
         "results": results,
-        "diagnostics": diagnostics,
+        "diagnostics": route_payload.get("diagnostics", []),
         "next_route": "Use refs.segment_index/raw for authority; this route only narrows assistant event evidence.",
     }
 
@@ -22206,6 +22366,7 @@ def task_episode_route_search(
     verification_state: str | None = None,
     failure_state: str | None = None,
     limit: int = 20,
+    order: str = "recent",
 ) -> dict[str, Any]:
     now = utc_now()
     try:
@@ -22227,14 +22388,19 @@ def task_episode_route_search(
         }
     results: list[dict[str, Any]] = []
     selected_count = 0
-    for record in records:
+    ordered_records = list(records)
+    if order == "recent":
+        ordered_records = list(reversed(ordered_records))
+    for record in ordered_records:
         session_dir = session_dir_from_record(record)
         index = read_json(session_dir / SESSION_INDEX_JSON, {})
         if not isinstance(index, dict):
             continue
         session_label = str(index.get("display", {}).get("label") if isinstance(index.get("display"), dict) else record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
-        for item in index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []:
+        task_episodes = index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []
+        episode_items = list(reversed(task_episodes)) if order == "recent" else list(task_episodes)
+        for item in episode_items:
             if not isinstance(item, dict):
                 continue
             selected_count += 1
@@ -22264,6 +22430,7 @@ def task_episode_route_search(
         "status": status or "",
         "verification_state": verification_state or "",
         "failure_state": failure_state or "",
+        "order": order,
         "selected_episode_count": selected_count,
         "result_count": len(results),
         "results": results,
@@ -31166,6 +31333,7 @@ def command_task_episodes(args: argparse.Namespace) -> int:
         verification_state=args.verification_state,
         failure_state=args.failure_state,
         limit=args.limit,
+        order=args.order,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -35308,6 +35476,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_episodes_parser.add_argument("--verification-state", choices=["verified", "unverified"])
     task_episodes_parser.add_argument("--failure-state", choices=["failed", "blocked", "no_failure_seen"])
     task_episodes_parser.add_argument("--limit", type=int, default=20)
+    task_episodes_parser.add_argument("--order", choices=["recent", "chronological"], default="recent")
     task_episodes_parser.set_defaults(func=command_task_episodes)
 
     trace_route_parser = sub.add_parser(

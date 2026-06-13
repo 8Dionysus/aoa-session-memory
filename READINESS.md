@@ -119,7 +119,7 @@ python3 scripts/aoa_session_memory.py agent-responses --workspace-root /path/to/
 python3 scripts/aoa_session_memory.py agent-closeouts --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
 python3 scripts/aoa_session_memory.py agent-progress-updates --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
 python3 scripts/aoa_session_memory.py agent-reasoning-windows --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
-python3 scripts/aoa_session_memory.py task-episodes latest --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --limit 20
+python3 scripts/aoa_session_memory.py task-episodes latest --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --limit 20 --order recent
 python3 scripts/aoa_session_memory.py answer-neighborhood --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
 python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain

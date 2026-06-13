@@ -210,6 +210,10 @@ python3 scripts/aoa_session_memory.py task-episodes latest --limit 20
 python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --limit 10
 ```
 
+`task-episodes` defaults to `--order recent` so an agent lands on the live tail
+of a long session first. Use `--order chronological` when replaying a session
+from the beginning.
+
 The SQLite search route stores `agent_event` and `task_episode_id` as first
 class filters. MCP may expose these read-only packets, but maintenance,
 reindex, repair, and promotion stay outside MCP.

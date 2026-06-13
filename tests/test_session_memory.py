@@ -283,9 +283,30 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) ->
     assert first_episode["verification_refs"]
     assert first_episode["closeout_refs"]
     assert session_index["task_episodes"][1]["transition"]["previous_episode_id"] == first_episode["episode_id"]
+    recent_episode_route = module.task_episode_route_search(aoa_root=aoa_root, target="latest", limit=1)
+    assert recent_episode_route["order"] == "recent"
+    assert recent_episode_route["results"][0]["episode_id"] == "task-0002"
+    chronological_episode_route = module.task_episode_route_search(
+        aoa_root=aoa_root,
+        target="latest",
+        limit=1,
+        order="chronological",
+    )
+    assert chronological_episode_route["order"] == "chronological"
+    assert chronological_episode_route["results"][0]["episode_id"] == "task-0001"
 
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
     assert search_index["ok"] is True
+    audit = module.agent_event_audit(
+        aoa_root=aoa_root,
+        target="latest",
+        sample_limit=2,
+        probe_routes=True,
+        route_probe_limit=2,
+    )
+    assert audit["stream_canonical_neighbor_pair_count"] >= 1
+    assert audit["stream_canonical_retrieval_guard_ok"] is True
+    assert audit["quality_ok"] is True
     closeouts = module.search_sessions(aoa_root=aoa_root, doc_type="event", agent_event="assistant_final_closeout", limit=5)
     assert closeouts["result_count"] == 1
     assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
@@ -320,6 +341,72 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) ->
     )
     assert windows["window_count"] == 1
     assert windows["windows"][0]["ok"] is True
+
+
+def test_agent_event_route_resolves_latest_and_filters_stream_copies_before_limit(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-agent-event-latest.jsonl"
+    stream_rows = [
+        {
+            "timestamp": f"2026-06-13T00:00:{second:02d}Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Сейчас проверяю живой контур."},
+        }
+        for second in range(4, 20)
+    ]
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-event-latest", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь живой контур"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю живой контур."}]}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Почти готово, сейчас прогоню еще одну проверку."}]}},
+            *stream_rows,
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-event-latest",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    direct_latest = module.search_sessions(
+        aoa_root=aoa_root,
+        session="latest",
+        doc_type="event",
+        agent_event="assistant_progress_update",
+        limit=5,
+    )
+    assert direct_latest["result_count"] == 5
+
+    route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session="latest",
+        agent_events=["assistant_progress_update"],
+        limit=2,
+    )
+    assert route["result_count"] == 2
+    assert {item["event_id"] for item in route["results"]} == {"000003", "000004"}
+    assert all(item["agent_event_source"] != "event_msg_stream" for item in route["results"])
+
+    with_stream = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session="latest",
+        agent_events=["assistant_progress_update"],
+        limit=3,
+        include_stream_copies=True,
+    )
+    assert with_stream["result_count"] == 3
+    assert "event_msg_stream" in {item["agent_event_source"] for item in with_stream["results"]}
 
 
 def test_token_accounting_records_provider_usage_and_estimates(tmp_path: Path) -> None:
