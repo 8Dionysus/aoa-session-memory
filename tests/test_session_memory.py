@@ -216,6 +216,93 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry_record["raw_blocks"]["block_count"] == 2
 
 
+def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-agent-events.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-events", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Audit the session-memory MCP hook"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need inspect source before changing."}]}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "Сейчас проверяю живой контур."}},
+            {"timestamp": "2026-06-13T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю живой контур."}]}},
+            {"timestamp": "2026-06-13T00:00:05Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-1", "arguments": "{\"cmd\":\"pytest -q\"}"}},
+            {"timestamp": "2026-06-13T00:00:06Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "1 passed"}},
+            {"timestamp": "2026-06-13T00:00:07Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Почти готово, сейчас прогоню еще одну проверку."}]}},
+            {"timestamp": "2026-06-13T00:00:08Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Готово. Итог: проверка прошла."}]}},
+            {"timestamp": "2026-06-13T00:00:09Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Продолжай"}]}},
+            {"timestamp": "2026-06-13T00:00:10Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Дальше беру второй сценарий."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-events",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
+    segment_index = json.loads(next((session_dir / "segments").glob("*.index.json")).read_text(encoding="utf-8"))
+    assert "assistant_reasoning_boundary" in segment_index["by_agent_event"]
+    assert "assistant_progress_update" in segment_index["by_agent_event"]
+    assert "assistant_final_closeout" in segment_index["by_agent_event"]
+
+    reasoning_event = next(event for event in segment_index["events"] if event["type"] == "ASSISTANT_REASONING_BOUNDARY")
+    assert reasoning_event["facets"]["conversation_act"]["kind"] == "assistant_reasoning_boundary"
+    assert reasoning_event["facets"]["agent_event"]["class"] == "assistant_reasoning_boundary"
+    assert reasoning_event["facets"]["agent_event"]["content_status"] == "boundary_only"
+
+    false_closeout = next(event for event in segment_index["events"] if "Почти готово" in event["title"] or event["event_id"] == "000008")
+    assert false_closeout["type"] != "FINAL_STATE"
+    assert false_closeout["facets"]["agent_event"]["class"] == "assistant_progress_update"
+    assert "final_marker_not_closeout" in false_closeout["facets"]["agent_event"]["ambiguity_flags"]
+
+    final_closeout = next(event for event in segment_index["events"] if event["type"] == "FINAL_STATE")
+    assert final_closeout["facets"]["agent_event"]["class"] == "assistant_final_closeout"
+
+    stream_event = next(event for event in segment_index["events"] if event.get("source_type") == "event_msg" and event["type"] == "ASSISTANT_MESSAGE")
+    assert stream_event["facets"]["agent_event"]["canonical"] is False
+    assert stream_event["facets"]["agent_event"]["source_lane"] == "event_msg_stream"
+
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    assert session_index["agent_event_counts"]["assistant_reasoning_boundary"] == 1
+    assert session_index["task_episode_counts"]["total"] == 2
+    first_episode = session_index["task_episodes"][0]
+    assert first_episode["start_user_ref"]["raw_ref"] == "raw:line:2"
+    assert first_episode["status"] == "closed"
+    assert first_episode["reasoning_refs"]
+    assert first_episode["progress_refs"]
+    assert first_episode["verification_refs"]
+    assert first_episode["closeout_refs"]
+    assert session_index["task_episodes"][1]["transition"]["previous_episode_id"] == first_episode["episode_id"]
+
+    search_index = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert search_index["ok"] is True
+    closeouts = module.search_sessions(aoa_root=aoa_root, doc_type="event", agent_event="assistant_final_closeout", limit=5)
+    assert closeouts["result_count"] == 1
+    assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
+    assert closeouts["results"][0]["task_episode_id"] == "task-0001"
+    episodes = module.search_sessions(aoa_root=aoa_root, doc_type="task_episode", limit=5)
+    assert episodes["result_count"] == 2
+    windows = module.agent_event_windows(
+        aoa_root=aoa_root,
+        agent_events=["assistant_reasoning_boundary"],
+        limit=1,
+        before=1,
+        after=2,
+    )
+    assert windows["window_count"] == 1
+    assert windows["windows"][0]["ok"] is True
+
+
 def test_token_accounting_records_provider_usage_and_estimates(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -3048,6 +3135,11 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
     stale_session_index_path = module.session_dir_from_record(stale_record) / module.SESSION_INDEX_JSON
     stale_session_index = json.loads(stale_session_index_path.read_text(encoding="utf-8"))
     stale_session_index["route_signal_classifier_version"] = module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    stale_session_index.pop("agent_event_schema_version", None)
+    stale_session_index.pop("task_episode_schema_version", None)
+    stale_session_index.pop("agent_event_counts", None)
+    stale_session_index.pop("task_episode_counts", None)
+    stale_session_index.pop("task_episodes", None)
     stale_session_index_path.write_text(json.dumps(stale_session_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     stale_sample_payload = module.route_sample_audit(
@@ -3084,6 +3176,11 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
     assert stale_reindex_payload["counts"] == {"reindexed": 1}
     refreshed = json.loads(stale_session_index_path.read_text(encoding="utf-8"))
     assert refreshed["route_signal_classifier_version"] == module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+    assert refreshed["agent_event_schema_version"] == module.AGENT_EVENT_SCHEMA_VERSION
+    assert refreshed["task_episode_schema_version"] == module.TASK_EPISODE_SCHEMA_VERSION
+    assert isinstance(refreshed["agent_event_counts"], dict)
+    assert isinstance(refreshed["task_episode_counts"], dict)
+    assert isinstance(refreshed["task_episodes"], list)
 
     scope_identity = module.route_sample_identity(sample_by_layer["scope_contract"])
     authority_identity = module.route_sample_identity(sample_by_layer["authority_surface"])
@@ -3923,6 +4020,86 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["providers"]["portable_sqlite"]["status"] == "ready"
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-fast-provider.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "fast-provider-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find agent response evidence quickly"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Проверяю и отвечаю."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "fast-provider-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    search = module.search_sessions(aoa_root=aoa_root, query="ответ", limit=1)
+    status = search["provider"]["status"]
+    provider = status["providers"]["portable_sqlite"]
+
+    assert status["status_mode"] == "fast_presence_probe"
+    assert provider["count_mode"] == "not_counted_fast"
+    assert provider["has_documents"] is True
+    assert provider["has_route_index"] is True
+    assert provider["has_route_terms"] is True
+    assert "document_count" not in provider
+
+
+def test_search_provider_status_detects_structural_schema_drift(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)", (str(module.SEARCH_SCHEMA_VERSION),))
+    conn.execute(
+        """
+        CREATE TABLE documents (
+            rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            doc_type TEXT NOT NULL,
+            session_id TEXT,
+            session_label TEXT,
+            session_act TEXT,
+            route_layers TEXT,
+            route_signals TEXT,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE VIRTUAL TABLE documents_fts USING fts5(title, body, session_label, session_title, content='documents', content_rowid='rowid')")
+    conn.execute("CREATE TABLE document_bodies (doc_rowid INTEGER PRIMARY KEY, body_zlib BLOB NOT NULL, body_sha256 TEXT NOT NULL, body_chars INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE route_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, layer TEXT NOT NULL, key TEXT NOT NULL, route_signal TEXT NOT NULL)")
+    conn.execute("CREATE TABLE document_routes (doc_rowid INTEGER NOT NULL, route_id INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE session_index_state (session_id TEXT PRIMARY KEY, session_label TEXT, source_fingerprint TEXT NOT NULL, source_latest_mtime REAL, search_schema_version TEXT, route_signal_classifier_version INTEGER, indexed_at TEXT, document_count INTEGER)")
+    conn.execute("INSERT INTO documents (id, doc_type, payload_json) VALUES ('doc-1', 'session', '{}')")
+    conn.commit()
+    conn.close()
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+    state = module.sqlite_search_index_state(aoa_root, latest_source_mtime=0)
+
+    assert provider["ok"] is False
+    assert provider["status"] == "stale"
+    assert "search_schema_missing_column:documents.agent_event" in provider["diagnostics"]
+    assert "search_schema_missing_column:documents.task_episode_id" in provider["diagnostics"]
+    assert "search_schema_missing_column:documents.agent_event" in state["reasons"]
+    assert state["needs_refresh"] is True
 
 
 def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, monkeypatch) -> None:

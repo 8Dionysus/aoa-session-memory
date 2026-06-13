@@ -71,16 +71,19 @@ RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
+AGENT_EVENT_SCHEMA_VERSION = 1
+TASK_EPISODE_SCHEMA_VERSION = 1
+TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 24
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 25
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 6
+SEARCH_SCHEMA_VERSION = 7
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
@@ -167,6 +170,7 @@ EVENT_TYPE_ORDER = [
     "SESSION_META",
     "CONTEXT_STATE",
     "USER_INTENT",
+    "ASSISTANT_REASONING_BOUNDARY",
     "ASSISTANT_PLAN",
     "ASSISTANT_MESSAGE",
     "TOOL_CALL",
@@ -216,6 +220,7 @@ EVENT_FACETS: dict[str, dict[str, str]] = {
     "SESSION_META": {"family": "session_lifecycle", "phase": "start", "actor": "codex_runtime", "action": "initialize", "object": "session", "outcome": "observed"},
     "CONTEXT_STATE": {"family": "context_memory", "phase": "observe", "actor": "codex_runtime", "action": "report_context", "object": "context", "outcome": "observed"},
     "USER_INTENT": {"family": "communication", "phase": "request", "actor": "user", "action": "request", "object": "task", "outcome": "requested"},
+    "ASSISTANT_REASONING_BOUNDARY": {"family": "agent_cognition", "phase": "plan", "actor": "assistant", "action": "mark_reasoning_boundary", "object": "reasoning", "outcome": "observed"},
     "ASSISTANT_PLAN": {"family": "agent_cognition", "phase": "plan", "actor": "assistant", "action": "reason", "object": "plan", "outcome": "planned"},
     "ASSISTANT_MESSAGE": {"family": "communication", "phase": "respond", "actor": "assistant", "action": "respond", "object": "message", "outcome": "observed"},
     "TOOL_CALL": {"family": "tool_interaction", "phase": "act", "actor": "assistant", "action": "call_tool", "object": "tool", "outcome": "requested"},
@@ -340,6 +345,7 @@ ROUTE_SIGNAL_LAYER_TO_AXIS = {
     "promotion_candidate": "by-promotion-candidate",
     "operator_request": "by-operator-request",
     "route_next_action": "by-route-next-action",
+    "agent_event": "by-agent-event",
 }
 
 GRAPH_ROUTE_NODE_TYPE_BY_LAYER = {
@@ -376,6 +382,7 @@ GRAPH_ROUTE_NODE_TYPE_BY_LAYER = {
     "authority_surface": "authority_surface",
     "operator_preference": "operator_preference",
     "freshness_drift": "freshness_drift",
+    "agent_event": "agent_event",
 }
 
 DEFAULT_ATLAS_AXES = [
@@ -385,6 +392,7 @@ DEFAULT_ATLAS_AXES = [
     "by-authority-surface",
     "by-session-act",
     "by-conversation-act",
+    "by-agent-event",
     "by-scope-contract",
     "by-verification-state",
     "by-open-thread",
@@ -2110,7 +2118,7 @@ def session_act_kind_for_memory(event_type: str, source_type: str, semantic_lowe
         return "memory_read"
     if event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT", "VERIFICATION"}:
         return "memory_observation"
-    if event_type in {"ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "CHECKPOINT", "FINAL_STATE"}:
+    if event_type in {"ASSISTANT_REASONING_BOUNDARY", "ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "CHECKPOINT", "FINAL_STATE"}:
         return "memory_discussion"
     return "memory_signal"
 
@@ -2143,6 +2151,8 @@ def session_act_for_event(
     if not kind:
         if event_type == "USER_INTENT":
             kind = "operator_prompt"
+        elif event_type == "ASSISTANT_REASONING_BOUNDARY":
+            kind = "assistant_reasoning_boundary"
         elif event_type == "ASSISTANT_PLAN":
             kind = "assistant_plan"
         elif event_type == "ASSISTANT_MESSAGE":
@@ -3157,6 +3167,7 @@ def route_signals_for_event(
     command_lower = command.lower()
     conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
     session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+    agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
     tool_name = str(facets.get("tool_name") or tool_name_from_payload(payload))
     tool_namespace = str(facets.get("tool_namespace") or tool_namespace_for_name(tool_name) if tool_name else "")
     haystack = " ".join(
@@ -3172,6 +3183,8 @@ def route_signals_for_event(
         ]
         if part
     ).lower()
+    if agent_event.get("class"):
+        add("agent_event", str(agent_event["class"]), confidence=str(agent_event.get("confidence") or "high"), source="agent_event")
     surface_haystack = " ".join(
         str(part)
         for part in [
@@ -3631,6 +3644,8 @@ def classify_operator_prompt_act(text: str) -> tuple[str, str, str]:
 
 
 def classify_assistant_message_act(event_type: str, text: str, tags: set[str]) -> tuple[str, str, str]:
+    if event_type == "ASSISTANT_REASONING_BOUNDARY":
+        return "assistant_reasoning_boundary", "mark_reasoning_boundary", "reasoning_boundary_signal"
     if event_type == "FINAL_STATE":
         return "assistant_final_closeout", "closeout", "final_signal"
     if event_type == "DECISION":
@@ -3647,13 +3662,130 @@ def classify_assistant_message_act(event_type: str, text: str, tags: set[str]) -
         return "assistant_plan", "plan", "plan_signal"
     if text_has_any(text, ["ошиб", "неверно", "неправильно", "ты прав", "я не понял"]):
         return "assistant_correction", "correct_self", "misread_or_correction_signal"
+    if text_has_any(text, ["сейчас", "делаю", "проверяю", "иду ", "перехожу", "почти готово", "прогоню"]):
+        return "assistant_progress_update", "report_progress", "progress_signal"
     if text_has_any(text, ["провер", "тест", "validate", "verification", "green", "зелен"]):
         return "assistant_verification_report", "report_verification", "verification_signal"
-    if text_has_any(text, ["сейчас", "делаю", "проверяю", "иду ", "перехожу"]):
-        return "assistant_progress_update", "report_progress", "progress_signal"
     if "message_stream" in tags:
         return "assistant_stream", "stream_message", "stream_signal"
     return "assistant_response", "respond", "response_signal"
+
+
+def looks_like_final_closeout(text: str) -> bool:
+    if not text:
+        return False
+    final_markers = [
+        "готово",
+        "final",
+        "итог",
+        "closeout",
+        "закрыл",
+        "завершено",
+        "done",
+    ]
+    if not text_has_any(text, final_markers):
+        return False
+    progress_anti_markers = [
+        "почти готово",
+        "ещё не готово",
+        "еще не готово",
+        "не готово",
+        "сейчас ",
+        "сейчас,",
+        "потом ",
+        "дальше ",
+        "жду ",
+        "жду финал",
+        "осталось",
+        "eta",
+        "%",
+        "прогоню",
+        "проверяю",
+        "буду ",
+    ]
+    if text_has_any(text, progress_anti_markers):
+        return False
+    return True
+
+
+def classify_agent_event(
+    event_type: str,
+    source_type: str,
+    payload: Any,
+    semantic_lower: str,
+    tags: set[str],
+    facets: dict[str, Any],
+    outcome: str,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    payload_type = str(facets.get("payload_type") or payload.get("type") or "")
+    role = str(payload.get("role") or "")
+    message_type = str(facets.get("message_type") or payload.get("type") or "")
+    is_reasoning = source_type == "response_item" and payload_type == "reasoning"
+    is_canonical_assistant_message = source_type == "response_item" and payload_type == "message" and role == "assistant"
+    is_stream_assistant_message = source_type == "event_msg" and message_type == "agent_message"
+    if not (is_reasoning or is_canonical_assistant_message or is_stream_assistant_message):
+        return None
+
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    conversation_kind = str(conversation_act.get("kind") or "")
+    flags: list[str] = []
+    source_lane = "response_item"
+    canonical = True
+    visibility = "public"
+    content_status = "public_text"
+    if is_stream_assistant_message:
+        source_lane = "event_msg_stream"
+        canonical = False
+        flags.append("stream_copy")
+    if is_reasoning:
+        source_lane = "reasoning_boundary"
+        visibility = "internal_boundary"
+        content_status = "boundary_only"
+        agent_class = "assistant_reasoning_boundary"
+    elif event_type == "FINAL_STATE" or conversation_kind == "assistant_final_closeout":
+        agent_class = "assistant_final_closeout"
+    elif (
+        text_has_any(semantic_lower, ["blocked", "blocker", "блокер", "заблок", "не могу продолж", "cannot proceed", "impasse"])
+        or event_type == "DEAD_BRANCH"
+    ):
+        agent_class = "assistant_blocker_report"
+    elif text_has_any(semantic_lower, ["handoff", "resume", "rehydrate", "перезапуск", "перезапуст", "следующему агент", "продолжить с"]):
+        agent_class = "assistant_handoff_or_resume"
+    elif text_has_any(semantic_lower, ["ты прав", "я не понял", "исправляю", "ошибся", "ошибка с моей стороны"]):
+        agent_class = "assistant_correction_ack"
+    elif conversation_kind == "assistant_verification_report":
+        agent_class = "assistant_verification_report"
+    elif event_type == "ASSISTANT_PLAN" or conversation_kind == "assistant_plan":
+        agent_class = "assistant_plan"
+    elif conversation_kind == "assistant_progress_update":
+        agent_class = "assistant_progress_update"
+    else:
+        agent_class = "assistant_answer"
+
+    if is_canonical_assistant_message and "final_state_signal" in tags and agent_class != "assistant_final_closeout":
+        flags.append("final_marker_not_closeout")
+    if is_canonical_assistant_message and conversation_kind == "assistant_progress_update" and agent_class != "assistant_progress_update":
+        flags.append("progress_marker_overridden")
+    if is_reasoning and semantic_lower:
+        flags.append("reasoning_text_present_raw_only")
+    return {
+        "schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "class": agent_class,
+        "role": agent_class,
+        "source_lane": source_lane,
+        "canonical": canonical,
+        "visibility": visibility,
+        "content_status": content_status,
+        "raw_event_type": event_type,
+        "source_type": source_type,
+        "payload_type": payload_type,
+        "conversation_act": conversation_kind,
+        "outcome": outcome,
+        "confidence": "high" if canonical else "medium",
+        "ambiguity_flags": flags,
+    }
 
 
 def classify_command_or_tool_act(event_type: str, facets: dict[str, Any], tags: set[str]) -> tuple[str, str, str]:
@@ -3698,7 +3830,7 @@ def conversation_act_for_event(
     signal: str | None = None
     if event_type == "USER_INTENT":
         kind, intent, signal = classify_operator_prompt_act(semantic_lower)
-    elif event_type in {"ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "PROCESS_LESSON", "CHECKPOINT", "FINAL_STATE"}:
+    elif event_type in {"ASSISTANT_REASONING_BOUNDARY", "ASSISTANT_PLAN", "ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "PROCESS_LESSON", "CHECKPOINT", "FINAL_STATE"}:
         kind, intent, signal = classify_assistant_message_act(event_type, semantic_lower, tags)
     elif event_type in {"COMMAND", "TOOL_CALL", "FILE_READ", "FILE_WRITE", "DIFF"}:
         kind, intent, signal = classify_command_or_tool_act(event_type, facets, tags)
@@ -3873,9 +4005,9 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
                 tags.update(["patch", "file_write"])
                 outcome_override = "changed"
         elif item_type == "reasoning":
-            event_type = "ASSISTANT_PLAN"
-            title = "Assistant reasoning item"
-            tags.add("reasoning")
+            event_type = "ASSISTANT_REASONING_BOUNDARY"
+            title = "Assistant reasoning boundary"
+            tags.update(["reasoning", "reasoning_boundary"])
         else:
             title = f"Response item: {item_type}"
     elif source_type == "event_msg" and isinstance(payload, dict):
@@ -4050,7 +4182,7 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             importance = "high"
     if semantic_signal_taggable and ("final" in signal_lower or "итог" in signal_lower or "готово" in signal_lower):
         tags.add("final_state_signal")
-        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE":
+        if semantic_signal_promotable and event_type == "ASSISTANT_MESSAGE" and looks_like_final_closeout(signal_lower):
             event_type = "FINAL_STATE"
             importance = "high"
     if source_type == "compacted" or payload_has_compaction_boundary(payload):
@@ -4097,6 +4229,20 @@ def classify_raw_event(raw: str, parsed: dict[str, Any] | None, line_no: int) ->
             tags.add(f"memory_surface:{session_act['memory_surface']}")
         if session_act.get("tool_namespace"):
             tags.add(f"tool_namespace:{session_act['tool_namespace']}")
+    agent_event = classify_agent_event(
+        canonical_event_type,
+        source_type,
+        payload,
+        semantic_lower,
+        tags,
+        facets,
+        universal["outcome"],
+    )
+    if agent_event:
+        facets["agent_event"] = agent_event
+        tags.add(f"agent_event:{agent_event['class']}")
+        if agent_event.get("source_lane"):
+            tags.add(f"agent_event_source:{agent_event['source_lane']}")
     route_signals = route_signals_for_event(
         canonical_event_type,
         source_type,
@@ -5743,6 +5889,246 @@ def session_act_counts_for_events(events: list[RawEvent]) -> dict[str, int]:
     )
 
 
+def agent_event_for_event(event: RawEvent) -> dict[str, Any]:
+    return event.facets.get("agent_event") if isinstance(event.facets.get("agent_event"), dict) else {}
+
+
+def agent_event_class_for_event(event: RawEvent) -> str:
+    agent_event = agent_event_for_event(event)
+    return str(agent_event.get("class") or "")
+
+
+def agent_event_counts_for_events(events: list[RawEvent]) -> dict[str, int]:
+    return dict(
+        sorted(
+            Counter(
+                agent_class
+                for agent_class in (agent_event_class_for_event(event) for event in events)
+                if agent_class
+            ).items()
+        )
+    )
+
+
+def task_episode_counts_for_episodes(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts = Counter(str(episode.get("status") or "unknown") for episode in episodes)
+    confidence_counts = Counter(str(episode.get("confidence") or "unknown") for episode in episodes)
+    return {
+        "total": len(episodes),
+        "by_status": dict(sorted(status_counts.items())),
+        "by_confidence": dict(sorted(confidence_counts.items())),
+    }
+
+
+def segment_for_line(segments: list[dict[str, Any]], line_no: int) -> dict[str, Any]:
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
+        from_line = int_value(source_range.get("from_line"), 0)
+        to_line = int_value(source_range.get("to_line"), 0)
+        if from_line and to_line and from_line <= line_no <= to_line:
+            return segment
+    return {}
+
+
+def task_episode_event_ref(event: RawEvent, segments: list[dict[str, Any]]) -> dict[str, Any]:
+    segment = segment_for_line(segments, event.line_no)
+    conversation_act = event.facets.get("conversation_act") if isinstance(event.facets.get("conversation_act"), dict) else {}
+    session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
+    agent_event = agent_event_for_event(event)
+    ref = {
+        "event_id": event.event_id,
+        "line": event.line_no,
+        "raw_ref": f"raw:line:{event.line_no}",
+        "segment_id": str(segment.get("segment_id") or ""),
+        "segment_ref": str(segment.get("markdown") or ""),
+        "segment_index": str(segment.get("index") or ""),
+        "event_type": event.event_type,
+        "source_type": event.source_type,
+        "title": event.title,
+        "conversation_act": str(conversation_act.get("kind") or ""),
+        "session_act": str(session_act.get("kind") or ""),
+        "agent_event": str(agent_event.get("class") or ""),
+    }
+    return {key: value for key, value in ref.items() if value not in {"", None}}
+
+
+def append_task_episode_ref(episode: dict[str, Any], bucket: str, event: RawEvent, segments: list[dict[str, Any]]) -> None:
+    refs = episode.setdefault(bucket, [])
+    if isinstance(refs, list) and len(refs) < TASK_EPISODE_REF_LIMIT_PER_BUCKET:
+        refs.append(task_episode_event_ref(event, segments))
+    elif isinstance(refs, list):
+        omitted = episode.setdefault("omitted_ref_counts", {})
+        if isinstance(omitted, dict):
+            omitted[bucket] = int_value(omitted.get(bucket), 0) + 1
+
+
+def new_task_episode(
+    *,
+    ordinal: int,
+    user_event: RawEvent,
+    segments: list[dict[str, Any]],
+    previous_episode_id: str,
+    transition_reason: str,
+) -> dict[str, Any]:
+    conversation_act = user_event.facets.get("conversation_act") if isinstance(user_event.facets.get("conversation_act"), dict) else {}
+    flags: list[str] = []
+    canonical_user = (
+        user_event.source_type == "response_item"
+        and isinstance(user_event.parsed, dict)
+        and isinstance(user_event.parsed.get("payload"), dict)
+        and str(user_event.parsed["payload"].get("type") or "") == "message"
+        and str(user_event.parsed["payload"].get("role") or "") == "user"
+    )
+    if not canonical_user:
+        flags.append("noncanonical_user_start")
+    if previous_episode_id:
+        flags.append("transition_from_previous_episode")
+    episode_id = f"task-{ordinal:04d}"
+    start_ref = task_episode_event_ref(user_event, segments)
+    return {
+        "schema_version": TASK_EPISODE_SCHEMA_VERSION,
+        "episode_id": episode_id,
+        "status": "open",
+        "confidence": "high" if canonical_user else "medium",
+        "ambiguity_flags": flags,
+        "transition": {
+            "reason": transition_reason,
+            "previous_episode_id": previous_episode_id,
+            "user_conversation_act": str(conversation_act.get("kind") or ""),
+        },
+        "start_user_ref": start_ref,
+        "event_range": {
+            "from_event_id": user_event.event_id,
+            "to_event_id": user_event.event_id,
+            "from_line": user_event.line_no,
+            "to_line": user_event.line_no,
+        },
+        "reasoning_refs": [],
+        "plan_refs": [],
+        "progress_refs": [],
+        "answer_refs": [],
+        "action_refs": [],
+        "tool_refs": [],
+        "verification_refs": [],
+        "error_refs": [],
+        "closeout_refs": [],
+        "blocker_refs": [],
+        "transition_refs": [],
+        "omitted_ref_counts": {},
+    }
+
+
+def close_open_task_episode_for_transition(episode: dict[str, Any], transition_event: RawEvent, segments: list[dict[str, Any]]) -> None:
+    if episode.get("status") == "open":
+        episode["status"] = "interrupted"
+        flags = episode.setdefault("ambiguity_flags", [])
+        if isinstance(flags, list) and "interrupted_by_new_user_prompt" not in flags:
+            flags.append("interrupted_by_new_user_prompt")
+    append_task_episode_ref(episode, "transition_refs", transition_event, segments)
+
+
+def update_task_episode_range(episode: dict[str, Any], event: RawEvent) -> None:
+    event_range = episode.setdefault("event_range", {})
+    if not isinstance(event_range, dict):
+        return
+    if not event_range.get("from_event_id"):
+        event_range["from_event_id"] = event.event_id
+        event_range["from_line"] = event.line_no
+    event_range["to_event_id"] = event.event_id
+    event_range["to_line"] = event.line_no
+
+
+class TaskEpisodeBuilder:
+    def __init__(self, segments: list[dict[str, Any]]) -> None:
+        self.segments = segments
+        self.episodes: list[dict[str, Any]] = []
+        self.current: dict[str, Any] | None = None
+        self.previous_episode_id = ""
+
+    def observe(self, event: RawEvent) -> None:
+        conversation_act = event.facets.get("conversation_act") if isinstance(event.facets.get("conversation_act"), dict) else {}
+        conversation_kind = str(conversation_act.get("kind") or "")
+        agent_class = agent_event_class_for_event(event)
+        canonical_user_message = (
+            event.event_type == "USER_INTENT"
+            and event.source_type == "response_item"
+            and isinstance(event.parsed, dict)
+            and isinstance(event.parsed.get("payload"), dict)
+            and str(event.parsed["payload"].get("type") or "") == "message"
+            and str(event.parsed["payload"].get("role") or "") == "user"
+        )
+        fallback_user_message = event.event_type == "USER_INTENT" and event.source_type == "event_msg"
+        if canonical_user_message or (fallback_user_message and self.current is None):
+            if self.current is not None:
+                close_open_task_episode_for_transition(self.current, event, self.segments)
+                self.previous_episode_id = str(self.current.get("episode_id") or "")
+            self.current = new_task_episode(
+                ordinal=len(self.episodes) + 1,
+                user_event=event,
+                segments=self.segments,
+                previous_episode_id=self.previous_episode_id,
+                transition_reason=conversation_kind or "user_prompt",
+            )
+            self.episodes.append(self.current)
+            return
+        if self.current is None:
+            return
+        update_task_episode_range(self.current, event)
+        if agent_class == "assistant_reasoning_boundary":
+            append_task_episode_ref(self.current, "reasoning_refs", event, self.segments)
+        elif agent_class == "assistant_plan":
+            append_task_episode_ref(self.current, "plan_refs", event, self.segments)
+        elif agent_class == "assistant_progress_update":
+            append_task_episode_ref(self.current, "progress_refs", event, self.segments)
+        elif agent_class == "assistant_verification_report":
+            append_task_episode_ref(self.current, "verification_refs", event, self.segments)
+        elif agent_class == "assistant_final_closeout":
+            append_task_episode_ref(self.current, "closeout_refs", event, self.segments)
+            self.current["status"] = "closed"
+        elif agent_class == "assistant_blocker_report":
+            append_task_episode_ref(self.current, "blocker_refs", event, self.segments)
+            self.current["status"] = "blocked"
+        elif agent_class in {"assistant_handoff_or_resume", "assistant_correction_ack"}:
+            append_task_episode_ref(self.current, "transition_refs", event, self.segments)
+            if agent_class == "assistant_handoff_or_resume" and self.current.get("status") == "open":
+                self.current["status"] = "handoff"
+        elif agent_class == "assistant_answer":
+            append_task_episode_ref(self.current, "answer_refs", event, self.segments)
+        if event.event_type in {"COMMAND", "FILE_READ", "FILE_WRITE", "DIFF", "TOOL_CALL"}:
+            append_task_episode_ref(self.current, "action_refs", event, self.segments)
+            if event.event_type == "TOOL_CALL":
+                append_task_episode_ref(self.current, "tool_refs", event, self.segments)
+        if event.event_type in {"COMMAND_OUTPUT", "TOOL_OUTPUT"} and event.outcome == "failed":
+            append_task_episode_ref(self.current, "error_refs", event, self.segments)
+        elif event.event_type == "ERROR" or event.outcome == "failed":
+            append_task_episode_ref(self.current, "error_refs", event, self.segments)
+        if event.event_type == "VERIFICATION" or conversation_kind == "assistant_verification_report":
+            append_task_episode_ref(self.current, "verification_refs", event, self.segments)
+
+    def finish(self) -> list[dict[str, Any]]:
+        for episode in self.episodes:
+            flags = episode.setdefault("ambiguity_flags", [])
+            if isinstance(flags, list):
+                if not episode.get("closeout_refs") and episode.get("status") == "open":
+                    flags.append("no_closeout_seen")
+                if not episode.get("verification_refs"):
+                    flags.append("no_verification_refs")
+                if episode.get("omitted_ref_counts"):
+                    flags.append("bounded_ref_lists")
+            if episode.get("status") == "open" and episode.get("closeout_refs"):
+                episode["status"] = "closed"
+        return self.episodes
+
+
+def generated_task_episodes_for_events(events: list[RawEvent], segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    builder = TaskEpisodeBuilder(segments)
+    for event in events:
+        builder.observe(event)
+    return builder.finish()
+
+
 def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     token_observations = token_accounting_for_event(event)
     record = {
@@ -5962,6 +6348,7 @@ def write_segment(
     by_correlation: dict[str, list[str]] = defaultdict(list)
     by_conversation_act: dict[str, list[str]] = defaultdict(list)
     by_session_act: dict[str, list[str]] = defaultdict(list)
+    by_agent_event: dict[str, list[str]] = defaultdict(list)
     by_route_layer: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     by_route_signal: dict[str, list[str]] = defaultdict(list)
     for event in events:
@@ -5980,6 +6367,9 @@ def write_segment(
         session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
         if session_act.get("kind"):
             by_session_act[str(session_act["kind"])].append(event.event_id)
+        agent_event = agent_event_for_event(event)
+        if agent_event.get("class"):
+            by_agent_event[str(agent_event["class"])].append(event.event_id)
         for signal in event_route_signals(event):
             layer = str(signal["layer"])
             key = str(signal["key"])
@@ -5997,6 +6387,7 @@ def write_segment(
         "schema_version": SCHEMA_VERSION,
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
         "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
@@ -6018,6 +6409,7 @@ def write_segment(
         "by_correlation": dict(sorted(by_correlation.items())),
         "by_conversation_act": dict(sorted(by_conversation_act.items())),
         "by_session_act": dict(sorted(by_session_act.items())),
+        "by_agent_event": dict(sorted(by_agent_event.items())),
         "by_route_layer": {
             layer: dict(sorted(keys.items()))
             for layer, keys in sorted(by_route_layer.items())
@@ -6102,6 +6494,7 @@ def write_segment_route_index_only(
     by_correlation: dict[str, list[str]] = defaultdict(list)
     by_conversation_act: dict[str, list[str]] = defaultdict(list)
     by_session_act: dict[str, list[str]] = defaultdict(list)
+    by_agent_event: dict[str, list[str]] = defaultdict(list)
     by_route_layer: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     by_route_signal: dict[str, list[str]] = defaultdict(list)
     for event in events:
@@ -6120,6 +6513,9 @@ def write_segment_route_index_only(
         session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
         if session_act.get("kind"):
             by_session_act[str(session_act["kind"])].append(event.event_id)
+        agent_event = agent_event_for_event(event)
+        if agent_event.get("class"):
+            by_agent_event[str(agent_event["class"])].append(event.event_id)
         for signal in event_route_signals(event):
             layer = str(signal["layer"])
             key = str(signal["key"])
@@ -6135,6 +6531,7 @@ def write_segment_route_index_only(
         "schema_version": SCHEMA_VERSION,
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
         "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
@@ -6156,6 +6553,7 @@ def write_segment_route_index_only(
         "by_correlation": dict(sorted(by_correlation.items())),
         "by_conversation_act": dict(sorted(by_conversation_act.items())),
         "by_session_act": dict(sorted(by_session_act.items())),
+        "by_agent_event": dict(sorted(by_agent_event.items())),
         "by_route_layer": {
             layer: dict(sorted(keys.items()))
             for layer, keys in sorted(by_route_layer.items())
@@ -6194,7 +6592,13 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
     outcome_counts = dict(sorted(Counter(event.outcome for event in events).items()))
     conversation_act_counts = conversation_act_counts_for_events(events)
     session_act_counts = session_act_counts_for_events(events)
+    agent_event_counts = agent_event_counts_for_events(events)
     route_signal_counts = route_signal_counts_for_events(events)
+    task_episodes = generated_task_episodes_for_events(
+        events,
+        manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
+    )
+    task_episode_counts = task_episode_counts_for_episodes(task_episodes)
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     semantic_names = semantic_names_payload(manifest)
     work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
@@ -6207,6 +6611,8 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "schema_version": SCHEMA_VERSION,
         "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "task_episode_schema_version": TASK_EPISODE_SCHEMA_VERSION,
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
@@ -6227,6 +6633,9 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         "outcome_counts": outcome_counts,
         "conversation_act_counts": conversation_act_counts,
         "session_act_counts": session_act_counts,
+        "agent_event_counts": agent_event_counts,
+        "task_episode_counts": task_episode_counts,
+        "task_episodes": task_episodes,
         "route_signal_counts": route_signal_counts,
         "segments": manifest.get("segments", []),
         "raw_blocks": manifest.get("raw_blocks", {}),
@@ -6326,6 +6735,17 @@ def write_session_index(session_dir: Path, manifest: dict[str, Any], events: lis
         lines.append("### Session Acts")
         for act, count in session_act_counts.items():
             lines.append(f"- `{act}`: {count}")
+        lines.append("")
+    if agent_event_counts:
+        lines.append("### Agent Events")
+        for act, count in agent_event_counts.items():
+            lines.append(f"- `{act}`: {count}")
+        lines.append("")
+    if task_episodes:
+        lines.append("### Task Episodes")
+        lines.append(f"- total: `{len(task_episodes)}`")
+        for status, count in task_episode_counts.get("by_status", {}).items():
+            lines.append(f"- `{status}`: {count}")
         lines.append("")
     if route_signal_counts:
         lines.append("### Route Signals")
@@ -12542,6 +12962,8 @@ def refresh_route_indexes_from_raw(
     conversation_act_counts: Counter[str] = Counter()
     session_act_counts: Counter[str] = Counter()
     route_signal_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    agent_event_class_counts: Counter[str] = Counter()
+    task_episode_builder = TaskEpisodeBuilder(indexed_segments)
 
     def observe_event(event: RawEvent) -> None:
         nonlocal event_count
@@ -12557,6 +12979,10 @@ def refresh_route_indexes_from_raw(
         session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
         if session_act.get("kind"):
             session_act_counts[str(session_act["kind"])] += 1
+        agent_class = agent_event_class_for_event(event)
+        if agent_class:
+            agent_event_class_counts[agent_class] += 1
+        task_episode_builder.observe(event)
         for signal in event_route_signals(event):
             route_signal_counts[str(signal["layer"])][str(signal["key"])] += 1
 
@@ -12601,6 +13027,9 @@ def refresh_route_indexes_from_raw(
     if not refreshed_segments:
         return reindex_session_from_raw(aoa_root, record, dry_run=False, max_raw_bytes=max_raw_bytes)
 
+    agent_event_counts = dict(sorted(agent_event_class_counts.items()))
+    task_episodes = task_episode_builder.finish()
+    task_episode_counts = task_episode_counts_for_episodes(task_episodes)
     manifest["segments"] = refreshed_segments
     manifest["latest_event_count"] = event_count
     manifest["updated_at"] = now
@@ -12611,6 +13040,8 @@ def refresh_route_indexes_from_raw(
         "relationships": True,
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "task_episode_schema_version": TASK_EPISODE_SCHEMA_VERSION,
         "route_refreshed_at": now,
     }
     refresh_semantic_name_anchors(session_dir, manifest)
@@ -12620,6 +13051,8 @@ def refresh_route_indexes_from_raw(
         "schema_version": SCHEMA_VERSION,
         "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "task_episode_schema_version": TASK_EPISODE_SCHEMA_VERSION,
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
@@ -12640,6 +13073,9 @@ def refresh_route_indexes_from_raw(
         "outcome_counts": dict(sorted(outcome_counts.items())),
         "conversation_act_counts": dict(sorted(conversation_act_counts.items())),
         "session_act_counts": dict(sorted(session_act_counts.items())),
+        "agent_event_counts": agent_event_counts,
+        "task_episode_counts": task_episode_counts,
+        "task_episodes": task_episodes,
         "route_signal_counts": {layer: dict(sorted(counter.items())) for layer, counter in sorted(route_signal_counts.items())},
         "segments": manifest.get("segments", []),
         "raw_blocks": manifest.get("raw_blocks", {}),
@@ -12674,7 +13110,22 @@ def session_record_has_stale_route_index(record: dict[str, Any]) -> bool:
     session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
     if not isinstance(session_index, dict) or not session_index:
         return True
-    return bool(route_signal_index_stale_reasons(session_index))
+    return bool(generated_session_index_stale_reasons(session_index))
+
+
+def generated_session_index_stale_reasons(session_index: dict[str, Any]) -> list[str]:
+    reasons = list(route_signal_index_stale_reasons(session_index))
+    if int_value(session_index.get("agent_event_schema_version")) != AGENT_EVENT_SCHEMA_VERSION:
+        reasons.append("agent_event_schema_mismatch")
+    if int_value(session_index.get("task_episode_schema_version")) != TASK_EPISODE_SCHEMA_VERSION:
+        reasons.append("task_episode_schema_mismatch")
+    if not isinstance(session_index.get("agent_event_counts"), dict):
+        reasons.append("agent_event_counts_missing")
+    if not isinstance(session_index.get("task_episode_counts"), dict):
+        reasons.append("task_episode_counts_missing")
+    if not isinstance(session_index.get("task_episodes"), list):
+        reasons.append("task_episodes_missing")
+    return reasons
 
 
 def reindex_sessions(
@@ -12694,7 +13145,8 @@ def reindex_sessions(
         if target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
         else:
-            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+            selection_limit = None if stale_route_indexes else limit
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=selection_limit)
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -12722,6 +13174,8 @@ def reindex_sessions(
     candidate_selected_count = len(records)
     if stale_route_indexes:
         records = [record for record in records if session_record_has_stale_route_index(record)]
+        if limit is not None:
+            records = records[: max(0, limit)]
     counts: Counter[str] = Counter()
     results: list[dict[str, Any]] = []
     for record in records:
@@ -13635,7 +14089,7 @@ def route_index_drift_records(records: list[dict[str, Any]]) -> list[dict[str, A
         session_dir = session_dir_from_record(record)
         session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
         manifest = read_json(session_dir / "session.manifest.json", {})
-        reasons = route_signal_index_stale_reasons(session_index if isinstance(session_index, dict) else {})
+        reasons = generated_session_index_stale_reasons(session_index if isinstance(session_index, dict) else {})
         if not isinstance(session_index, dict) or not session_index:
             reasons = ["missing_session_index"]
         drift.append(
@@ -13746,6 +14200,7 @@ def sqlite_search_index_state(
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         metadata = search_index_metadata(conn)
+        schema_diagnostics = search_schema_diagnostics(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         route_counts = search_route_storage_counts(conn)
         selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
@@ -13765,7 +14220,7 @@ def sqlite_search_index_state(
     route_term_count = route_counts["route_term_count"]
     db_mtime = path_mtime(db_path)
     dirty_sessions = search_dirty_projection_states(selected_fingerprints, indexed_session_states) if records is not None else []
-    reasons: list[str] = []
+    reasons: list[str] = list(schema_diagnostics)
     if schema_version != str(SEARCH_SCHEMA_VERSION):
         reasons.append("search_schema_mismatch")
     if document_count <= 0:
@@ -17882,6 +18337,7 @@ def reindex_print_payload(payload: dict[str, Any], *, full: bool = False, sample
 
 CONVERSATION_ACT_ELIGIBLE_EVENT_TYPES = {
     "USER_INTENT",
+    "ASSISTANT_REASONING_BOUNDARY",
     "ASSISTANT_PLAN",
     "ASSISTANT_MESSAGE",
     "TOOL_CALL",
@@ -18393,6 +18849,7 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         metadata = search_index_metadata(conn)
+        schema_diagnostics = search_schema_diagnostics(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
@@ -18407,7 +18864,7 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
             "diagnostics": [f"sqlite_error:{exc}"],
         }
     schema_version = str(metadata.get("schema_version") or "")
-    diagnostics: list[str] = []
+    diagnostics: list[str] = list(schema_diagnostics)
     if total <= 0:
         diagnostics.append("search index has no documents")
     if schema_version != str(SEARCH_SCHEMA_VERSION):
@@ -18430,6 +18887,91 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         "document_counts": counts,
         **route_counts,
         "diagnostics": diagnostics,
+    }
+
+
+def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "provider": "portable_sqlite",
+            "ok": False,
+            "status": "missing",
+            "db_path": str(db_path),
+            "diagnostics": ["search index missing; run search-index"],
+            "count_mode": "not_counted_fast",
+        }
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        metadata = search_index_metadata(conn)
+        schema_diagnostics = search_schema_diagnostics(conn)
+        has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
+        has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
+        has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+        conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "provider": "portable_sqlite",
+            "ok": False,
+            "status": "sqlite_error",
+            "db_path": str(db_path),
+            "diagnostics": [f"sqlite_error:{exc}"],
+            "count_mode": "not_counted_fast",
+        }
+    schema_version = str(metadata.get("schema_version") or "")
+    diagnostics: list[str] = list(schema_diagnostics)
+    if not has_documents:
+        diagnostics.append("search index has no documents")
+    if schema_version != str(SEARCH_SCHEMA_VERSION):
+        diagnostics.append("search_schema_mismatch")
+    if has_documents and not has_routes:
+        diagnostics.append("search_route_index_empty")
+    if has_routes and not has_route_terms:
+        diagnostics.append("search_route_terms_empty")
+    ok = has_documents and not diagnostics
+    status = "ready" if ok else ("empty" if not has_documents else "stale")
+    return {
+        "provider": "portable_sqlite",
+        "ok": ok,
+        "status": status,
+        "db_path": str(db_path),
+        "index_generated_at": metadata.get("generated_at"),
+        "search_schema_version": schema_version,
+        "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
+        "has_documents": has_documents,
+        "has_route_index": has_routes,
+        "has_route_terms": has_route_terms,
+        "count_mode": "not_counted_fast",
+        "diagnostics": diagnostics,
+    }
+
+
+def search_provider_status_fast(
+    *,
+    aoa_root: Path,
+    provider_name: str = "portable_sqlite",
+) -> dict[str, Any]:
+    now = utc_now()
+    config = search_provider_config(aoa_root)
+    default_provider = str(config.get("default_provider") or "portable_sqlite")
+    if provider_name != "portable_sqlite":
+        return search_provider_status(aoa_root=aoa_root, provider_name=provider_name)
+    provider = sqlite_provider_status_fast(aoa_root)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_provider_status",
+        "provider_schema_version": SEARCH_PROVIDER_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": bool(provider.get("ok")),
+        "aoa_root": str(aoa_root),
+        "config_path": str(aoa_root / SEARCH_PROVIDER_CONFIG_PATH),
+        "default_provider": default_provider,
+        "authority_law": config.get("authority_law"),
+        "selected_provider": provider_name,
+        "status_mode": "fast_presence_probe",
+        "providers": {"portable_sqlite": provider},
+        "diagnostics": [] if provider.get("ok") else [f"portable_sqlite:{provider.get('status')}"],
     }
 
 
@@ -18895,6 +19437,8 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
             outcome TEXT,
             conversation_act TEXT,
             session_act TEXT,
+            agent_event TEXT,
+            task_episode_id TEXT,
             route_layers TEXT,
             route_signals TEXT,
             tags TEXT,
@@ -18976,6 +19520,10 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
     if "session_act" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN session_act TEXT")
+    if "agent_event" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN agent_event TEXT")
+    if "task_episode_id" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN task_episode_id TEXT")
     if "route_layers" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN route_layers TEXT")
     if "route_signals" not in existing_columns:
@@ -18989,6 +19537,11 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_agent_event ON documents(agent_event)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_task_episode ON documents(task_episode_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_agent_event ON documents(session_label, agent_event)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_task_episode ON documents(session_label, task_episode_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_doc_type ON documents(session_label, doc_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)")
@@ -19280,6 +19833,8 @@ SEARCH_DOCUMENT_COLUMN_KEYS = frozenset(
         "outcome",
         "conversation_act",
         "session_act",
+        "agent_event",
+        "task_episode_id",
         "route_layers",
         "route_signals",
         "tags",
@@ -19317,7 +19872,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             id, doc_type, session_id, session_label, session_title, session_date,
             cwd, archive_status, distillation_status, review_status, segment_id,
             event_id, event_type, family, phase, actor, action, object, outcome,
-            conversation_act, session_act, route_layers, route_signals, tags, raw_ref, raw_block_ref, segment_ref,
+            conversation_act, session_act, agent_event, task_episode_id, route_layers, route_signals, tags, raw_ref, raw_block_ref, segment_ref,
             manifest_path, raw_path, segment_index_path, raw_sha256,
             segment_index_sha256, freshness_status, stale_reason, title, body,
             payload_json
@@ -19326,7 +19881,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
             :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
             :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
-            :conversation_act, :session_act, :route_layers, :route_signals, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+            :conversation_act, :session_act, :agent_event, :task_episode_id, :route_layers, :route_signals, :tags, :raw_ref, :raw_block_ref, :segment_ref,
             :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
             :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
             :payload_json
@@ -19355,6 +19910,8 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
                 "outcome",
                 "conversation_act",
                 "session_act",
+                "agent_event",
+                "task_episode_id",
                 "tags",
                 "raw_ref",
                 "raw_block_ref",
@@ -19526,6 +20083,76 @@ def search_documents_for_record(
         }
     )
 
+    task_episodes = session_index_payload.get("task_episodes") if isinstance(session_index_payload.get("task_episodes"), list) else []
+    event_episode_ids: dict[str, str] = {}
+    for episode in task_episodes:
+        if not isinstance(episode, dict):
+            continue
+        episode_id = str(episode.get("episode_id") or "")
+        if not episode_id:
+            continue
+        for bucket in (
+            "reasoning_refs",
+            "plan_refs",
+            "progress_refs",
+            "answer_refs",
+            "action_refs",
+            "tool_refs",
+            "verification_refs",
+            "error_refs",
+            "closeout_refs",
+            "blocker_refs",
+            "transition_refs",
+        ):
+            for ref in episode.get(bucket, []) if isinstance(episode.get(bucket), list) else []:
+                if isinstance(ref, dict) and ref.get("event_id"):
+                    event_episode_ids[str(ref["event_id"])] = episode_id
+        start_ref = episode.get("start_user_ref") if isinstance(episode.get("start_user_ref"), dict) else {}
+        if start_ref.get("event_id"):
+            event_episode_ids[str(start_ref["event_id"])] = episode_id
+        episode_segment_index_path = Path(str(start_ref.get("segment_index") or ""))
+        episode_segment_index_sha = sha256_file(episode_segment_index_path) if episode_segment_index_path.exists() else ""
+        episode_body = search_doc_text(
+            [
+                session_label,
+                session_title,
+                episode_id,
+                episode.get("status"),
+                episode.get("confidence"),
+                episode.get("transition"),
+                start_ref,
+                episode.get("ambiguity_flags"),
+                {
+                    "reasoning_ref_count": len(episode.get("reasoning_refs", [])) if isinstance(episode.get("reasoning_refs"), list) else 0,
+                    "plan_ref_count": len(episode.get("plan_refs", [])) if isinstance(episode.get("plan_refs"), list) else 0,
+                    "progress_ref_count": len(episode.get("progress_refs", [])) if isinstance(episode.get("progress_refs"), list) else 0,
+                    "answer_ref_count": len(episode.get("answer_refs", [])) if isinstance(episode.get("answer_refs"), list) else 0,
+                    "verification_ref_count": len(episode.get("verification_refs", [])) if isinstance(episode.get("verification_refs"), list) else 0,
+                    "closeout_ref_count": len(episode.get("closeout_refs", [])) if isinstance(episode.get("closeout_refs"), list) else 0,
+                    "error_ref_count": len(episode.get("error_refs", [])) if isinstance(episode.get("error_refs"), list) else 0,
+                },
+            ],
+            max_chars=3600,
+        )
+        documents.append(
+            {
+                **base,
+                "id": f"task_episode:{session_id}:{episode_id}",
+                "doc_type": "task_episode",
+                "task_episode_id": episode_id,
+                "title": f"{session_label} {episode_id} {episode.get('status') or ''}".strip(),
+                "body": episode_body,
+                "raw_ref": str(start_ref.get("raw_ref") or ""),
+                "raw_block_ref": "",
+                "segment_ref": str(start_ref.get("segment_ref") or session_dir / SESSION_INDEX_MARKDOWN),
+                "segment_index_path": str(start_ref.get("segment_index") or ""),
+                "segment_index_sha256": episode_segment_index_sha,
+                "route_layers": session_route_layers,
+                "route_signals": session_route_signals,
+                "tags": "task_episode " + " ".join(str(item) for item in episode.get("ambiguity_flags", []) if item) if isinstance(episode.get("ambiguity_flags"), list) else "task_episode",
+            }
+        )
+
     for incident_path in sorted((session_dir / "incidents").glob("*")):
         if not incident_path.is_file() or incident_path.suffix not in {".md", ".json"}:
             continue
@@ -19611,6 +20238,9 @@ def search_documents_for_record(
             facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
             conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
             session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+            agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+            agent_event_class = str(agent_event.get("class") or "")
+            task_episode_id = event_episode_ids.get(str(event.get("event_id") or ""), "")
             route_layers, route_signals = route_fields_from_signals(facets.get("route_signals")) if segment_route_index_current else ("", "")
             event_type = str(event.get("type") or "")
             line_no = int_value(event.get("line"))
@@ -19632,6 +20262,8 @@ def search_documents_for_record(
                     conversation_act.get("kind"),
                     conversation_act.get("intent"),
                     session_act.get("kind"),
+                    agent_event_class,
+                    task_episode_id,
                     session_act.get("memory_surface"),
                     session_act.get("tool_namespace"),
                     route_layers,
@@ -19658,6 +20290,8 @@ def search_documents_for_record(
                     "outcome": str(event.get("outcome") or ""),
                     "conversation_act": str(conversation_act.get("kind") or ""),
                     "session_act": str(session_act.get("kind") or ""),
+                    "agent_event": agent_event_class,
+                    "task_episode_id": task_episode_id,
                     "route_layers": route_layers,
                     "route_signals": route_signals,
                     "tags": tags,
@@ -19922,6 +20556,8 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
         "outcome": row["outcome"],
         "conversation_act": row["conversation_act"],
         "session_act": row["session_act"] if "session_act" in row.keys() else None,
+        "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+        "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
         "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
         "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
         "title": row["title"],
@@ -19938,6 +20574,8 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
                 "family": row["family"],
                 "conversation_act": row["conversation_act"],
                 "session_act": row["session_act"] if "session_act" in row.keys() else None,
+                "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+                "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
                 "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
                 "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
                 "archive_status": row["archive_status"],
@@ -19978,6 +20616,43 @@ def sqlite_table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+REQUIRED_SEARCH_DOCUMENT_COLUMNS = {
+    "id",
+    "doc_type",
+    "session_id",
+    "session_label",
+    "session_act",
+    "agent_event",
+    "task_episode_id",
+    "route_layers",
+    "route_signals",
+    "payload_json",
+}
+
+
+REQUIRED_SEARCH_TABLES = {
+    "documents",
+    "documents_fts",
+    "document_bodies",
+    "route_terms",
+    "document_routes",
+    "session_index_state",
+    "meta",
+}
+
+
+def search_schema_diagnostics(conn: sqlite3.Connection) -> list[str]:
+    tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    diagnostics: list[str] = []
+    for table in sorted(REQUIRED_SEARCH_TABLES - tables):
+        diagnostics.append(f"search_schema_missing_table:{table}")
+    if "documents" in tables:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        for column in sorted(REQUIRED_SEARCH_DOCUMENT_COLUMNS - columns):
+            diagnostics.append(f"search_schema_missing_column:documents.{column}")
+    return diagnostics
+
+
 def search_route_storage_counts(conn: sqlite3.Connection) -> dict[str, int]:
     route_count = 0
     route_doc_count = 0
@@ -20013,6 +20688,8 @@ def search_sessions(
     outcome: str | None = None,
     conversation_act: str | None = None,
     session_act: str | None = None,
+    agent_event: str | None = None,
+    task_episode_id: str | None = None,
     route_layer: str | None = None,
     route_signal: str | None = None,
     archive_status: str | None = None,
@@ -20071,6 +20748,8 @@ def search_sessions(
         ("documents.outcome", outcome),
         ("documents.conversation_act", conversation_act),
         ("documents.session_act", session_act),
+        ("documents.agent_event", agent_event),
+        ("documents.task_episode_id", task_episode_id),
         ("documents.archive_status", archive_status),
         ("documents.freshness_status", freshness_status),
     ]:
@@ -20156,12 +20835,15 @@ def search_sessions(
         for row in rows
     ]
     accelerator_provider = provider if provider != "portable_sqlite" else "abyss_machine_nervous"
-    provider_payload = search_provider_status(
-        aoa_root=aoa_root,
-        provider_name=provider,
-        include_host=provider != "portable_sqlite",
-        timeout=host_timeout,
-    )
+    if provider == "portable_sqlite" and not include_host_context:
+        provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
+    else:
+        provider_payload = search_provider_status(
+            aoa_root=aoa_root,
+            provider_name=provider,
+            include_host=provider != "portable_sqlite",
+            timeout=host_timeout,
+        )
     accelerator_status: dict[str, Any] | None = None
     if rerank_local or include_semantic_context:
         accelerator_status = search_provider_status(
@@ -20250,6 +20932,299 @@ def search_sessions(
         "result_count": len(results),
         "results": results,
         "diagnostics": diagnostics,
+    }
+
+
+AGENT_RESPONSE_ROUTE_CLASSES = [
+    "assistant_answer",
+    "assistant_final_closeout",
+    "assistant_verification_report",
+    "assistant_blocker_report",
+    "assistant_handoff_or_resume",
+    "assistant_correction_ack",
+]
+
+
+def merge_search_results_by_doc_id(payloads: list[dict[str, Any]], *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
+    merged: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    for payload in payloads:
+        diagnostics.extend(str(item) for item in payload.get("diagnostics", []) if item)
+        for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+            doc_id = str(result.get("doc_id") or "")
+            if not doc_id or doc_id in merged:
+                continue
+            merged[doc_id] = result
+    return list(merged.values())[: max(1, limit)], diagnostics
+
+
+def agent_event_route_search(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    limit: int = 20,
+    session: str | None = None,
+    task_episode_id: str | None = None,
+    agent_events: list[str] | None = None,
+    provider: str = "portable_sqlite",
+    explain: bool = True,
+) -> dict[str, Any]:
+    now = utc_now()
+    classes = [item for item in (agent_events or []) if item]
+    if not classes:
+        classes = AGENT_RESPONSE_ROUTE_CLASSES
+    payloads = [
+        search_sessions(
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            session=session,
+            doc_type="event",
+            agent_event=agent_class,
+            task_episode_id=task_episode_id,
+            explain=explain,
+        )
+        for agent_class in classes
+    ]
+    results, diagnostics = merge_search_results_by_doc_id(payloads, limit=limit)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "agent_event_route_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": all(payload.get("ok") for payload in payloads),
+        "query": query,
+        "session": session or "",
+        "task_episode_id": task_episode_id or "",
+        "agent_events": classes,
+        "provider": payloads[0].get("provider") if payloads else {},
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+        "next_route": "Use refs.segment_index/raw for authority; this route only narrows assistant event evidence.",
+    }
+
+
+def compact_event_record_for_window(event: dict[str, Any]) -> dict[str, Any]:
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+    agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+    return {
+        "event_id": event.get("event_id"),
+        "line": event.get("line"),
+        "raw_ref": event.get("raw_ref"),
+        "segment_ref": event.get("md_anchor"),
+        "event_type": event.get("type"),
+        "source_type": event.get("source_type"),
+        "title": event.get("title"),
+        "conversation_act": conversation_act.get("kind"),
+        "session_act": session_act.get("kind"),
+        "agent_event": agent_event.get("class"),
+        "outcome": event.get("outcome"),
+    }
+
+
+def event_window_for_search_result(hit: dict[str, Any], *, before: int = 3, after: int = 6) -> dict[str, Any]:
+    refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+    segment_index_path = Path(str(refs.get("segment_index") or ""))
+    event_id = str(hit.get("event_id") or "")
+    if not event_id or not segment_index_path.exists():
+        return {
+            "ok": False,
+            "doc_id": hit.get("doc_id"),
+            "event_id": event_id,
+            "diagnostics": ["segment_index_missing_or_event_id_empty"],
+        }
+    index = read_json(segment_index_path, {})
+    events = index.get("events") if isinstance(index.get("events"), list) else []
+    position = next((idx for idx, event in enumerate(events) if isinstance(event, dict) and str(event.get("event_id") or "") == event_id), -1)
+    if position < 0:
+        return {
+            "ok": False,
+            "doc_id": hit.get("doc_id"),
+            "event_id": event_id,
+            "segment_index": str(segment_index_path),
+            "diagnostics": ["event_not_found_in_segment_index"],
+        }
+    start = max(0, position - max(0, before))
+    end = min(len(events), position + max(0, after) + 1)
+    window_events = [
+        compact_event_record_for_window(event)
+        for event in events[start:end]
+        if isinstance(event, dict)
+    ]
+    return {
+        "ok": True,
+        "doc_id": hit.get("doc_id"),
+        "session_label": hit.get("session_label"),
+        "segment_id": hit.get("segment_id"),
+        "event_id": event_id,
+        "target_offset": position - start,
+        "window_scope": "segment_index",
+        "before": before,
+        "after": after,
+        "events": window_events,
+        "refs": refs,
+    }
+
+
+def agent_event_windows(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    limit: int = 10,
+    session: str | None = None,
+    task_episode_id: str | None = None,
+    agent_events: list[str] | None = None,
+    before: int = 3,
+    after: int = 6,
+    provider: str = "portable_sqlite",
+) -> dict[str, Any]:
+    payload = agent_event_route_search(
+        aoa_root=aoa_root,
+        query=query,
+        limit=limit,
+        session=session,
+        task_episode_id=task_episode_id,
+        agent_events=agent_events,
+        provider=provider,
+        explain=True,
+    )
+    windows = [
+        event_window_for_search_result(hit, before=before, after=after)
+        for hit in payload.get("results", []) if isinstance(hit, dict)
+    ]
+    payload["artifact_type"] = "agent_event_windows"
+    payload["window_count"] = len(windows)
+    payload["windows"] = windows
+    return payload
+
+
+def task_episode_verification_state(episode: dict[str, Any]) -> str:
+    return "verified" if isinstance(episode.get("verification_refs"), list) and episode["verification_refs"] else "unverified"
+
+
+def task_episode_failure_state(episode: dict[str, Any]) -> str:
+    if episode.get("status") == "blocked":
+        return "blocked"
+    if isinstance(episode.get("error_refs"), list) and episode["error_refs"]:
+        return "failed"
+    return "no_failure_seen"
+
+
+def compact_task_episode(episode: dict[str, Any], *, session_label: str, session_id: str) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "session_label": session_label,
+        "episode_id": episode.get("episode_id"),
+        "status": episode.get("status"),
+        "confidence": episode.get("confidence"),
+        "verification_state": task_episode_verification_state(episode),
+        "failure_state": task_episode_failure_state(episode),
+        "ambiguity_flags": episode.get("ambiguity_flags", []),
+        "transition": episode.get("transition", {}),
+        "event_range": episode.get("event_range", {}),
+        "start_user_ref": episode.get("start_user_ref", {}),
+        "counts": {
+            "reasoning": len(episode.get("reasoning_refs", [])) if isinstance(episode.get("reasoning_refs"), list) else 0,
+            "plans": len(episode.get("plan_refs", [])) if isinstance(episode.get("plan_refs"), list) else 0,
+            "progress": len(episode.get("progress_refs", [])) if isinstance(episode.get("progress_refs"), list) else 0,
+            "answers": len(episode.get("answer_refs", [])) if isinstance(episode.get("answer_refs"), list) else 0,
+            "actions": len(episode.get("action_refs", [])) if isinstance(episode.get("action_refs"), list) else 0,
+            "tools": len(episode.get("tool_refs", [])) if isinstance(episode.get("tool_refs"), list) else 0,
+            "verification": len(episode.get("verification_refs", [])) if isinstance(episode.get("verification_refs"), list) else 0,
+            "errors": len(episode.get("error_refs", [])) if isinstance(episode.get("error_refs"), list) else 0,
+            "closeouts": len(episode.get("closeout_refs", [])) if isinstance(episode.get("closeout_refs"), list) else 0,
+            "blockers": len(episode.get("blocker_refs", [])) if isinstance(episode.get("blocker_refs"), list) else 0,
+        },
+        "sample_refs": {
+            "reasoning": episode.get("reasoning_refs", [])[:3] if isinstance(episode.get("reasoning_refs"), list) else [],
+            "answers": episode.get("answer_refs", [])[:3] if isinstance(episode.get("answer_refs"), list) else [],
+            "progress": episode.get("progress_refs", [])[:3] if isinstance(episode.get("progress_refs"), list) else [],
+            "verification": episode.get("verification_refs", [])[:3] if isinstance(episode.get("verification_refs"), list) else [],
+            "closeouts": episode.get("closeout_refs", [])[:3] if isinstance(episode.get("closeout_refs"), list) else [],
+            "errors": episode.get("error_refs", [])[:3] if isinstance(episode.get("error_refs"), list) else [],
+        },
+        "truth_level": "generated_navigation_not_reviewed_truth",
+    }
+
+
+def task_episode_route_search(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    session: str | None = None,
+    episode: str | None = None,
+    status: str | None = None,
+    verification_state: str | None = None,
+    failure_state: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        if session:
+            records = [resolve_session_record(aoa_root, session)]
+        elif target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, limit=None)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "task_episode_route_results",
+            "generated_at": now,
+            "ok": False,
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [str(exc)],
+        }
+    results: list[dict[str, Any]] = []
+    selected_count = 0
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        if not isinstance(index, dict):
+            continue
+        session_label = str(index.get("display", {}).get("label") if isinstance(index.get("display"), dict) else record.get("session_label") or session_dir.name)
+        session_id = str(index.get("session_id") or record.get("session_id") or "")
+        for item in index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            selected_count += 1
+            compact = compact_task_episode(item, session_label=session_label, session_id=session_id)
+            if episode and str(compact.get("episode_id") or "") != episode:
+                continue
+            if status and str(compact.get("status") or "") != status:
+                continue
+            if verification_state and compact.get("verification_state") != verification_state:
+                continue
+            if failure_state and compact.get("failure_state") != failure_state:
+                continue
+            results.append(compact)
+            if len(results) >= max(1, limit):
+                break
+        if len(results) >= max(1, limit):
+            break
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "task_episode_route_results",
+        "task_episode_schema_version": TASK_EPISODE_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": True,
+        "target": target,
+        "session": session or "",
+        "episode": episode or "",
+        "status": status or "",
+        "verification_state": verification_state or "",
+        "failure_state": failure_state or "",
+        "selected_episode_count": selected_count,
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": [],
+        "next_route": "Open start_user_ref, sample refs, or session segment indexes for authority.",
     }
 
 
@@ -28805,6 +29780,8 @@ def command_search(args: argparse.Namespace) -> int:
         outcome=args.outcome,
         conversation_act=args.conversation_act,
         session_act=args.session_act,
+        agent_event=args.agent_event,
+        task_episode_id=args.task_episode_id,
         route_layer=args.route_layer,
         route_signal=args.route_signal,
         archive_status=args.archive_status,
@@ -28812,6 +29789,67 @@ def command_search(args: argparse.Namespace) -> int:
         date_from=args.date_from,
         date_to=args.date_to,
         explain=args.explain,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_agent_responses(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    query = args.query or args.query_text or ""
+    classes = list(args.agent_event or [])
+    if args.closeout_final:
+        classes = ["assistant_final_closeout"]
+    if args.verification_state == "verified":
+        classes = ["assistant_verification_report"]
+    if args.failure_state in {"failed", "blocked"}:
+        classes = ["assistant_blocker_report"]
+    payload = agent_event_route_search(
+        aoa_root=root,
+        query=query,
+        limit=args.limit,
+        session=args.session_filter,
+        task_episode_id=args.task_episode_id,
+        agent_events=classes,
+        provider=args.provider,
+        explain=args.explain,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_agent_event_windows(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    query = args.query or args.query_text or ""
+    payload = agent_event_windows(
+        aoa_root=root,
+        query=query,
+        limit=args.limit,
+        session=args.session_filter,
+        task_episode_id=args.task_episode_id,
+        agent_events=list(args.agent_event or []),
+        before=args.before,
+        after=args.after,
+        provider=args.provider,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_task_episodes(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = task_episode_route_search(
+        aoa_root=root,
+        target=args.target,
+        session=args.session_filter,
+        episode=args.task_episode_id,
+        status=args.status,
+        verification_state=args.verification_state,
+        failure_state=args.failure_state,
+        limit=args.limit,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -32788,12 +33826,14 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay even when host quality gates report warnings.")
     search.add_argument("--host-timeout", type=int, default=45)
     search.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
-    search.add_argument("--doc-type", choices=["session", "segment", "event", "incident"])
+    search.add_argument("--doc-type", choices=["session", "segment", "event", "incident", "task_episode"])
     search.add_argument("--event-type")
     search.add_argument("--family")
     search.add_argument("--outcome")
     search.add_argument("--conversation-act")
     search.add_argument("--session-act")
+    search.add_argument("--agent-event")
+    search.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     search.add_argument("--route-layer", help="Filter by generated route-signal layer such as scope_contract.")
     search.add_argument("--route-signal", help="Filter by generated route signal in layer:key form.")
     search.add_argument("--archive-status")
@@ -32802,6 +33842,89 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     search.set_defaults(func=command_search)
+
+    agent_responses = sub.add_parser(
+        "agent-responses",
+        aliases=["agent-answers"],
+        help="Find canonical assistant responses by generated agent-event class with refs and freshness.",
+    )
+    agent_responses.add_argument("query_text", nargs="?", default="", help="Search text. Use --query when the text begins with a dash.")
+    agent_responses.add_argument("--query", help="Search text.")
+    agent_responses.add_argument("--workspace-root")
+    agent_responses.add_argument("--aoa-root")
+    agent_responses.add_argument("--limit", type=int, default=20)
+    agent_responses.add_argument("--provider", default="portable_sqlite")
+    agent_responses.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    agent_responses.add_argument("--agent-event", action="append", help="Repeatable agent-event class filter.")
+    agent_responses.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    agent_responses.add_argument("--closeout-final", action="store_true", help="Return assistant_final_closeout events only.")
+    agent_responses.add_argument("--verification-state", choices=["any", "verified"], default="any")
+    agent_responses.add_argument("--failure-state", choices=["any", "failed", "blocked"], default="any")
+    agent_responses.add_argument("--explain", action="store_true")
+    agent_responses.set_defaults(func=command_agent_responses)
+
+    agent_closeouts = sub.add_parser("agent-closeouts", help="Find assistant final closeout events.")
+    agent_closeouts.add_argument("query_text", nargs="?", default="")
+    agent_closeouts.add_argument("--query")
+    agent_closeouts.add_argument("--workspace-root")
+    agent_closeouts.add_argument("--aoa-root")
+    agent_closeouts.add_argument("--limit", type=int, default=20)
+    agent_closeouts.add_argument("--provider", default="portable_sqlite")
+    agent_closeouts.add_argument("--session", dest="session_filter")
+    agent_closeouts.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    agent_closeouts.add_argument("--explain", action="store_true")
+    agent_closeouts.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_final_closeout"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
+
+    agent_progress = sub.add_parser("agent-progress-updates", help="Find assistant progress updates separately from answers.")
+    agent_progress.add_argument("query_text", nargs="?", default="")
+    agent_progress.add_argument("--query")
+    agent_progress.add_argument("--workspace-root")
+    agent_progress.add_argument("--aoa-root")
+    agent_progress.add_argument("--limit", type=int, default=20)
+    agent_progress.add_argument("--provider", default="portable_sqlite")
+    agent_progress.add_argument("--session", dest="session_filter")
+    agent_progress.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    agent_progress.add_argument("--explain", action="store_true")
+    agent_progress.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_progress_update"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
+
+    reasoning_windows = sub.add_parser("agent-reasoning-windows", help="Find assistant reasoning boundary events and bounded neighboring events.")
+    reasoning_windows.add_argument("query_text", nargs="?", default="")
+    reasoning_windows.add_argument("--query")
+    reasoning_windows.add_argument("--workspace-root")
+    reasoning_windows.add_argument("--aoa-root")
+    reasoning_windows.add_argument("--limit", type=int, default=10)
+    reasoning_windows.add_argument("--provider", default="portable_sqlite")
+    reasoning_windows.add_argument("--session", dest="session_filter")
+    reasoning_windows.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    reasoning_windows.add_argument("--before", type=int, default=3)
+    reasoning_windows.add_argument("--after", type=int, default=6)
+    reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
+
+    answer_neighborhood = sub.add_parser("answer-neighborhood", help="Find assistant answer-like events and return bounded neighboring events.")
+    answer_neighborhood.add_argument("query_text", nargs="?", default="")
+    answer_neighborhood.add_argument("--query")
+    answer_neighborhood.add_argument("--workspace-root")
+    answer_neighborhood.add_argument("--aoa-root")
+    answer_neighborhood.add_argument("--limit", type=int, default=10)
+    answer_neighborhood.add_argument("--provider", default="portable_sqlite")
+    answer_neighborhood.add_argument("--session", dest="session_filter")
+    answer_neighborhood.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    answer_neighborhood.add_argument("--agent-event", action="append", help="Repeatable agent-event class filter; defaults to answer/closeout/report classes.")
+    answer_neighborhood.add_argument("--before", type=int, default=3)
+    answer_neighborhood.add_argument("--after", type=int, default=6)
+    answer_neighborhood.set_defaults(func=command_agent_event_windows)
+
+    task_episodes_parser = sub.add_parser("task-episodes", help="List generated task episodes with status, verification/failure filters, and refs.")
+    task_episodes_parser.add_argument("target", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    task_episodes_parser.add_argument("--workspace-root")
+    task_episodes_parser.add_argument("--aoa-root")
+    task_episodes_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    task_episodes_parser.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    task_episodes_parser.add_argument("--status", choices=["open", "closed", "blocked", "handoff", "interrupted"])
+    task_episodes_parser.add_argument("--verification-state", choices=["verified", "unverified"])
+    task_episodes_parser.add_argument("--failure-state", choices=["failed", "blocked", "no_failure_seen"])
+    task_episodes_parser.add_argument("--limit", type=int, default=20)
+    task_episodes_parser.set_defaults(func=command_task_episodes)
 
     trace_route_parser = sub.add_parser(
         "trace-route",

@@ -183,6 +183,37 @@ receipt/result evidence rather than direct "usage" events. For hook health,
 start with hook receipt routes and use entity usage audit as surrounding
 session evidence.
 
+## Agent Event And Task Episode Route
+
+Agent answers, progress updates, reasoning boundaries, closeouts, blockers,
+handoffs, and verification reports are generated navigation classes under
+`facets.agent_event`. They are not reviewed truth and they do not expose hidden
+reasoning content. A reasoning item is indexed as a boundary/context event with
+refs and neighbors; interpretation belongs to a later reviewed layer.
+
+Segment indexes expose `by_agent_event`. Session indexes expose
+`agent_event_counts`, `task_episode_counts`, and `task_episodes`. A task
+episode links the start user ref, reasoning boundary refs, plan refs, action
+and tool refs, verification refs, error/blocker refs, and final/closeout refs
+inside a bounded generated interval. Ambiguous boundaries carry confidence and
+`ambiguity_flags` instead of pretending the episode is reviewed truth.
+
+Use these routes when the question is about what the agent answered or how a
+task interval unfolded:
+
+```bash
+python3 scripts/aoa_session_memory.py agent-responses --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-closeouts --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-progress-updates --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-reasoning-windows --session latest --limit 10
+python3 scripts/aoa_session_memory.py task-episodes latest --limit 20
+python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --limit 10
+```
+
+The SQLite search route stores `agent_event` and `task_episode_id` as first
+class filters. MCP may expose these read-only packets, but maintenance,
+reindex, repair, and promotion stay outside MCP.
+
 ### PostCompact
 
 Purpose: capture the closed interval after compaction succeeds.

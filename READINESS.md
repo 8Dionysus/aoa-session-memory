@@ -31,6 +31,12 @@ Build the `.aoa` session-memory mechanism end to end:
 - Operational route-signal layer: event `facets.route_signals`,
   segment `by_route_layer` / `by_route_signal`, session
   `route_signal_counts`, search filters, and atlas generation
+- Agent event and task episode layer: event `facets.agent_event`, segment
+  `by_agent_event`, session `agent_event_counts`, `task_episode_counts`,
+  generated `task_episodes`, SQLite `agent_event` / `task_episode_id`
+  filters, and CLI routes `agent-responses`, `agent-closeouts`,
+  `agent-progress-updates`, `agent-reasoning-windows`, `task-episodes`, and
+  `answer-neighborhood`
 - Agent atlas skeleton: `maps/`, `config/atlas-policy.json`, and
   `schemas/atlas-route-entry.schema.json`
 - Distillation routes: `config/event-distillation-routes.json`
@@ -104,6 +110,12 @@ python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /pa
 python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
+python3 scripts/aoa_session_memory.py agent-responses --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-closeouts --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-progress-updates --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-reasoning-windows --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
+python3 scripts/aoa_session_memory.py task-episodes latest --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --limit 20
+python3 scripts/aoa_session_memory.py answer-neighborhood --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
 python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
 python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
@@ -337,6 +349,23 @@ Last observed result:
   heavy first dirty source is skipped while a later cheap source is applied.
   Source `.aoa` and the standalone bundle passed py_compile, `107` pytest
   tests, `validate`, and `doctor`; the standalone portable audit also passed.
+- 2026-06-13 agent-event/task-episode live proof: generated session indexes
+  are current across `206` indexed live sessions with `6687` generated task
+  episodes, `56347` assistant answers, and `147269` reasoning-boundary events
+  in session indexes. Portable SQLite was refreshed to `1443382` documents,
+  including `6698` `task_episode` docs and `496415` docs carrying
+  `task_episode_id`; provider status is `ready`, route-readiness diagnostics
+  are `0`, and atlas build produced `74860` entries across `52` axes.
+  Live CLI/MCP probes on
+  `2026-06-04__003__у-нас-в-отрефакторенных-репо-есть-определенным` returned
+  fresh refs for agent responses, closeouts, progress updates, reasoning
+  windows, answer neighborhoods, and task episodes. Graph maintenance remains
+  a bounded blocker for this layer: `graph-maintenance all --apply
+  --batch-limit 50 --refresh-chunk-size 250 --max-refresh-nodes 50000
+  --max-refresh-edges 100000` was stopped after RSS grew past `9.9 GiB`; the
+  read-only follow-up reported `remaining_count=3941` dirty graph sources in
+  `diagnostics/20260613T043359Z__graph-maintenance.json`. Treat graph
+  freshness as deferred until graph refresh memory profile is tightened.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite
@@ -467,6 +496,8 @@ Stress-pass evidence:
 | Session archives have a local route card and table of contents before agents open individual sessions | `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`, doctor checks, semantic-name and registry recovery regression tests |
 | Segment Markdown has sibling indexes | segment generation, doctor, tests |
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
+| Agent answers, progress updates, closeouts, blockers, handoffs, verification reports, and reasoning boundaries are searchable without treating generated classes as reviewed truth | `facets.agent_event`, `by_agent_event`, `agent_event_counts`, `agent-responses`, `agent-closeouts`, `agent-progress-updates`, `agent-reasoning-windows`, agent-event regression test |
+| Task intervals can be inspected as generated navigation packets with raw/segment refs | `task_episodes`, `task_episode_counts`, `task-episodes`, `answer-neighborhood`, task-episode regression test |
 | Segment and session indexes expose operational route signals for the 22-layer map | `facets.route_signals`, `by_route_layer`, `by_route_signal`, `route_signal_counts`, route-signal regression tests |
 | Stable AoA skill and MCP service names route agents through canonical map axes | `entity:aoa_memo_writeback`, `entity:aoa_memo_mcp`, `mcp:aoa_memo_mcp`, `maps/by-entity/INDEX.md`, `maps/by-mcp/INDEX.md`, route-signal regression tests |
 | Agents can start from a named operational anchor instead of hand-picking a map axis | `trace-route`, `resolve-anchor`, route-trace regression test, 2026-05-26 live route-trace reports |

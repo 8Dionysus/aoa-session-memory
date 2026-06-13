@@ -2,6 +2,7 @@
   "schema_version": 1,
   "routes": {
     "USER_INTENT": ["intent_pattern", "prompt_template", "requirement_shape"],
+    "ASSISTANT_REASONING_BOUNDARY": ["reasoning_boundary", "transition_context", "agent_process_gap"],
     "ASSISTANT_PLAN": ["planning_quality", "missed_step", "reusable_plan"],
     "TOOL_CALL": ["tool_usage_pattern", "tool_sequence", "automation_macro"],
     "TOOL_OUTPUT": ["evidence_extract", "signal_noise_ratio", "parser_candidate"],

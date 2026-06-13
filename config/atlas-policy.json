@@ -61,6 +61,11 @@
       "source_signals": ["conversation_act.kind"]
     },
     {
+      "name": "by-agent-event",
+      "route_question": "Which assistant answer, progress, closeout, blocker, handoff, or reasoning boundary class was observed?",
+      "source_signals": ["agent_event.class", "task_episode", "response_item", "event_msg"]
+    },
+    {
       "name": "by-scope-contract",
       "route_question": "What user scope or delivery contract was active?",
       "source_signals": ["operator_prompt", "conversation_act", "assistant_plan", "final_state"]
