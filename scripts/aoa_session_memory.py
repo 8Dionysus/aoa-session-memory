@@ -18691,6 +18691,377 @@ def conversation_act_audit(
     return payload
 
 
+AGENT_EVENT_REF_BUCKETS = (
+    "reasoning_refs",
+    "plan_refs",
+    "progress_refs",
+    "answer_refs",
+    "action_refs",
+    "tool_refs",
+    "verification_refs",
+    "error_refs",
+    "closeout_refs",
+    "blocker_refs",
+    "transition_refs",
+)
+
+
+def agent_event_eligible_event(event: dict[str, Any]) -> bool:
+    source_type = str(event.get("source_type") or "")
+    tags = {str(tag) for tag in event.get("tags", []) if tag} if isinstance(event.get("tags"), list) else set()
+    if source_type == "response_item" and ("assistant" in tags or "reasoning" in tags):
+        return True
+    return source_type == "event_msg" and "agent_message" in tags
+
+
+def agent_event_audit_ref(
+    *,
+    session_label: str,
+    segment_id: str,
+    segment: dict[str, Any],
+    index_path: Path,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+    return {
+        "session_label": session_label,
+        "segment_id": segment_id,
+        "event_id": event.get("event_id"),
+        "line": event.get("line"),
+        "raw_ref": event.get("raw_ref"),
+        "segment_ref": event.get("md_anchor") or segment.get("markdown"),
+        "segment_index": str(index_path),
+        "event_type": event.get("type"),
+        "source_type": event.get("source_type"),
+        "title": event.get("title"),
+        "agent_event": agent_event.get("class"),
+        "agent_event_source": agent_event.get("source_lane"),
+        "canonical": agent_event.get("canonical"),
+        "ambiguity_flags": agent_event.get("ambiguity_flags", []),
+    }
+
+
+def agent_event_audit_route_probe(aoa_root: Path, session_label: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    probes: list[dict[str, Any]] = []
+    for route, classes in [
+        ("agent-responses", None),
+        ("agent-progress-updates", ["assistant_progress_update"]),
+        ("agent-closeouts", ["assistant_final_closeout"]),
+    ]:
+        started = time.monotonic()
+        payload = agent_event_route_search(
+            aoa_root=aoa_root,
+            session=session_label,
+            agent_events=classes,
+            limit=limit,
+            include_stream_copies=False,
+            explain=False,
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        stream_sources = [item for item in results if isinstance(item, dict) and item.get("agent_event_source") == "event_msg_stream"]
+        probes.append(
+            {
+                "route": route,
+                "ok": bool(payload.get("ok")),
+                "elapsed_ms": elapsed_ms,
+                "result_count": len(results),
+                "stream_copy_result_count": len(stream_sources),
+                "agent_event_sources": sorted({str(item.get("agent_event_source") or "") for item in results if isinstance(item, dict)}),
+                "sample_refs": [
+                    {
+                        "event_id": item.get("event_id"),
+                        "agent_event": item.get("agent_event"),
+                        "agent_event_source": item.get("agent_event_source"),
+                        "raw_ref": (item.get("refs") or {}).get("raw") if isinstance(item.get("refs"), dict) else "",
+                        "segment_index": (item.get("refs") or {}).get("segment_index") if isinstance(item.get("refs"), dict) else "",
+                    }
+                    for item in results[: min(3, len(results))]
+                    if isinstance(item, dict)
+                ],
+            }
+        )
+    return probes
+
+
+def agent_event_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Agent Event Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- event_count: `{payload.get('event_count')}`",
+        f"- eligible_agent_event_count: `{payload.get('eligible_agent_event_count')}`",
+        f"- quality_ok: `{payload.get('quality_ok')}`",
+        "",
+        "## Weak Spots",
+        "",
+    ]
+    weak_spots = payload.get("weak_spots") if isinstance(payload.get("weak_spots"), dict) else {}
+    for bucket in ["taxonomy_gap", "classifier_gap", "index_gap", "search_mcp_surface_gap", "task_episode_gap"]:
+        items = weak_spots.get(bucket) if isinstance(weak_spots.get(bucket), list) else []
+        lines.append(f"### `{bucket}`")
+        lines.append("")
+        if items:
+            for item in items:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- none")
+        lines.append("")
+    lines.extend(["## Agent Event Counts", "", "| class | count |", "| --- | ---: |"])
+    for kind, count in sorted((payload.get("agent_event_counts") or {}).items()):
+        lines.append(f"| `{kind}` | {count} |")
+    lines.extend(["", "## Source Lanes", "", "| source lane | count |", "| --- | ---: |"])
+    for lane, count in sorted((payload.get("source_lane_counts") or {}).items()):
+        lines.append(f"| `{lane}` | {count} |")
+    lines.extend(["", "## Samples", ""])
+    for section in ["missing_agent_event_samples", "stream_canonical_pair_samples", "zero_count_episode_samples", "index_gap_samples"]:
+        lines.append(f"### `{section}`")
+        lines.append("")
+        samples = payload.get(section) if isinstance(payload.get(section), list) else []
+        if not samples:
+            lines.append("- none")
+        for item in samples:
+            lines.append(f"- `{item.get('session_label')}` `{item.get('segment_id') or item.get('episode_id')}` `{item.get('event_id') or ''}` raw=`{item.get('raw_ref') or ''}`")
+        lines.append("")
+    probes = payload.get("route_probes") if isinstance(payload.get("route_probes"), list) else []
+    if probes:
+        lines.extend(["## Route Probes", "", "| session | route | ok | elapsed ms | results | stream copies |", "| --- | --- | --- | ---: | ---: | ---: |"])
+        for item in probes:
+            lines.append(
+                f"| `{item.get('session_label')}` | `{item.get('route')}` | `{item.get('ok')}` | "
+                f"{item.get('elapsed_ms')} | {item.get('result_count')} | {item.get('stream_copy_result_count')} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def agent_event_audit(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    sample_limit: int = 3,
+    probe_routes: bool = False,
+    route_probe_limit: int = 5,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        if target and target != "all":
+            records = [resolve_session_record(aoa_root, target)]
+        else:
+            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "agent_event_audit",
+            "generated_at": now,
+            "ok": False,
+            "quality_ok": False,
+            "aoa_root": str(aoa_root),
+            "target": target,
+            "diagnostics": [str(exc)],
+        }
+
+    event_count = 0
+    eligible_count = 0
+    segment_count = 0
+    agent_counts: Counter[str] = Counter()
+    source_lane_counts: Counter[str] = Counter()
+    ambiguity_flag_counts: Counter[str] = Counter()
+    source_type_counts: Counter[str] = Counter()
+    event_type_counts: Counter[str] = Counter()
+    missing_samples: list[dict[str, Any]] = []
+    pair_samples: list[dict[str, Any]] = []
+    index_gap_samples: list[dict[str, Any]] = []
+    zero_episode_samples: list[dict[str, Any]] = []
+    missing_agent_event_count = 0
+    stream_pair_count = 0
+    index_gap_count = 0
+    zero_episode_count = 0
+    task_episode_count = 0
+    route_probes: list[dict[str, Any]] = []
+
+    for record in records:
+        session_label = str(record.get("session_label") or "")
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        task_episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
+        task_episode_count += len(task_episodes)
+        for episode in task_episodes:
+            if not isinstance(episode, dict):
+                continue
+            bucket_total = sum(len(episode.get(bucket, [])) for bucket in AGENT_EVENT_REF_BUCKETS if isinstance(episode.get(bucket), list))
+            if bucket_total == 0:
+                zero_episode_count += 1
+                if len(zero_episode_samples) < sample_limit:
+                    start_ref = episode.get("start_user_ref") if isinstance(episode.get("start_user_ref"), dict) else {}
+                    zero_episode_samples.append(
+                        {
+                            "session_label": session_label,
+                            "episode_id": episode.get("episode_id"),
+                            "status": episode.get("status"),
+                            "raw_ref": start_ref.get("raw_ref"),
+                            "segment_index": start_ref.get("segment_index"),
+                            "ambiguity_flags": episode.get("ambiguity_flags", []),
+                        }
+                    )
+        segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            index_path = Path(str(segment.get("index") or ""))
+            if not index_path.is_file():
+                continue
+            segment_count += 1
+            index = read_json(index_path, {})
+            segment_id = str(index.get("segment_id") or segment.get("segment_id") or index_path.stem.split("__", 1)[0])
+            events = index.get("events") if isinstance(index.get("events"), list) else []
+            computed_by_agent: Counter[str] = Counter()
+            previous_agent_event: dict[str, Any] | None = None
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_count += 1
+                source_type_counts[str(event.get("source_type") or "")] += 1
+                event_type_counts[str(event.get("type") or "")] += 1
+                facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+                agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+                if agent_event_eligible_event(event):
+                    eligible_count += 1
+                    if not agent_event.get("class"):
+                        missing_agent_event_count += 1
+                        if len(missing_samples) < sample_limit:
+                            missing_samples.append(agent_event_audit_ref(session_label=session_label, segment_id=segment_id, segment=segment, index_path=index_path, event=event))
+                if agent_event.get("class"):
+                    agent_class = str(agent_event.get("class"))
+                    source_lane = str(agent_event.get("source_lane") or "unknown")
+                    agent_counts[agent_class] += 1
+                    source_lane_counts[source_lane] += 1
+                    computed_by_agent[agent_class] += 1
+                    for flag in agent_event.get("ambiguity_flags", []) if isinstance(agent_event.get("ambiguity_flags"), list) else []:
+                        ambiguity_flag_counts[str(flag)] += 1
+                    current = agent_event_audit_ref(session_label=session_label, segment_id=segment_id, segment=segment, index_path=index_path, event=event)
+                    if previous_agent_event:
+                        previous_line = int_value(previous_agent_event.get("line"))
+                        current_line = int_value(current.get("line"))
+                        if (
+                            previous_agent_event.get("agent_event") == current.get("agent_event")
+                            and previous_agent_event.get("agent_event_source") == "event_msg_stream"
+                            and current.get("agent_event_source") == "response_item"
+                            and current_line - previous_line <= 2
+                        ):
+                            stream_pair_count += 1
+                            if len(pair_samples) < sample_limit:
+                                pair_samples.append(
+                                    {
+                                        "session_label": session_label,
+                                        "segment_id": segment_id,
+                                        "event_id": current.get("event_id"),
+                                        "raw_ref": current.get("raw_ref"),
+                                        "stream_event_id": previous_agent_event.get("event_id"),
+                                        "stream_raw_ref": previous_agent_event.get("raw_ref"),
+                                        "agent_event": current.get("agent_event"),
+                                        "segment_index": str(index_path),
+                                    }
+                                )
+                    previous_agent_event = current
+            indexed_by_agent = index.get("by_agent_event") if isinstance(index.get("by_agent_event"), dict) else {}
+            for agent_class, count in computed_by_agent.items():
+                indexed_count = len(indexed_by_agent.get(agent_class, [])) if isinstance(indexed_by_agent.get(agent_class), list) else 0
+                if indexed_count != count:
+                    index_gap_count += 1
+                    if len(index_gap_samples) < sample_limit:
+                        index_gap_samples.append(
+                            {
+                                "session_label": session_label,
+                                "segment_id": segment_id,
+                                "agent_event": agent_class,
+                                "computed_count": count,
+                                "indexed_count": indexed_count,
+                                "segment_index": str(index_path),
+                            }
+                        )
+        if probe_routes:
+            for probe in agent_event_audit_route_probe(aoa_root, session_label, limit=route_probe_limit):
+                probe["session_label"] = session_label
+                route_probes.append(probe)
+
+    route_stream_noise = sum(int(item.get("stream_copy_result_count") or 0) for item in route_probes)
+    route_failures = [item for item in route_probes if not item.get("ok")]
+    weak_spots = {
+        "taxonomy_gap": ["eligible assistant/reasoning events without agent_event facets"] if missing_agent_event_count else [],
+        "classifier_gap": ["stream/canonical neighbor pairs exist in generated indexes and require canonical-first retrieval"] if stream_pair_count else [],
+        "index_gap": ["segment by_agent_event counts differ from event facets"] if index_gap_count else [],
+        "search_mcp_surface_gap": [],
+        "task_episode_gap": ["zero-count task episodes from operator-only or interrupted prompts"] if zero_episode_count else [],
+    }
+    if route_stream_noise:
+        weak_spots["search_mcp_surface_gap"].append("default route probes returned event_msg_stream copies")
+    if route_failures:
+        weak_spots["search_mcp_surface_gap"].append("one or more route probes failed")
+    finding_count = (
+        missing_agent_event_count
+        + stream_pair_count
+        + index_gap_count
+        + zero_episode_count
+        + route_stream_noise
+        + len(route_failures)
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "agent_event_audit",
+        "agent_event_schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "task_episode_schema_version": TASK_EPISODE_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": bool(records),
+        "quality_ok": finding_count == 0,
+        "aoa_root": str(aoa_root),
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(records),
+        "segment_count": segment_count,
+        "event_count": event_count,
+        "eligible_agent_event_count": eligible_count,
+        "missing_eligible_agent_event": missing_agent_event_count,
+        "stream_canonical_neighbor_pair_count": stream_pair_count,
+        "index_gap_count": index_gap_count,
+        "task_episode_count": task_episode_count,
+        "zero_count_task_episode_count": zero_episode_count,
+        "agent_event_counts": dict(sorted(agent_counts.items())),
+        "source_lane_counts": dict(sorted(source_lane_counts.items())),
+        "ambiguity_flag_counts": dict(sorted(ambiguity_flag_counts.items())),
+        "source_type_counts": dict(sorted(source_type_counts.items())),
+        "event_type_counts": dict(sorted(event_type_counts.items())),
+        "weak_spots": weak_spots,
+        "missing_agent_event_samples": missing_samples,
+        "stream_canonical_pair_samples": pair_samples,
+        "zero_count_episode_samples": zero_episode_samples,
+        "index_gap_samples": index_gap_samples,
+        "route_probes": route_probes,
+        "diagnostics": ["quality_findings_present"] if finding_count else [],
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__agent-event-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, agent_event_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def search_db_path(aoa_root: Path) -> Path:
     return aoa_root / SEARCH_ROOT / SEARCH_DB_NAME
 
@@ -20795,22 +21166,46 @@ def cleanup_search_rebuild_temp(temp_db_path: Path) -> None:
 
 
 def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
-    raw_path_value = row["raw_path"] if "raw_path" in row.keys() else ""
-    segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
-    checks: list[dict[str, Any]] = []
-    if raw_path_value:
-        raw_path = Path(str(raw_path_value))
-        if raw_path.exists() and row["raw_sha256"]:
-            checks.append(search_manifest_freshness({"raw": {"sha256": row["raw_sha256"]}}, raw_path))
-        else:
-            checks.append({"status": "unverifiable", "reasons": ["raw_path_missing" if not raw_path.exists() else "raw_sha_missing"]})
-    if segment_path_value:
-        checks.append(segment_index_freshness(Path(str(segment_path_value)), row["segment_index_sha256"]))
-    if checks:
-        return combine_freshness(*checks)
     status = str(row["freshness_status"] or "unverifiable")
     reasons = [reason for reason in str(row["stale_reason"] or "").split(",") if reason]
-    return {"status": status, "reasons": reasons}
+    payload = {
+        "status": status,
+        "reasons": reasons,
+        "basis": "indexed_snapshot",
+        "live_verification": "not_checked_fast_route",
+    }
+    segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
+    segment_sha = row["segment_index_sha256"] if "segment_index_sha256" in row.keys() else ""
+    if segment_path_value:
+        segment_check = segment_index_freshness(Path(str(segment_path_value)), segment_sha)
+        payload["segment_index_live_check"] = segment_check.get("status")
+        if segment_check.get("status") != "fresh":
+            return {
+                **segment_check,
+                "basis": "segment_index_live_check",
+                "raw_live_verification": "not_checked_fast_route",
+            }
+    return payload
+
+
+def agent_event_source_from_tags(tags: Any) -> str:
+    for token in str(tags or "").split():
+        if token.startswith("agent_event_source:"):
+            return token.split(":", 1)[1]
+    return ""
+
+
+def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tuple[str | None, str | None]:
+    if not session:
+        return None, None
+    text = str(session).strip()
+    if not text:
+        return None, None
+    if (aoa_root / "sessions" / text).is_dir():
+        return "documents.session_label", text
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text):
+        return "documents.session_id", text
+    return None, None
 
 
 def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "", full_body: str | None = None) -> dict[str, Any]:
@@ -20842,6 +21237,7 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
         "conversation_act": row["conversation_act"],
         "session_act": row["session_act"] if "session_act" in row.keys() else None,
         "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+        "agent_event_source": agent_event_source_from_tags(row["tags"] if "tags" in row.keys() else ""),
         "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
         "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
         "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
@@ -20860,6 +21256,7 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
                 "conversation_act": row["conversation_act"],
                 "session_act": row["session_act"] if "session_act" in row.keys() else None,
                 "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+                "agent_event_source": agent_event_source_from_tags(row["tags"] if "tags" in row.keys() else ""),
                 "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
                 "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
                 "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
@@ -21023,9 +21420,14 @@ def search_sessions(
     route_filters: list[str] = []
     route_params: list[Any] = []
     if session:
-        filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
-        like = f"%{session}%"
-        params.extend([session, like, like])
+        exact_column, exact_value = exact_session_filter_for_search(aoa_root, session)
+        if exact_column and exact_value:
+            filters.append(f"{exact_column} = ?")
+            params.append(exact_value)
+        else:
+            filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
+            like = f"%{session}%"
+            params.extend([session, like, like])
     for column, value in [
         ("documents.doc_type", doc_type),
         ("documents.event_type", event_type),
@@ -21253,16 +21655,18 @@ def agent_event_route_search(
     agent_events: list[str] | None = None,
     provider: str = "portable_sqlite",
     explain: bool = True,
+    include_stream_copies: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     classes = [item for item in (agent_events or []) if item]
     if not classes:
         classes = AGENT_RESPONSE_ROUTE_CLASSES
+    query_limit = limit if include_stream_copies else max(limit * 4, limit + 10)
     payloads = [
         search_sessions(
             aoa_root=aoa_root,
             query=query,
-            limit=limit,
+            limit=query_limit,
             provider=provider,
             session=session,
             doc_type="event",
@@ -21272,7 +21676,10 @@ def agent_event_route_search(
         )
         for agent_class in classes
     ]
-    results, diagnostics = merge_search_results_by_doc_id(payloads, limit=limit)
+    results, diagnostics = merge_search_results_by_doc_id(payloads, limit=query_limit)
+    if not include_stream_copies:
+        results = [result for result in results if result.get("agent_event_source") != "event_msg_stream"]
+    results = results[: max(1, limit)]
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "agent_event_route_results",
@@ -21284,6 +21691,7 @@ def agent_event_route_search(
         "session": session or "",
         "task_episode_id": task_episode_id or "",
         "agent_events": classes,
+        "include_stream_copies": include_stream_copies,
         "provider": payloads[0].get("provider") if payloads else {},
         "result_count": len(results),
         "results": results,
@@ -21367,6 +21775,7 @@ def agent_event_windows(
     before: int = 3,
     after: int = 6,
     provider: str = "portable_sqlite",
+    include_stream_copies: bool = False,
 ) -> dict[str, Any]:
     payload = agent_event_route_search(
         aoa_root=aoa_root,
@@ -21377,6 +21786,7 @@ def agent_event_windows(
         agent_events=agent_events,
         provider=provider,
         explain=True,
+        include_stream_copies=include_stream_copies,
     )
     windows = [
         event_window_for_search_result(hit, before=before, after=after)
@@ -30124,6 +30534,25 @@ def command_conversation_act_audit(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_agent_event_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = agent_event_audit(
+        aoa_root=root,
+        target=args.session,
+        since=since,
+        until=args.until,
+        limit=args.limit,
+        sample_limit=args.sample_limit,
+        probe_routes=args.probe_routes,
+        route_probe_limit=args.route_probe_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search_index(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -30244,6 +30673,7 @@ def command_agent_responses(args: argparse.Namespace) -> int:
         agent_events=classes,
         provider=args.provider,
         explain=args.explain,
+        include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -30263,6 +30693,7 @@ def command_agent_event_windows(args: argparse.Namespace) -> int:
         before=args.before,
         after=args.after,
         provider=args.provider,
+        include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -34211,6 +34642,20 @@ def build_parser() -> argparse.ArgumentParser:
     conversation_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown conversation-act audit reports under .aoa/diagnostics.")
     conversation_audit.set_defaults(func=command_conversation_act_audit)
 
+    agent_event_audit_parser = sub.add_parser("agent-event-audit", help="Audit agent-event classifier, canonical route, and task episode coverage from generated indexes.")
+    agent_event_audit_parser.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    agent_event_audit_parser.add_argument("--workspace-root")
+    agent_event_audit_parser.add_argument("--aoa-root")
+    agent_event_audit_parser.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    agent_event_audit_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    agent_event_audit_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    agent_event_audit_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    agent_event_audit_parser.add_argument("--sample-limit", type=int, default=3, help="Maximum evidence samples per weak-spot bucket.")
+    agent_event_audit_parser.add_argument("--probe-routes", action="store_true", help="Run bounded live route probes for canonical agent responses/progress/closeouts.")
+    agent_event_audit_parser.add_argument("--route-probe-limit", type=int, default=5, help="Maximum results per live route probe.")
+    agent_event_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown agent-event audit reports under .aoa/diagnostics.")
+    agent_event_audit_parser.set_defaults(func=command_agent_event_audit)
+
     search_index = sub.add_parser(
         "search-index",
         aliases=["aoa-search-index"],
@@ -34297,6 +34742,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_responses.add_argument("--closeout-final", action="store_true", help="Return assistant_final_closeout events only.")
     agent_responses.add_argument("--verification-state", choices=["any", "verified"], default="any")
     agent_responses.add_argument("--failure-state", choices=["any", "failed", "blocked"], default="any")
+    agent_responses.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_responses.add_argument("--explain", action="store_true")
     agent_responses.set_defaults(func=command_agent_responses)
 
@@ -34309,6 +34755,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_closeouts.add_argument("--provider", default="portable_sqlite")
     agent_closeouts.add_argument("--session", dest="session_filter")
     agent_closeouts.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    agent_closeouts.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_closeouts.add_argument("--explain", action="store_true")
     agent_closeouts.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_final_closeout"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -34321,6 +34768,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_progress.add_argument("--provider", default="portable_sqlite")
     agent_progress.add_argument("--session", dest="session_filter")
     agent_progress.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    agent_progress.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_progress.add_argument("--explain", action="store_true")
     agent_progress.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_progress_update"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -34335,6 +34783,7 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning_windows.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     reasoning_windows.add_argument("--before", type=int, default=3)
     reasoning_windows.add_argument("--after", type=int, default=6)
+    reasoning_windows.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
 
     answer_neighborhood = sub.add_parser("answer-neighborhood", help="Find assistant answer-like events and return bounded neighboring events.")
@@ -34349,6 +34798,7 @@ def build_parser() -> argparse.ArgumentParser:
     answer_neighborhood.add_argument("--agent-event", action="append", help="Repeatable agent-event class filter; defaults to answer/closeout/report classes.")
     answer_neighborhood.add_argument("--before", type=int, default=3)
     answer_neighborhood.add_argument("--after", type=int, default=6)
+    answer_neighborhood.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     answer_neighborhood.set_defaults(func=command_agent_event_windows)
 
     task_episodes_parser = sub.add_parser("task-episodes", help="List generated task episodes with status, verification/failure filters, and refs.")

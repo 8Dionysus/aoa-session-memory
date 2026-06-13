@@ -290,6 +290,25 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) ->
     assert closeouts["result_count"] == 1
     assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
     assert closeouts["results"][0]["task_episode_id"] == "task-0001"
+    assert closeouts["results"][0]["freshness"]["basis"] == "indexed_snapshot"
+    progress_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_progress_update"],
+        limit=10,
+    )
+    assert progress_route["result_count"] == 2
+    assert {item["event_id"] for item in progress_route["results"]} == {"000005", "000008"}
+    assert all(item["agent_event_source"] != "event_msg_stream" for item in progress_route["results"])
+    progress_with_stream = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_progress_update"],
+        limit=10,
+        include_stream_copies=True,
+    )
+    assert progress_with_stream["result_count"] == 3
+    assert "event_msg_stream" in {item["agent_event_source"] for item in progress_with_stream["results"]}
     episodes = module.search_sessions(aoa_root=aoa_root, doc_type="task_episode", limit=5)
     assert episodes["result_count"] == 2
     windows = module.agent_event_windows(
