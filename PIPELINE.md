@@ -356,11 +356,15 @@ drift for portable SQLite search, per-session source-fingerprint drift for the
 atlas, and deferred raw mirrors. With `--apply`, it reindexes only stale route
 indexes, updates only dirty search/atlas sessions when schemas are compatible,
 falls back to full rebuild only for missing/corrupt/schema-mismatched stores,
-and records a route-readiness report. Its graph action exposes
-`--graph-batch-limit` for source count and `--graph-refresh-chunk-size` for
-aggregate node/edge recomputation chunks. Use `--sample-audit` when a route
-schema or classifier change requires a new manual calibration packet. Sample
-verdicts still require explicit review.
+and records a route-readiness report over the same selected target/date/limit
+window. After token, route-index, search, or atlas mutation, the controller
+rechecks the selected sources before planning graph maintenance; this prevents a
+green search/atlas pass from leaving graph sources dirty. Its graph action
+exposes `--graph-batch-limit` for source count and
+`--graph-refresh-chunk-size` for aggregate node/edge recomputation chunks. Use
+`--sample-audit` when a route schema or classifier change requires a new manual
+calibration packet. Sample-audit commands inherit the same selected window as
+the controller. Sample verdicts still require explicit review.
 
 For recurring unattended work, use the session-memory auto route above the same
 controller:
@@ -424,6 +428,12 @@ The default command remains strict full-selection truth. `--stable` checks only
 sessions whose projection sources have been quiet for the selected window and
 reports recent live writes under `deferred_live_sessions`; deferred sessions
 are visible but not treated as checked.
+
+Scoped readiness is a truth gate for the selected window, not for the full
+archive unless the command selected the full archive. Portable SQLite freshness
+can therefore report `scope=selected_records` inside route-readiness while the
+global provider status remains stale because of sessions outside the current
+repair window.
 
 Segment indexes must keep both the legacy event map and the universal event
 facets:
@@ -647,7 +657,21 @@ one historical session does not block smaller repairs. `index-maintenance` and
 `graph_max_refresh_edges` guards; individually oversized sources are reported
 under `oversized_sources`, while sources that fit alone but not the current
 combined pass are reported under `budget_deferred_sources` for a narrower or
-heavier pass. Full
+heavier pass. Use `--source-key` with an explicit higher guard when the report
+names a specific oversized graph source and the operator wants to repair that
+source without widening the whole maintenance batch:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-maintenance all \
+  --source-key segment:<session-id>:<segment-id> \
+  --apply \
+  --batch-limit 1 \
+  --max-refresh-nodes 12000 \
+  --max-refresh-edges 20000 \
+  --write-report
+```
+
+Full
 `graph-build all --write --force-large-export` remains the fallback
 for schema changes, corruption, excessive dirty backlog, invariant failure, or
 large historical imports.

@@ -1732,6 +1732,55 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
     conn.close()
 
+    heavy_deferred = module.graph_maintenance(
+        aoa_root=aoa_root,
+        source_keys=[heavy_source_key],
+        apply=True,
+        batch_limit=10,
+        max_refresh_nodes=max(1, heavy_node_cost - 1),
+        max_refresh_edges=max(1, heavy_edge_cost - 1),
+        write_report=True,
+    )
+    assert heavy_deferred["ok"] is True
+    assert heavy_deferred["source_keys"] == [heavy_source_key]
+    assert heavy_deferred["source_state"]["filtered_by_source_key"] is True
+    assert heavy_deferred["source_state"]["source_count"] == 1
+    assert heavy_deferred["selected_count"] == 0
+    assert heavy_deferred["remaining_count"] == 1
+    assert heavy_deferred["oversized_source_count"] == 1
+    assert heavy_deferred["maintenance_detail"]["matched_source_keys"] == [heavy_source_key]
+    assert heavy_deferred["maintenance_detail"]["oversized_plan"][0]["source_key"] == heavy_source_key
+    assert heavy_deferred["unfiltered_source_state"]["source_count"] >= 2
+
+    missing_source = module.graph_maintenance(
+        aoa_root=aoa_root,
+        source_keys=["segment:missing-session:999"],
+        apply=True,
+        batch_limit=10,
+    )
+    assert missing_source["ok"] is False
+    assert missing_source["source_state"]["source_count"] == 0
+    assert missing_source["maintenance_detail"]["missing_source_keys"] == ["segment:missing-session:999"]
+    assert "requested_graph_source_not_found:segment:missing-session:999" in missing_source["diagnostics"]
+
+    heavy_maintained = module.graph_maintenance(
+        aoa_root=aoa_root,
+        source_keys=[heavy_source_key],
+        apply=True,
+        batch_limit=10,
+        max_refresh_nodes=heavy_node_cost,
+        max_refresh_edges=heavy_edge_cost,
+        write_report=True,
+    )
+    assert heavy_maintained["ok"] is True
+    assert heavy_maintained["selected_count"] == 1
+    assert heavy_maintained["remaining_count"] == 0
+    assert heavy_maintained["maintenance_detail"]["selected_sources"] == [heavy_source_key]
+    assert any(item["source_key"] == heavy_source_key and item["status"] == "updated" for item in heavy_maintained["results"])
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 1
+    conn.close()
+
 
 def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -3421,6 +3470,80 @@ def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_p
     assert refreshed["atlas_dirty_session_count"] == 0
     assert refreshed["search_index"]["status"] == "current"
     assert refreshed["atlas_index"]["status"] == "current"
+
+
+def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = [
+        ("old-stale", "2026-06-01T00:00:00Z", "Old session outside the hot maintenance window"),
+        ("hot-dirty", "2026-06-02T00:00:00Z", "Hot session inside the maintenance window"),
+    ]
+    for session_id, timestamp, text in sessions:
+        transcript = tmp_path / f"rollout-{timestamp.replace(':', '-')}-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": timestamp, "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo)}},
+                {"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}},
+                {"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Indexed scoped maintenance fixture."}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    for session_id, name in [
+        ("old-stale", "prior scoped control"),
+        ("hot-dirty", "active scoped repair"),
+    ]:
+        semantic = module.set_session_semantic_name(
+            aoa_root=aoa_root,
+            target=session_id,
+            name=name,
+            scope="session",
+            kind="session_essence",
+            evidence_refs=["raw:line:2"],
+            from_line=1,
+            to_line=3,
+            apply=True,
+            verify_raw_hash=True,
+        )
+        assert semantic["status"] == "applied"
+
+    applied = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        since="2026-06-02",
+        apply=True,
+        graph_batch_limit=10,
+    )
+    actions = {action["id"]: action for action in applied["actions"]}
+    assert actions["rebuild_search_index"]["result"]["selected_count"] == 1
+    assert actions["route_readiness"]["result"]["since"] == "2026-06-02"
+    assert actions["route_readiness"]["result"]["selected_count"] == 1
+
+    full_provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert full_provider["providers"]["portable_sqlite"]["freshness"]["status"] == "stale"
+
+    scoped_readiness = module.route_layer_readiness(aoa_root=aoa_root, target="all", since="2026-06-02")
+    search_gate = next(gate for gate in scoped_readiness["global_gates"] if gate["name"] == "portable_sqlite_search_index")
+    provider = search_gate["evidence"]["providers"]["portable_sqlite"]
+    assert search_gate["status"] == "covered"
+    assert provider["freshness"]["scope"] == "selected_records"
+    assert provider["freshness"]["dirty_session_count"] == 0
 
 
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:

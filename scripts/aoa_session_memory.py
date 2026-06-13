@@ -14434,18 +14434,27 @@ def maintain_indexes(
         + (["--until", until] if until else [])
         + (["--limit", str(limit)] if limit is not None else [])
     )
-    search_reasons = search_state.get("reasons") if isinstance(search_state.get("reasons"), list) else []
-    search_rebuild_required = (
-        str(search_state.get("status") or "") in {"missing", "empty", "sqlite_error"}
-        or "search_schema_mismatch" in search_reasons
-        or "search_route_index_empty" in search_reasons
-        or "search_route_terms_empty" in search_reasons
-    )
-    atlas_reasons = atlas_state.get("reasons") if isinstance(atlas_state.get("reasons"), list) else []
-    atlas_rebuild_required = (
-        str(atlas_state.get("status") or "") in {"missing", "empty", "invalid"}
-        or "atlas_schema_mismatch" in atlas_reasons
-    )
+    def search_rebuild_required_for(state: dict[str, Any]) -> bool:
+        reasons = state.get("reasons") if isinstance(state.get("reasons"), list) else []
+        return (
+            str(state.get("status") or "") in {"missing", "empty", "sqlite_error"}
+            or "search_schema_mismatch" in reasons
+            or "search_route_index_empty" in reasons
+            or "search_route_terms_empty" in reasons
+        )
+
+    def atlas_rebuild_required_for(state: dict[str, Any]) -> bool:
+        reasons = state.get("reasons") if isinstance(state.get("reasons"), list) else []
+        return (
+            str(state.get("status") or "") in {"missing", "empty", "invalid"}
+            or "atlas_schema_mismatch" in reasons
+        )
+
+    def current_selected_records() -> list[dict[str, Any]]:
+        return [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+
+    search_rebuild_required = search_rebuild_required_for(search_state)
+    atlas_rebuild_required = atlas_rebuild_required_for(atlas_state)
     search_dirty_selector = search_state.get("dirty_session_ids") if isinstance(search_state.get("dirty_session_ids"), list) else search_state.get("dirty_sessions", [])
     atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
@@ -14501,7 +14510,7 @@ def maintain_indexes(
             "route_readiness",
             reason="post_maintenance_gate",
             needed=repair_indexes and index_repair_needed,
-            command=base + ["route-readiness", "all", *root_args, "--write-report"],
+            command=base + ["route-readiness", target, *root_args] + selection_args + ["--write-report"],
         ),
         maintenance_action(
             "graph_maintenance",
@@ -14526,7 +14535,10 @@ def maintain_indexes(
             "route_sample_audit",
             reason="classifier_or_schema_reindex_calibration",
             needed=repair_indexes and sample_audit and bool(route_drift),
-            command=base + ["route-sample-audit", "all", *root_args, "--sample-limit", str(sample_limit), "--max-raw-chars", str(max_raw_chars), "--write-report"],
+            command=base
+            + ["route-sample-audit", target, *root_args]
+            + selection_args
+            + ["--sample-limit", str(sample_limit), "--max-raw-chars", str(max_raw_chars), "--write-report"],
         ),
     ]
     if not repair_indexes and index_repair_needed:
@@ -14541,6 +14553,7 @@ def maintain_indexes(
 
     action_results: list[dict[str, Any]] = []
     budget_exhausted = False
+    post_maintenance_states: dict[str, Any] = {}
 
     def budget_remaining() -> float | None:
         if deadline is None:
@@ -14554,6 +14567,8 @@ def maintain_indexes(
     if apply:
         reindex_ran = False
         token_backfill_ran = False
+        post_index_ran = False
+        graph_ran = False
         if actions[0]["needed"]:
             if not has_budget():
                 budget_exhausted = True
@@ -14644,23 +14659,111 @@ def maintain_indexes(
                 action_results.append(actions[3])
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[4]["needed"] or reindex_ran or token_backfill_ran:
-            if not has_budget():
-                budget_exhausted = True
-                actions[4]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[4])
-            else:
-                result = route_layer_readiness(
-                    aoa_root=aoa_root,
-                    target="all",
-                    sample_limit=sample_limit,
-                    write_report=write_report,
-                )
-                actions[4]["status"] = "applied" if result.get("ok") else "remaining"
-                actions[4]["result"] = {key: result.get(key) for key in ("ok", "covered_requirement_count", "required_requirement_count", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[4])
-                if not result.get("ok") and result.get("diagnostics"):
-                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if repair_indexes and has_budget():
+            try:
+                refreshed_records = current_selected_records()
+                refreshed_latest_source_mtime, refreshed_latest_source_paths = latest_index_source_mtime(aoa_root, refreshed_records)
+                refreshed_search_state = sqlite_search_index_state(aoa_root, refreshed_latest_source_mtime, refreshed_records)
+                post_maintenance_states["post_projection_latest_source_mtime"] = refreshed_latest_source_mtime
+                post_maintenance_states["post_projection_latest_source_paths"] = refreshed_latest_source_paths
+                post_maintenance_states["post_projection_search_index"] = refreshed_search_state
+                if refreshed_search_state.get("needs_refresh"):
+                    refreshed_search_rebuild_required = search_rebuild_required_for(refreshed_search_state)
+                    refreshed_search_dirty_selector = (
+                        refreshed_search_state.get("dirty_session_ids")
+                        if isinstance(refreshed_search_state.get("dirty_session_ids"), list)
+                        else refreshed_search_state.get("dirty_sessions", [])
+                    )
+                    refreshed_search_dirty_records = (
+                        []
+                        if refreshed_search_rebuild_required
+                        else records_matching_projection_states(
+                            refreshed_records,
+                            refreshed_search_dirty_selector if isinstance(refreshed_search_dirty_selector, list) else [],
+                        )
+                    )
+                    post_search_action = maintenance_action(
+                        "reconcile_search_index",
+                        reason="post_mutation_search_freshness_recheck",
+                        needed=True,
+                        command=base
+                        + ["search-index", "all" if refreshed_search_rebuild_required else target, *root_args]
+                        + ([] if refreshed_search_rebuild_required else selection_args)
+                        + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+                        + ([] if refreshed_search_rebuild_required else ["--no-rebuild"])
+                        + ["--write-report"],
+                    )
+                    result = search_index_sessions(
+                        aoa_root=aoa_root,
+                        target="all" if refreshed_search_rebuild_required else target,
+                        since=None if refreshed_search_rebuild_required else since,
+                        until=None if refreshed_search_rebuild_required else until,
+                        limit=None if refreshed_search_rebuild_required else limit,
+                        max_raw_bytes=max_raw_bytes,
+                        rebuild=refreshed_search_rebuild_required,
+                        write_report=write_report,
+                        selected_records=None if refreshed_search_rebuild_required else (refreshed_search_dirty_records or refreshed_records),
+                        budget_seconds=None if refreshed_search_rebuild_required else budget_remaining(),
+                        progress_every=progress_every,
+                    )
+                    post_search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                    post_search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
+                    action_results.append(post_search_action)
+                    post_index_ran = post_index_ran or bool(result.get("selected_count") or result.get("processed_count"))
+                    budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
+                    if not result.get("ok") and result.get("diagnostics"):
+                        diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+
+                refreshed_records = current_selected_records()
+                refreshed_latest_source_mtime, refreshed_latest_source_paths = latest_index_source_mtime(aoa_root, refreshed_records)
+                refreshed_atlas_state = atlas_index_state(aoa_root, refreshed_latest_source_mtime, refreshed_records)
+                post_maintenance_states["post_projection_atlas_index"] = refreshed_atlas_state
+                if refreshed_atlas_state.get("needs_refresh"):
+                    refreshed_atlas_rebuild_required = atlas_rebuild_required_for(refreshed_atlas_state)
+                    refreshed_atlas_dirty_selector = (
+                        refreshed_atlas_state.get("dirty_session_ids")
+                        if isinstance(refreshed_atlas_state.get("dirty_session_ids"), list)
+                        else refreshed_atlas_state.get("dirty_sessions", [])
+                    )
+                    refreshed_atlas_dirty_records = (
+                        []
+                        if refreshed_atlas_rebuild_required
+                        else records_matching_projection_states(
+                            refreshed_records,
+                            refreshed_atlas_dirty_selector if isinstance(refreshed_atlas_dirty_selector, list) else [],
+                        )
+                    )
+                    post_atlas_action = maintenance_action(
+                        "reconcile_agent_atlas",
+                        reason="post_mutation_atlas_freshness_recheck",
+                        needed=True,
+                        command=base
+                        + ["atlas", "build", "all", *root_args]
+                        + ([] if refreshed_atlas_rebuild_required else selection_args)
+                        + ([] if refreshed_atlas_rebuild_required else ["--no-clean"])
+                        + ["--write-report"],
+                    )
+                    result = build_agent_atlas(
+                        aoa_root=aoa_root,
+                        target="all",
+                        clean=refreshed_atlas_rebuild_required,
+                        selected_records=None if refreshed_atlas_rebuild_required else (refreshed_atlas_dirty_records or refreshed_records),
+                        write_report=write_report,
+                    )
+                    post_atlas_action["status"] = "applied" if result.get("ok") else "failed"
+                    post_atlas_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "axis_count", "entry_count", "updated_entry_count", "removed_entry_artifact_count", "report_json", "report_markdown", "diagnostics")}
+                    action_results.append(post_atlas_action)
+                    post_index_ran = post_index_ran or bool(result.get("selected_count"))
+                    if not result.get("ok"):
+                        diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+
+                refreshed_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+                post_maintenance_states["pre_readiness_graph_store"] = refreshed_graph_state
+                if refreshed_graph_state.get("needs_maintenance") or refreshed_graph_state.get("status") == "missing":
+                    actions[5]["needed"] = True
+                    actions[5]["reason"] = "graph_store_missing_or_dirty_after_index_mutation"
+            except ValueError as exc:
+                diagnostics.append(f"post_mutation_freshness_recheck_failed:{exc}")
         if actions[5]["needed"] or reindex_ran or token_backfill_ran:
             if not has_budget():
                 budget_exhausted = True
@@ -14684,6 +14787,43 @@ def maintain_indexes(
                 actions[5]["status"] = "applied" if result.get("ok") else "remaining"
                 actions[5]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "remaining_count", "source_state", "maintenance_detail", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(actions[5])
+                graph_ran = True
+                if not result.get("ok") and result.get("diagnostics"):
+                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if actions[4]["needed"] or reindex_ran or token_backfill_ran or post_index_ran or graph_ran:
+            if not has_budget():
+                budget_exhausted = True
+                actions[4]["status"] = "deferred_budget_exhausted"
+                action_results.append(actions[4])
+            else:
+                result = route_layer_readiness(
+                    aoa_root=aoa_root,
+                    target=target,
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    sample_limit=sample_limit,
+                    write_report=write_report,
+                )
+                actions[4]["status"] = "applied" if result.get("ok") else "remaining"
+                actions[4]["result"] = {
+                    key: result.get(key)
+                    for key in (
+                        "ok",
+                        "target",
+                        "since",
+                        "until",
+                        "limit",
+                        "selected_count",
+                        "covered_requirement_count",
+                        "required_requirement_count",
+                        "report_json",
+                        "report_markdown",
+                        "diagnostics",
+                    )
+                }
+                actions[4]["result"]["remaining_count"] = len(result.get("remaining", []) if isinstance(result.get("remaining"), list) else [])
+                action_results.append(actions[4])
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if actions[6]["needed"]:
@@ -14694,7 +14834,10 @@ def maintain_indexes(
             else:
                 result = route_sample_audit(
                     aoa_root=aoa_root,
-                    target="all",
+                    target=target,
+                    since=since,
+                    until=until,
+                    limit=limit,
                     sample_limit=sample_limit,
                     max_raw_chars=max_raw_chars,
                     write_report=write_report,
@@ -14709,6 +14852,20 @@ def maintain_indexes(
         if action.get("needed") and not any(item.get("id") == action["id"] for item in action_results):
             action_results.append(action)
     action_counts = dict(Counter(str(action.get("status") or "unknown") for action in action_results))
+    final_records = records
+    final_latest_source_mtime = latest_source_mtime
+    final_latest_source_paths = latest_source_paths
+    final_search_state = search_state
+    final_atlas_state = atlas_state
+    final_graph_state = graph_state
+    try:
+        final_records = current_selected_records()
+        final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
+        final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
+        final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
+        final_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        diagnostics.append(f"final_freshness_snapshot_failed:{exc}")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "index_maintenance",
@@ -14734,6 +14891,8 @@ def maintain_indexes(
         "budget_exhausted": budget_exhausted,
         "latest_source_mtime": latest_source_mtime,
         "latest_source_paths": latest_source_paths,
+        "final_latest_source_mtime": final_latest_source_mtime,
+        "final_latest_source_paths": final_latest_source_paths,
         "token_backfill": {
             "ok": token_backfill_state.get("ok"),
             "selected_count": token_backfill_state.get("selected_count"),
@@ -14758,6 +14917,10 @@ def maintain_indexes(
         "search_index": search_state,
         "atlas_index": atlas_state,
         "graph_store": graph_state,
+        "post_maintenance_states": post_maintenance_states,
+        "final_search_index": final_search_state,
+        "final_atlas_index": final_atlas_state,
+        "final_graph_store": final_graph_state,
         "action_counts": action_counts,
         "actions": action_results,
         "diagnostics": diagnostics,
@@ -14805,6 +14968,9 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
         f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
         f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
+        f"- final_search_index: `{(payload.get('final_search_index') or {}).get('status') if isinstance(payload.get('final_search_index'), dict) else ''}`",
+        f"- final_atlas_index: `{(payload.get('final_atlas_index') or {}).get('status') if isinstance(payload.get('final_atlas_index'), dict) else ''}`",
+        f"- final_graph_store: `{(payload.get('final_graph_store') or {}).get('status') if isinstance(payload.get('final_graph_store'), dict) else ''}`",
         "",
         "## Actions",
         "",
@@ -18839,7 +19005,13 @@ def compact_rerank_health_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sqlite_provider_status(aoa_root: Path, *, check_freshness: bool = True) -> dict[str, Any]:
+def sqlite_provider_status(
+    aoa_root: Path,
+    *,
+    check_freshness: bool = True,
+    freshness_records: list[dict[str, Any]] | None = None,
+    projection_fingerprints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return {
@@ -18881,8 +19053,8 @@ def sqlite_provider_status(aoa_root: Path, *, check_freshness: bool = True) -> d
     freshness: dict[str, Any] = {"status": "unchecked", "checked": False}
     if check_freshness:
         try:
-            records = chronological_session_records(aoa_root)
-            projection_fingerprints = projection_fingerprints_for_records(records)
+            records = freshness_records if freshness_records is not None else chronological_session_records(aoa_root)
+            projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records)
             dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
             latest_source_mtime = max(
                 (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
@@ -18898,6 +19070,7 @@ def sqlite_provider_status(aoa_root: Path, *, check_freshness: bool = True) -> d
             freshness = {
                 "status": "current" if not freshness_reasons else "stale",
                 "checked": True,
+                "scope": "selected_records" if freshness_records is not None or projection_fingerprints is not None else "all_sessions",
                 "selected_session_state_count": len(projection_fingerprints),
                 "indexed_session_state_count": len(indexed_session_states),
                 "dirty_session_count": len(dirty_sessions),
@@ -19125,6 +19298,8 @@ def search_provider_status(
     include_host: bool = False,
     refresh_host: bool = False,
     refresh_host_index: bool = False,
+    freshness_records: list[dict[str, Any]] | None = None,
+    projection_fingerprints: list[dict[str, Any]] | None = None,
     timeout: int = 45,
     write_report: bool = False,
 ) -> dict[str, Any]:
@@ -19136,7 +19311,11 @@ def search_provider_status(
     diagnostics: list[str] = []
     for name in selected:
         if name == "portable_sqlite":
-            results[name] = sqlite_provider_status(aoa_root)
+            results[name] = sqlite_provider_status(
+                aoa_root,
+                freshness_records=freshness_records,
+                projection_fingerprints=projection_fingerprints,
+            )
         elif name in providers:
             if include_host or bool(providers.get(name, {}).get("enabled")):
                 results[name] = host_provider_status(
@@ -19164,7 +19343,11 @@ def search_provider_status(
         if not result.get("ok"):
             diagnostics.append(f"{name}:{result.get('status')}")
     default_provider = str(config.get("default_provider") or "portable_sqlite")
-    default_status = results.get(default_provider) or sqlite_provider_status(aoa_root)
+    default_status = results.get(default_provider) or sqlite_provider_status(
+        aoa_root,
+        freshness_records=freshness_records,
+        projection_fingerprints=projection_fingerprints,
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_provider_status",
@@ -24209,6 +24392,57 @@ def graph_maintenance_plan_sort_key(entry: dict[str, Any]) -> tuple[int, int, in
     )
 
 
+def normalize_graph_source_key_filters(source_keys: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_item in source_keys or []:
+        for part in str(raw_item or "").split(","):
+            source_key = part.strip()
+            if not source_key or source_key in seen:
+                continue
+            seen.add(source_key)
+            normalized.append(source_key)
+    return normalized
+
+
+def graph_source_state_summary(
+    states: list[dict[str, Any]],
+    *,
+    states_payload: dict[str, Any],
+    filtered: bool = False,
+) -> dict[str, Any]:
+    if not filtered:
+        return {
+            key: states_payload.get(key)
+            for key in (
+                "source_count",
+                "existing_source_count",
+                "status_counts",
+                "dirty_count",
+                "missing_count",
+                "blocked_count",
+                "orphaned_count",
+                "out_of_scope_existing_count",
+                "orphan_scope",
+                "selection_scope",
+            )
+        }
+    counts = dict(Counter(str(item.get("status") or "unknown") for item in states if isinstance(item, dict)))
+    return {
+        "source_count": len(states),
+        "existing_source_count": states_payload.get("existing_source_count"),
+        "status_counts": counts,
+        "dirty_count": counts.get("dirty", 0),
+        "missing_count": counts.get("missing", 0),
+        "blocked_count": counts.get("blocked", 0),
+        "orphaned_count": counts.get("orphaned", 0),
+        "out_of_scope_existing_count": states_payload.get("out_of_scope_existing_count"),
+        "orphan_scope": states_payload.get("orphan_scope"),
+        "selection_scope": states_payload.get("selection_scope"),
+        "filtered_by_source_key": True,
+    }
+
+
 def graph_maintenance(
     *,
     aoa_root: Path,
@@ -24216,6 +24450,7 @@ def graph_maintenance(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    source_keys: Iterable[str] | None = None,
     apply: bool = False,
     batch_limit: int = GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT,
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
@@ -24228,6 +24463,23 @@ def graph_maintenance(
     now = utc_now()
     states_payload = graph_source_states(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
     states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
+    requested_source_keys = normalize_graph_source_key_filters(source_keys)
+    missing_requested_source_keys: list[str] = []
+    if requested_source_keys:
+        state_by_source_key = {
+            str(item.get("source_key") or ""): item
+            for item in states
+            if isinstance(item, dict) and item.get("source_key")
+        }
+        missing_requested_source_keys = [
+            source_key for source_key in requested_source_keys
+            if source_key not in state_by_source_key
+        ]
+        states = [
+            state_by_source_key[source_key]
+            for source_key in requested_source_keys
+            if source_key in state_by_source_key
+        ]
     actionable = [
         item for item in states
         if isinstance(item, dict) and item.get("status") in {"dirty", "missing", "orphaned"}
@@ -24244,16 +24496,23 @@ def graph_maintenance(
     candidate_pool_limit = min(len(cheap_sorted_actionable), max(batch_limit * 10, batch_limit, 50))
     candidate_pool = cheap_sorted_actionable[:candidate_pool_limit]
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
+    diagnostics.extend(f"requested_graph_source_not_found:{source_key}" for source_key in missing_requested_source_keys)
     results: list[dict[str, Any]] = []
     maintenance_detail: dict[str, Any] = {
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
         "selection_strategy": "cheap_first_exact_refresh_cost" if apply else "cheap_first_stored_counts",
+        "requested_source_keys": requested_source_keys,
+        "matched_source_keys": [str(item.get("source_key") or "") for item in states if isinstance(item, dict) and item.get("source_key")],
+        "missing_source_keys": missing_requested_source_keys,
     }
     budget_deferred_source_keys: list[str] = []
+    budget_deferred_plan: list[dict[str, Any]] = []
     oversized_source_keys: list[str] = []
+    oversized_plan: list[dict[str, Any]] = []
     batch_deferred_source_keys: list[str] = []
+    batch_deferred_plan: list[dict[str, Any]] = []
     selected_plan: list[dict[str, Any]] = []
     if apply and candidate_pool:
         store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
@@ -24337,6 +24596,7 @@ def graph_maintenance(
                 individual_over_edge_budget = max_refresh_edges is not None and len(source_edge_ids) > max_refresh_edges
                 if individual_over_node_budget or individual_over_edge_budget:
                     oversized_source_keys.append(source_key)
+                    oversized_plan.append(graph_maintenance_plan_summary(entry))
                     results.append(
                         {
                             **graph_maintenance_plan_summary(entry),
@@ -24348,6 +24608,7 @@ def graph_maintenance(
                     continue
                 if len(selected_plan) >= batch_limit:
                     batch_deferred_source_keys.append(source_key)
+                    batch_deferred_plan.append(graph_maintenance_plan_summary(entry))
                     continue
                 next_node_ids = planned_node_ids | source_node_ids
                 next_edge_ids = planned_edge_ids | source_edge_ids
@@ -24355,6 +24616,7 @@ def graph_maintenance(
                 over_edge_budget = max_refresh_edges is not None and len(next_edge_ids) > max_refresh_edges
                 if over_node_budget or over_edge_budget:
                     budget_deferred_source_keys.append(source_key)
+                    budget_deferred_plan.append(graph_maintenance_plan_summary(entry))
                     results.append(
                         {
                             **graph_maintenance_plan_summary(entry),
@@ -24389,10 +24651,13 @@ def graph_maintenance(
                     "selected_plan": [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]],
                     "budget_deferred_source_count": len(budget_deferred_source_keys),
                     "budget_deferred_sources": budget_deferred_source_keys[:40],
+                    "budget_deferred_plan": budget_deferred_plan[:40],
                     "oversized_source_count": len(oversized_source_keys),
                     "oversized_sources": oversized_source_keys[:40],
+                    "oversized_plan": oversized_plan[:40],
                     "batch_deferred_source_count": len(batch_deferred_source_keys),
                     "batch_deferred_sources": batch_deferred_source_keys[:40],
+                    "batch_deferred_plan": batch_deferred_plan[:40],
                 }
             )
 
@@ -24431,25 +24696,21 @@ def graph_maintenance(
         "since": since,
         "until": until,
         "limit": limit,
+        "source_keys": requested_source_keys,
         "batch_limit": batch_limit,
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
         "reason": reason,
-        "source_state": {
-            key: states_payload.get(key)
-            for key in (
-                "source_count",
-                "existing_source_count",
-                "status_counts",
-                "dirty_count",
-                "missing_count",
-                "blocked_count",
-                "orphaned_count",
-                "out_of_scope_existing_count",
-                "orphan_scope",
+        "source_state": graph_source_state_summary(states, states_payload=states_payload, filtered=bool(requested_source_keys)),
+        "unfiltered_source_state": (
+            graph_source_state_summary(
+                states_payload.get("states") if isinstance(states_payload.get("states"), list) else [],
+                states_payload=states_payload,
+                filtered=False,
             )
-        },
+            if requested_source_keys else {}
+        ),
         "selected_count": len(selected),
         "remaining_count": max(0, len(actionable) - len(selected)),
         "budget_deferred_source_count": len(budget_deferred_source_keys),
@@ -24484,6 +24745,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- ok: `{payload.get('ok')}`",
         f"- apply: `{payload.get('apply')}`",
         f"- target: `{payload.get('target')}`",
+        f"- source_keys: `{json.dumps(payload.get('source_keys', []), ensure_ascii=False)}`",
         f"- batch_limit: `{payload.get('batch_limit')}`",
         f"- refresh_chunk_size: `{payload.get('refresh_chunk_size')}`",
         f"- max_refresh_nodes: `{payload.get('max_refresh_nodes')}`",
@@ -24514,6 +24776,9 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- max_refresh_nodes: `{detail.get('max_refresh_nodes')}`",
                 f"- max_refresh_edges: `{detail.get('max_refresh_edges')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
+                f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
+                f"- matched_source_keys: `{json.dumps(detail.get('matched_source_keys', []), ensure_ascii=False)}`",
+                f"- missing_source_keys: `{json.dumps(detail.get('missing_source_keys', []), ensure_ascii=False)}`",
                 f"- planned_candidate_count: `{detail.get('planned_candidate_count')}`",
                 f"- selected_planned_refresh_node_count: `{detail.get('selected_planned_refresh_node_count')}`",
                 f"- selected_planned_refresh_edge_count: `{detail.get('selected_planned_refresh_edge_count')}`",
@@ -24531,6 +24796,22 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         if selected_plan:
             lines.extend(["", "### Selected Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
             for item in selected_plan:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
+                    )
+        oversized_plan = detail.get("oversized_plan") if isinstance(detail.get("oversized_plan"), list) else []
+        if oversized_plan:
+            lines.extend(["", "### Oversized Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
+            for item in oversized_plan:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
+                    )
+        budget_deferred_plan = detail.get("budget_deferred_plan") if isinstance(detail.get("budget_deferred_plan"), list) else []
+        if budget_deferred_plan:
+            lines.extend(["", "### Budget Deferred Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
+            for item in budget_deferred_plan:
                 if isinstance(item, dict):
                     lines.append(
                         f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
@@ -28880,7 +29161,10 @@ def entity_usage_scenario_audit(
         if full:
             sample["audit"] = audit
         samples.append(sample)
-    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_status = search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+    )
     provider_payload = provider_status.get("providers", {}).get("portable_sqlite") if isinstance(provider_status.get("providers"), dict) else {}
     quality = {
         "sample_count": len(samples),
@@ -30102,6 +30386,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    source_keys = getattr(args, "source_keys", None) or getattr(args, "source_key", None)
     def run_maintenance() -> dict[str, Any]:
         return graph_maintenance(
             aoa_root=root,
@@ -30109,6 +30394,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             since=since,
             until=args.until,
             limit=args.limit,
+            source_keys=source_keys,
             apply=args.apply,
             batch_limit=args.batch_limit,
             refresh_chunk_size=args.refresh_chunk_size,
@@ -31163,7 +31449,11 @@ def route_layer_readiness(
     axis_states = atlas_axis_states(aoa_root)
     root_atlas_index = read_json(aoa_root / ATLAS_ROOT / "index.json", {})
     root_atlas_entry_count = int_value(root_atlas_index.get("entry_count")) if isinstance(root_atlas_index, dict) else 0
-    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_status = search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_records=records,
+    )
     provider_ready = bool(provider_status.get("ok"))
 
     requirements: list[dict[str, Any]] = []
@@ -34135,6 +34425,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     graph_maintenance_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     graph_maintenance_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    graph_maintenance_parser.add_argument("--source-key", dest="source_keys", action="append", help="Limit maintenance to exact graph source keys; repeat or comma-separate values.")
     graph_maintenance_parser.add_argument("--batch-limit", type=int, default=GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT, help="Maximum dirty graph sources to process in this pass.")
     graph_maintenance_parser.add_argument("--refresh-chunk-size", type=int, default=GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE, help="Aggregate refresh IN-list chunk size for node/edge recomputation.")
     graph_maintenance_parser.add_argument("--max-refresh-nodes", type=int, help="Defer source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
