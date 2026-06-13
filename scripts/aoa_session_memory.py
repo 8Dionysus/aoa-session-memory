@@ -14039,12 +14039,12 @@ def records_by_session_id(records: list[dict[str, Any]]) -> dict[str, dict[str, 
     return result
 
 
-def records_matching_projection_states(records: list[dict[str, Any]], states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def records_matching_projection_states(records: list[dict[str, Any]], states: list[dict[str, Any] | str]) -> list[dict[str, Any]]:
     by_id = records_by_session_id(records)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
     for state in states:
-        session_id = str(state.get("session_id") or "")
+        session_id = str(state.get("session_id") if isinstance(state, dict) else state or "")
         if not session_id or session_id in seen:
             continue
         record = by_id.get(session_id)
@@ -14248,6 +14248,7 @@ def sqlite_search_index_state(
         "selected_session_state_count": len(selected_fingerprints),
         "indexed_session_state_count": len(indexed_session_states),
         "dirty_session_count": len(dirty_sessions),
+        "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
         "reasons": reasons,
         "diagnostics": [],
@@ -14333,6 +14334,7 @@ def atlas_index_state(
         "expected_schema_version": ATLAS_SCHEMA_VERSION,
         "selected_session_state_count": len(selected_fingerprints),
         "dirty_session_count": len(dirty_sessions),
+        "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
         "reasons": reasons,
         "diagnostics": [],
@@ -14444,8 +14446,10 @@ def maintain_indexes(
         str(atlas_state.get("status") or "") in {"missing", "empty", "invalid"}
         or "atlas_schema_mismatch" in atlas_reasons
     )
-    search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_state.get("dirty_sessions", []) if isinstance(search_state.get("dirty_sessions"), list) else [])
-    atlas_dirty_records = [] if atlas_rebuild_required else records_matching_projection_states(records, atlas_state.get("dirty_sessions", []) if isinstance(atlas_state.get("dirty_sessions"), list) else [])
+    search_dirty_selector = search_state.get("dirty_session_ids") if isinstance(search_state.get("dirty_session_ids"), list) else search_state.get("dirty_sessions", [])
+    atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
+    search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
+    atlas_dirty_records = [] if atlas_rebuild_required else records_matching_projection_states(records, atlas_dirty_selector if isinstance(atlas_dirty_selector, list) else [])
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     search_command = (
@@ -18835,7 +18839,7 @@ def compact_rerank_health_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
+def sqlite_provider_status(aoa_root: Path, *, check_freshness: bool = True) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return {
@@ -18854,6 +18858,7 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
         route_counts = search_route_storage_counts(conn)
+        indexed_session_states = sqlite_search_session_states(conn) if check_freshness else {}
         conn.close()
     except sqlite3.Error as exc:
         return {
@@ -18873,6 +18878,42 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         diagnostics.append("search_route_index_empty")
     if int_value(route_counts.get("route_index_count")) > 0 and int_value(route_counts.get("route_term_count")) <= 0:
         diagnostics.append("search_route_terms_empty")
+    freshness: dict[str, Any] = {"status": "unchecked", "checked": False}
+    if check_freshness:
+        try:
+            records = chronological_session_records(aoa_root)
+            projection_fingerprints = projection_fingerprints_for_records(records)
+            dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
+            latest_source_mtime = max(
+                (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
+                default=0.0,
+            )
+            db_mtime = path_mtime(db_path)
+            freshness_reasons: list[str] = []
+            if dirty_sessions:
+                freshness_reasons.append("session_projection_dirty")
+            elif latest_source_mtime > 0 and db_mtime < latest_source_mtime:
+                freshness_reasons.append("source_newer_than_search_index")
+            diagnostics.extend(reason for reason in freshness_reasons if reason not in diagnostics)
+            freshness = {
+                "status": "current" if not freshness_reasons else "stale",
+                "checked": True,
+                "selected_session_state_count": len(projection_fingerprints),
+                "indexed_session_state_count": len(indexed_session_states),
+                "dirty_session_count": len(dirty_sessions),
+                "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
+                "dirty_sessions": dirty_sessions[:8],
+                "latest_source_mtime": latest_source_mtime,
+                "db_mtime": db_mtime,
+                "reasons": freshness_reasons,
+            }
+        except Exception as exc:
+            diagnostics.append(f"search_freshness_probe_failed:{exc.__class__.__name__}")
+            freshness = {
+                "status": "unknown",
+                "checked": False,
+                "error": short_text(str(exc), max_chars=300),
+            }
     ok = total > 0 and not diagnostics
     status = "ready" if ok else ("empty" if total <= 0 else "stale")
     return {
@@ -18886,6 +18927,7 @@ def sqlite_provider_status(aoa_root: Path) -> dict[str, Any]:
         "document_count": total,
         "document_counts": counts,
         **route_counts,
+        "freshness": freshness,
         "diagnostics": diagnostics,
     }
 
@@ -19394,7 +19436,31 @@ def local_rerank_search_results(
     }
 
 
-def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connection:
+SEARCH_DB_INDEX_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_agent_event ON documents(agent_event)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_task_episode ON documents(task_episode_id)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_session_agent_event ON documents(session_label, agent_event)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_session_task_episode ON documents(session_label, task_episode_id)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_session_doc_type ON documents(session_label, doc_type)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)",
+    "CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)",
+    "CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)",
+    "CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)",
+    "CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, route_id)",
+    "CREATE INDEX IF NOT EXISTS idx_session_index_state_label ON session_index_state(session_label)",
+]
+
+
+def create_search_db_indexes(conn: sqlite3.Connection) -> None:
+    for statement in SEARCH_DB_INDEX_STATEMENTS:
+        conn.execute(statement)
+
+
+def init_search_db(db_path: Path, *, rebuild: bool = False, create_indexes: bool = True) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if rebuild and db_path.exists():
         db_path.unlink()
@@ -19534,21 +19600,8 @@ def init_search_db(db_path: Path, *, rebuild: bool = False) -> sqlite3.Connectio
         USING fts5(title, body, session_label, session_title, content='documents', content_rowid='rowid')
         """
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_agent_event ON documents(agent_event)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_task_episode ON documents(task_episode_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_agent_event ON documents(session_label, agent_event)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_task_episode ON documents(session_label, task_episode_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session_doc_type ON documents(session_label, doc_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, route_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_index_state_label ON session_index_state(session_label)")
+    if create_indexes:
+        create_search_db_indexes(conn)
     conn.commit()
     return conn
 
@@ -20335,6 +20388,12 @@ def search_index_sessions(
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     db_path = search_db_path(aoa_root)
+    write_db_path = db_path
+    temp_db_path: Path | None = None
+    if rebuild:
+        temp_db_path = search_rebuild_temp_path(db_path)
+        cleanup_search_rebuild_temp(temp_db_path)
+        write_db_path = temp_db_path
     try:
         if selected_records is not None:
             records = selected_records
@@ -20372,7 +20431,7 @@ def search_index_sessions(
             "diagnostics": ["no sessions selected"],
             "sessions": [],
         }
-    conn = init_search_db(db_path, rebuild=rebuild)
+    conn = init_search_db(write_db_path, rebuild=rebuild, create_indexes=not rebuild)
     if rebuild:
         reset_search_db(conn)
         conn.commit()
@@ -20444,9 +20503,14 @@ def search_index_sessions(
                 )
             if record_index % 10 == 0:
                 conn.execute("PRAGMA optimize")
+        if rebuild:
+            create_search_db_indexes(conn)
+            conn.commit()
     except sqlite3.Error as exc:
         conn.rollback()
         conn.close()
+        if rebuild and temp_db_path is not None:
+            cleanup_search_rebuild_temp(temp_db_path)
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_index",
@@ -20458,6 +20522,7 @@ def search_index_sessions(
             "document_count": 0,
             "max_raw_bytes": max_raw_bytes,
             "db_path": str(db_path),
+            "build_db_path": str(write_db_path),
             "diagnostics": [f"sqlite_error:{exc}"],
             "sessions": session_results,
         }
@@ -20493,9 +20558,17 @@ def search_index_sessions(
         "event_document_count": counts.get("event", 0),
         "incident_document_count": counts.get("incident", 0),
         "db_path": str(db_path),
+        "build_db_path": str(write_db_path),
         "diagnostics": diagnostics,
         "sessions": session_results,
     }
+    if rebuild and temp_db_path is not None:
+        if payload["ok"]:
+            os.replace(temp_db_path, db_path)
+            payload["replaced_db_path"] = str(db_path)
+        else:
+            cleanup_search_rebuild_temp(temp_db_path)
+            payload["discarded_build_db_path"] = str(temp_db_path)
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -20507,6 +20580,35 @@ def search_index_sessions(
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
+
+
+def search_index_default_rebuild(
+    *,
+    target: str,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    force_rebuild: bool = False,
+    no_rebuild: bool = False,
+) -> bool:
+    if force_rebuild and no_rebuild:
+        raise ValueError("--rebuild and --no-rebuild cannot be used together")
+    if force_rebuild:
+        return True
+    if no_rebuild:
+        return False
+    return (not target or target == "all") and since is None and until is None and limit is None
+
+
+def search_rebuild_temp_path(db_path: Path) -> Path:
+    return db_path.with_name(f".{db_path.name}.rebuild-{os.getpid()}")
+
+
+def cleanup_search_rebuild_temp(temp_db_path: Path) -> None:
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        path = Path(str(temp_db_path) + suffix)
+        if path.exists():
+            path.unlink()
 
 
 def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
@@ -22241,9 +22343,15 @@ def graph_rows_from_maps(nodes: dict[str, dict[str, Any]], edges: dict[str, dict
     )
 
 
-def graph_contributions_for_record(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def graph_contributions_for_record(
+    record: dict[str, Any],
+    *,
+    source_keys: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
     contributions: list[dict[str, Any]] = []
+    source_filter = {str(item) for item in source_keys or set() if str(item)}
+    include_all_sources = not source_filter
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     session_index_path = session_dir / SESSION_INDEX_JSON
@@ -22273,92 +22381,94 @@ def graph_contributions_for_record(record: dict[str, Any]) -> tuple[list[dict[st
     def add_session_edge(edge: dict[str, Any]) -> None:
         graph_add_edge(session_edges, edge)
 
-    add_session_node(
-        {
-            "id": session_node_id,
-            "type": "session",
-            "label": session_label,
-            "title": session_title,
-            "session_id": session_id,
-            "session_label": session_label,
-            "work_context": manifest.get("work_context") or session_index.get("work_context"),
-            "refs": session_refs,
-            "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
-        }
-    )
-
     work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else session_index.get("work_context")
-    if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
-        work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
+    route_signal_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
+    session_source_key = graph_source_key("session", session_id)
+    if include_all_sources or session_source_key in source_filter:
         add_session_node(
             {
-                "id": work_node_id,
-                "type": "work_context",
-                "label": work_context.get("work_name") or work_context.get("work_root"),
-                "work_root": work_context.get("work_root"),
-                "work_family": work_context.get("work_family"),
-                "confidence": work_context.get("confidence"),
-                "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
-            }
-        )
-        add_session_edge(
-            {
-                "source": session_node_id,
-                "target": work_node_id,
-                "type": "has_work_context",
+                "id": session_node_id,
+                "type": "session",
+                "label": session_label,
+                "title": session_title,
                 "session_id": session_id,
+                "session_label": session_label,
+                "work_context": work_context,
+                "refs": session_refs,
                 "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
             }
         )
 
-    route_signal_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
-    for layer, layer_counts in sorted(route_signal_counts.items()):
-        if not isinstance(layer_counts, dict):
-            continue
-        for key, count in sorted(layer_counts.items()):
-            route_node_id = graph_route_node_id(str(layer), str(key))
-            route_signal_value = route_signal_token(route_key_slug(layer, fallback="route_signal"), route_key_slug(key, fallback="generic"))
+        if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
+            work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
             add_session_node(
                 {
-                    "id": route_node_id,
-                    "type": graph_route_node_type(str(layer), str(key)),
-                    "label": route_signal_value,
-                    "route_layer": route_key_slug(layer, fallback="route_signal"),
-                    "route_key": route_key_slug(key, fallback="generic"),
-                    "route_signal": route_signal_value,
-                    "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(route_key_slug(layer, fallback="route_signal"), ""),
+                    "id": work_node_id,
+                    "type": "work_context",
+                    "label": work_context.get("work_name") or work_context.get("work_root"),
+                    "work_root": work_context.get("work_root"),
+                    "work_family": work_context.get("work_family"),
+                    "confidence": work_context.get("confidence"),
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
             add_session_edge(
                 {
                     "source": session_node_id,
-                    "target": route_node_id,
-                    "type": "session_has_route_signal",
+                    "target": work_node_id,
+                    "type": "has_work_context",
                     "session_id": session_id,
-                    "count": int_value(count, 1),
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
 
-    node_rows, edge_rows = graph_rows_from_maps(session_nodes, session_edges)
-    contributions.append(
-        {
-            "source": graph_source_metadata(
-                source_type="session",
-                session_id=session_id,
-                session_label=session_label,
-                source_paths=[manifest_path, session_index_path],
-                identity={
-                    "session_title": session_title,
-                    "work_context": work_context if isinstance(work_context, dict) else {},
-                    "route_signal_counts": route_signal_counts,
-                },
-            ),
-            "nodes": node_rows,
-            "edges": edge_rows,
-        }
-    )
+        for layer, layer_counts in sorted(route_signal_counts.items()):
+            if not isinstance(layer_counts, dict):
+                continue
+            for key, count in sorted(layer_counts.items()):
+                route_node_id = graph_route_node_id(str(layer), str(key))
+                route_signal_value = route_signal_token(route_key_slug(layer, fallback="route_signal"), route_key_slug(key, fallback="generic"))
+                add_session_node(
+                    {
+                        "id": route_node_id,
+                        "type": graph_route_node_type(str(layer), str(key)),
+                        "label": route_signal_value,
+                        "route_layer": route_key_slug(layer, fallback="route_signal"),
+                        "route_key": route_key_slug(key, fallback="generic"),
+                        "route_signal": route_signal_value,
+                        "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(route_key_slug(layer, fallback="route_signal"), ""),
+                        "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
+                    }
+                )
+                add_session_edge(
+                    {
+                        "source": session_node_id,
+                        "target": route_node_id,
+                        "type": "session_has_route_signal",
+                        "session_id": session_id,
+                        "count": int_value(count, 1),
+                        "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
+                    }
+                )
+
+        node_rows, edge_rows = graph_rows_from_maps(session_nodes, session_edges)
+        contributions.append(
+            {
+                "source": graph_source_metadata(
+                    source_type="session",
+                    session_id=session_id,
+                    session_label=session_label,
+                    source_paths=[manifest_path, session_index_path],
+                    identity={
+                        "session_title": session_title,
+                        "work_context": work_context if isinstance(work_context, dict) else {},
+                        "route_signal_counts": route_signal_counts,
+                    },
+                ),
+                "nodes": node_rows,
+                "edges": edge_rows,
+            }
+        )
 
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else session_index.get("segments")
     for segment in segments if isinstance(segments, list) else []:
@@ -22366,6 +22476,9 @@ def graph_contributions_for_record(record: dict[str, Any]) -> tuple[list[dict[st
             continue
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id:
+            continue
+        segment_source_key = graph_source_key("segment", session_id, segment_id)
+        if not include_all_sources and segment_source_key not in source_filter:
             continue
         segment_nodes: dict[str, dict[str, Any]] = {}
         segment_edges: dict[str, dict[str, Any]] = {}
@@ -24007,8 +24120,8 @@ def graph_contribution_for_source(aoa_root: Path, source_state: dict[str, Any]) 
             record = resolve_session_record(aoa_root, session_id)
         except ValueError as exc:
             return None, [str(exc)]
-    contributions, diagnostics = graph_contributions_for_record(record)
     source_key = str(source_state.get("source_key") or "")
+    contributions, diagnostics = graph_contributions_for_record(record, source_keys={source_key} if source_key else None)
     for contribution in contributions:
         source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
         if source.get("source_key") == source_key:
@@ -24123,7 +24236,13 @@ def graph_maintenance(
     refresh_chunk_size = max(1, min(int_value(refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     max_refresh_nodes = None if max_refresh_nodes is None or int_value(max_refresh_nodes) <= 0 else int_value(max_refresh_nodes)
     max_refresh_edges = None if max_refresh_edges is None or int_value(max_refresh_edges) <= 0 else int_value(max_refresh_edges)
-    selected = sorted(actionable, key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")))[:batch_limit]
+    cheap_sorted_actionable = sorted(
+        actionable,
+        key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")),
+    )
+    selected = cheap_sorted_actionable[:batch_limit]
+    candidate_pool_limit = min(len(cheap_sorted_actionable), max(batch_limit * 10, batch_limit, 50))
+    candidate_pool = cheap_sorted_actionable[:candidate_pool_limit]
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     results: list[dict[str, Any]] = []
     maintenance_detail: dict[str, Any] = {
@@ -24136,11 +24255,11 @@ def graph_maintenance(
     oversized_source_keys: list[str] = []
     batch_deferred_source_keys: list[str] = []
     selected_plan: list[dict[str, Any]] = []
-    if apply and actionable:
+    if apply and candidate_pool:
         store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
         try:
             plan_entries: list[dict[str, Any]] = []
-            for state in actionable:
+            for state in candidate_pool:
                 if state.get("status") != "orphaned":
                     continue
                 source_key = str(state.get("source_key") or "")
@@ -24155,7 +24274,7 @@ def graph_maintenance(
                 )
 
             grouped_states: dict[str, list[dict[str, Any]]] = {}
-            for state in actionable:
+            for state in candidate_pool:
                 if state.get("status") == "orphaned":
                     continue
                 session_dir_value = str(state.get("session_dir") or "")
@@ -24167,6 +24286,7 @@ def graph_maintenance(
                 if not group:
                     continue
                 first_state = group[0]
+                group_source_keys = {str(state.get("source_key") or "") for state in group if state.get("source_key")}
                 session_id = str(first_state.get("session_id") or "")
                 session_dir_value = str(first_state.get("session_dir") or "")
                 if session_dir_value:
@@ -24180,7 +24300,7 @@ def graph_maintenance(
                         for state in group:
                             results.append({"source_key": state.get("source_key"), "status": "blocked", "diagnostics": group_diagnostics})
                         continue
-                record_contributions, record_diagnostics = graph_contributions_for_record(record)
+                record_contributions, record_diagnostics = graph_contributions_for_record(record, source_keys=group_source_keys)
                 diagnostics.extend(record_diagnostics)
                 by_source_key: dict[str, dict[str, Any]] = {}
                 for contribution in record_contributions:
@@ -24261,6 +24381,8 @@ def graph_maintenance(
             maintenance_detail.update(
                 {
                     "planned_candidate_count": len(plan_entries),
+                    "candidate_pool_count": len(candidate_pool),
+                    "candidate_pool_limit": candidate_pool_limit,
                     "selected_planned_refresh_node_count": len(planned_node_ids),
                     "selected_planned_refresh_edge_count": len(planned_edge_ids),
                     "selected_sources": [str(entry.get("source_key") or "") for entry in selected_plan[:40]],
@@ -29724,6 +29846,30 @@ def command_search_index(args: argparse.Namespace) -> int:
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
     def run_search_index() -> dict[str, Any]:
+        try:
+            rebuild = search_index_default_rebuild(
+                target=args.session,
+                since=since,
+                until=args.until,
+                limit=args.limit,
+                force_rebuild=args.rebuild,
+                no_rebuild=args.no_rebuild,
+            )
+        except ValueError as exc:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "search_index",
+                "search_schema_version": SEARCH_SCHEMA_VERSION,
+                "generated_at": utc_now(),
+                "ok": False,
+                "target": args.session,
+                "selected_count": 0,
+                "document_count": 0,
+                "max_raw_bytes": max_raw_bytes,
+                "db_path": str(search_db_path(root)),
+                "diagnostics": [str(exc)],
+                "sessions": [],
+            }
         return search_index_sessions(
             aoa_root=root,
             target=args.session,
@@ -29731,7 +29877,7 @@ def command_search_index(args: argparse.Namespace) -> int:
             until=args.until,
             limit=args.limit,
             max_raw_bytes=max_raw_bytes,
-            rebuild=not args.no_rebuild,
+            rebuild=rebuild,
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
@@ -33788,7 +33934,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     search_index.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     search_index.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
-    search_index.add_argument("--no-rebuild", action="store_true", help="Append/update into the existing search DB instead of rebuilding it.")
+    search_index.add_argument("--rebuild", action="store_true", help="Force a destructive rebuild even for scoped targets. Unfiltered all already rebuilds by default.")
+    search_index.add_argument("--no-rebuild", action="store_true", help="Force append/update into the existing search DB instead of rebuilding it.")
     search_index.add_argument("--budget-seconds", type=float, help="Stop after the current session transaction when this wall-clock budget is exhausted.")
     search_index.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
     search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")

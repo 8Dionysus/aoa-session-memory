@@ -1880,19 +1880,24 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert states["missing_count"] >= 2
     assert any(item["status"] == "missing" and item["session_id"] == "second-graph-source" for item in states["states"])
 
-    contribution_calls: list[str] = []
+    contribution_calls: list[tuple[str, set[str] | None]] = []
     original_graph_contributions_for_record = module.graph_contributions_for_record
 
-    def counted_graph_contributions_for_record(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-        contribution_calls.append(str(record.get("session_id") or Path(str(record.get("path") or "")).name))
-        return original_graph_contributions_for_record(record)
+    def counted_graph_contributions_for_record(
+        record: dict[str, Any],
+        *,
+        source_keys: set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        contribution_calls.append((str(record.get("session_id") or Path(str(record.get("path") or "")).name), source_keys))
+        return original_graph_contributions_for_record(record, source_keys=source_keys)
 
     monkeypatch.setattr(module, "graph_contributions_for_record", counted_graph_contributions_for_record)
     inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, refresh_chunk_size=2)
     assert inserted["ok"] is True
     assert inserted["selected_count"] >= 2
     assert inserted["refresh_chunk_size"] == 2
-    assert contribution_calls.count("second-graph-source") == 1
+    assert [session_id for session_id, _source_keys in contribution_calls].count("second-graph-source") == 1
+    assert all(source_keys for session_id, source_keys in contribution_calls if session_id == "second-graph-source")
     assert inserted["maintenance_detail"]["refresh_chunk_size"] == 2
     assert inserted["maintenance_detail"]["replacement_group_count"] == 1
     assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] >= 1
@@ -3080,6 +3085,20 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
         for layer in requirement["layers"]:
             assert layer["samples"] == []
 
+    record = module.resolve_session_record(aoa_root, "route-readiness")
+    session_dir = module.session_dir_from_record(record)
+    session_md = session_dir / module.SESSION_INDEX_MARKDOWN
+    session_md.write_text(session_md.read_text(encoding="utf-8") + "\n\nGenerated route drift.\n", encoding="utf-8")
+
+    stale_payload = module.route_layer_readiness(aoa_root=aoa_root, target="all", sample_limit=0, write_report=False)
+    gates = {gate["name"]: gate for gate in stale_payload["global_gates"]}
+    provider = gates["portable_sqlite_search_index"]["evidence"]["providers"]["portable_sqlite"]
+
+    assert stale_payload["ok"] is False
+    assert gates["portable_sqlite_search_index"]["status"] == "remaining"
+    assert "session_projection_dirty" in provider["diagnostics"]
+    assert provider["freshness"]["dirty_session_count"] == 1
+
     sample_payload = module.route_sample_audit(
         aoa_root=aoa_root,
         target="all",
@@ -3794,6 +3813,124 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
 
 
+def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    sessions = [
+        ("target-refresh-session", "Target refresh body"),
+        ("other-search-session", "Other searchable body"),
+    ]
+    for session_id, text in sessions:
+        transcript = tmp_path / f"rollout-2026-06-13T00-00-00-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo)}},
+                {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}},
+                {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"Answer for {session_id}"}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    full = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert full["ok"] is True
+    assert full["session_document_count"] == 2
+
+    scoped_default = module.search_index_default_rebuild(target="target-refresh-session")
+    assert scoped_default is False
+    assert module.search_index_default_rebuild(target="all") is True
+    assert module.search_index_default_rebuild(target="all", limit=1) is False
+
+    target_label = module.resolve_session_record(aoa_root, "target-refresh-session")["session_label"]
+    scoped = module.search_index_sessions(aoa_root=aoa_root, target=str(target_label), rebuild=scoped_default)
+    assert scoped["ok"] is True
+    assert scoped["session_document_count"] == 1
+    assert scoped["removed_document_count"] >= 1
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    try:
+        state_count = conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0]
+        labels = {row[0] for row in conn.execute("SELECT session_label FROM session_index_state").fetchall()}
+        other_docs = conn.execute("SELECT COUNT(*) FROM documents WHERE session_id = ?", ("other-search-session",)).fetchone()[0]
+    finally:
+        conn.close()
+    assert state_count == 2
+    assert str(target_label) in labels
+    assert other_docs > 0
+
+
+def test_budgeted_full_search_rebuild_does_not_replace_existing_db(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    for index in range(3):
+        session_id = f"atomic-rebuild-{index}"
+        transcript = tmp_path / f"rollout-2026-06-13T00-0{index}-00-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": f"2026-06-13T00:0{index}:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo)}},
+                {"timestamp": f"2026-06-13T00:0{index}:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"atomic body {index}"}]}},
+                {"timestamp": f"2026-06-13T00:0{index}:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"atomic answer {index}"}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    full = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert full["ok"] is True
+    db_path = module.search_db_path(aoa_root)
+    before_size = db_path.stat().st_size
+
+    partial = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True, budget_seconds=0.000001)
+    assert partial["ok"] is False
+    assert partial["budget_exhausted"] is True
+    assert partial["discarded_build_db_path"].endswith(f".{module.SEARCH_DB_NAME}.rebuild-{os.getpid()}")
+    assert not Path(partial["discarded_build_db_path"]).exists()
+    assert db_path.stat().st_size == before_size
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        state_count = conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0]
+        document_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    finally:
+        conn.close()
+    assert state_count == 3
+    assert document_count == full["document_count"]
+
+
+def test_projection_state_selection_uses_full_dirty_id_list_not_sample_only() -> None:
+    records = [{"session_id": f"session-{index}", "session_label": f"label-{index}"} for index in range(45)]
+    dirty_ids = [f"session-{index}" for index in range(45)]
+    selected = module.records_matching_projection_states(records, dirty_ids)
+
+    assert len(selected) == 45
+    assert selected[0]["session_id"] == "session-0"
+    assert selected[-1]["session_id"] == "session-44"
+
+
 def test_search_document_storage_compacts_payloads_without_losing_route_postings(tmp_path: Path) -> None:
     conn = module.init_search_db(tmp_path / "search" / module.SEARCH_DB_NAME, rebuild=True)
     route_signals = module.packed_route_values(module.route_signal_token("tool", f"live-tool-{index}") for index in range(500))
@@ -4020,6 +4157,45 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["providers"]["portable_sqlite"]["status"] == "ready"
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+def test_search_provider_status_detects_session_projection_drift(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-drift.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-drift", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find fresh search evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-drift",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "provider-drift")
+    session_dir = module.session_dir_from_record(record)
+    session_md = session_dir / module.SESSION_INDEX_MARKDOWN
+    session_md.write_text(session_md.read_text(encoding="utf-8") + "\n\nGenerated source drift.\n", encoding="utf-8")
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+
+    assert status["ok"] is False
+    assert provider["ok"] is False
+    assert provider["status"] == "stale"
+    assert "session_projection_dirty" in provider["diagnostics"]
+    assert provider["freshness"]["status"] == "stale"
+    assert provider["freshness"]["dirty_session_count"] == 1
 
 
 def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> None:
