@@ -356,12 +356,19 @@ python3 scripts/aoa_session_memory.py auto-maintenance hot \
   --write-report
 ```
 
-Profiles are `hot` (`probe`, recent graph batch, defers search/atlas repair,
-small refresh chunks), `backlog` (`medium`, recent index and graph repair,
+Profiles are `hot` (`probe`, recent route/search/atlas repair, graph deferred
+with explicit follow-up), `backlog` (`medium`, recent index and graph repair,
 medium refresh chunks), and `deep` (`heavy`, full archive repair, larger
-refresh chunks). Host timers should run them through `abyss-machine resource
-launch --kind indexing --unattended --success-on-block` so heavier work uses
-the machine resource layer instead of hooks or MCP reads.
+refresh chunks). For a live route-cache repair without graph cost, run
+`index-maintenance --skip-graph-repair`; the report keeps graph follow-up
+visible through `defer_graph_repair`. The hot profile uses
+`route-cache-freshness-gates` before and after maintenance, so it does not scan
+`graph.sqlite3` on the live read path. Search fingerprints ignore rendered
+Markdown companions and can refresh stale `session_index_state` without
+rebuilding session documents when the SQLite documents are already current.
+Host timers should run maintenance through `abyss-machine resource launch
+--kind indexing --unattended --success-on-block` so heavier work uses the
+machine resource layer instead of hooks or MCP reads.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
 ## Storage Audit

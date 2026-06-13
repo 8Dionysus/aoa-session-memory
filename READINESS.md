@@ -72,9 +72,14 @@ Build the `.aoa` session-memory mechanism end to end:
   graph maintenance ignores out-of-scope graph sources instead of treating
   every non-selected row as an orphan
 - Resource-gated unattended maintenance route: `auto-maintenance` /
-  `maintain-auto` profiles `hot` (`probe`, graph-only/deferred index repair),
-  `backlog` (`medium`, recent index+graph repair), and `deep` (`heavy`, full
-  repair); MCP remains read-only and plan-only
+  `maintain-auto` profiles `hot` (`probe`, recent route/search/atlas repair
+  with explicit graph deferral), `backlog` (`medium`, recent index+graph
+  repair), and `deep` (`heavy`, full repair); MCP remains read-only and
+  plan-only
+- Hot route-cache maintenance avoids graph scans: `route-cache-freshness-gates`
+  checks route/search/atlas state while graph is `deferred_not_checked`;
+  search projection fingerprints exclude rendered Markdown companions and can
+  refresh stale `session_index_state` without rebuilding SQLite documents
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata
@@ -366,6 +371,19 @@ Last observed result:
   read-only follow-up reported `remaining_count=3941` dirty graph sources in
   `diagnostics/20260613T043359Z__graph-maintenance.json`. Treat graph
   freshness as deferred until graph refresh memory profile is tightened.
+- 2026-06-13 hot route-cache proof: on
+  `2026-06-04__003__у-нас-в-отрефакторенных-репо-есть-определенным`, full hot
+  maintenance with graph freshness had measured `elapsed=217.52s`. After
+  splitting hot route-cache freshness from graph freshness, excluding rendered
+  Markdown from search projection fingerprints, and adding
+  `refresh_search_projection_state`, `index-maintenance --skip-graph-repair`
+  returned current search/atlas with graph `deferred_not_checked` in
+  `elapsed=7.36s`, and `auto-maintenance hot` completed in `elapsed=9.79s`.
+  Reports:
+  `diagnostics/20260613T221851Z__index-maintenance.json`,
+  `diagnostics/20260613T222212Z__route-cache-freshness-gates.json`,
+  `diagnostics/20260613T222218Z__index-maintenance.json`, and
+  `diagnostics/20260613T222219Z__auto-maintenance-hot.json`.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

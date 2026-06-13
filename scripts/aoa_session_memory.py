@@ -119,13 +119,15 @@ AUTO_MAINTENANCE_PROFILES = {
         "limit": None,
         "max_raw_mb": 16,
         "token_max_raw_mb": 512,
-        "graph_batch_limit": 10,
+        "graph_batch_limit": 0,
         "graph_refresh_chunk_size": 32,
         "graph_max_refresh_nodes": 20000,
         "graph_max_refresh_edges": 60000,
         "ref_sample_limit": 200,
         "sample_audit": False,
-        "repair_indexes": False,
+        "repair_indexes": True,
+        "repair_graph": False,
+        "allow_deferred_graph": True,
         "resource_class": "probe",
         "resource_kind": "indexing",
         "timeout_sec": 900,
@@ -142,6 +144,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "ref_sample_limit": 400,
         "sample_audit": False,
         "repair_indexes": True,
+        "repair_graph": True,
+        "allow_deferred_graph": False,
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 3600,
@@ -158,6 +162,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "ref_sample_limit": 1000,
         "sample_audit": True,
         "repair_indexes": True,
+        "repair_graph": True,
+        "allow_deferred_graph": False,
         "resource_class": "heavy",
         "resource_kind": "indexing",
         "timeout_sec": 7200,
@@ -13886,13 +13892,14 @@ def projection_path_from_ref(value: Any, *, base: Path) -> Path:
     return path if path.is_absolute() else base / path
 
 
-def index_source_paths_for_record(record: dict[str, Any]) -> list[Path]:
+def index_source_paths_for_record(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> list[Path]:
     session_dir = session_dir_from_record(record)
     paths: list[Path] = [
         session_dir / "session.manifest.json",
         session_dir / SESSION_INDEX_JSON,
-        session_dir / SESSION_INDEX_MARKDOWN,
     ]
+    if include_rendered_markdown:
+        paths.append(session_dir / SESSION_INDEX_MARKDOWN)
     manifest = read_json(session_dir / "session.manifest.json", {})
     if isinstance(manifest, dict):
         for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
@@ -13900,7 +13907,7 @@ def index_source_paths_for_record(record: dict[str, Any]) -> list[Path]:
                 continue
             if segment.get("index"):
                 paths.append(projection_path_from_ref(segment.get("index"), base=session_dir))
-            if segment.get("markdown"):
+            if include_rendered_markdown and segment.get("markdown"):
                 paths.append(projection_path_from_ref(segment.get("markdown"), base=session_dir))
     incidents_dir = session_dir / "incidents"
     if incidents_dir.is_dir():
@@ -13916,7 +13923,7 @@ def index_source_paths_for_record(record: dict[str, Any]) -> list[Path]:
     return unique
 
 
-def session_projection_fingerprint(record: dict[str, Any]) -> dict[str, Any]:
+def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     manifest = read_json(manifest_path, {})
@@ -13926,7 +13933,7 @@ def session_projection_fingerprint(record: dict[str, Any]) -> dict[str, Any]:
     raw_path = projection_path_from_ref(raw.get("path"), base=session_dir) if raw.get("path") else session_dir / "raw" / "session.raw.jsonl"
     source_files: list[dict[str, Any]] = []
     latest_mtime = 0.0
-    for path in index_source_paths_for_record(record):
+    for path in index_source_paths_for_record(record, include_rendered_markdown=include_rendered_markdown):
         if not path.exists() or not path.is_file():
             continue
         try:
@@ -13981,6 +13988,10 @@ def session_projection_fingerprint(record: dict[str, Any]) -> dict[str, Any]:
 
 def projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [session_projection_fingerprint(record) for record in records]
+
+
+def search_projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [session_projection_fingerprint(record, include_rendered_markdown=False) for record in records]
 
 
 def projection_quiescence_split(
@@ -14182,6 +14193,111 @@ def upsert_search_session_state(
     )
 
 
+def search_document_count_for_projection(conn: sqlite3.Connection, projection_state: dict[str, Any]) -> int:
+    session_id = str(projection_state.get("session_id") or "")
+    session_label = str(projection_state.get("session_label") or "")
+    if session_id:
+        row = conn.execute("SELECT COUNT(*) FROM documents WHERE session_id = ?", (session_id,)).fetchone()
+        count = int(row[0]) if row else 0
+        if count > 0:
+            return count
+    if session_label:
+        row = conn.execute("SELECT COUNT(*) FROM documents WHERE session_label = ?", (session_label,)).fetchone()
+        return int(row[0]) if row else 0
+    return 0
+
+
+def refresh_search_projection_states(
+    aoa_root: Path,
+    projections: list[dict[str, Any]],
+    *,
+    indexed_at: str,
+) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {"ok": False, "updated_count": 0, "diagnostics": ["search_index_missing"], "sessions": []}
+    updated = 0
+    skipped = 0
+    sessions: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = init_search_db(db_path, rebuild=False)
+        conn.execute("BEGIN")
+        for projection in projections:
+            document_count = search_document_count_for_projection(conn, projection)
+            item = {
+                "session_id": projection.get("session_id"),
+                "session_label": projection.get("session_label"),
+                "document_count": document_count,
+            }
+            if document_count <= 0:
+                skipped += 1
+                item["status"] = "skipped_missing_documents"
+                sessions.append(item)
+                continue
+            upsert_search_session_state(conn, projection_state=projection, indexed_at=indexed_at, document_count=document_count)
+            updated += 1
+            item["status"] = "updated"
+            sessions.append(item)
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(f"sqlite_error:{exc}")
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+    return {
+        "ok": not diagnostics,
+        "updated_count": updated,
+        "skipped_count": skipped,
+        "sessions": sessions,
+        "diagnostics": diagnostics,
+    }
+
+
+def refreshable_search_projection_records(
+    aoa_root: Path,
+    records: list[dict[str, Any]],
+    dirty_records: list[dict[str, Any]],
+    fingerprints: list[dict[str, Any]],
+    search_state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not dirty_records:
+        return [], []
+    db_mtime = float(search_state.get("db_mtime") or 0.0)
+    if db_mtime <= 0:
+        return [], dirty_records
+    dirty_ids = {str(item.get("session_id") or "") for item in dirty_records if item.get("session_id")}
+    dirty_labels = {str(item.get("session_label") or "") for item in dirty_records if item.get("session_label")}
+    record_by_id = records_by_session_id(records)
+    record_by_label = {str(record.get("session_label") or session_dir_from_record(record).name): record for record in records}
+    projection_by_id = {str(item.get("session_id") or ""): item for item in fingerprints if item.get("session_id")}
+    projection_by_label = {str(item.get("session_label") or ""): item for item in fingerprints if item.get("session_label")}
+    refreshable: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    for session_id in sorted(dirty_ids):
+        projection = projection_by_id.get(session_id)
+        record = record_by_id.get(session_id)
+        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime:
+            refreshable.append(record)
+        elif record:
+            remaining.append(record)
+    for session_label in sorted(dirty_labels):
+        if any(str(item.get("session_label") or "") == session_label for item in refreshable + remaining):
+            continue
+        projection = projection_by_label.get(session_label)
+        record = record_by_label.get(session_label)
+        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime:
+            refreshable.append(record)
+        elif record:
+            remaining.append(record)
+    return refreshable, remaining
+
+
 def sqlite_search_index_state(
     aoa_root: Path,
     latest_source_mtime: float,
@@ -14203,7 +14319,7 @@ def sqlite_search_index_state(
         schema_diagnostics = search_schema_diagnostics(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
         route_counts = search_route_storage_counts(conn)
-        selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
+        selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records or [])
         indexed_session_states = sqlite_search_session_states(conn)
         conn.close()
     except sqlite3.Error as exc:
@@ -14369,6 +14485,7 @@ def maintain_indexes(
     graph_max_refresh_nodes: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES,
     graph_max_refresh_edges: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES,
     repair_indexes: bool = True,
+    repair_graph: bool = True,
     write_report: bool = False,
     reason: str = "operator_requested",
     budget_seconds: float | None = None,
@@ -14417,14 +14534,30 @@ def maintain_indexes(
         for record in records
         if str(read_json(session_dir_from_record(record) / "session.manifest.json", {}).get("archive_status") or record.get("archive_status") or "") == "raw_mirrored_index_deferred"
     ]
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records)
+    search_projection_fingerprints = search_projection_fingerprints_for_records(records)
+    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=search_projection_fingerprints)
     atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
-    graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
-    effective_graph_batch_limit = max(1, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
+    if repair_graph:
+        graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+    else:
+        graph_state = {
+            "status": "deferred_not_checked",
+            "needs_maintenance": None,
+            "needs_full_rebuild": False,
+            "reasons": ["graph_state_check_skipped_by_profile"],
+            "diagnostics": [],
+        }
+    effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(1, min(int_value(graph_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     effective_graph_max_refresh_nodes = None if graph_max_refresh_nodes is None or int_value(graph_max_refresh_nodes) <= 0 else int_value(graph_max_refresh_nodes)
     effective_graph_max_refresh_edges = None if graph_max_refresh_edges is None or int_value(graph_max_refresh_edges) <= 0 else int_value(graph_max_refresh_edges)
     index_repair_needed = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh")) or token_backfill_needed
+    graph_repair_needed = (
+        bool(graph_state.get("needs_maintenance"))
+        or graph_state.get("status") == "missing"
+        or token_backfill_needed
+        or not repair_graph
+    )
     max_raw_mb_text = str(max_raw_bytes / (1024 * 1024)) if max_raw_bytes is not None else None
     token_max_raw_mb_text = str(effective_token_max_raw_bytes / (1024 * 1024)) if effective_token_max_raw_bytes is not None else None
     base = ["python3", "scripts/aoa_session_memory.py"]
@@ -14459,6 +14592,19 @@ def maintain_indexes(
     atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
     atlas_dirty_records = [] if atlas_rebuild_required else records_matching_projection_states(records, atlas_dirty_selector if isinstance(atlas_dirty_selector, list) else [])
+    search_state_refresh_records: list[dict[str, Any]] = []
+    search_reindex_records = search_dirty_records
+    search_reasons = set(str(reason) for reason in search_state.get("reasons", []) if reason)
+    search_non_projection_repair_needed = bool(search_reasons - {"session_projection_dirty"})
+    if not search_rebuild_required and not route_drift and not token_backfill_needed and search_dirty_records:
+        search_state_refresh_records, search_reindex_records = refreshable_search_projection_records(
+            aoa_root,
+            records,
+            search_dirty_records,
+            search_projection_fingerprints,
+            search_state,
+        )
+    search_state_refresh_fingerprints = search_projection_fingerprints_for_records(search_state_refresh_records)
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     search_command = (
@@ -14495,9 +14641,22 @@ def maintain_indexes(
             + ["--write-report"],
         ),
         maintenance_action(
+            "refresh_search_projection_state",
+            reason="search_documents_current_but_projection_state_stale",
+            needed=repair_indexes and bool(search_state_refresh_records),
+            command=base + ["index-maintenance", target, *root_args] + selection_args + ["--apply", "--skip-graph-repair", "--write-report"],
+        ),
+        maintenance_action(
             "rebuild_search_index",
             reason="portable_sqlite_missing_or_stale",
-            needed=repair_indexes and (bool(search_state.get("needs_refresh")) or bool(route_drift) or token_backfill_needed),
+            needed=repair_indexes
+            and (
+                search_rebuild_required
+                or search_non_projection_repair_needed
+                or bool(search_reindex_records)
+                or bool(route_drift)
+                or token_backfill_needed
+            ),
             command=search_command,
         ),
         maintenance_action(
@@ -14515,7 +14674,7 @@ def maintain_indexes(
         maintenance_action(
             "graph_maintenance",
             reason="graph_store_missing_or_dirty",
-            needed=bool(graph_state.get("needs_maintenance")) or graph_state.get("status") == "missing" or token_backfill_needed,
+            needed=repair_graph and graph_repair_needed,
             command=base
             + [
                 "graph-maintenance",
@@ -14541,6 +14700,24 @@ def maintain_indexes(
             + ["--sample-limit", str(sample_limit), "--max-raw-chars", str(max_raw_chars), "--write-report"],
         ),
     ]
+    token_action = actions[0]
+    reindex_action = actions[1]
+    search_state_refresh_action = actions[2]
+    search_action = actions[3]
+    atlas_action = actions[4]
+    readiness_action = actions[5]
+    graph_action = actions[6]
+    sample_action = actions[7]
+    deferred_graph_action: dict[str, Any] | None = None
+    if not repair_graph and graph_repair_needed:
+        deferred_graph_action = maintenance_action(
+            "defer_graph_repair",
+            reason="profile_delegates_graph_repair_to_backlog_or_deep",
+            needed=True,
+            command=base + ["auto-maintenance", "backlog", target, *root_args, "--apply", "--write-report"],
+        )
+        deferred_graph_action["status"] = "deferred"
+        actions.append(deferred_graph_action)
     if not repair_indexes and index_repair_needed:
         deferred = maintenance_action(
             "defer_index_repair",
@@ -14569,11 +14746,11 @@ def maintain_indexes(
         token_backfill_ran = False
         post_index_ran = False
         graph_ran = False
-        if actions[0]["needed"]:
+        if token_action["needed"]:
             if not has_budget():
                 budget_exhausted = True
-                actions[0]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[0])
+                token_action["status"] = "deferred_budget_exhausted"
+                action_results.append(token_action)
             else:
                 result = token_accounting_backfill(
                     aoa_root=aoa_root,
@@ -14585,18 +14762,18 @@ def maintain_indexes(
                     max_raw_bytes=effective_token_max_raw_bytes,
                     write_report=write_report,
                 )
-                actions[0]["status"] = "applied" if result.get("ok") else "failed"
-                actions[0]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[0])
+                token_action["status"] = "applied" if result.get("ok") else "failed"
+                token_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(token_action)
                 result_counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
                 token_backfill_ran = int(token_accounting_int(result_counts.get("backfilled")) or 0) > 0
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[1]["needed"]:
+        if reindex_action["needed"]:
             if not has_budget():
                 budget_exhausted = True
-                actions[1]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[1])
+                reindex_action["status"] = "deferred_budget_exhausted"
+                action_results.append(reindex_action)
             else:
                 result = reindex_sessions(
                     aoa_root=aoa_root,
@@ -14608,19 +14785,35 @@ def maintain_indexes(
                     stale_route_indexes=True,
                     write_report=write_report,
                 )
-                actions[1]["status"] = "applied" if result.get("ok") else "failed"
-                actions[1]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[1])
+                reindex_action["status"] = "applied" if result.get("ok") else "failed"
+                reindex_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(reindex_action)
                 reindex_ran = bool(result.get("selected_count"))
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[2]["needed"] or reindex_ran or token_backfill_ran:
+        if search_state_refresh_action["needed"] and not reindex_ran and not token_backfill_ran:
             if not has_budget():
                 budget_exhausted = True
-                actions[2]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[2])
+                search_state_refresh_action["status"] = "deferred_budget_exhausted"
+                action_results.append(search_state_refresh_action)
             else:
-                selected_search_records = None if search_rebuild_required else (search_dirty_records or (records if reindex_ran or token_backfill_ran else []))
+                result = refresh_search_projection_states(
+                    aoa_root,
+                    search_state_refresh_fingerprints,
+                    indexed_at=now,
+                )
+                search_state_refresh_action["status"] = "applied" if result.get("ok") else "failed"
+                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "diagnostics")}
+                action_results.append(search_state_refresh_action)
+                if not result.get("ok") and result.get("diagnostics"):
+                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if search_action["needed"] or reindex_ran or token_backfill_ran:
+            if not has_budget():
+                budget_exhausted = True
+                search_action["status"] = "deferred_budget_exhausted"
+                action_results.append(search_action)
+            else:
+                selected_search_records = None if search_rebuild_required else (search_reindex_records or (records if reindex_ran or token_backfill_ran else []))
                 result = search_index_sessions(
                     aoa_root=aoa_root,
                     target=search_update_target,
@@ -14634,17 +14827,17 @@ def maintain_indexes(
                     budget_seconds=None if search_rebuild_required else budget_remaining(),
                     progress_every=progress_every,
                 )
-                actions[2]["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
-                actions[2]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[2])
+                search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(search_action)
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[3]["needed"] or reindex_ran or token_backfill_ran:
+        if atlas_action["needed"] or reindex_ran or token_backfill_ran:
             if not has_budget():
                 budget_exhausted = True
-                actions[3]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[3])
+                atlas_action["status"] = "deferred_budget_exhausted"
+                action_results.append(atlas_action)
             else:
                 selected_atlas_records = None if atlas_rebuild_required else (atlas_dirty_records or (records if reindex_ran or token_backfill_ran else []))
                 result = build_agent_atlas(
@@ -14654,9 +14847,9 @@ def maintain_indexes(
                     selected_records=selected_atlas_records,
                     write_report=write_report,
                 )
-                actions[3]["status"] = "applied" if result.get("ok") else "failed"
-                actions[3]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "axis_count", "entry_count", "updated_entry_count", "removed_entry_artifact_count", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[3])
+                atlas_action["status"] = "applied" if result.get("ok") else "failed"
+                atlas_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "axis_count", "entry_count", "updated_entry_count", "removed_entry_artifact_count", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(atlas_action)
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_indexes and has_budget():
@@ -14757,18 +14950,41 @@ def maintain_indexes(
                     if not result.get("ok"):
                         diagnostics.extend(str(item) for item in result.get("diagnostics", []))
 
-                refreshed_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+                refreshed_graph_state = (
+                    graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+                    if repair_graph
+                    else {
+                        "status": "deferred_not_checked",
+                        "needs_maintenance": None,
+                        "needs_full_rebuild": False,
+                        "reasons": ["graph_state_check_skipped_by_profile"],
+                        "diagnostics": [],
+                    }
+                )
                 post_maintenance_states["pre_readiness_graph_store"] = refreshed_graph_state
-                if refreshed_graph_state.get("needs_maintenance") or refreshed_graph_state.get("status") == "missing":
-                    actions[5]["needed"] = True
-                    actions[5]["reason"] = "graph_store_missing_or_dirty_after_index_mutation"
+                if refreshed_graph_state.get("needs_maintenance") or refreshed_graph_state.get("status") == "missing" or not repair_graph:
+                    if repair_graph:
+                        graph_action["needed"] = True
+                        graph_action["reason"] = "graph_store_missing_or_dirty_after_index_mutation"
+                    else:
+                        if deferred_graph_action is None:
+                            deferred_graph_action = maintenance_action(
+                                "defer_graph_repair",
+                                reason="graph_state_not_checked_deferred_by_profile",
+                                needed=True,
+                                command=base + ["auto-maintenance", "backlog", target, *root_args, "--apply", "--write-report"],
+                            )
+                            deferred_graph_action["status"] = "deferred"
+                            actions.append(deferred_graph_action)
+                        else:
+                            deferred_graph_action["reason"] = "graph_state_not_checked_deferred_by_profile"
             except ValueError as exc:
                 diagnostics.append(f"post_mutation_freshness_recheck_failed:{exc}")
-        if actions[5]["needed"] or reindex_ran or token_backfill_ran:
+        if repair_graph and (graph_action["needed"] or reindex_ran or token_backfill_ran):
             if not has_budget():
                 budget_exhausted = True
-                actions[5]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[5])
+                graph_action["status"] = "deferred_budget_exhausted"
+                action_results.append(graph_action)
             else:
                 result = graph_maintenance(
                     aoa_root=aoa_root,
@@ -14784,17 +15000,17 @@ def maintain_indexes(
                     write_report=write_report,
                     reason="index_maintenance",
                 )
-                actions[5]["status"] = "applied" if result.get("ok") else "remaining"
-                actions[5]["result"] = {key: result.get(key) for key in ("ok", "selected_count", "remaining_count", "source_state", "maintenance_detail", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[5])
+                graph_action["status"] = "applied" if result.get("ok") else "remaining"
+                graph_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "remaining_count", "source_state", "maintenance_detail", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(graph_action)
                 graph_ran = True
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[4]["needed"] or reindex_ran or token_backfill_ran or post_index_ran or graph_ran:
+        if readiness_action["needed"] or reindex_ran or token_backfill_ran or post_index_ran or graph_ran:
             if not has_budget():
                 budget_exhausted = True
-                actions[4]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[4])
+                readiness_action["status"] = "deferred_budget_exhausted"
+                action_results.append(readiness_action)
             else:
                 result = route_layer_readiness(
                     aoa_root=aoa_root,
@@ -14805,8 +15021,8 @@ def maintain_indexes(
                     sample_limit=sample_limit,
                     write_report=write_report,
                 )
-                actions[4]["status"] = "applied" if result.get("ok") else "remaining"
-                actions[4]["result"] = {
+                readiness_action["status"] = "applied" if result.get("ok") else "remaining"
+                readiness_action["result"] = {
                     key: result.get(key)
                     for key in (
                         "ok",
@@ -14822,15 +15038,15 @@ def maintain_indexes(
                         "diagnostics",
                     )
                 }
-                actions[4]["result"]["remaining_count"] = len(result.get("remaining", []) if isinstance(result.get("remaining"), list) else [])
-                action_results.append(actions[4])
+                readiness_action["result"]["remaining_count"] = len(result.get("remaining", []) if isinstance(result.get("remaining"), list) else [])
+                action_results.append(readiness_action)
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if actions[6]["needed"]:
+        if sample_action["needed"]:
             if not has_budget():
                 budget_exhausted = True
-                actions[6]["status"] = "deferred_budget_exhausted"
-                action_results.append(actions[6])
+                sample_action["status"] = "deferred_budget_exhausted"
+                action_results.append(sample_action)
             else:
                 result = route_sample_audit(
                     aoa_root=aoa_root,
@@ -14842,9 +15058,9 @@ def maintain_indexes(
                     max_raw_chars=max_raw_chars,
                     write_report=write_report,
                 )
-                actions[6]["status"] = "applied" if result.get("ok") else "remaining"
-                actions[6]["result"] = {key: result.get(key) for key in ("ok", "total_sample_count", "sampled_layer_count", "required_layer_count", "report_json", "report_markdown", "diagnostics")}
-                action_results.append(actions[6])
+                sample_action["status"] = "applied" if result.get("ok") else "remaining"
+                sample_action["result"] = {key: result.get(key) for key in ("ok", "total_sample_count", "sampled_layer_count", "required_layer_count", "report_json", "report_markdown", "diagnostics")}
+                action_results.append(sample_action)
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
 
@@ -14863,7 +15079,7 @@ def maintain_indexes(
         final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
         final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
         final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
-        final_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+        final_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit) if repair_graph else graph_state
     except ValueError as exc:
         diagnostics.append(f"final_freshness_snapshot_failed:{exc}")
     payload = {
@@ -14878,7 +15094,9 @@ def maintain_indexes(
         "limit": limit,
         "reason": reason,
         "repair_indexes": repair_indexes,
+        "repair_graph": repair_graph,
         "index_repair_needed": index_repair_needed,
+        "graph_repair_needed": graph_repair_needed,
         "selected_count": len(records),
         "max_raw_bytes": max_raw_bytes,
         "token_max_raw_bytes": effective_token_max_raw_bytes,
@@ -14903,6 +15121,8 @@ def maintain_indexes(
         "route_drift_count": len(route_drift),
         "route_drift": route_drift,
         "search_dirty_session_count": len(search_dirty_records),
+        "search_state_refresh_count": len(search_state_refresh_records),
+        "search_reindex_session_count": len(search_reindex_records),
         "search_dirty_sessions": [
             {"session_id": item.get("session_id"), "session_label": item.get("session_label"), "reasons": item.get("reasons", [])}
             for item in (search_state.get("dirty_sessions", []) if isinstance(search_state.get("dirty_sessions"), list) else [])[:20]
@@ -14948,7 +15168,9 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- reason: `{payload.get('reason')}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
+        f"- repair_graph: `{payload.get('repair_graph')}`",
         f"- index_repair_needed: `{payload.get('index_repair_needed')}`",
+        f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
         f"- remaining_count: `{payload.get('remaining_count')}`",
@@ -14962,6 +15184,8 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- route_drift_count: `{payload.get('route_drift_count')}`",
         f"- search_dirty_session_count: `{payload.get('search_dirty_session_count')}`",
+        f"- search_state_refresh_count: `{payload.get('search_state_refresh_count')}`",
+        f"- search_reindex_session_count: `{payload.get('search_reindex_session_count')}`",
         f"- atlas_dirty_session_count: `{payload.get('atlas_dirty_session_count')}`",
         f"- deferred_session_count: `{payload.get('deferred_session_count')}`",
         f"- token_backfill_counts: `{json.dumps((payload.get('token_backfill') or {}).get('counts', {}) if isinstance(payload.get('token_backfill'), dict) else {}, ensure_ascii=False)}`",
@@ -15070,6 +15294,8 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
+        f"- repair_graph: `{payload.get('repair_graph')}`",
+        f"- allow_deferred_graph: `{payload.get('allow_deferred_graph')}`",
         f"- graph_batch_limit: `{payload.get('graph_batch_limit')}`",
         f"- graph_max_refresh_nodes: `{payload.get('graph_max_refresh_nodes')}`",
         f"- graph_max_refresh_edges: `{payload.get('graph_max_refresh_edges')}`",
@@ -15080,6 +15306,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- needs_graph_before: `{before.get('needs_graph_maintenance')}`",
         f"- needs_index_after: `{after.get('needs_index_maintenance')}`",
         f"- needs_graph_after: `{after.get('needs_graph_maintenance')}`",
+        f"- deferred_graph_after: `{payload.get('deferred_graph_after')}`",
         f"- action_counts: `{maintenance.get('action_counts') if isinstance(maintenance, dict) else {}}`",
         "",
         "## Boundary",
@@ -15132,8 +15359,14 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "apply",
                 "target",
                 "selected_count",
+                "repair_indexes",
+                "repair_graph",
+                "index_repair_needed",
+                "graph_repair_needed",
                 "route_drift_count",
                 "search_dirty_session_count",
+                "search_state_refresh_count",
+                "search_reindex_session_count",
                 "atlas_dirty_session_count",
                 "deferred_session_count",
                 "graph_max_refresh_nodes",
@@ -15163,6 +15396,24 @@ def run_with_maintenance_lock(aoa_root: Path, callback: Callable[[], dict[str, A
         return payload
 
 
+def auto_maintenance_freshness_blockers(freshness: dict[str, Any], *, allow_deferred_graph: bool) -> list[str]:
+    if allow_deferred_graph and not freshness.get("needs_index_maintenance"):
+        return []
+    diagnostics = [str(item) for item in freshness.get("diagnostics", []) if item] if isinstance(freshness.get("diagnostics"), list) else []
+    if freshness.get("needs_index_maintenance"):
+        diagnostics.append("index_maintenance_needed")
+    graph_blockers = []
+    if freshness.get("needs_graph_maintenance"):
+        graph_blockers.append("graph_maintenance_needed")
+    if freshness.get("needs_sidecar_export"):
+        graph_blockers.append("graph_sidecar_export_needed")
+    if freshness.get("needs_offline_graph_build"):
+        graph_blockers.append("offline_graph_build_needed")
+    if not allow_deferred_graph:
+        diagnostics.extend(graph_blockers)
+    return sorted(set(diagnostics))
+
+
 def auto_maintenance(
     *,
     workspace_root: Path,
@@ -15183,6 +15434,7 @@ def auto_maintenance(
     ref_sample_limit: int | None = None,
     sample_audit: bool | None = None,
     repair_indexes: bool | None = None,
+    repair_graph: bool | None = None,
     write_report: bool = False,
     lock_timeout_sec: float = 0.0,
     reason: str = "timer",
@@ -15197,7 +15449,7 @@ def auto_maintenance(
     effective_limit = limit if limit is not None else settings.get("limit")
     effective_max_raw_bytes = max_raw_bytes if max_raw_bytes is not None else int(float(settings["max_raw_mb"]) * 1024 * 1024)
     effective_token_max_raw_bytes = token_max_raw_bytes if token_max_raw_bytes is not None else int(float(settings["token_max_raw_mb"]) * 1024 * 1024)
-    effective_graph_batch_limit = max(1, min(int_value(graph_batch_limit if graph_batch_limit is not None else settings["graph_batch_limit"], GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
+    effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit if graph_batch_limit is not None else settings["graph_batch_limit"], GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(
         1,
         min(
@@ -15215,6 +15467,8 @@ def auto_maintenance(
     effective_ref_sample_limit = max(1, int_value(ref_sample_limit if ref_sample_limit is not None else settings["ref_sample_limit"], 200))
     effective_sample_audit = bool(settings["sample_audit"] if sample_audit is None else sample_audit)
     effective_repair_indexes = bool(settings["repair_indexes"] if repair_indexes is None else repair_indexes)
+    effective_repair_graph = bool(settings.get("repair_graph", True) if repair_graph is None else repair_graph)
+    allow_deferred_graph = bool(settings.get("allow_deferred_graph", False)) and not effective_repair_graph
     effective_resource_class = str(settings["resource_class"])
     effective_resource_kind = str(settings["resource_kind"])
     effective_timeout_sec = int_value(settings["timeout_sec"], 0)
@@ -15252,6 +15506,8 @@ def auto_maintenance(
                         "timeout_sec": effective_timeout_sec,
                         "budget_seconds": effective_budget_seconds,
                         "repair_indexes": effective_repair_indexes,
+                        "repair_graph": effective_repair_graph,
+                        "allow_deferred_graph": allow_deferred_graph,
                         "max_raw_bytes": effective_max_raw_bytes,
                         "token_max_raw_bytes": effective_token_max_raw_bytes,
                         "graph_batch_limit": effective_graph_batch_limit,
@@ -15266,15 +15522,27 @@ def auto_maintenance(
                         "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
                     }
                 time.sleep(0.25)
-        freshness_before = graph_freshness_gates(
-            aoa_root=aoa_root,
-            target=target,
-            since=effective_since,
-            until=until,
-            limit=effective_limit,
-            ref_sample_limit=effective_ref_sample_limit,
-            write_report=write_report,
-        )
+        def run_auto_freshness_probe() -> dict[str, Any]:
+            if allow_deferred_graph:
+                return route_cache_freshness_gates(
+                    aoa_root=aoa_root,
+                    target=target,
+                    since=effective_since,
+                    until=until,
+                    limit=effective_limit,
+                    write_report=write_report,
+                )
+            return graph_freshness_gates(
+                aoa_root=aoa_root,
+                target=target,
+                since=effective_since,
+                until=until,
+                limit=effective_limit,
+                ref_sample_limit=effective_ref_sample_limit,
+                write_report=write_report,
+            )
+
+        freshness_before = run_auto_freshness_probe()
         maintenance = maintain_indexes(
             aoa_root=aoa_root,
             target=target,
@@ -15294,28 +15562,28 @@ def auto_maintenance(
             reason=f"auto_maintenance:{profile}:{reason}",
             budget_seconds=effective_budget_seconds,
             progress_every=progress_every,
+            repair_graph=effective_repair_graph,
         )
-        freshness_after = graph_freshness_gates(
-            aoa_root=aoa_root,
-            target=target,
-            since=effective_since,
-            until=until,
-            limit=effective_limit,
-            ref_sample_limit=effective_ref_sample_limit,
-            write_report=write_report,
-        )
-        if not freshness_before.get("ok"):
-            diagnostics.extend(str(item) for item in freshness_before.get("diagnostics", []) if item)
+        freshness_after = run_auto_freshness_probe()
+        preflight_diagnostics = auto_maintenance_freshness_blockers(freshness_before, allow_deferred_graph=False)
         if not maintenance.get("ok") and maintenance.get("diagnostics"):
             diagnostics.extend(str(item) for item in maintenance.get("diagnostics", []) if item)
-        if not freshness_after.get("ok") and freshness_after.get("diagnostics"):
-            diagnostics.extend(str(item) for item in freshness_after.get("diagnostics", []) if item)
+        diagnostics.extend(auto_maintenance_freshness_blockers(freshness_after, allow_deferred_graph=allow_deferred_graph))
+        deferred_graph_after = bool(
+            allow_deferred_graph
+            and (
+                freshness_after.get("needs_graph_maintenance")
+                or freshness_after.get("needs_sidecar_export")
+                or freshness_after.get("needs_offline_graph_build")
+            )
+            and not freshness_after.get("needs_index_maintenance")
+        )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_auto_maintenance",
             "generated_at": now,
             "ok": not diagnostics and bool(maintenance.get("ok")),
-            "status": "applied" if apply else "planned",
+            "status": "applied_with_deferred_graph" if apply and deferred_graph_after else ("applied" if apply else "planned"),
             "mutates": bool(apply),
             "apply": apply,
             "profile": profile,
@@ -15328,6 +15596,8 @@ def auto_maintenance(
             "timeout_sec": effective_timeout_sec,
             "budget_seconds": effective_budget_seconds,
             "repair_indexes": effective_repair_indexes,
+            "repair_graph": effective_repair_graph,
+            "allow_deferred_graph": allow_deferred_graph,
             "max_raw_bytes": effective_max_raw_bytes,
             "token_max_raw_bytes": effective_token_max_raw_bytes,
             "graph_batch_limit": effective_graph_batch_limit,
@@ -15340,8 +15610,10 @@ def auto_maintenance(
             "lock_path": str(lock_path),
             "resource_launcher": resource_launcher,
             "freshness_before": freshness_before,
+            "preflight_diagnostics": preflight_diagnostics,
             "maintenance": maintenance,
             "freshness_after": freshness_after,
+            "deferred_graph_after": deferred_graph_after,
             "diagnostics": sorted(set(diagnostics)),
             "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
             "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
@@ -19425,7 +19697,7 @@ def sqlite_provider_status(
     if check_freshness:
         try:
             records = freshness_records if freshness_records is not None else chronological_session_records(aoa_root)
-            projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records)
+            projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records)
             dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
             latest_source_mtime = max(
                 (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
@@ -21020,7 +21292,7 @@ def search_index_sessions(
                 budget_exhausted = True
                 break
             conn.execute("BEGIN")
-            projection_state = session_projection_fingerprint(record)
+            projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
             documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=max_raw_bytes)
             session_results.append(result)
             if result.get("diagnostics"):
@@ -28155,7 +28427,8 @@ def graph_freshness_gates(
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, gate_records)
     latest_graph_mtime, latest_graph_paths = latest_graph_source_mtime(aoa_root, gate_records)
     route_drift = route_index_drift_records(gate_records)
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
+    search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
+    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=search_gate_projection_fingerprints)
     atlas_state = atlas_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
     global_selection = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
     graph_selection_global = global_selection and not deferred_live_sessions
@@ -28260,6 +28533,109 @@ def graph_freshness_gates(
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
         write_markdown(report_md, graph_freshness_gates_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def route_cache_freshness_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Route Cache Freshness Gates",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- needs_index_maintenance: `{payload.get('needs_index_maintenance')}`",
+        f"- needs_graph_maintenance: `{payload.get('needs_graph_maintenance')}`",
+        f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
+        f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
+        f"- route_drift_count: `{payload.get('route_drift_count')}`",
+        f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def route_cache_freshness_gates(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_route_cache_freshness_gates",
+            "generated_at": now,
+            "ok": False,
+            "target": target,
+            "selected_count": 0,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "diagnostics": [str(exc)],
+            "gates": [],
+        }
+    latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
+    route_drift = route_index_drift_records(records)
+    search_state = sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        records,
+        projection_fingerprints=search_projection_fingerprints_for_records(records),
+    )
+    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+    needs_index_maintenance = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh"))
+    diagnostics = ["index_maintenance_needed"] if needs_index_maintenance else []
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_route_cache_freshness_gates",
+        "generated_at": now,
+        "ok": not needs_index_maintenance,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "selected_count": len(records),
+        "needs_index_maintenance": needs_index_maintenance,
+        "needs_graph_maintenance": True,
+        "needs_sidecar_export": False,
+        "needs_offline_graph_build": False,
+        "search_vs_graph": None,
+        "latest_source_mtime": latest_source_mtime,
+        "latest_source_paths": latest_source_paths,
+        "route_drift_count": len(route_drift),
+        "route_drift": route_drift[:40],
+        "search_index": search_state,
+        "atlas_index": atlas_state,
+        "graph_store": {
+            "status": "deferred_not_checked",
+            "needs_maintenance": None,
+            "needs_full_rebuild": False,
+            "reasons": ["graph_state_check_skipped_by_profile"],
+            "diagnostics": [],
+        },
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__route-cache-freshness-gates"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, route_cache_freshness_markdown(payload))
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
@@ -30470,6 +30846,7 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             graph_max_refresh_nodes=getattr(args, "graph_max_refresh_nodes", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES),
             graph_max_refresh_edges=getattr(args, "graph_max_refresh_edges", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES),
             repair_indexes=not args.skip_index_repair,
+            repair_graph=not args.skip_graph_repair,
             write_report=args.write_report,
             reason=args.reason,
             budget_seconds=args.budget_seconds,
@@ -30507,6 +30884,7 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
         ref_sample_limit=args.ref_sample_limit,
         sample_audit=False if args.no_sample_audit else (True if args.sample_audit else None),
         repair_indexes=args.repair_indexes,
+        repair_graph=args.repair_graph,
         write_report=args.write_report,
         lock_timeout_sec=args.lock_timeout_sec,
         reason=args.reason,
@@ -34588,6 +34966,7 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--graph-max-refresh-nodes", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES, help="Defer graph source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
     index_maintenance.add_argument("--graph-max-refresh-edges", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES, help="Defer graph source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
     index_maintenance.add_argument("--skip-index-repair", action="store_true", help="Only run graph maintenance and defer search/atlas/route-index repair to a heavier profile.")
+    index_maintenance.add_argument("--skip-graph-repair", action="store_true", help="Repair route/search/atlas indexes but defer graph maintenance to a graph/backlog profile.")
     index_maintenance.add_argument("--budget-seconds", type=float, help="Stop applying maintenance after this wall-clock budget; never interrupts a session transaction.")
     index_maintenance.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
     index_maintenance.add_argument("--reason", default="operator_requested")
@@ -34619,6 +34998,9 @@ def build_parser() -> argparse.ArgumentParser:
     repair_group = auto_maintenance_parser.add_mutually_exclusive_group()
     repair_group.add_argument("--repair-indexes", dest="repair_indexes", action="store_true", default=None, help="Override profile and allow search/atlas/route-index repair.")
     repair_group.add_argument("--skip-index-repair", dest="repair_indexes", action="store_false", help="Override profile and defer search/atlas/route-index repair.")
+    graph_repair_group = auto_maintenance_parser.add_mutually_exclusive_group()
+    graph_repair_group.add_argument("--repair-graph", dest="repair_graph", action="store_true", default=None, help="Override profile and allow graph maintenance.")
+    graph_repair_group.add_argument("--skip-graph-repair", dest="repair_graph", action="store_false", help="Override profile and defer graph maintenance.")
     audit_group = auto_maintenance_parser.add_mutually_exclusive_group()
     audit_group.add_argument("--sample-audit", action="store_true", help="Force route-sample-audit when route indexes are refreshed.")
     audit_group.add_argument("--no-sample-audit", action="store_true", help="Disable profile route-sample-audit.")

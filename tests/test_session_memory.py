@@ -3155,8 +3155,10 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
 
     record = module.resolve_session_record(aoa_root, "route-readiness")
     session_dir = module.session_dir_from_record(record)
-    session_md = session_dir / module.SESSION_INDEX_MARKDOWN
-    session_md.write_text(session_md.read_text(encoding="utf-8") + "\n\nGenerated route drift.\n", encoding="utf-8")
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index_payload = json.loads(session_index_path.read_text(encoding="utf-8"))
+    session_index_payload["test_search_drift"] = "Generated route drift."
+    session_index_path.write_text(json.dumps(session_index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     stale_payload = module.route_layer_readiness(aoa_root=aoa_root, target="all", sample_limit=0, write_report=False)
     gates = {gate["name"]: gate for gate in stale_payload["global_gates"]}
@@ -3491,6 +3493,64 @@ def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_p
     assert refreshed["atlas_index"]["status"] == "current"
 
 
+def test_index_maintenance_refreshes_search_state_without_reindexing_when_documents_are_current(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-02T00-00-00-search-state.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-02T00:00:00Z", "type": "session_meta", "payload": {"id": "search-state-refresh", "cwd": str(repo)}},
+            {"timestamp": "2026-06-02T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Refresh search state"}]}},
+            {"timestamp": "2026-06-02T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Search state should not rebuild."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-state-refresh",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "search-state-refresh")
+
+    old_full_projection = module.session_projection_fingerprint(record, include_rendered_markdown=True)
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=False)
+    module.upsert_search_session_state(
+        conn,
+        projection_state=old_full_projection,
+        indexed_at=module.utc_now(),
+        document_count=module.search_document_count_for_projection(conn, old_full_projection),
+    )
+    conn.commit()
+    conn.close()
+
+    plan = module.maintain_indexes(aoa_root=aoa_root, target="search-state-refresh", repair_graph=False)
+    actions = {action["id"]: action for action in plan["actions"]}
+    assert plan["search_dirty_session_count"] == 1
+    assert plan["search_state_refresh_count"] == 1
+    assert plan["search_reindex_session_count"] == 0
+    assert actions["refresh_search_projection_state"]["needed"] is True
+    assert "rebuild_search_index" not in actions
+
+    applied = module.maintain_indexes(aoa_root=aoa_root, target="search-state-refresh", apply=True, repair_graph=False)
+    applied_actions = {action["id"]: action for action in applied["actions"]}
+    assert applied_actions["refresh_search_projection_state"]["status"] == "applied"
+    assert applied_actions["refresh_search_projection_state"]["result"]["updated_count"] == 1
+    assert "rebuild_search_index" not in applied_actions
+
+    refreshed = module.maintain_indexes(aoa_root=aoa_root, target="search-state-refresh", repair_graph=False)
+    assert refreshed["search_dirty_session_count"] == 0
+    assert refreshed["final_search_index"]["status"] == "current"
+
+
 def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -3573,12 +3633,21 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
 
     def fake_freshness(**kwargs: Any) -> dict[str, Any]:
         calls["freshness"].append(kwargs)
+        if len(calls["freshness"]) == 1:
+            return {
+                "ok": False,
+                "target": kwargs["target"],
+                "selected_count": 1,
+                "needs_index_maintenance": True,
+                "needs_graph_maintenance": True,
+                "diagnostics": ["preflight_dirty"],
+            }
         return {
             "ok": True,
             "target": kwargs["target"],
             "selected_count": 1,
-            "needs_index_maintenance": True,
-            "needs_graph_maintenance": True,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
             "diagnostics": [],
         }
 
@@ -3592,6 +3661,8 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
             "route_drift_count": 0,
             "deferred_session_count": 0,
             "action_counts": {"applied": 2},
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
             "diagnostics": [],
         }
 
@@ -3613,6 +3684,8 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["backlog"]["graph_batch_limit"]
     assert payload["repair_indexes"] is True
     assert calls["maintenance"]["repair_indexes"] is True
+    assert payload["repair_graph"] is True
+    assert calls["maintenance"]["repair_graph"] is True
     assert calls["maintenance"]["reason"] == "auto_maintenance:backlog:timer"
     assert len(calls["freshness"]) == 2
     assert payload["resource_launcher"][:3] == ["abyss-machine", "resource", "launch"]
@@ -3621,20 +3694,30 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert Path(payload["report_markdown"]).exists()
 
 
-def test_hot_auto_maintenance_defers_index_repair_to_heavier_profile(tmp_path: Path, monkeypatch: Any) -> None:
+def test_hot_auto_maintenance_repairs_route_cache_and_defers_graph(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
-    calls: dict[str, Any] = {}
+    calls: dict[str, Any] = {"freshness_count": 0}
 
     def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness_count"] += 1
+        if calls["freshness_count"] == 1:
+            return {
+                "ok": False,
+                "target": kwargs["target"],
+                "selected_count": 1,
+                "needs_index_maintenance": True,
+                "needs_graph_maintenance": True,
+                "diagnostics": ["search_stale", "graph_dirty"],
+            }
         return {
             "ok": False,
             "target": kwargs["target"],
             "selected_count": 1,
-            "needs_index_maintenance": True,
+            "needs_index_maintenance": False,
             "needs_graph_maintenance": True,
-            "diagnostics": [],
+            "diagnostics": ["graph_dirty"],
         }
 
     def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
@@ -3647,19 +3730,30 @@ def test_hot_auto_maintenance_defers_index_repair_to_heavier_profile(tmp_path: P
             "route_drift_count": 0,
             "deferred_session_count": 0,
             "repair_indexes": kwargs["repair_indexes"],
-            "index_repair_needed": True,
-            "action_counts": {"applied": 1, "deferred": 1},
+            "repair_graph": kwargs["repair_graph"],
+            "index_repair_needed": False,
+            "graph_repair_needed": True,
+            "action_counts": {"applied": 2, "deferred": 1},
             "diagnostics": [],
         }
 
-    monkeypatch.setattr(module, "graph_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_: (_ for _ in ()).throw(AssertionError("hot profile should use route-cache freshness")))
     monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
 
     payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
 
-    assert payload["repair_indexes"] is False
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_deferred_graph"
+    assert payload["repair_indexes"] is True
+    assert payload["repair_graph"] is False
+    assert payload["allow_deferred_graph"] is True
+    assert payload["deferred_graph_after"] is True
+    assert "search_stale" in payload["preflight_diagnostics"]
+    assert payload["diagnostics"] == []
     assert payload["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
-    assert calls["maintenance"]["repair_indexes"] is False
+    assert calls["maintenance"]["repair_indexes"] is True
+    assert calls["maintenance"]["repair_graph"] is False
     assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
 
 
@@ -3770,7 +3864,10 @@ def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, 
         max_raw_chars=360,
         graph_batch_limit=1,
         graph_refresh_chunk_size=8,
+        graph_max_refresh_nodes=None,
+        graph_max_refresh_edges=None,
         skip_index_repair=False,
+        skip_graph_repair=False,
         budget_seconds=None,
         progress_every=0,
         reason="test",
@@ -4326,8 +4423,10 @@ def test_search_provider_status_detects_session_projection_drift(tmp_path: Path)
     module.search_index_sessions(aoa_root=aoa_root, target="all")
     record = module.resolve_session_record(aoa_root, "provider-drift")
     session_dir = module.session_dir_from_record(record)
-    session_md = session_dir / module.SESSION_INDEX_MARKDOWN
-    session_md.write_text(session_md.read_text(encoding="utf-8") + "\n\nGenerated source drift.\n", encoding="utf-8")
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index_payload = json.loads(session_index_path.read_text(encoding="utf-8"))
+    session_index_payload["test_search_drift"] = "Generated source drift."
+    session_index_path.write_text(json.dumps(session_index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
     provider = status["providers"]["portable_sqlite"]
