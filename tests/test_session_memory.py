@@ -3493,7 +3493,7 @@ def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_p
     assert refreshed["atlas_index"]["status"] == "current"
 
 
-def test_index_maintenance_refreshes_search_state_without_reindexing_when_documents_are_current(tmp_path: Path) -> None:
+def test_index_maintenance_refreshes_search_state_without_reindexing_when_documents_are_current(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
@@ -3532,6 +3532,11 @@ def test_index_maintenance_refreshes_search_state_without_reindexing_when_docume
     conn.commit()
     conn.close()
 
+    def fail_per_projection_count(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("refresh_search_projection_states should use bulk document counts")
+
+    monkeypatch.setattr(module, "search_document_count_for_projection", fail_per_projection_count)
+
     plan = module.maintain_indexes(aoa_root=aoa_root, target="search-state-refresh", repair_graph=False)
     actions = {action["id"]: action for action in plan["actions"]}
     assert plan["search_dirty_session_count"] == 1
@@ -3549,6 +3554,111 @@ def test_index_maintenance_refreshes_search_state_without_reindexing_when_docume
     refreshed = module.maintain_indexes(aoa_root=aoa_root, target="search-state-refresh", repair_graph=False)
     assert refreshed["search_dirty_session_count"] == 0
     assert refreshed["final_search_index"]["status"] == "current"
+
+
+def test_refresh_search_projection_states_respects_expired_budget(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-02T00-00-00-budget-refresh.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-02T00:00:00Z", "type": "session_meta", "payload": {"id": "budget-refresh", "cwd": str(repo)}},
+            {"timestamp": "2026-06-02T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Budget refresh"}]}},
+            {"timestamp": "2026-06-02T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Budget should stop."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "budget-refresh",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "budget-refresh")
+    projection = module.session_projection_fingerprint(record)
+
+    result = module.refresh_search_projection_states(
+        aoa_root,
+        [projection],
+        indexed_at=module.utc_now(),
+        budget_deadline=time.monotonic() - 1,
+    )
+
+    assert result["ok"] is False
+    assert result["budget_exhausted"] is True
+    assert result["updated_count"] == 0
+    assert result["skipped_count"] == 0
+
+
+def test_build_agent_atlas_defers_remaining_records_when_budget_expires(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    records = []
+    for label in ["atlas-budget-one", "atlas-budget-two"]:
+        session_dir = aoa_root / "sessions" / label
+        session_dir.mkdir(parents=True)
+        module.write_json(
+            session_dir / "session.manifest.json",
+            {
+                "schema_version": module.SCHEMA_VERSION,
+                "session_id": label,
+                "display": {"label": label},
+                "work_context": {"work_name": label, "confidence": "high"},
+                "segments": [],
+            },
+        )
+        module.write_json(session_dir / module.SESSION_INDEX_JSON, {})
+        records.append({"path": str(session_dir), "session_label": label, "session_id": label})
+
+    def fake_atlas_entries(_aoa_root: Path, record: dict[str, Any], _axes: set[str]) -> list[dict[str, Any]]:
+        label = str(record["session_label"])
+        return [
+            {
+                "schema_version": module.ATLAS_SCHEMA_VERSION,
+                "axis": "by-work-context",
+                "route_key": label,
+                "status": "generated",
+                "truth_status": "route_signal_not_reviewed_truth",
+                "session": label,
+                "session_id": label,
+                "work_context": label,
+                "work_family": "",
+                "authority_surface": "",
+                "summary": label,
+                "confidence": "high",
+                "next_route": "fixture",
+                "evidence": {"session_ref": str(Path(record["path"]) / module.SESSION_INDEX_MARKDOWN)},
+                "related_axes": [],
+                "signal_count": 1,
+                "route_layer": "",
+                "generated_at": module.utc_now(),
+            }
+        ]
+
+    ticks = iter([0.0, 0.5, 2.0, 2.5])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks, 2.5))
+    monkeypatch.setattr(module, "atlas_entries_for_session", fake_atlas_entries)
+
+    result = module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=False,
+        selected_records=records,
+        budget_seconds=1,
+    )
+
+    assert result["ok"] is False
+    assert result["budget_exhausted"] is True
+    assert result["processed_count"] == 1
+    assert result["remaining_count"] == 1
+    assert result["projection_session_count"] == 1
 
 
 def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: Path) -> None:
@@ -3612,6 +3722,7 @@ def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: P
     actions = {action["id"]: action for action in applied["actions"]}
     assert actions["rebuild_search_index"]["result"]["selected_count"] == 1
     assert actions["route_readiness"]["result"]["since"] == "2026-06-02"
+    assert actions["route_readiness"]["result"]["sample_limit"] == 0
     assert actions["route_readiness"]["result"]["selected_count"] == 1
 
     full_provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")

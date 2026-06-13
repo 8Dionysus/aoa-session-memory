@@ -14207,25 +14207,89 @@ def search_document_count_for_projection(conn: sqlite3.Connection, projection_st
     return 0
 
 
+def search_document_counts_for_projections(conn: sqlite3.Connection, projections: list[dict[str, Any]]) -> dict[str, int]:
+    session_ids = sorted({str(item.get("session_id") or "") for item in projections if item.get("session_id")})
+    session_labels = sorted({str(item.get("session_label") or "") for item in projections if item.get("session_label")})
+    counts: dict[str, int] = {}
+
+    def load_counts(column: str, values: list[str], prefix: str) -> None:
+        state_column = column
+        if sqlite_table_exists(conn, "session_index_state"):
+            for start in range(0, len(values), 500):
+                chunk = values[start : start + 500]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT {state_column}, document_count
+                    FROM session_index_state
+                    WHERE {state_column} IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    key = str(row[0] or "")
+                    count = int_value(row[1])
+                    if key and count > 0:
+                        counts[f"{prefix}:{key}"] = count
+        missing_values = [value for value in values if f"{prefix}:{value}" not in counts]
+        for start in range(0, len(missing_values), 500):
+            chunk = missing_values[start : start + 500]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT {column}, COUNT(*) FROM documents WHERE {column} IN ({placeholders}) GROUP BY {column}",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                key = str(row[0] or "")
+                if key:
+                    counts[f"{prefix}:{key}"] = int(row[1] or 0)
+
+    load_counts("session_id", session_ids, "id")
+    load_counts("session_label", session_labels, "label")
+    return counts
+
+
+def search_document_count_from_prefetched_counts(counts: dict[str, int], projection_state: dict[str, Any]) -> int:
+    session_id = str(projection_state.get("session_id") or "")
+    session_label = str(projection_state.get("session_label") or "")
+    if session_id:
+        count = counts.get(f"id:{session_id}", 0)
+        if count > 0:
+            return count
+    if session_label:
+        return counts.get(f"label:{session_label}", 0)
+    return 0
+
+
 def refresh_search_projection_states(
     aoa_root: Path,
     projections: list[dict[str, Any]],
     *,
     indexed_at: str,
+    budget_deadline: float | None = None,
 ) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
-        return {"ok": False, "updated_count": 0, "diagnostics": ["search_index_missing"], "sessions": []}
+        return {"ok": False, "updated_count": 0, "skipped_count": 0, "budget_exhausted": False, "diagnostics": ["search_index_missing"], "sessions": []}
     updated = 0
     skipped = 0
+    budget_exhausted = False
     sessions: list[dict[str, Any]] = []
     diagnostics: list[str] = []
     conn: sqlite3.Connection | None = None
     try:
         conn = init_search_db(db_path, rebuild=False)
+        prefetched_counts = search_document_counts_for_projections(conn, projections)
         conn.execute("BEGIN")
         for projection in projections:
-            document_count = search_document_count_for_projection(conn, projection)
+            if budget_deadline is not None and time.monotonic() >= budget_deadline:
+                budget_exhausted = True
+                break
+            document_count = search_document_count_from_prefetched_counts(prefetched_counts, projection)
             item = {
                 "session_id": projection.get("session_id"),
                 "session_label": projection.get("session_label"),
@@ -14251,9 +14315,10 @@ def refresh_search_projection_states(
             except Exception:
                 pass
     return {
-        "ok": not diagnostics,
+        "ok": not diagnostics and not budget_exhausted,
         "updated_count": updated,
         "skipped_count": skipped,
+        "budget_exhausted": budget_exhausted,
         "sessions": sessions,
         "diagnostics": diagnostics,
     }
@@ -14535,8 +14600,9 @@ def maintain_indexes(
         if str(read_json(session_dir_from_record(record) / "session.manifest.json", {}).get("archive_status") or record.get("archive_status") or "") == "raw_mirrored_index_deferred"
     ]
     search_projection_fingerprints = search_projection_fingerprints_for_records(records)
+    atlas_projection_fingerprints = projection_fingerprints_for_records(records)
     search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=search_projection_fingerprints)
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=atlas_projection_fingerprints)
     if repair_graph:
         graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
     else:
@@ -14607,6 +14673,7 @@ def maintain_indexes(
     search_state_refresh_fingerprints = search_projection_fingerprints_for_records(search_state_refresh_records)
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
+    maintenance_readiness_sample_limit = 0
     search_command = (
         base
         + ["search-index", search_update_target, *root_args]
@@ -14669,7 +14736,7 @@ def maintain_indexes(
             "route_readiness",
             reason="post_maintenance_gate",
             needed=repair_indexes and index_repair_needed,
-            command=base + ["route-readiness", target, *root_args] + selection_args + ["--write-report"],
+            command=base + ["route-readiness", target, *root_args] + selection_args + ["--sample-limit", str(maintenance_readiness_sample_limit), "--write-report"],
         ),
         maintenance_action(
             "graph_maintenance",
@@ -14801,10 +14868,16 @@ def maintain_indexes(
                     aoa_root,
                     search_state_refresh_fingerprints,
                     indexed_at=now,
+                    budget_deadline=deadline,
                 )
-                search_state_refresh_action["status"] = "applied" if result.get("ok") else "failed"
-                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "diagnostics")}
+                search_state_refresh_action["status"] = (
+                    "applied"
+                    if result.get("ok")
+                    else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                )
+                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "budget_exhausted", "diagnostics")}
                 action_results.append(search_state_refresh_action)
+                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_action["needed"] or reindex_ran or token_backfill_ran:
@@ -14846,10 +14919,13 @@ def maintain_indexes(
                     clean=atlas_rebuild_required,
                     selected_records=selected_atlas_records,
                     write_report=write_report,
+                    budget_seconds=None if atlas_rebuild_required else budget_remaining(),
+                    progress_every=progress_every,
                 )
-                atlas_action["status"] = "applied" if result.get("ok") else "failed"
-                atlas_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "axis_count", "entry_count", "updated_entry_count", "removed_entry_artifact_count", "report_json", "report_markdown", "diagnostics")}
+                atlas_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                atlas_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "axis_count", "entry_count", "updated_entry_count", "removed_entry_artifact_count", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(atlas_action)
+                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_indexes and has_budget():
@@ -15018,7 +15094,7 @@ def maintain_indexes(
                     since=since,
                     until=until,
                     limit=limit,
-                    sample_limit=sample_limit,
+                    sample_limit=maintenance_readiness_sample_limit,
                     write_report=write_report,
                 )
                 readiness_action["status"] = "applied" if result.get("ok") else "remaining"
@@ -15030,6 +15106,7 @@ def maintain_indexes(
                         "since",
                         "until",
                         "limit",
+                        "sample_limit",
                         "selected_count",
                         "covered_requirement_count",
                         "required_requirement_count",
@@ -31934,8 +32011,12 @@ def build_agent_atlas(
     clean: bool = True,
     write_report: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
 ) -> dict[str, Any]:
     now = utc_now()
+    started = time.monotonic()
+    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     axes = atlas_policy_axes(aoa_root)
     axis_set = set(axes)
     try:
@@ -31959,7 +32040,45 @@ def build_agent_atlas(
     selected_session_labels: set[str] = set()
     selected_session_ids: set[str] = set()
     if not clean:
-        for record in records:
+        for axis in axes:
+            axis_dir = maps_root / axis
+            indexed_entries = read_atlas_axis_index_entries(axis_dir, axis)
+            previous_axis_entries[axis] = indexed_entries if indexed_entries else read_atlas_entries_from_axis(axis_dir, axis)
+    by_axis: dict[str, list[dict[str, Any]]] = {axis: [] for axis in axes}
+    diagnostics: list[str] = []
+    processed_records: list[dict[str, Any]] = []
+    remaining_records: list[dict[str, Any]] = []
+    budget_exhausted = False
+    removed_entry_artifact_count = 0
+    for index, record in enumerate(records):
+        if deadline is not None and time.monotonic() >= deadline:
+            budget_exhausted = True
+            remaining_records = records[index:]
+            diagnostics.append("agent_atlas_budget_exhausted")
+            break
+        try:
+            entries = atlas_entries_for_session(aoa_root, record, axis_set)
+        except Exception as exc:
+            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:atlas_entry_error:{exc}")
+            continue
+        processed_records.append(record)
+        for entry in entries:
+            by_axis.setdefault(str(entry["axis"]), []).append(entry)
+        if progress_every and len(processed_records) % progress_every == 0:
+            print(
+                json.dumps(
+                    {
+                        "event": "agent_atlas_progress",
+                        "processed": len(processed_records),
+                        "selected": len(records),
+                        "remaining": max(0, len(records) - index - 1),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+    if not clean:
+        for record in processed_records:
             session_dir = session_dir_from_record(record)
             manifest = read_json(session_dir / "session.manifest.json", {})
             display = manifest.get("display") if isinstance(manifest, dict) and isinstance(manifest.get("display"), dict) else {}
@@ -31967,21 +32086,6 @@ def build_agent_atlas(
             selected_session_ids.add(str(record.get("session_id") or (manifest.get("session_id") if isinstance(manifest, dict) else "") or ""))
         selected_session_labels.discard("")
         selected_session_ids.discard("")
-        for axis in axes:
-            axis_dir = maps_root / axis
-            indexed_entries = read_atlas_axis_index_entries(axis_dir, axis)
-            previous_axis_entries[axis] = indexed_entries if indexed_entries else read_atlas_entries_from_axis(axis_dir, axis)
-    by_axis: dict[str, list[dict[str, Any]]] = {axis: [] for axis in axes}
-    diagnostics: list[str] = []
-    removed_entry_artifact_count = 0
-    for record in records:
-        try:
-            entries = atlas_entries_for_session(aoa_root, record, axis_set)
-        except Exception as exc:
-            diagnostics.append(f"{record.get('session_label') or record.get('session_id')}:atlas_entry_error:{exc}")
-            continue
-        for entry in entries:
-            by_axis.setdefault(str(entry["axis"]), []).append(entry)
     updated_entries: list[dict[str, Any]] = []
     axis_summaries: list[dict[str, Any]] = []
     for axis in axes:
@@ -32046,15 +32150,21 @@ def build_agent_atlas(
     for axis in axis_summaries:
         lines.append(f"| `{axis['axis']}` | {axis['entry_count']} | `{axis['index']}` |")
     write_markdown(maps_root / "INDEX.md", "\n".join(lines) + "\n")
-    atlas_projection = update_atlas_projection_state(aoa_root, records=records, generated_at=now, clean=clean)
+    projection_records = processed_records if budget_exhausted else records
+    atlas_projection = update_atlas_projection_state(aoa_root, records=projection_records, generated_at=now, clean=clean)
     payload = {
         "schema_version": ATLAS_SCHEMA_VERSION,
         "artifact_type": "agent_atlas",
         "generated_at": now,
-        "ok": not diagnostics,
+        "ok": not diagnostics and not budget_exhausted,
         "target": target,
         "clean": clean,
         "selected_count": len(records),
+        "processed_count": len(processed_records),
+        "remaining_count": len(remaining_records),
+        "budget_seconds": budget_seconds,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "budget_exhausted": budget_exhausted,
         "axis_count": len(axes),
         "entry_count": root_payload["entry_count"],
         "updated_entry_count": len(updated_entries),
@@ -32087,6 +32197,10 @@ def atlas_build_report_markdown(payload: dict[str, Any]) -> str:
         f"- ok: `{payload.get('ok')}`",
         f"- target: `{payload.get('target')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
+        f"- processed_count: `{payload.get('processed_count')}`",
+        f"- remaining_count: `{payload.get('remaining_count')}`",
+        f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- entry_count: `{payload.get('entry_count')}`",
         "",
         "## Axes",
@@ -32376,6 +32490,7 @@ def route_layer_readiness(
         "since": since,
         "until": until,
         "limit": limit,
+        "sample_limit": sample_limit,
         "selected_count": len(records),
         "route_signal_schema_version": ROUTE_SIGNAL_SCHEMA_VERSION,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
