@@ -1829,6 +1829,8 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
 
     states = module.graph_source_states(aoa_root=aoa_root)
     assert states["dirty_count"] >= 1
+    assert states["reason_group_counts"]["source_sha_mismatch"] >= 1
+    assert states["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance"}
     assert any(item["status"] == "dirty" and item["source_type"] == "segment" for item in states["states"])
 
     dirty_gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
@@ -1911,6 +1913,26 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
+def test_graph_source_recommendation_routes_mass_classifier_drift_to_store_rebuild() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4000,
+        dirty_count=3900,
+        missing_count=10,
+        orphaned_count=0,
+        blocked_count=50,
+        reason_group_counts={
+            "source_sha_mismatch": 3900,
+            "route_signal_classifier_mismatch": 3800,
+            "graph_source_missing": 10,
+        },
+    )
+
+    assert recommendation["route"] == "store_only_rebuild"
+    assert recommendation["reason"] == "route_signal_classifier_drift_dominates"
+    assert "--store-only --in-place" in recommendation["command"]
+    assert "blocked_sources_need_lower_layer_repair" in recommendation["notes"]
+
+
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -1986,6 +2008,27 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     light_node_cost = len(light_old_nodes | light_new_nodes)
     light_edge_cost = len(light_old_edges | light_new_edges)
     assert heavy_node_cost > light_node_cost or heavy_edge_cost > light_edge_cost
+
+    planned = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=False,
+        plan_refresh_costs=True,
+        batch_limit=1,
+        max_refresh_nodes=light_node_cost,
+        max_refresh_edges=light_edge_cost,
+        write_report=True,
+    )
+    assert planned["ok"] is True
+    assert planned["apply"] is False
+    assert planned["plan_refresh_costs"] is True
+    assert planned["selected_count"] == 1
+    assert planned["selected"][0]["source_key"] == light_source_key
+    assert planned["maintenance_detail"]["planned_only"] is True
+    assert planned["maintenance_detail"]["selection_strategy"] == "cheap_first_exact_refresh_cost_plan"
+    assert heavy_source_key in planned["maintenance_detail"]["oversized_sources"]
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "light_cost_anchor"),)).fetchone()[0] == 0
+    conn.close()
 
     maintained = module.graph_maintenance(
         aoa_root=aoa_root,

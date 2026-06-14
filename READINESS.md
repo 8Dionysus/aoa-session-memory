@@ -426,6 +426,17 @@ Last observed result:
   graph-maintenance reports now keep matched source evidence bounded as
   `matched_source_key_count` plus `matched_source_key_sample`, preserving full
   `matched_source_keys` only for explicit `--source-key` probes.
+- 2026-06-14 graph-drift route diagnosis proof: graph source state now exposes
+  bounded raw reason counts, normalized reason groups, examples, and a
+  maintenance recommendation. A live dry exact-cost plan
+  (`graph-maintenance all --plan-refresh-costs --batch-limit 1
+  --max-refresh-nodes 20000 --max-refresh-edges 60000 --write-report`) finished
+  without mutating `graph.sqlite3` in `20.518s`, reported
+  `source_sha_mismatch=4079`, `route_signal_classifier_mismatch=3892`,
+  `missing_graph_source_path=61`, `graph_source_missing=20`, selected a
+  `3` node / `3` edge source for a bounded incremental pass, and correctly
+  recommended the store-only in-place rebuild route for mass classifier drift.
+  Report: `diagnostics/20260614T102133Z__graph-maintenance.json`.
 - 2026-06-14 bounded catch-up proof: a full dry maintenance scan found
   classifier/projection drift across the archive, with `261` dirty search
   sessions before the first foreground repair and `209` dirty search sessions

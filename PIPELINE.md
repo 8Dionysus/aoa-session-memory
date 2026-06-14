@@ -712,6 +712,13 @@ and an exhausted in-flight SQLite mutation is rolled back before reporting.
 For unfiltered `all` runs, graph-maintenance reports keep matched source lists
 bounded as `matched_source_key_count` plus `matched_source_key_sample`; the full
 `matched_source_keys` list is retained only for explicit `--source-key` runs.
+Graph source state reports include bounded reason counts, normalized reason
+groups, examples, and a maintenance recommendation so an agent can distinguish
+small missing-source repair from mass classifier/fingerprint drift. Use
+`graph-maintenance --plan-refresh-costs` for a dry exact-cost plan over the
+candidate pool before applying a bounded repair; it parses the candidate
+sources and reports planned aggregate node/edge refresh counts without mutating
+`graph.sqlite3`.
 Incremental maintenance plans exact old-plus-new refresh cost, sorts
 actionable sources cheap-first, and isolates individually oversized sources so
 one historical session does not block smaller repairs. `index-maintenance` and

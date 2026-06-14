@@ -25892,6 +25892,115 @@ def graph_store_existing_sources(aoa_root: Path) -> tuple[dict[str, dict[str, An
     return {str(row["source_key"]): dict(row) for row in rows}, []
 
 
+def graph_source_reason_group(reason: str) -> str:
+    reason_text = str(reason or "")
+    if reason_text.startswith("missing_graph_source_path:"):
+        return "missing_graph_source_path"
+    if reason_text.startswith("stored_status_"):
+        return "stored_status"
+    if reason_text.startswith("requested_graph_source_not_found:"):
+        return "requested_graph_source_not_found"
+    return reason_text or "unknown"
+
+
+def graph_source_reason_summary(states: list[dict[str, Any]], *, limit: int = 40) -> dict[str, Any]:
+    reason_counts: Counter[str] = Counter()
+    reason_group_counts: Counter[str] = Counter()
+    reason_examples: dict[str, dict[str, str]] = {}
+    for item in states:
+        if not isinstance(item, dict):
+            continue
+        source_key = str(item.get("source_key") or "")
+        for reason in item.get("reasons", []) if isinstance(item.get("reasons"), list) else []:
+            reason_text = str(reason or "")
+            if not reason_text:
+                continue
+            reason_counts[reason_text] += 1
+            group = graph_source_reason_group(reason_text)
+            reason_group_counts[group] += 1
+            if group not in reason_examples:
+                reason_examples[group] = {"reason": reason_text, "source_key": source_key}
+    bounded_limit = max(1, min(int_value(limit, 40), 200))
+    return {
+        "reason_counts": dict(reason_counts.most_common(bounded_limit)),
+        "reason_group_counts": dict(reason_group_counts.most_common(bounded_limit)),
+        "reason_examples": reason_examples,
+    }
+
+
+def graph_source_maintenance_recommendation(
+    *,
+    source_count: int,
+    dirty_count: int,
+    missing_count: int,
+    orphaned_count: int,
+    blocked_count: int,
+    reason_group_counts: dict[str, Any],
+    workspace_root: str = "/path/to/workspace",
+    aoa_root: str = "/path/to/workspace/.aoa",
+) -> dict[str, Any]:
+    actionable_count = max(0, int_value(dirty_count) + int_value(missing_count) + int_value(orphaned_count))
+    source_total = max(0, int_value(source_count))
+    classifier_mismatch = int_value(reason_group_counts.get("route_signal_classifier_mismatch"))
+    source_sha_mismatch = int_value(reason_group_counts.get("source_sha_mismatch"))
+    graph_missing = int_value(reason_group_counts.get("graph_source_missing"))
+    missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
+    blocked = max(0, int_value(blocked_count))
+    root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
+    if actionable_count <= 0:
+        route = "none"
+        reason = "graph_sources_current"
+        command = ""
+    elif (
+        source_total
+        and int_value(dirty_count) >= max(20, int(source_total * 0.25))
+        and classifier_mismatch >= max(1, int(int_value(dirty_count) * 0.5))
+    ):
+        route = "store_only_rebuild"
+        reason = "route_signal_classifier_drift_dominates"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-build all "
+            f"{root_args} --write --store-only --in-place --progress-every 10"
+        )
+    elif source_total and int_value(dirty_count) >= max(100, int(source_total * 0.35)) and source_sha_mismatch >= max(1, int(int_value(dirty_count) * 0.8)):
+        route = "store_only_rebuild"
+        reason = "mass_source_fingerprint_drift"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-build all "
+            f"{root_args} --write --store-only --in-place --progress-every 10"
+        )
+    elif actionable_count <= 100:
+        route = "bounded_graph_maintenance"
+        reason = "small_incremental_backlog"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
+        )
+    else:
+        route = "budgeted_graph_maintenance"
+        reason = "mixed_or_medium_backlog"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --plan-refresh-costs --batch-limit 3 --budget-seconds 300 --write-report"
+        )
+    notes: list[str] = []
+    if blocked:
+        notes.append("blocked_sources_need_lower_layer_repair")
+    if missing_paths:
+        notes.append("missing_graph_source_paths_are_blocked_evidence_sources")
+    if graph_missing:
+        notes.append("missing_sources_can_be_inserted_by_incremental_or_rebuild_route")
+    return {
+        "route": route,
+        "reason": reason,
+        "actionable_count": actionable_count,
+        "blocked_count": blocked,
+        "dominant_reason": max(reason_group_counts.items(), key=lambda item: int_value(item[1]))[0] if reason_group_counts else "",
+        "command": command,
+        "notes": notes,
+    }
+
+
 def graph_source_states(
     *,
     aoa_root: Path,
@@ -25984,6 +26093,18 @@ def graph_source_states(
             }
         )
     counts = dict(Counter(str(item.get("status") or "unknown") for item in states))
+    reason_summary = graph_source_reason_summary(states)
+    workspace_root = str(aoa_root.parent)
+    recommendation = graph_source_maintenance_recommendation(
+        source_count=len(candidates),
+        dirty_count=counts.get("dirty", 0),
+        missing_count=counts.get("missing", 0),
+        orphaned_count=counts.get("orphaned", 0),
+        blocked_count=counts.get("blocked", 0),
+        reason_group_counts=reason_summary.get("reason_group_counts", {}),
+        workspace_root=workspace_root,
+        aoa_root=str(aoa_root),
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_source_states",
@@ -25993,6 +26114,8 @@ def graph_source_states(
         "ok": not diagnostics,
         "mutates": False,
         "target": target,
+        "workspace_root": workspace_root,
+        "aoa_root": str(aoa_root),
         "selection_scope": "global" if global_selection else "selected_sessions",
         "selected_session_count": len(records),
         "source_count": len(candidates),
@@ -26004,6 +26127,8 @@ def graph_source_states(
         "orphaned_count": counts.get("orphaned", 0),
         "out_of_scope_existing_count": out_of_scope_existing_count,
         "orphan_scope": "global" if global_selection else "selected_sessions",
+        **reason_summary,
+        "maintenance_recommendation": recommendation,
         "states": states,
         "diagnostics": diagnostics,
     }
@@ -26245,13 +26370,20 @@ def graph_source_state_summary(
                 "dirty_count",
                 "missing_count",
                 "blocked_count",
-                "orphaned_count",
-                "out_of_scope_existing_count",
-                "orphan_scope",
-                "selection_scope",
+            "orphaned_count",
+            "out_of_scope_existing_count",
+            "orphan_scope",
+            "selection_scope",
+            "workspace_root",
+            "aoa_root",
+            "reason_counts",
+            "reason_group_counts",
+            "reason_examples",
+                "maintenance_recommendation",
             )
         }
     counts = dict(Counter(str(item.get("status") or "unknown") for item in states if isinstance(item, dict)))
+    reason_summary = graph_source_reason_summary(states)
     return {
         "source_count": len(states),
         "existing_source_count": states_payload.get("existing_source_count"),
@@ -26263,6 +26395,17 @@ def graph_source_state_summary(
         "out_of_scope_existing_count": states_payload.get("out_of_scope_existing_count"),
         "orphan_scope": states_payload.get("orphan_scope"),
         "selection_scope": states_payload.get("selection_scope"),
+        **reason_summary,
+        "maintenance_recommendation": graph_source_maintenance_recommendation(
+            source_count=len(states),
+            dirty_count=counts.get("dirty", 0),
+            missing_count=counts.get("missing", 0),
+            orphaned_count=counts.get("orphaned", 0),
+            blocked_count=counts.get("blocked", 0),
+            reason_group_counts=reason_summary.get("reason_group_counts", {}),
+            workspace_root=str(states_payload.get("workspace_root") or "/path/to/workspace"),
+            aoa_root=str(states_payload.get("aoa_root") or "/path/to/workspace/.aoa"),
+        ),
         "filtered_by_source_key": True,
     }
 
@@ -26281,6 +26424,7 @@ def graph_maintenance(
     max_refresh_nodes: int | None = None,
     max_refresh_edges: int | None = None,
     budget_seconds: float | None = None,
+    plan_refresh_costs: bool = False,
     export_sidecar: bool = False,
     write_report: bool = False,
     reason: str = "operator_requested",
@@ -26348,7 +26492,13 @@ def graph_maintenance(
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
-        "selection_strategy": "cheap_first_exact_refresh_cost" if apply else "cheap_first_stored_counts",
+        "selection_strategy": (
+            "cheap_first_exact_refresh_cost"
+            if apply
+            else "cheap_first_exact_refresh_cost_plan"
+            if plan_refresh_costs
+            else "cheap_first_stored_counts"
+        ),
         "requested_source_keys": requested_source_keys,
         "matched_source_key_count": sum(
             1 for item in states if isinstance(item, dict) and item.get("source_key")
@@ -26398,7 +26548,7 @@ def graph_maintenance(
             results.append({**summary, "status": "deferred_time_budget"})
 
     sidecar: dict[str, Any] = {}
-    if apply and candidate_pool:
+    if (apply or plan_refresh_costs) and candidate_pool:
         if not has_time_budget():
             defer_for_time_budget(candidate_pool)
             selected = []
@@ -26574,43 +26724,46 @@ def graph_maintenance(
                     }
                 )
 
-                try:
-                    if orphaned_source_keys:
-                        removed = store.remove_sources(orphaned_source_keys, budget_deadline=deadline)
-                        results.extend(removed.get("results", []))
-                        maintenance_detail["removed_refreshed_node_count"] = removed.get("refreshed_node_count", 0)
-                        maintenance_detail["removed_refreshed_edge_count"] = removed.get("refreshed_edge_count", 0)
-                        maintenance_detail["removed_node_refresh"] = removed.get("node_refresh", {})
-                        maintenance_detail["removed_edge_refresh"] = removed.get("edge_refresh", {})
-                    if replacements:
-                        replaced = store.replace_sources(replacements, budget_deadline=deadline)
-                        results.extend(replaced.get("results", []))
-                        maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
-                        maintenance_detail["replaced_refreshed_edge_count"] = replaced.get("refreshed_edge_count", 0)
-                        maintenance_detail["replaced_node_refresh"] = replaced.get("node_refresh", {})
-                        maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
-                        maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
-                        maintenance_detail["replacement_group_count"] = replacement_group_count
-                    if export_sidecar:
-                        graph_check_budget(deadline)
-                        sidecar = store.write_sidecar()
-                    else:
-                        sidecar = {}
-                    store.conn.commit()
-                except GraphMaintenanceBudgetExceeded:
-                    store.conn.rollback()
-                    mutation_rolled_back = True
-                    rolled_back_plan = [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]]
-                    maintenance_detail["rolled_back_source_count"] = len(selected_plan)
-                    maintenance_detail["rolled_back_sources"] = [str(entry.get("source_key") or "") for entry in selected_plan[:40]]
-                    maintenance_detail["rolled_back_plan"] = rolled_back_plan
-                    maintenance_detail["selected_planned_refresh_node_count"] = 0
-                    maintenance_detail["selected_planned_refresh_edge_count"] = 0
-                    maintenance_detail["selected_sources"] = []
-                    maintenance_detail["selected_plan"] = []
-                    defer_for_time_budget(selected_plan)
-                    selected_plan = []
-                    selected = []
+                if apply:
+                    try:
+                        if orphaned_source_keys:
+                            removed = store.remove_sources(orphaned_source_keys, budget_deadline=deadline)
+                            results.extend(removed.get("results", []))
+                            maintenance_detail["removed_refreshed_node_count"] = removed.get("refreshed_node_count", 0)
+                            maintenance_detail["removed_refreshed_edge_count"] = removed.get("refreshed_edge_count", 0)
+                            maintenance_detail["removed_node_refresh"] = removed.get("node_refresh", {})
+                            maintenance_detail["removed_edge_refresh"] = removed.get("edge_refresh", {})
+                        if replacements:
+                            replaced = store.replace_sources(replacements, budget_deadline=deadline)
+                            results.extend(replaced.get("results", []))
+                            maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
+                            maintenance_detail["replaced_refreshed_edge_count"] = replaced.get("refreshed_edge_count", 0)
+                            maintenance_detail["replaced_node_refresh"] = replaced.get("node_refresh", {})
+                            maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
+                            maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
+                            maintenance_detail["replacement_group_count"] = replacement_group_count
+                        if export_sidecar:
+                            graph_check_budget(deadline)
+                            sidecar = store.write_sidecar()
+                        else:
+                            sidecar = {}
+                        store.conn.commit()
+                    except GraphMaintenanceBudgetExceeded:
+                        store.conn.rollback()
+                        mutation_rolled_back = True
+                        rolled_back_plan = [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]]
+                        maintenance_detail["rolled_back_source_count"] = len(selected_plan)
+                        maintenance_detail["rolled_back_sources"] = [str(entry.get("source_key") or "") for entry in selected_plan[:40]]
+                        maintenance_detail["rolled_back_plan"] = rolled_back_plan
+                        maintenance_detail["selected_planned_refresh_node_count"] = 0
+                        maintenance_detail["selected_planned_refresh_edge_count"] = 0
+                        maintenance_detail["selected_sources"] = []
+                        maintenance_detail["selected_plan"] = []
+                        defer_for_time_budget(selected_plan)
+                        selected_plan = []
+                        selected = []
+                else:
+                    maintenance_detail["planned_only"] = True
             finally:
                 store.close()
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -26644,6 +26797,7 @@ def graph_maintenance(
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
         "budget_seconds": budget_seconds,
+        "plan_refresh_costs": bool(plan_refresh_costs),
         "elapsed_ms": elapsed_ms,
         "budget_exhausted": budget_exhausted,
         "reason": reason,
@@ -26698,6 +26852,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- max_refresh_nodes: `{payload.get('max_refresh_nodes')}`",
         f"- max_refresh_edges: `{payload.get('max_refresh_edges')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- plan_refresh_costs: `{payload.get('plan_refresh_costs')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
@@ -26708,6 +26863,8 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- time_budget_deferred_source_count: `{payload.get('time_budget_deferred_source_count')}`",
         f"- mutation_rolled_back: `{payload.get('mutation_rolled_back')}`",
         f"- status_counts: `{state.get('status_counts')}`",
+        f"- reason_group_counts: `{state.get('reason_group_counts')}`",
+        f"- maintenance_recommendation: `{json.dumps(state.get('maintenance_recommendation', {}), ensure_ascii=False)}`",
         "",
         "## Selected Sources",
         "",
@@ -26731,6 +26888,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- elapsed_ms: `{detail.get('elapsed_ms')}`",
                 f"- budget_exhausted: `{detail.get('budget_exhausted')}`",
                 f"- mutation_rolled_back: `{detail.get('mutation_rolled_back')}`",
+                f"- planned_only: `{detail.get('planned_only')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_key_count: `{detail.get('matched_source_key_count')}`",
@@ -32529,6 +32687,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             max_refresh_nodes=getattr(args, "max_refresh_nodes", None),
             max_refresh_edges=getattr(args, "max_refresh_edges", None),
             budget_seconds=getattr(args, "budget_seconds", None),
+            plan_refresh_costs=getattr(args, "plan_refresh_costs", False),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             reason="operator_requested",
@@ -36628,6 +36787,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--max-refresh-nodes", type=int, help="Defer source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
     graph_maintenance_parser.add_argument("--max-refresh-edges", type=int, help="Defer source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
     graph_maintenance_parser.add_argument("--budget-seconds", type=float, help="Stop planning or roll back the current mutation pass once this wall-clock budget is exhausted.")
+    graph_maintenance_parser.add_argument("--plan-refresh-costs", action="store_true", help="In dry-run mode, compute exact old-plus-new aggregate refresh costs for the candidate pool without mutating the graph store.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--write-report", action="store_true", help="Write graph maintenance reports under .aoa/diagnostics.")
