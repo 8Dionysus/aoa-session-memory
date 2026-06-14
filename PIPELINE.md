@@ -197,6 +197,10 @@ episode links the start user ref, reasoning boundary refs, plan refs, action
 and tool refs, verification refs, error/blocker refs, and final/closeout refs
 inside a bounded generated interval. Ambiguous boundaries carry confidence and
 `ambiguity_flags` instead of pretending the episode is reviewed truth.
+If a user prompt reaches the archive tail without any agent response, action,
+tool, verification, error, blocker, or closeout refs, the episode is marked
+`interrupted` with `no_agent_response_seen`; this is a transition signal, not
+a reviewed claim that work happened.
 
 Use these routes when the question is about what the agent answered or how a
 task interval unfolded:
@@ -208,11 +212,18 @@ python3 scripts/aoa_session_memory.py agent-progress-updates --session latest --
 python3 scripts/aoa_session_memory.py agent-reasoning-windows --session latest --limit 10
 python3 scripts/aoa_session_memory.py task-episodes latest --limit 20
 python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --limit 10
+python3 scripts/aoa_session_memory.py agent-event-audit all \
+  --order longest --min-events 1000 --limit 5 --probe-routes --write-report
 ```
 
 `task-episodes` defaults to `--order recent` so an agent lands on the live tail
 of a long session first. Use `--order chronological` when replaying a session
 from the beginning.
+
+`agent-event-audit --order longest` is the Stage-1 classification route for
+real long sessions. It records selected sessions, generated shape counts,
+bounded raw event-shape samples, weak spots, route probes, and refs without
+dumping transcript text into the diagnostic.
 
 The SQLite search route stores `agent_event` and `task_episode_id` as first
 class filters. MCP may expose these read-only packets, but maintenance,
@@ -295,10 +306,13 @@ but it is not the normal collection path.
 The archive may compact generated route stores, but it must preserve raw
 evidence and stable refs.
 
-- Graph aggregate `nodes` and `edges` may store compact evidence refs because
-  `node_contribs` and `edge_contribs` remain the full per-source evidence
-  store. Graph packets must hydrate bounded refs from contribution rows before
-  an agent relies on them.
+- Graph aggregate `nodes` and `edges` may omit full evidence refs because
+  `node_contribs` and `edge_contribs` remain the per-source evidence store.
+  Contribution payloads should keep compact refs only: session identity,
+  segment identity, event identity, raw refs, bounded segment refs, and enough
+  session refs for quality gates. Full route-signal lists are represented by
+  graph edges, not duplicated inside event-node payloads. Graph packets must
+  hydrate bounded refs from contribution rows before an agent relies on them.
 - Search may keep full body text in FTS and compressed `document_bodies` while
   `documents.body` stores only a hot preview. Query recall must still use full
   text, and selected snippets may hydrate from compressed body storage.
@@ -744,6 +758,12 @@ Full
 `graph-build all --write --force-large-export` remains the fallback
 for schema changes, corruption, excessive dirty backlog, invariant failure, or
 large historical imports.
+
+On a large live archive, treat full graph rebuild as an offline/resource-gated
+repair, not the default continuation route. If a full store-only rebuild is
+killed by memory pressure, reset only the generated `graph/graph.sqlite3` store
+and resume with bounded `graph-maintenance --apply` batches; raw/session/search
+evidence remains the stronger source truth.
 
 When the live archive is large and sidecar snapshots are not needed, prefer a
 store-only rebuild to avoid multi-GB `nodes.jsonl` / `edges.jsonl` exports and

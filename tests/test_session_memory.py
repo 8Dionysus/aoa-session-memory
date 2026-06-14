@@ -307,9 +307,22 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert audit["stream_canonical_neighbor_pair_count"] >= 1
     assert audit["stream_canonical_retrieval_guard_ok"] is True
     assert audit["quality_ok"] is True
+    assert audit["raw_shape_samples"]
+    assert any(sample["raw_shape"]["payload_type"] == "message" for sample in audit["raw_shape_samples"])
+    ordered_audit = module.agent_event_audit(
+        aoa_root=aoa_root,
+        target="all",
+        order="longest",
+        min_events=1,
+        limit=1,
+    )
+    assert ordered_audit["order"] == "longest"
+    assert ordered_audit["selected_count"] == 1
+    assert ordered_audit["selected_sessions"][0]["event_count"] >= 1
     monkeypatch.setattr(module, "compact_stamp", lambda: "20260614T000000Z")
     first_report = module.agent_event_audit(aoa_root=aoa_root, target="latest", write_report=True)
     second_report = module.agent_event_audit(aoa_root=aoa_root, target="latest", write_report=True)
+    assert first_report["quality_ok"] is True
     assert first_report["report_json"] != second_report["report_json"]
     assert first_report["report_json"].endswith("__agent-event-audit.json")
     assert second_report["report_json"].endswith("__agent-event-audit__01.json")
@@ -399,6 +412,43 @@ def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path
     assert windows["windows"][0]["ok"] is True
     assert windows["windows"][0]["events"][0]["agent_event"] == "assistant_reasoning_boundary"
     assert windows["windows"][0]["bridge"]["source"] == "query_matched_agent_event_neighborhood"
+
+
+def test_prompt_only_task_episode_is_interrupted_not_quality_gap(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-prompt-only-tail.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "prompt-only-tail", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Continue"}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "prompt-only-tail",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    episode = session_index["task_episodes"][0]
+    assert episode["status"] == "interrupted"
+    assert "no_agent_response_seen" in episode["ambiguity_flags"]
+
+    audit = module.agent_event_audit(aoa_root=aoa_root, target="latest")
+    assert audit["zero_count_task_episode_count"] == 1
+    assert audit["unexplained_zero_count_task_episode_count"] == 0
+    assert audit["weak_spots"]["task_episode_gap"] == []
+    assert audit["quality_ok"] is True
 
 
 def test_agent_event_windows_resolve_renamed_latest_segment_refs(tmp_path: Path) -> None:
@@ -1569,11 +1619,29 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     aggregate_edge = json.loads(conn.execute("SELECT payload_json FROM edges LIMIT 1").fetchone()[0])
     aggregate_node = json.loads(conn.execute("SELECT payload_json FROM nodes LIMIT 1").fetchone()[0])
+    node_contrib_row = conn.execute("SELECT payload_json FROM node_contribs WHERE payload_json LIKE ? LIMIT 1", ('%"raw"%',)).fetchone()
+    edge_contrib_row = conn.execute("SELECT payload_json FROM edge_contribs WHERE payload_json LIKE ? LIMIT 1", ('%"raw"%',)).fetchone()
     conn.close()
     assert aggregate_edge["aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
     assert aggregate_edge["evidence_refs_compacted"] is True
     assert "evidence_refs" not in aggregate_edge
+    assert "refs" not in aggregate_edge
     assert aggregate_node["aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
+    assert "refs" not in aggregate_node
+    assert node_contrib_row is not None
+    assert edge_contrib_row is not None
+    node_contrib = json.loads(str(node_contrib_row[0]))
+    edge_contrib = json.loads(str(edge_contrib_row[0]))
+    for contrib in (node_contrib, edge_contrib):
+        assert contrib["contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+        assert "session_index" not in contrib.get("refs", {})
+        assert "segment_index" not in contrib.get("refs", {})
+        assert contrib["evidence_refs"]
+        compact_refs = contrib["evidence_refs"][0]["refs"]
+        assert "session_index" not in compact_refs
+        assert "segment_index" not in compact_refs
+        assert compact_refs["session"].startswith("sessions/")
+        assert compact_refs.get("raw") or compact_refs.get("segment")
 
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=2)
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
@@ -1728,6 +1796,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert any("did_you_mean:aoa_decisions_mcp" in item for item in typo_mcp_trace["diagnostics"])
     assert query_state["query_scope"] == "lightweight_store_availability_not_full_dirty_audit"
     assert query_state["metadata"]["graph_store_aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
+    assert query_state["metadata"]["graph_store_contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
     assert storage["artifact_type"] == "session_memory_storage_audit"
     assert storage["ok"] is True
     assert storage["graph_store"]["ok"] is True
@@ -1882,10 +1951,16 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
         )
         node_row = store.conn.execute("SELECT payload_json, count FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()
         edge_row = store.conn.execute("SELECT payload_json, count FROM edges WHERE id = ?", (shared_edge_id,)).fetchone()
+        node_contrib_row = store.conn.execute("SELECT payload_json FROM node_contribs WHERE node_id = ? LIMIT 1", (shared_node_id,)).fetchone()
+        edge_contrib_row = store.conn.execute("SELECT payload_json FROM edge_contribs WHERE edge_id = ? LIMIT 1", (shared_edge_id,)).fetchone()
         assert node_row is not None
         assert edge_row is not None
+        assert node_contrib_row is not None
+        assert edge_contrib_row is not None
         stored_node = json.loads(str(node_row["payload_json"]))
         stored_edge = json.loads(str(edge_row["payload_json"]))
+        node_contrib = json.loads(str(node_contrib_row["payload_json"]))
+        edge_contrib = json.loads(str(edge_contrib_row["payload_json"]))
         hydrated_node = next(payload for payload in store.iter_payloads("nodes") if payload["id"] == shared_node_id)
         hydrated_edge = next(payload for payload in store.iter_payloads("edges") if payload["id"] == shared_edge_id)
     finally:
@@ -1900,6 +1975,12 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert stored_node["title"] == "second anchor title"
     assert stored_edge["count"] == 2
     assert stored_edge["evidence_ref_count"] == 2
+    assert node_contrib["contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+    assert edge_contrib["contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+    assert node_contrib["evidence_refs"][0]["refs"]["raw"] == "raw:line:1"
+    assert edge_contrib["evidence_refs"][0]["refs"]["raw"] == "raw:line:1"
+    assert "session_index" not in node_contrib["evidence_refs"][0]["refs"]
+    assert "segment_index" not in edge_contrib["evidence_refs"][0]["refs"]
     assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
 

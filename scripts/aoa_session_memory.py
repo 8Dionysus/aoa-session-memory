@@ -80,7 +80,7 @@ RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
 AGENT_EVENT_SCHEMA_VERSION = 1
-TASK_EPISODE_SCHEMA_VERSION = 1
+TASK_EPISODE_SCHEMA_VERSION = 2
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
@@ -107,8 +107,11 @@ GRAPH_NODES_JSONL = "nodes.jsonl"
 GRAPH_EDGES_JSONL = "edges.jsonl"
 GRAPH_INDEX_JSON = "index.json"
 GRAPH_STORE_SQLITE = "graph.sqlite3"
-GRAPH_STORE_SCHEMA_VERSION = 1
+GRAPH_STORE_SCHEMA_VERSION = 2
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
+GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
+GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
+GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
@@ -6174,7 +6177,12 @@ class TaskEpisodeBuilder:
     def finish(self) -> list[dict[str, Any]]:
         for episode in self.episodes:
             flags = episode.setdefault("ambiguity_flags", [])
+            bucket_total = sum(len(episode.get(bucket, [])) for bucket in AGENT_EVENT_REF_BUCKETS if isinstance(episode.get(bucket), list))
             if isinstance(flags, list):
+                if bucket_total == 0 and episode.get("status") == "open":
+                    episode["status"] = "interrupted"
+                    if "no_agent_response_seen" not in flags:
+                        flags.append("no_agent_response_seen")
                 if not episode.get("closeout_refs") and episode.get("status") == "open":
                     flags.append("no_closeout_seen")
                 if not episode.get("verification_refs"):
@@ -17144,6 +17152,44 @@ def chronological_session_records(
     return records[:limit] if limit is not None else records
 
 
+def session_record_event_count_for_order(record: dict[str, Any]) -> int:
+    return int_value(
+        record.get("event_count"),
+        int_value(record.get("latest_event_count"), 0),
+    )
+
+
+def ordered_session_records_for_audit(
+    records: list[dict[str, Any]],
+    *,
+    order: str = "chronological",
+    min_events: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    candidates = [
+        record
+        for record in records
+        if min_events is None or session_record_event_count_for_order(record) >= min_events
+    ]
+    if order == "longest":
+        candidates = sorted(
+            candidates,
+            key=lambda item: (
+                session_record_event_count_for_order(item),
+                session_record_date(item),
+                session_record_sequence(item),
+                str(item.get("session_label") or ""),
+                str(item.get("session_id") or ""),
+            ),
+            reverse=True,
+        )
+    elif order == "recent":
+        candidates = sorted(candidates, key=latest_session_sort_key, reverse=True)
+    else:
+        candidates = sort_session_records_chronologically(candidates)
+    return candidates[:limit] if limit is not None else candidates
+
+
 def sort_session_records_chronologically(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         records,
@@ -19680,6 +19726,26 @@ def agent_event_audit_ref(
     }
 
 
+def agent_event_shape_sample(
+    *,
+    session_label: str,
+    segment_id: str,
+    segment: dict[str, Any],
+    index_path: Path,
+    raw_path: Path,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    sample = agent_event_audit_ref(
+        session_label=session_label,
+        segment_id=segment_id,
+        segment=segment,
+        index_path=index_path,
+        event=event,
+    )
+    sample["raw_shape"] = raw_event_shape(raw_path, event.get("raw_ref"))
+    return sample
+
+
 def agent_event_audit_route_probe(aoa_root: Path, session_label: str, *, limit: int = 5) -> list[dict[str, Any]]:
     probes: list[dict[str, Any]] = []
     for route, classes in [
@@ -19729,6 +19795,8 @@ def agent_event_audit_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- target: `{payload.get('target')}`",
+        f"- order: `{payload.get('order')}`",
+        f"- min_events: `{payload.get('min_events')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- event_count: `{payload.get('event_count')}`",
         f"- eligible_agent_event_count: `{payload.get('eligible_agent_event_count')}`",
@@ -19754,15 +19822,28 @@ def agent_event_audit_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "## Source Lanes", "", "| source lane | count |", "| --- | ---: |"])
     for lane, count in sorted((payload.get("source_lane_counts") or {}).items()):
         lines.append(f"| `{lane}` | {count} |")
+    lines.extend(["", "## Raw Shape Counts", "", "| generated shape | count |", "| --- | ---: |"])
+    for shape, count in sorted((payload.get("generated_shape_counts") or {}).items()):
+        lines.append(f"| `{shape}` | {count} |")
+    lines.extend(["", "## Selected Sessions", "", "| session | events | segments | raw bytes |", "| --- | ---: | ---: | ---: |"])
+    for item in payload.get("selected_sessions", []) if isinstance(payload.get("selected_sessions"), list) else []:
+        if isinstance(item, dict):
+            lines.append(
+                f"| `{item.get('session_label')}` | {item.get('event_count')} | "
+                f"{item.get('segment_count')} | {item.get('raw_bytes')} |"
+            )
     lines.extend(["", "## Samples", ""])
-    for section in ["missing_agent_event_samples", "stream_canonical_pair_samples", "zero_count_episode_samples", "index_gap_samples"]:
+    for section in ["missing_agent_event_samples", "stream_canonical_pair_samples", "zero_count_episode_samples", "index_gap_samples", "raw_shape_samples"]:
         lines.append(f"### `{section}`")
         lines.append("")
         samples = payload.get(section) if isinstance(payload.get(section), list) else []
         if not samples:
             lines.append("- none")
         for item in samples:
-            lines.append(f"- `{item.get('session_label')}` `{item.get('segment_id') or item.get('episode_id')}` `{item.get('event_id') or ''}` raw=`{item.get('raw_ref') or ''}`")
+            raw_shape = item.get("raw_shape") if isinstance(item.get("raw_shape"), dict) else {}
+            shape = raw_shape.get("shape_key") if raw_shape else ""
+            suffix = f" shape=`{shape}`" if shape else ""
+            lines.append(f"- `{item.get('session_label')}` `{item.get('segment_id') or item.get('episode_id')}` `{item.get('event_id') or ''}` raw=`{item.get('raw_ref') or ''}`{suffix}")
         lines.append("")
     probes = payload.get("route_probes") if isinstance(payload.get("route_probes"), list) else []
     if probes:
@@ -19783,6 +19864,8 @@ def agent_event_audit(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    order: str = "chronological",
+    min_events: int | None = None,
     sample_limit: int = 3,
     probe_routes: bool = False,
     route_probe_limit: int = 5,
@@ -19793,7 +19876,12 @@ def agent_event_audit(
         if target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
         else:
-            records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+            records = ordered_session_records_for_audit(
+                chronological_session_records(aoa_root, since=since, until=until),
+                order=order,
+                min_events=min_events,
+                limit=limit,
+            )
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -19803,6 +19891,8 @@ def agent_event_audit(
             "quality_ok": False,
             "aoa_root": str(aoa_root),
             "target": target,
+            "order": order,
+            "min_events": min_events,
             "diagnostics": [str(exc)],
         }
 
@@ -19814,14 +19904,19 @@ def agent_event_audit(
     ambiguity_flag_counts: Counter[str] = Counter()
     source_type_counts: Counter[str] = Counter()
     event_type_counts: Counter[str] = Counter()
+    generated_shape_counts: Counter[str] = Counter()
     missing_samples: list[dict[str, Any]] = []
     pair_samples: list[dict[str, Any]] = []
     index_gap_samples: list[dict[str, Any]] = []
     zero_episode_samples: list[dict[str, Any]] = []
+    raw_shape_samples: list[dict[str, Any]] = []
+    raw_shape_sample_keys: set[str] = set()
+    selected_sessions: list[dict[str, Any]] = []
     missing_agent_event_count = 0
     stream_pair_count = 0
     index_gap_count = 0
     zero_episode_count = 0
+    unexplained_zero_episode_count = 0
     task_episode_count = 0
     route_probes: list[dict[str, Any]] = []
 
@@ -19830,6 +19925,21 @@ def agent_event_audit(
         session_dir = session_dir_from_record(record)
         manifest = read_json(session_dir / "session.manifest.json", {})
         session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        raw_path = manifest_raw_path(session_dir, manifest) if isinstance(manifest, dict) else session_dir / "raw" / "session.raw.jsonl"
+        selected_sessions.append(
+            {
+                "session_id": record.get("session_id") or manifest.get("session_id") if isinstance(manifest, dict) else record.get("session_id"),
+                "session_label": session_label,
+                "event_count": int_value(
+                    manifest.get("latest_event_count") if isinstance(manifest, dict) else None,
+                    session_record_event_count_for_order(record),
+                ),
+                "segment_count": len(manifest.get("segments", [])) if isinstance(manifest.get("segments") if isinstance(manifest, dict) else None, list) else 0,
+                "raw_bytes": int_value(raw.get("bytes") if isinstance(raw, dict) else None, 0),
+                "archive_path": str(session_dir),
+            }
+        )
         task_episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
         task_episode_count += len(task_episodes)
         for episode in task_episodes:
@@ -19838,6 +19948,10 @@ def agent_event_audit(
             bucket_total = sum(len(episode.get(bucket, [])) for bucket in AGENT_EVENT_REF_BUCKETS if isinstance(episode.get(bucket), list))
             if bucket_total == 0:
                 zero_episode_count += 1
+                flags = episode.get("ambiguity_flags", []) if isinstance(episode.get("ambiguity_flags"), list) else []
+                explained_interruption = episode.get("status") == "interrupted" and "no_agent_response_seen" in flags
+                if not explained_interruption:
+                    unexplained_zero_episode_count += 1
                 if len(zero_episode_samples) < sample_limit:
                     start_ref = episode.get("start_user_ref") if isinstance(episode.get("start_user_ref"), dict) else {}
                     zero_episode_samples.append(
@@ -19869,14 +19983,43 @@ def agent_event_audit(
                 event_count += 1
                 source_type_counts[str(event.get("source_type") or "")] += 1
                 event_type_counts[str(event.get("type") or "")] += 1
+                generated_shape = f"{event.get('source_type') or ''}:{event.get('type') or ''}"
+                generated_shape_counts[generated_shape] += 1
                 facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
                 agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
                 if agent_event_eligible_event(event):
                     eligible_count += 1
+                    shape_sample_key = f"{generated_shape}:{agent_event.get('class') or 'missing_agent_event'}"
+                    if shape_sample_key not in raw_shape_sample_keys and len(raw_shape_samples) < max(1, sample_limit) * 8:
+                        raw_shape_samples.append(
+                            agent_event_shape_sample(
+                                session_label=session_label,
+                                segment_id=segment_id,
+                                segment=segment,
+                                index_path=index_path,
+                                raw_path=raw_path,
+                                event=event,
+                            )
+                        )
+                        raw_shape_sample_keys.add(shape_sample_key)
                     if not agent_event.get("class"):
                         missing_agent_event_count += 1
                         if len(missing_samples) < sample_limit:
                             missing_samples.append(agent_event_audit_ref(session_label=session_label, segment_id=segment_id, segment=segment, index_path=index_path, event=event))
+                elif event.get("type") in {"TOOL_CALL", "TOOL_OUTPUT", "COMMAND", "COMMAND_OUTPUT", "ERROR", "VERIFICATION"}:
+                    shape_sample_key = f"{generated_shape}:non_agent_event"
+                    if shape_sample_key not in raw_shape_sample_keys and len(raw_shape_samples) < max(1, sample_limit) * 8:
+                        raw_shape_samples.append(
+                            agent_event_shape_sample(
+                                session_label=session_label,
+                                segment_id=segment_id,
+                                segment=segment,
+                                index_path=index_path,
+                                raw_path=raw_path,
+                                event=event,
+                            )
+                        )
+                        raw_shape_sample_keys.add(shape_sample_key)
                 if agent_event.get("class"):
                     agent_class = str(agent_event.get("class"))
                     source_lane = str(agent_event.get("source_lane") or "unknown")
@@ -19933,14 +20076,14 @@ def agent_event_audit(
 
     route_stream_noise = sum(int(item.get("stream_copy_result_count") or 0) for item in route_probes)
     route_failures = [item for item in route_probes if not item.get("ok")]
-    stream_pair_retrieval_guard_ok = bool(route_probes) and not route_stream_noise and not route_failures
-    stream_pair_requires_guard = bool(stream_pair_count and not stream_pair_retrieval_guard_ok)
+    stream_pair_retrieval_guard_ok = (not probe_routes) or (bool(route_probes) and not route_stream_noise and not route_failures)
+    stream_pair_requires_guard = bool(probe_routes and stream_pair_count and not stream_pair_retrieval_guard_ok)
     weak_spots = {
         "taxonomy_gap": ["eligible assistant/reasoning events without agent_event facets"] if missing_agent_event_count else [],
         "classifier_gap": ["stream/canonical neighbor pairs exist but canonical-first route probes did not prove retrieval safety"] if stream_pair_requires_guard else [],
         "index_gap": ["segment by_agent_event counts differ from event facets"] if index_gap_count else [],
         "search_mcp_surface_gap": [],
-        "task_episode_gap": ["zero-count task episodes from operator-only or interrupted prompts"] if zero_episode_count else [],
+        "task_episode_gap": ["unexplained zero-count task episodes"] if unexplained_zero_episode_count else [],
     }
     if route_stream_noise:
         weak_spots["search_mcp_surface_gap"].append("default route probes returned event_msg_stream copies")
@@ -19950,7 +20093,7 @@ def agent_event_audit(
         missing_agent_event_count
         + (stream_pair_count if stream_pair_requires_guard else 0)
         + index_gap_count
-        + zero_episode_count
+        + unexplained_zero_episode_count
         + route_stream_noise
         + len(route_failures)
     )
@@ -19967,7 +20110,10 @@ def agent_event_audit(
         "since": since,
         "until": until,
         "limit": limit,
+        "order": order,
+        "min_events": min_events,
         "selected_count": len(records),
+        "selected_sessions": selected_sessions,
         "segment_count": segment_count,
         "event_count": event_count,
         "eligible_agent_event_count": eligible_count,
@@ -19977,16 +20123,19 @@ def agent_event_audit(
         "index_gap_count": index_gap_count,
         "task_episode_count": task_episode_count,
         "zero_count_task_episode_count": zero_episode_count,
+        "unexplained_zero_count_task_episode_count": unexplained_zero_episode_count,
         "agent_event_counts": dict(sorted(agent_counts.items())),
         "source_lane_counts": dict(sorted(source_lane_counts.items())),
         "ambiguity_flag_counts": dict(sorted(ambiguity_flag_counts.items())),
         "source_type_counts": dict(sorted(source_type_counts.items())),
         "event_type_counts": dict(sorted(event_type_counts.items())),
+        "generated_shape_counts": dict(sorted(generated_shape_counts.items())),
         "weak_spots": weak_spots,
         "missing_agent_event_samples": missing_samples,
         "stream_canonical_pair_samples": pair_samples,
         "zero_count_episode_samples": zero_episode_samples,
         "index_gap_samples": index_gap_samples,
+        "raw_shape_samples": raw_shape_samples,
         "route_probes": route_probes,
         "diagnostics": ["quality_findings_present"] if finding_count else [],
     }
@@ -24066,6 +24215,94 @@ def graph_merge_evidence_refs(existing_refs: Any, new_refs: Any, *, limit: int) 
     return selected
 
 
+def graph_compact_ref_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/sessions/" in text:
+        return f"sessions/{text.split('/sessions/', 1)[1]}"
+    return text
+
+
+def graph_compact_refs_map(refs: Any) -> dict[str, str]:
+    if not isinstance(refs, dict):
+        return {}
+    compact: dict[str, str] = {}
+    for key in ("session", "segment", "raw", "raw_block"):
+        value = graph_compact_ref_value(refs.get(key))
+        if value:
+            if key == "segment" and "#" in value:
+                value = value.split("#", 1)[0]
+            compact[key] = value
+    return compact
+
+
+def graph_compact_evidence_ref(ref: Any) -> Any:
+    if not isinstance(ref, dict):
+        return ref
+    compact: dict[str, Any] = {}
+    for key in ("session_id", "segment_id", "event_id", "doc_id"):
+        value = str(ref.get(key) or "").strip()
+        if value:
+            compact[key] = value
+    compact_refs = graph_compact_refs_map(ref.get("refs") if isinstance(ref.get("refs"), dict) else ref)
+    if compact_refs:
+        compact["refs"] = compact_refs
+    return compact
+
+
+def graph_compact_evidence_refs(refs: Any, *, limit: int) -> list[Any]:
+    compacted: list[Any] = []
+    for ref in refs if isinstance(refs, list) else []:
+        compact = graph_compact_evidence_ref(ref)
+        if compact:
+            compacted.append(compact)
+    selected = graph_merge_evidence_refs([], compacted, limit=limit)
+    seen_session_refs: set[str] = set()
+    seen_raw_blocks: set[tuple[str, str, str]] = set()
+    for ref in selected:
+        if not isinstance(ref, dict) or not isinstance(ref.get("refs"), dict):
+            continue
+        nested = ref["refs"]
+        session_key = str(ref.get("session_id") or nested.get("session") or "")
+        if nested.get("session"):
+            if session_key in seen_session_refs:
+                nested.pop("session", None)
+            else:
+                seen_session_refs.add(session_key)
+        raw_block = str(nested.get("raw_block") or "")
+        if raw_block:
+            raw_block_key = (str(ref.get("session_id") or ""), str(ref.get("segment_id") or ""), raw_block)
+            if raw_block_key in seen_raw_blocks:
+                nested.pop("raw_block", None)
+            else:
+                seen_raw_blocks.add(raw_block_key)
+    return selected
+
+
+def graph_contribution_evidence_limit(kind: str) -> int:
+    return GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT if kind in {"edge", "edges", "edge_contribs"} else GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT
+
+
+def graph_compact_contribution_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    compact = dict(payload)
+    fallback_refs = compact.get("refs")
+    compact.pop("refs", None)
+    if isinstance(compact.get("route_signals"), list):
+        compact["route_signal_count"] = len(compact["route_signals"])
+        compact.pop("route_signals", None)
+    refs = compact.get("evidence_refs")
+    if not isinstance(refs, list) and isinstance(fallback_refs, dict) and fallback_refs:
+        refs = [{"refs": fallback_refs}]
+    if isinstance(refs, list):
+        compact["evidence_ref_count"] = max(int_value(compact.get("evidence_ref_count"), 0), len(refs))
+        compact["evidence_refs"] = graph_compact_evidence_refs(refs, limit=graph_contribution_evidence_limit(kind))
+    else:
+        compact["evidence_refs"] = []
+    compact["contrib_payload_mode"] = GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+    return compact
+
+
 def graph_add_node(nodes: dict[str, dict[str, Any]], node: dict[str, Any]) -> None:
     node_id = str(node.get("id") or "")
     if not node_id:
@@ -24267,6 +24504,11 @@ def graph_aggregate_evidence_limit(table_or_kind: str) -> int:
 
 def graph_compact_aggregate_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
     compact = dict(payload)
+    compact.pop("refs", None)
+    compact.pop("contrib_payload_mode", None)
+    if isinstance(compact.get("route_signals"), list):
+        compact["route_signal_count"] = len(compact["route_signals"])
+        compact.pop("route_signals", None)
     refs = compact.pop("evidence_refs", None)
     if isinstance(refs, list):
         compact["evidence_ref_count"] = len(refs)
@@ -24833,6 +25075,10 @@ class GraphSqliteStore:
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             ("graph_schema_version", str(GRAPH_SCHEMA_VERSION)),
         )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE),
+        )
         self.conn.commit()
 
     def close(self) -> None:
@@ -24883,7 +25129,7 @@ class GraphSqliteStore:
         for node in contribution.get("nodes", []) if isinstance(contribution.get("nodes"), list) else []:
             if not isinstance(node, dict) or not node.get("id"):
                 continue
-            payload = dict(node)
+            payload = graph_compact_contribution_payload(dict(node), kind="node")
             payload["count"] = int_value(payload.get("count"), 1)
             node_id = str(payload["id"])
             node_ids.add(node_id)
@@ -24894,7 +25140,7 @@ class GraphSqliteStore:
         for edge in contribution.get("edges", []) if isinstance(contribution.get("edges"), list) else []:
             if not isinstance(edge, dict) or not edge.get("source") or not edge.get("target"):
                 continue
-            payload = dict(edge)
+            payload = graph_compact_contribution_payload(dict(edge), kind="edge")
             payload["id"] = str(payload.get("id") or graph_edge_id(str(payload.get("source")), str(payload.get("target")), str(payload.get("type") or "")))
             payload["count"] = int_value(payload.get("count"), 1)
             edge_id = str(payload["id"])
@@ -25116,6 +25362,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
+        self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -25152,6 +25399,7 @@ class GraphSqliteStore:
         edge_refresh = self._refresh_edges(touched_edge_ids, budget_deadline=budget_deadline)
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
+        self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -25192,6 +25440,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
+        self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         return {"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []}
 
     def remove_source(self, source_key: str) -> dict[str, Any]:
@@ -25219,6 +25468,7 @@ class GraphSqliteStore:
         self._upsert_metadata("generated_at", now)
         self._upsert_metadata("updated_at", now)
         self._upsert_metadata("graph_store_aggregate_payload_mode", GRAPH_STORE_AGGREGATE_PAYLOAD_MODE)
+        self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self.conn.commit()
         return {
             "status": "rebuilt",
@@ -32504,6 +32754,8 @@ def command_agent_event_audit(args: argparse.Namespace) -> int:
         since=since,
         until=args.until,
         limit=args.limit,
+        order=args.order,
+        min_events=args.min_events,
         sample_limit=args.sample_limit,
         probe_routes=args.probe_routes,
         route_probe_limit=args.route_probe_limit,
@@ -34107,6 +34359,75 @@ def raw_line_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 360) -> d
             if current_line > line_no:
                 break
     return {"status": "raw_line_not_found", "line": line_no, "text": ""}
+
+
+def raw_event_shape(raw_path: Path, raw_ref: Any) -> dict[str, Any]:
+    line_no = line_from_raw_ref(raw_ref)
+    if not line_no:
+        return {"status": "missing_raw_ref", "line": None, "shape_key": "missing_raw_ref"}
+    if not raw_path.is_file():
+        return {"status": "raw_unavailable", "line": line_no, "shape_key": "raw_unavailable"}
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for current_line, line in enumerate(handle, start=1):
+            if current_line != line_no:
+                if current_line > line_no:
+                    break
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                return {"status": "invalid_json", "line": line_no, "shape_key": "invalid_json"}
+            if not isinstance(row, dict):
+                return {"status": "non_object_json", "line": line_no, "shape_key": "non_object_json"}
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            raw_type = str(row.get("type") or "")
+            payload_type = str(payload.get("type") or "") if isinstance(payload, dict) else ""
+            role = str(payload.get("role") or "") if isinstance(payload, dict) else ""
+            name = str(payload.get("name") or "") if isinstance(payload, dict) else ""
+            content = payload.get("content") if isinstance(payload, dict) else None
+            summary = payload.get("summary") if isinstance(payload, dict) else None
+            content_types = [
+                str(item.get("type") or "")
+                for item in content
+                if isinstance(item, dict) and item.get("type")
+            ] if isinstance(content, list) else []
+            summary_types = [
+                str(item.get("type") or "")
+                for item in summary
+                if isinstance(item, dict) and item.get("type")
+            ] if isinstance(summary, list) else []
+            output_value = payload.get("output") if isinstance(payload, dict) else None
+            message_value = payload.get("message") if isinstance(payload, dict) else None
+            shape_parts = [raw_type or "unknown"]
+            if payload_type:
+                shape_parts.append(payload_type)
+            if role:
+                shape_parts.append(f"role={role}")
+            if name:
+                shape_parts.append(f"name={name}")
+            if content_types:
+                shape_parts.append("content=" + ",".join(sorted(set(content_types))))
+            if isinstance(summary, list):
+                shape_parts.append(f"summary_count={len(summary)}")
+            return {
+                "status": "available",
+                "line": line_no,
+                "shape_key": "|".join(shape_parts),
+                "raw_type": raw_type,
+                "payload_type": payload_type,
+                "role": role,
+                "name": name,
+                "content_types": sorted(set(content_types)),
+                "content_count": len(content) if isinstance(content, list) else 0,
+                "summary_types": sorted(set(summary_types)),
+                "summary_count": len(summary) if isinstance(summary, list) else 0,
+                "has_encrypted_content": bool(payload.get("encrypted_content")) if isinstance(payload, dict) else False,
+                "has_usage": isinstance(row.get("usage"), dict) or isinstance(payload.get("usage") if isinstance(payload, dict) else None, dict),
+                "message_chars": len(message_value) if isinstance(message_value, str) else 0,
+                "output_chars": len(output_value) if isinstance(output_value, str) else 0,
+                "payload_keys": sorted(str(key) for key in payload.keys()) if isinstance(payload, dict) else [],
+            }
+    return {"status": "raw_line_not_found", "line": line_no, "shape_key": "raw_line_not_found"}
 
 
 def route_signal_for_event_record(event: dict[str, Any], layer: str, key: str) -> dict[str, Any]:
@@ -36661,7 +36982,9 @@ def build_parser() -> argparse.ArgumentParser:
     agent_event_audit_parser.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
     agent_event_audit_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     agent_event_audit_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
-    agent_event_audit_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    agent_event_audit_parser.add_argument("--limit", type=int, help="Limit selected sessions after ordering when session=all.")
+    agent_event_audit_parser.add_argument("--order", choices=["chronological", "recent", "longest"], default="chronological", help="Order selected sessions before applying --limit.")
+    agent_event_audit_parser.add_argument("--min-events", type=int, help="Select only sessions with at least this many indexed events when session=all.")
     agent_event_audit_parser.add_argument("--sample-limit", type=int, default=3, help="Maximum evidence samples per weak-spot bucket.")
     agent_event_audit_parser.add_argument("--probe-routes", action="store_true", help="Run bounded live route probes for canonical agent responses/progress/closeouts.")
     agent_event_audit_parser.add_argument("--route-probe-limit", type=int, default=5, help="Maximum results per live route probe.")

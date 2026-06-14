@@ -37,6 +37,10 @@ Build the `.aoa` session-memory mechanism end to end:
   filters, and CLI routes `agent-responses`, `agent-closeouts`,
   `agent-progress-updates`, `agent-reasoning-windows`, `task-episodes`, and
   `answer-neighborhood`
+- Agent event classification audit: `agent-event-audit` over real sessions,
+  including longest-session selection, route probes, bounded raw event-shape
+  samples, weak spots, and diagnostics without promoting generated classes to
+  reviewed truth
 - Agent atlas skeleton: `maps/`, `config/atlas-policy.json`, and
   `schemas/atlas-route-entry.schema.json`
 - Distillation routes: `config/event-distillation-routes.json`
@@ -56,9 +60,10 @@ Build the `.aoa` session-memory mechanism end to end:
   `graph-maintenance --budget-seconds`, and profile-level refresh chunk sizes
   plus aggregate refresh budget guards for `index-maintenance` /
   `auto-maintenance`
-- Storage weight controls: `storage-audit`, compact graph aggregate payloads
-  with evidence hydration from contribution rows, and search body storage with
-  full-text FTS plus compressed selected-hit hydration
+- Storage weight controls: `storage-audit`, compact graph aggregate and
+  contribution payloads with evidence hydration from contribution rows, and
+  search body storage with full-text FTS plus compressed selected-hit
+  hydration
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
   `graph-freshness-check`, `entity-dossier`, and GraphRAG packet
@@ -127,6 +132,7 @@ python3 scripts/aoa_session_memory.py agent-progress-updates --workspace-root /p
 python3 scripts/aoa_session_memory.py agent-reasoning-windows --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
 python3 scripts/aoa_session_memory.py task-episodes latest --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --limit 20 --order recent
 python3 scripts/aoa_session_memory.py answer-neighborhood --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 10
+python3 scripts/aoa_session_memory.py agent-event-audit all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --order longest --min-events 1000 --limit 5 --probe-routes --write-report
 python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
 python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
@@ -708,6 +714,47 @@ Maintenance gates:
   `/srv` had about `63G` free at `88%` use after the repair. Full graph rebuild
   is a heavy repair route and should remain resource-gated; normal upkeep
   should prefer incremental graph/index maintenance.
+
+2026-06-14 graph store compact-v2 / OOM recovery proof:
+
+- A later full `graph-build all --write --store-only --in-place` after the
+  agent-event/task-episode reindex was resource-gated through
+  `abyss-machine resource launch --class heavy --kind indexing`, but the
+  kernel OOM killer stopped the unit after about `53m` at `200/272` processed
+  records. Because `graph.sqlite3` is a generated read model, the recovery path
+  reset only `graph/graph.sqlite3` and rebuilt from preserved session indexes.
+- The pre-reset live partial graph baseline was `525.6 MiB`, `19` sources,
+  `25,658` nodes, `149,661` edges. `dbstat` showed the weight concentrated in
+  contribution payload tables: `edge_contribs=220.8 MiB`,
+  `node_contribs=115.1 MiB`, plus aggregate `edges=97.6 MiB` and
+  `nodes=41.1 MiB`.
+- Graph store schema `2` now writes `compact_evidence_refs_v2` contribution
+  payloads: repeated absolute refs, route-signal copies inside event-node
+  payloads, repeated session refs, and repeated raw-block refs are removed or
+  bounded while `session_id`, `segment_id`, `event_id`, `raw`, segment refs,
+  and enough session refs remain for hydration and quality gates.
+- A bounded live `graph-maintenance all --apply --batch-limit 25
+  --refresh-chunk-size 64 --max-refresh-nodes 50000 --max-refresh-edges
+  150000 --budget-seconds 300 --write-report` rebuilt the same scale of graph
+  evidence in compact-v2: `19` sources, `25,335` nodes, `148,388` edges in
+  `80.378s`. The resulting `graph.sqlite3` is `353 MiB`; `dbstat` reports
+  `edge_contribs=148.0 MiB`, `node_contribs=39.6 MiB`, `edges=96.8 MiB`, and
+  `nodes=17.9 MiB`.
+- Live route proof after compaction: `graph-neighborhood validate_playbooks
+  --kind script --depth 2 --limit 12` resolved script/entity/validator/path
+  graph nodes and hydrated raw/segment/session evidence refs from contribution
+  rows. `graphrag-packet --query "validate_playbooks script usage" --anchor
+  validate_playbooks --limit 3` returned `ok=true`,
+  `answer_rules.status=needs_review`, `important_claim_allowed=true`, and raw,
+  segment, and session refs. `graph-quality-audit --anchor
+  script:validate_playbooks --limit 3 --sample-ref-limit 3 --write-report`
+  returned `ok=true` with no quality flags.
+- The strict freshness state at the compact-v2 proof point was intentionally
+  partial, not hidden: search and atlas were `current`, refs were `alive`, and
+  graph store had `19` clean sources, `4114` missing graph sources, and `62`
+  blocked lower-layer sources. Later bounded graph ticks may advance those
+  counts. Continue with bounded graph maintenance; do not retry full rebuild by
+  default until the weight profile is reduced further.
 
 ## Probe Notes
 
