@@ -4629,6 +4629,29 @@ def test_reindex_sessions_defers_remaining_records_when_budget_expires(tmp_path:
     assert result["ok"] is False
 
 
+def test_reindex_sessions_selection_error_uses_session_reindex_schema(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    payload = module.reindex_sessions(
+        aoa_root=aoa_root,
+        target="missing-session",
+        dry_run=True,
+        max_raw_bytes=1,
+        stale_route_indexes=True,
+    )
+
+    assert payload["artifact_type"] == "session_reindex"
+    assert payload["ok"] is False
+    assert payload["dry_run"] is True
+    assert payload["max_raw_bytes"] == 1
+    assert payload["stale_route_indexes"] is True
+    assert payload["selected_count"] == 0
+    assert payload["processed_count"] == 0
+    assert payload["results"] == []
+    assert "missing_eligible_conversation_act" not in payload
+
+
 def test_build_agent_atlas_defers_remaining_records_when_budget_expires(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     records = []
@@ -5528,6 +5551,15 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
 
+    stale_filtered = module.search_sessions(
+        aoa_root=aoa_root,
+        query="hook timed out",
+        freshness_status="stale",
+        explain=True,
+    )
+    assert stale_filtered["result_count"] == 1
+    assert stale_filtered["results"][0]["freshness"]["status"] == "stale"
+
 
 def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -5697,6 +5729,47 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
         ).fetchone()
         is not None
     )
+
+    rowid = conn.execute("SELECT rowid FROM documents WHERE id = ?", ("stress-doc",)).fetchone()["rowid"]
+    updated_route_signal = module.route_signal_token("entity", "updated")
+    module.insert_search_document(
+        conn,
+        {
+            "id": "stress-doc",
+            "doc_type": "event",
+            "session_id": "session-stress",
+            "session_label": "2026-06-12__001__route-stress",
+            "session_title": "Route stress updated",
+            "session_date": "2026-06-12",
+            "event_id": "000001",
+            "event_type": "USER_MESSAGE",
+            "route_layers": module.packed_route_values(["entity"]),
+            "route_signals": module.packed_route_values([updated_route_signal]),
+            "title": "updated route signal payload",
+            "body": "updated route body",
+            "raw_text_status": "indexed",
+        },
+    )
+    conn.commit()
+
+    updated_row = conn.execute("SELECT rowid, title, body FROM documents WHERE id = ?", ("stress-doc",)).fetchone()
+    old_route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (target_route_signal,)).fetchone()["id"]
+    new_route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (updated_route_signal,)).fetchone()["id"]
+
+    assert updated_row["rowid"] == rowid
+    assert updated_row["title"] == "updated route signal payload"
+    assert updated_row["body"] == "updated route body"
+    assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = ?", ("stress-doc",)).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM documents_fts WHERE rowid = ?", (rowid,)).fetchone()[0] == 1
+    assert conn.execute("SELECT body_chars FROM document_bodies WHERE doc_rowid = ?", (rowid,)).fetchone()[0] == len("updated route body")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM document_routes WHERE doc_rowid = ? AND route_id = ?",
+        (rowid, old_route_id),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM document_routes WHERE doc_rowid = ? AND route_id = ?",
+        (rowid, new_route_id),
+    ).fetchone()[0] == 1
     conn.close()
 
 
@@ -7678,6 +7751,27 @@ def test_real_codex_compacted_events_define_segments(tmp_path: Path) -> None:
     assert first_index["by_type"]["COMPACTION_EVENT"] == ["000003", "000004"]
 
 
+def test_raw_compaction_stats_counts_standalone_context_compacted_as_boundary(tmp_path: Path) -> None:
+    raw_path = tmp_path / "session.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {"timestamp": "2026-05-14T02:00:00Z", "type": "session_meta", "payload": {"id": "standalone-context"}},
+            {"timestamp": "2026-05-14T02:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "before"}]}},
+            {"timestamp": "2026-05-14T02:00:02Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-14T02:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after"}]}},
+        ],
+    )
+
+    stats = module.raw_compaction_stats(raw_path)
+
+    assert stats["source_compacted_count"] == 0
+    assert stats["context_compacted_event_count"] == 1
+    assert stats["compaction_boundary_count"] == 1
+    assert stats["compaction_marker_count"] == 1
+    assert stats["expected_segment_count"] == 2
+
+
 def test_stress_pass_audits_first_compaction_intervals(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -7879,6 +7973,69 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+
+
+def test_completion_audit_portable_bundle_rejects_bundled_runtime_archives(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    bundle_root = tmp_path / "aoa-session-memory"
+    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
+    (bundle_root / ".git").mkdir()
+
+    session_dir = bundle_root / "sessions" / "2026-05-14__001__dirty-runtime"
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {"timestamp": "2026-05-14T00:00:00Z", "type": "session_meta", "payload": {"id": "dirty-runtime"}},
+            {"timestamp": "2026-05-14T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "dirty bundle"}]}},
+            {"timestamp": "2026-05-14T00:00:02Z", "type": "compacted", "payload": {"replacement_history": []}},
+            {"timestamp": "2026-05-14T00:00:03Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
+            {"timestamp": "2026-05-14T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "tail"}]}},
+        ],
+    )
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "session_id": "dirty-runtime",
+            "session_label": "2026-05-14__001__dirty-runtime",
+            "archive_status": "indexed",
+            "raw": {"path": str(raw_path)},
+            "segments": [
+                {"role": "initial-to-compaction", "index": str(session_dir / "segments" / "000.index.json")},
+                {"role": "compaction-to-latest", "index": str(session_dir / "segments" / "001.index.json")},
+            ],
+        },
+    )
+
+    def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
+        if repo_root == bundle_root:
+            return "git@github.com:8Dionysus/aoa-session-memory.git"
+        return None
+
+    monkeypatch.setattr(module, "git_remote_url", fake_remote)
+
+    payload = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        check_codex=False,
+        portable_bundle=True,
+    )
+
+    statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
+    assert payload["ok"] is False
+    assert statuses["Portable bundle intentionally excludes local raw session archives"] == "missing"
+    assert statuses["Portable bundle carries compaction logic without bundled live raw proof"] == "missing"
+    assert statuses["Portable bundle has clean runtime topology without bundled segment drift"] == "missing"
+    raw_item = next(
+        item
+        for item in payload["checklist"]
+        if item["requirement"] == "Portable bundle intentionally excludes local raw session archives"
+    )
+    assert raw_item["evidence"]["portable_clean_runtime"] is False
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
@@ -8749,6 +8906,20 @@ def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
     assert repaired_manifest["display"]["title"] == "Repair the session naming topology"
     assert repaired_manifest["raw"]["path"] == str(repaired_dir / "raw" / "session.raw.jsonl")
     assert not session_dir.exists()
+
+
+def test_repair_session_titles_selection_error_uses_title_repair_schema(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    payload = module.repair_session_titles(aoa_root=aoa_root, target="missing-session", apply=True)
+
+    assert payload["artifact_type"] == "session_title_repair"
+    assert payload["ok"] is False
+    assert payload["apply"] is True
+    assert payload["selected_count"] == 0
+    assert payload["results"] == []
+    assert "missing_eligible_conversation_act" not in payload
 
 
 def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Path) -> None:
