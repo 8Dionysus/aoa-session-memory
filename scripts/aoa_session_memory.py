@@ -13931,10 +13931,13 @@ def token_accounting_backfill(
     max_raw_bytes: int | None = None,
     force: bool = False,
     write_report: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     try:
-        if target and target != "all":
+        if selected_records is not None:
+            records = selected_records
+        elif target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
         else:
             records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
@@ -13986,6 +13989,7 @@ def token_accounting_backfill(
         "since": since,
         "until": until,
         "limit": limit,
+        "selection_source": "provided_records" if selected_records is not None else "target_filters",
         "apply": apply,
         "max_raw_bytes": max_raw_bytes,
         "force": force,
@@ -14794,13 +14798,19 @@ def maintain_indexes(
     reason: str = "operator_requested",
     budget_seconds: float | None = None,
     progress_every: int = 0,
+    selected_records: list[dict[str, Any]] | None = None,
+    selection_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     diagnostics: list[str] = []
     try:
-        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+        records = (
+            list(selected_records)
+            if selected_records is not None
+            else ([resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit))
+        )
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -14826,6 +14836,7 @@ def maintain_indexes(
         limit=limit,
         apply=False,
         max_raw_bytes=effective_token_max_raw_bytes,
+        selected_records=records,
     )
     token_backfill_counts = token_backfill_state.get("counts") if isinstance(token_backfill_state.get("counts"), dict) else {}
     token_backfill_needed = int(token_accounting_int(token_backfill_counts.get("planned")) or 0) > 0
@@ -15094,6 +15105,7 @@ def maintain_indexes(
                     apply=True,
                     max_raw_bytes=effective_token_max_raw_bytes,
                     write_report=write_report,
+                    selected_records=records,
                 )
                 token_action["status"] = "applied" if result.get("ok") else "failed"
                 token_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
@@ -15357,6 +15369,8 @@ def maintain_indexes(
                     budget_seconds=budget_remaining(),
                     write_report=write_report,
                     reason="index_maintenance",
+                    selected_records=current_selected_records(),
+                    selected_records_global=stable_selected_records_global,
                 )
                 graph_action["status"] = (
                     "deferred_budget_exhausted"
@@ -15469,6 +15483,8 @@ def maintain_indexes(
         "since": since,
         "until": until,
         "limit": limit,
+        "selection_source": "provided_records" if selected_records is not None else "target_filters",
+        "selection_scope": selection_scope or {},
         "reason": reason,
         "repair_indexes": repair_indexes,
         "repair_graph": repair_graph,
@@ -15931,6 +15947,8 @@ def auto_maintenance(
     effective_resource_kind = str(settings["resource_kind"])
     effective_timeout_sec = int_value(settings["timeout_sec"], 0)
     effective_budget_seconds = budget_seconds if budget_seconds is not None else (float(effective_timeout_sec) if effective_timeout_sec > 0 else None)
+    selected_records_override: list[dict[str, Any]] | None = None
+    selection_scope: dict[str, Any] = {"mode": "target_filters"}
     diagnostics: list[str] = []
     lock_path = maintenance_lock_path(aoa_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -15959,6 +15977,7 @@ def auto_maintenance(
                         "apply": apply,
                         "profile": profile,
                         "target": target,
+                        "selection_scope": selection_scope,
                         "resource_class": effective_resource_class,
                         "resource_kind": effective_resource_kind,
                         "timeout_sec": effective_timeout_sec,
@@ -15982,6 +16001,14 @@ def auto_maintenance(
                         "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
                     }
                 time.sleep(0.25)
+        if profile == "hot" and target == "all" and since is None and until is None:
+            selected_records_override, selection_scope = hot_source_session_scope(
+                aoa_root,
+                since=effective_since,
+                until=until,
+                limit=effective_limit,
+                activity_hot_seconds=float(effective_since_days or 0) * 86400.0,
+            )
         def run_auto_freshness_probe() -> dict[str, Any]:
             if allow_deferred_graph:
                 return route_cache_freshness_gates(
@@ -15990,6 +16017,8 @@ def auto_maintenance(
                     since=effective_since,
                     until=until,
                     limit=effective_limit,
+                    selected_records=selected_records_override,
+                    selection_scope=selection_scope,
                     write_report=write_report,
                 )
             return graph_freshness_gates(
@@ -16024,6 +16053,8 @@ def auto_maintenance(
             budget_seconds=effective_budget_seconds,
             progress_every=progress_every,
             repair_graph=effective_repair_graph,
+            selected_records=selected_records_override,
+            selection_scope=selection_scope,
         )
         freshness_after = run_auto_freshness_probe()
         preflight_diagnostics = auto_maintenance_freshness_blockers(freshness_before, allow_deferred_graph=False)
@@ -16085,6 +16116,7 @@ def auto_maintenance(
             "since": effective_since,
             "until": until,
             "limit": effective_limit,
+            "selection_scope": selection_scope,
             "repair_limit": effective_repair_limit,
             "resource_class": effective_resource_class,
             "resource_kind": effective_resource_kind,
@@ -17031,6 +17063,22 @@ def session_record_sequence(record: dict[str, Any]) -> int:
     return int(match.group(1)) if match else 0
 
 
+def session_record_key(record: dict[str, Any]) -> str:
+    return str(record.get("session_id") or record.get("session_label") or record.get("path") or record.get("navigation_path") or "")
+
+
+def unique_session_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for record in records:
+        key = session_record_key(record)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    return unique
+
+
 def chronological_session_records(
     aoa_root: Path,
     *,
@@ -17057,6 +17105,84 @@ def chronological_session_records(
         )
     )
     return records[:limit] if limit is not None else records
+
+
+def sort_session_records_chronologically(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda item: (
+            session_record_date(item),
+            session_record_sequence(item),
+            str(item.get("session_label") or ""),
+            str(item.get("session_id") or ""),
+        ),
+    )
+
+
+def hot_source_session_scope(
+    aoa_root: Path,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    activity_hot_seconds: float | None = None,
+    now_ts: float | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select normal hot-window sessions plus older sessions with live transcript activity."""
+    base_records = chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+    seconds = max(0.0, float(activity_hot_seconds or 0.0))
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - seconds if seconds > 0 else now_value
+    base_keys = {session_record_key(record) for record in base_records}
+    activity_records: list[dict[str, Any]] = []
+    activity_sessions: list[dict[str, Any]] = []
+    for record in registry_sessions(aoa_root):
+        activity_mtime = session_record_activity_mtime(record)
+        if activity_mtime <= 0 or activity_mtime < threshold:
+            continue
+        latest_mtime, latest_paths = latest_index_source_mtime(aoa_root, [record])
+        activity_records.append(record)
+        key = session_record_key(record)
+        activity_sessions.append(
+            {
+                "session_id": record.get("session_id"),
+                "session_label": record.get("session_label"),
+                "session_dir": str(session_dir_from_record(record)),
+                "activity_mtime": activity_mtime,
+                "activity_age_seconds": max(0.0, now_value - activity_mtime),
+                "latest_source_mtime": latest_mtime,
+                "latest_source_paths": latest_paths,
+                "extra_to_date_window": key not in base_keys,
+            }
+        )
+    combined = sort_session_records_chronologically(unique_session_records([*base_records, *activity_records]))
+    extra_records = [record for record in activity_records if session_record_key(record) not in base_keys]
+    metadata = {
+        "mode": "date_window_plus_activity_mtime",
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "activity_hot_seconds": seconds,
+        "activity_hot_threshold": threshold,
+        "date_window_session_count": len(base_records),
+        "activity_hot_session_count": len(activity_records),
+        "extra_activity_hot_session_count": len(unique_session_records(extra_records)),
+        "selected_count": len(combined),
+        "extra_activity_hot_sessions": [
+            {
+                "session_id": item.get("session_id"),
+                "session_label": item.get("session_label"),
+                "session_dir": item.get("session_dir"),
+                "activity_mtime": item.get("activity_mtime"),
+                "activity_age_seconds": item.get("activity_age_seconds"),
+                "latest_source_mtime": item.get("latest_source_mtime"),
+                "latest_source_paths": item.get("latest_source_paths"),
+            }
+            for item in activity_sessions
+            if item.get("extra_to_date_window")
+        ][:20],
+    }
+    return combined, metadata
 
 
 def route_map_for_distillation(aoa_root: Path) -> dict[str, list[str]]:
@@ -25994,6 +26120,8 @@ def graph_maintenance(
     export_sidecar: bool = False,
     write_report: bool = False,
     reason: str = "operator_requested",
+    selected_records: list[dict[str, Any]] | None = None,
+    selected_records_global: bool | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -26002,7 +26130,15 @@ def graph_maintenance(
         if budget_seconds <= 0:
             budget_seconds = None
     deadline = started + budget_seconds if budget_seconds is not None else None
-    states_payload = graph_source_states(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+    states_payload = graph_source_states(
+        aoa_root=aoa_root,
+        target=target,
+        since=since,
+        until=until,
+        limit=limit,
+        selected_records=selected_records,
+        selected_records_global=selected_records_global,
+    )
     states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
     missing_requested_source_keys: list[str] = []
@@ -29562,10 +29698,16 @@ def route_cache_freshness_gates(
     until: str | None = None,
     limit: int | None = None,
     write_report: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
+    selection_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     try:
-        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+        records = (
+            list(selected_records)
+            if selected_records is not None
+            else ([resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit))
+        )
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -29601,6 +29743,8 @@ def route_cache_freshness_gates(
         "since": since,
         "until": until,
         "limit": limit,
+        "selection_source": "provided_records" if selected_records is not None else "target_filters",
+        "selection_scope": selection_scope or {},
         "selected_count": len(records),
         "needs_index_maintenance": needs_index_maintenance,
         "needs_graph_maintenance": True,

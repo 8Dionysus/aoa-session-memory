@@ -4586,6 +4586,116 @@ def test_hot_auto_maintenance_repairs_route_cache_and_advances_graph(tmp_path: P
     assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
 
 
+def test_hot_auto_maintenance_includes_old_session_with_fresh_activity_mtime(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    sessions_root.mkdir(parents=True)
+    now_ts = time.time()
+    cold_ts = now_ts - 10 * 86400
+
+    def make_session(label: str, session_id: str, source_mtime: float) -> dict[str, Any]:
+        session_dir = sessions_root / label
+        raw_dir = session_dir / "raw"
+        raw_dir.mkdir(parents=True)
+        raw_path = raw_dir / "session.raw.jsonl"
+        raw_path.write_text("{}\n", encoding="utf-8")
+        manifest = {
+            "session_id": session_id,
+            "session_label": label,
+            "session_title": label,
+            "updated_at": "2020-01-01T00:00:00Z",
+            "archive_status": "indexed",
+            "distillation_status": "indexed",
+            "display": {
+                "label": label,
+                "title": label,
+                "date": label[:10],
+                "navigation_path": str(session_dir),
+            },
+            "source": {"cwd": str(workspace)},
+            "raw": {
+                "path": str(raw_path),
+                "source_path": str(raw_path),
+                "line_count": 1,
+                "bytes": raw_path.stat().st_size,
+            },
+            "segments": [],
+        }
+        record = {
+            "session_id": session_id,
+            "session_label": label,
+            "session_title": label,
+            "updated_at": "2020-01-01T00:00:00Z",
+            "archive_status": "indexed",
+            "distillation_status": "indexed",
+            "path": str(session_dir),
+            "display": manifest["display"],
+            "raw": manifest["raw"],
+        }
+        module.write_json(session_dir / "session.manifest.json", manifest)
+        module.write_json(session_dir / module.SESSION_INDEX_JSON, {"session_id": session_id, "session_label": label, "segments": []})
+        (session_dir / module.SESSION_INDEX_MARKDOWN).write_text(f"# {label}\n", encoding="utf-8")
+        for path in [raw_path, *[item for item in session_dir.iterdir() if item.is_file()]]:
+            if path.is_file():
+                os.utime(path, (source_mtime, source_mtime))
+        return record
+
+    active_old = make_session("2020-01-01__001__old-active", "old-active", now_ts)
+    cold_old = make_session("2020-01-02__001__old-cold", "old-cold", cold_ts)
+    module.write_json(aoa_root / module.REGISTRY_NAME, {"sessions": [active_old, cold_old]})
+
+    calls: dict[str, Any] = {"freshness": [], "maintenance": None}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness"].append(kwargs)
+        selected = kwargs.get("selected_records") or []
+        return {
+            "ok": True,
+            "target": kwargs["target"],
+            "selected_count": len(selected),
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "diagnostics": [],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        selected = kwargs.get("selected_records") or []
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": len(selected),
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "index_repair_needed": False,
+            "graph_repair_needed": False,
+            "action_counts": {},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        apply=True,
+        since_days=1,
+    )
+
+    maintenance_labels = [record["session_label"] for record in calls["maintenance"]["selected_records"]]
+    freshness_labels = [record["session_label"] for record in calls["freshness"][0]["selected_records"]]
+    assert payload["ok"] is True
+    assert maintenance_labels == ["2020-01-01__001__old-active"]
+    assert freshness_labels == maintenance_labels
+    assert "2020-01-02__001__old-cold" not in maintenance_labels
+    assert payload["selection_scope"]["mode"] == "date_window_plus_activity_mtime"
+    assert payload["selection_scope"]["extra_activity_hot_session_count"] == 1
+
+
 def test_hot_auto_maintenance_queues_bounded_graph_job_when_budget_starves_tick(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
