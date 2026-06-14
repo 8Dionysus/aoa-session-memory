@@ -74,13 +74,17 @@ Build the `.aoa` session-memory mechanism end to end:
   every non-selected row as an orphan
 - Resource-gated unattended maintenance route: `auto-maintenance` /
   `maintain-auto` profiles `hot` (`probe`, recent route/search/atlas repair
-  with explicit graph deferral), `backlog` (`medium`, recent index+graph
-  repair), and `deep` (`heavy`, full repair); MCP remains read-only and
-  plan-only
-- Hot route-cache maintenance avoids graph scans: `route-cache-freshness-gates`
-  checks route/search/atlas state while graph is `deferred_not_checked`;
-  search projection fingerprints exclude rendered Markdown companions and can
-  refresh stale `session_index_state` without rebuilding SQLite documents
+  plus a small bounded graph tick with explicit graph remainder deferral),
+  `backlog` (`medium`, recent index+graph repair), and `deep` (`heavy`, full
+  repair); MCP remains read-only and plan-only
+- Hot route-cache maintenance avoids graph scans on the gate path:
+  `route-cache-freshness-gates` checks route/search/atlas state while the
+  maintenance pass advances graph state in small batches; search projection
+  fingerprints exclude rendered Markdown companions and can refresh stale
+  `session_index_state` without rebuilding SQLite documents; if route-cache
+  work spends the hot budget before graph work starts, a bounded graph job is
+  queued as the automatic continuation route with a separate profile graph
+  budget
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata
@@ -385,6 +389,25 @@ Last observed result:
   `diagnostics/20260613T222212Z__route-cache-freshness-gates.json`,
   `diagnostics/20260613T222218Z__index-maintenance.json`, and
   `diagnostics/20260613T222219Z__auto-maintenance-hot.json`.
+- 2026-06-14 hot graph tick proof: `auto-maintenance hot latest --apply
+  --budget-seconds 120` now repairs graph in the hot profile while allowing a
+  deferred graph remainder. The live run selected `3` graph sources with
+  `candidate_pool_limit=9`, completed graph maintenance in `elapsed_ms=63570`,
+  reduced missing graph sources from `16` to `13`, and kept route-cache
+  freshness green with `status=applied_with_deferred_graph`. Report:
+  `diagnostics/20260614T022956Z__auto-maintenance-hot.json`.
+- 2026-06-14 queued graph-continuation proof: a live
+  `auto-maintenance hot latest --apply --budget-seconds 1` created/upserted a
+  bounded `graph_maintenance` job with `batch_limit=3`,
+  `candidate_pool_limit=9`, graph guards `20000` nodes / `60000` edges, and a
+  separate `120s` graph-job budget instead of inheriting the exhausted
+  foreground budget. `hook-worker --limit 1` then processed that pending job,
+  selected `3` graph sources, completed in `elapsed_ms=48840` with
+  `budget_exhausted=false`, and left `route-readiness latest` green at `23/23`
+  while graph freshness honestly reported the remaining deferred graph sources
+  (`dirty=183`, `missing=6`, `clean=6`). Reports:
+  `diagnostics/20260614T025525Z__auto-maintenance-hot.json` and
+  `diagnostics/20260614T025625Z__graph-maintenance.json`.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

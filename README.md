@@ -360,16 +360,21 @@ python3 scripts/aoa_session_memory.py auto-maintenance hot \
   --write-report
 ```
 
-Profiles are `hot` (`probe`, recent route/search/atlas repair, graph deferred
-with explicit follow-up), `backlog` (`medium`, recent index and graph repair,
-medium refresh chunks), and `deep` (`heavy`, full archive repair, larger
-refresh chunks). For a live route-cache repair without graph cost, run
-`index-maintenance --skip-graph-repair`; the report keeps graph follow-up
-visible through `defer_graph_repair`. The hot profile uses
-`route-cache-freshness-gates` before and after maintenance, so it does not scan
-`graph.sqlite3` on the live read path. Search fingerprints ignore rendered
-Markdown companions and can refresh stale `session_index_state` without
-rebuilding session documents when the SQLite documents are already current.
+Profiles are `hot` (`probe`, recent route/search/atlas repair plus a small
+bounded graph tick with deferred remainder allowed), `backlog` (`medium`,
+recent index and graph repair, medium refresh chunks), and `deep` (`heavy`,
+full archive repair, larger refresh chunks). For a live route-cache repair
+without graph cost, run `index-maintenance --skip-graph-repair`; the report
+keeps graph follow-up visible through `defer_graph_repair`. The hot profile
+uses `route-cache-freshness-gates` before and after maintenance, so it does not
+scan `graph.sqlite3` on the live read path, but its maintenance pass still
+advances graph state in small batches. If route/search/atlas repair consumes
+the hot budget before the graph tick can start, `auto-maintenance` queues a
+bounded `graph_maintenance` job with the same graph guards and a separate
+profile graph budget instead of requiring a manual follow-up. Search
+fingerprints ignore rendered Markdown companions and can refresh stale
+`session_index_state` without rebuilding session documents when the SQLite
+documents are already current.
 Host timers should run maintenance through `abyss-machine resource launch
 --kind indexing --unattended --success-on-block` so heavier work uses the
 machine resource layer instead of hooks or MCP reads.

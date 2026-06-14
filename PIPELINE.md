@@ -387,7 +387,11 @@ maintenance pass, and delegates actual route/search/atlas/graph work to
 `index-maintenance`. Its profiles are:
 
 - `hot`: two-day recent window, probe resource route, route/search/atlas repair
-  for interactive agent routes, and explicit graph deferral.
+  for interactive agent routes, and a small bounded graph repair tick with
+  explicit deferred remainder. If the route-cache repair spends the hot budget
+  before graph work starts, it queues a bounded graph-maintenance job with the
+  same batch, chunk, and aggregate refresh guards plus a separate profile graph
+  budget.
 - `backlog`: wider recent archive window, medium resource route, search/atlas
   repair, larger graph backlog batch, and medium aggregate refresh chunks.
 - `deep`: full archive, heavy resource route, full repair and
@@ -403,15 +407,20 @@ run maintenance.
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.
 The report must expose `defer_graph_repair` when graph sources are dirty, so a
-future backlog/deep pass can repair graph state without pretending the hot
+future hot/backlog/deep pass can repair graph state without pretending the
 route cache is incomplete.
 
 The hot profile uses a route-cache freshness gate, not full graph freshness.
 It checks route drift, portable SQLite search, and atlas projection state while
-marking graph state as `deferred_not_checked`. Search projection fingerprints
-exclude rendered Markdown companions (`SESSION.md` and segment `.md`) because
-search documents are sourced from manifests, session indexes, segment indexes,
-incidents, and raw refs. If only the stored projection state is stale while
+allowing graph remainder to stay deferred after the bounded graph tick. When
+the graph tick is starved by budget exhaustion, the queued graph job is the
+automatic continuation route and uses the profile's graph-job budget rather
+than inheriting the already-exhausted foreground budget; MCP remains read-only
+and only reports this route. Search projection fingerprints exclude rendered
+Markdown companions (`SESSION.md` and
+segment `.md`) because search documents are sourced from manifests, session
+indexes, segment indexes, incidents, and raw refs. If only the stored projection
+state is stale while
 documents are already current, `index-maintenance` refreshes
 `session_index_state` instead of rebuilding all SQLite documents and route
 rows for the session.
