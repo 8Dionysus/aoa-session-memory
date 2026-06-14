@@ -14304,6 +14304,23 @@ def sqlite_search_session_states(conn: sqlite3.Connection) -> dict[str, dict[str
     }
 
 
+def sqlite_error_status(exc: sqlite3.Error) -> str:
+    text = str(exc).lower()
+    if "database is locked" in text or "database table is locked" in text or "database is busy" in text:
+        return "sqlite_locked"
+    return "sqlite_error"
+
+
+def sqlite_error_diagnostic(exc: sqlite3.Error) -> str:
+    return f"{sqlite_error_status(exc)}:{exc}"
+
+
+def connect_existing_search_db(db_path: Path, *, timeout: float = 1.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def search_dirty_projection_states(
     fingerprints: list[dict[str, Any]],
     indexed_states: dict[str, dict[str, Any]],
@@ -14503,7 +14520,7 @@ def refresh_search_projection_states(
     diagnostics: list[str] = []
     conn: sqlite3.Connection | None = None
     try:
-        conn = init_search_db(db_path, rebuild=False)
+        conn = init_search_db(db_path, rebuild=False, budget_deadline=budget_deadline)
         prefetched_counts = search_document_counts_for_projections(conn, projections)
         conn.execute("BEGIN")
         for projection in projections:
@@ -14562,6 +14579,7 @@ def refreshable_search_projection_records(
     dirty_records: list[dict[str, Any]],
     fingerprints: list[dict[str, Any]],
     search_state: dict[str, Any],
+    budget_deadline: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not dirty_records:
         return [], []
@@ -14581,7 +14599,7 @@ def refreshable_search_projection_records(
     def documents_are_current(projection: dict[str, Any]) -> bool:
         nonlocal conn
         if conn is None:
-            conn = init_search_db(search_db_path(aoa_root), rebuild=False)
+            conn = init_search_db(search_db_path(aoa_root), rebuild=False, budget_deadline=budget_deadline)
         return bool(search_projection_documents_freshness(conn, projection).get("ok"))
 
     for session_id in sorted(dirty_ids):
@@ -14620,8 +14638,7 @@ def sqlite_search_index_state(
             "diagnostics": ["search_index_missing"],
         }
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
         schema_diagnostics = search_schema_diagnostics(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
@@ -14630,11 +14647,12 @@ def sqlite_search_index_state(
         indexed_session_states = sqlite_search_session_states(conn)
         conn.close()
     except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
         return {
-            "status": "sqlite_error",
-            "needs_refresh": True,
+            "status": status,
+            "needs_refresh": status != "sqlite_locked",
             "db_path": str(db_path),
-            "diagnostics": [f"sqlite_error:{exc}"],
+            "diagnostics": [sqlite_error_diagnostic(exc)],
         }
     schema_version = str(metadata.get("schema_version") or "")
     counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
@@ -14923,14 +14941,25 @@ def maintain_indexes(
     search_reindex_candidate_records = search_dirty_records
     search_reasons = set(str(reason) for reason in search_state.get("reasons", []) if reason)
     search_non_projection_repair_needed = bool(search_reasons - {"session_projection_dirty"})
+    planning_budget_exhausted = False
     if not search_rebuild_required and not route_drift and not token_backfill_needed and search_dirty_records:
-        search_state_refresh_candidate_records, search_reindex_candidate_records = refreshable_search_projection_records(
-            aoa_root,
-            records,
-            search_dirty_records,
-            search_projection_fingerprints,
-            search_state,
-        )
+        try:
+            search_state_refresh_candidate_records, search_reindex_candidate_records = refreshable_search_projection_records(
+                aoa_root,
+                records,
+                search_dirty_records,
+                search_projection_fingerprints,
+                search_state,
+                budget_deadline=deadline,
+            )
+        except sqlite3.Error as exc:
+            if "interrupted" in str(exc).lower() and deadline is not None and time.monotonic() >= deadline:
+                planning_budget_exhausted = True
+                diagnostics.append("search_refreshability_budget_exhausted")
+                search_state_refresh_candidate_records = []
+                search_reindex_candidate_records = search_dirty_records
+            else:
+                raise
     remaining_repair_slots = effective_repair_limit
     if remaining_repair_slots is None:
         search_state_refresh_records = search_state_refresh_candidate_records
@@ -15073,7 +15102,7 @@ def maintain_indexes(
         actions.append(deferred)
 
     action_results: list[dict[str, Any]] = []
-    budget_exhausted = False
+    budget_exhausted = planning_budget_exhausted
     post_maintenance_states: dict[str, Any] = {}
 
     def budget_remaining() -> float | None:
@@ -20295,8 +20324,7 @@ def sqlite_provider_status(
             "diagnostics": ["search index missing; run search-index"],
         }
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
         schema_diagnostics = search_schema_diagnostics(conn)
         rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
@@ -20306,12 +20334,13 @@ def sqlite_provider_status(
         indexed_session_states = sqlite_search_session_states(conn) if check_freshness else {}
         conn.close()
     except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
         return {
             "provider": "portable_sqlite",
             "ok": False,
-            "status": "sqlite_error",
+            "status": status,
             "db_path": str(db_path),
-            "diagnostics": [f"sqlite_error:{exc}"],
+            "diagnostics": [sqlite_error_diagnostic(exc)],
         }
     schema_version = str(metadata.get("schema_version") or "")
     diagnostics: list[str] = list(schema_diagnostics)
@@ -20390,8 +20419,7 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
             "count_mode": "not_counted_fast",
         }
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
         schema_diagnostics = search_schema_diagnostics(conn)
         has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
@@ -20399,12 +20427,13 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
         has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
         conn.close()
     except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
         return {
             "provider": "portable_sqlite",
             "ok": False,
-            "status": "sqlite_error",
+            "status": status,
             "db_path": str(db_path),
-            "diagnostics": [f"sqlite_error:{exc}"],
+            "diagnostics": [sqlite_error_diagnostic(exc)],
             "count_mode": "not_counted_fast",
         }
     schema_version = str(metadata.get("schema_version") or "")
@@ -20894,6 +20923,7 @@ def local_rerank_search_results(
 
 SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_session_id ON documents(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)",
     "CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)",
     "CREATE INDEX IF NOT EXISTS idx_documents_agent_event ON documents(agent_event)",
@@ -20916,7 +20946,13 @@ def create_search_db_indexes(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-def init_search_db(db_path: Path, *, rebuild: bool = False, create_indexes: bool = True) -> sqlite3.Connection:
+def init_search_db(
+    db_path: Path,
+    *,
+    rebuild: bool = False,
+    create_indexes: bool = True,
+    budget_deadline: float | None = None,
+) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if rebuild and db_path.exists():
         db_path.unlink()
@@ -21057,7 +21093,13 @@ def init_search_db(db_path: Path, *, rebuild: bool = False, create_indexes: bool
         """
     )
     if create_indexes:
-        create_search_db_indexes(conn)
+        if budget_deadline is not None:
+            conn.set_progress_handler(lambda: 1 if time.monotonic() >= budget_deadline else 0, 10000)
+        try:
+            create_search_db_indexes(conn)
+        finally:
+            if budget_deadline is not None:
+                conn.set_progress_handler(None, 0)
     conn.commit()
     return conn
 
@@ -21089,15 +21131,21 @@ def delete_search_documents_for_session(
         values.append(session_id)
     if not clauses:
         return 0
-    rows = conn.execute(f"SELECT rowid FROM documents WHERE {' OR '.join(clauses)}", values).fetchall()
-    rowids = [int(row[0]) for row in rows]
-    if not rowids:
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS search_delete_rowids(rowid INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    conn.execute(
+        f"INSERT OR IGNORE INTO search_delete_rowids(rowid) SELECT rowid FROM documents WHERE {' OR '.join(clauses)}",
+        values,
+    )
+    count = int_value(conn.execute("SELECT COUNT(*) FROM search_delete_rowids").fetchone()[0])
+    if count <= 0:
         return 0
-    conn.executemany("DELETE FROM document_routes WHERE doc_rowid = ?", [(rowid,) for rowid in rowids])
-    conn.executemany("DELETE FROM document_bodies WHERE doc_rowid = ?", [(rowid,) for rowid in rowids])
-    conn.executemany("DELETE FROM documents_fts WHERE rowid = ?", [(rowid,) for rowid in rowids])
-    conn.executemany("DELETE FROM documents WHERE rowid = ?", [(rowid,) for rowid in rowids])
-    return len(rowids)
+    conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    return count
 
 
 def search_tokenize(query: str) -> list[str]:
@@ -21887,7 +21935,9 @@ def search_index_sessions(
             "diagnostics": ["no sessions selected"],
             "sessions": [],
         }
-    conn = init_search_db(write_db_path, rebuild=rebuild, create_indexes=not rebuild)
+    conn = init_search_db(write_db_path, rebuild=rebuild, create_indexes=not rebuild, budget_deadline=deadline)
+    if deadline is not None:
+        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 10000)
     if rebuild:
         reset_search_db(conn)
         conn.commit()
@@ -21895,6 +21945,7 @@ def search_index_sessions(
     removed_document_count = 0
     diagnostics: list[str] = []
     session_results: list[dict[str, Any]] = []
+    committed_count = 0
     budget_exhausted = False
     try:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
@@ -21925,17 +21976,19 @@ def search_index_sessions(
             projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
             documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=max_raw_bytes)
             session_results.append(result)
+            record_counts: Counter[str] = Counter()
+            record_removed_document_count = 0
             if result.get("diagnostics"):
                 diagnostics.extend(str(item) for item in result.get("diagnostics", []))
             if not rebuild:
-                removed_document_count += delete_search_documents_for_session(
+                record_removed_document_count = delete_search_documents_for_session(
                     conn,
                     session_label=str(result.get("session_label") or record.get("session_label") or session_dir_from_record(record).name),
                     session_id=str(record.get("session_id") or ""),
                 )
             for doc in documents:
                 insert_search_document(conn, doc)
-                counts[str(doc.get("doc_type") or "unknown")] += 1
+                record_counts[str(doc.get("doc_type") or "unknown")] += 1
             upsert_search_session_state(
                 conn,
                 projection_state=projection_state,
@@ -21943,6 +21996,9 @@ def search_index_sessions(
                 document_count=len(documents),
             )
             conn.commit()
+            counts.update(record_counts)
+            removed_document_count += record_removed_document_count
+            committed_count += 1
             if progress_every > 0 and record_index % progress_every == 0:
                 print(
                     json.dumps(
@@ -21963,6 +22019,40 @@ def search_index_sessions(
             create_search_db_indexes(conn)
             conn.commit()
     except sqlite3.Error as exc:
+        interrupted = "interrupted" in str(exc).lower()
+        if interrupted and deadline is not None and time.monotonic() >= deadline:
+            budget_exhausted = True
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            conn.close()
+            if rebuild and temp_db_path is not None:
+                cleanup_search_rebuild_temp(temp_db_path)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "search_index",
+                "search_schema_version": SEARCH_SCHEMA_VERSION,
+                "generated_at": now,
+                "ok": False,
+                "target": target,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "selected_count": len(records),
+                "processed_count": committed_count,
+                "remaining_count": max(0, len(records) - committed_count),
+                "budget_seconds": budget_seconds,
+                "budget_exhausted": True,
+                "partial": True,
+                "document_count": sum(counts.values()),
+                "removed_document_count": removed_document_count,
+                "max_raw_bytes": max_raw_bytes,
+                "db_path": str(db_path),
+                "build_db_path": str(write_db_path),
+                "diagnostics": ["search_index_budget_exhausted"],
+                "sessions": session_results[:committed_count],
+            }
         conn.rollback()
         conn.close()
         if rebuild and temp_db_path is not None:
@@ -21983,9 +22073,13 @@ def search_index_sessions(
             "sessions": session_results,
         }
     finally:
+        try:
+            conn.set_progress_handler(None, 0)
+        except sqlite3.Error:
+            pass
         conn.close()
     document_count = sum(counts.values())
-    processed_count = len(session_results)
+    processed_count = committed_count
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_index",
@@ -22479,10 +22573,6 @@ def search_sessions(
             "provider": {"selected": provider, "status": "portable_sqlite_missing"},
             "diagnostics": ["search index missing; run search-index"],
         }
-    schema_conn = init_search_db(db_path, rebuild=False)
-    schema_conn.close()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
     filters: list[str] = []
     params: list[Any] = []
     route_filters: list[str] = []
@@ -22531,7 +22621,9 @@ def search_sessions(
     route_join = ""
     route_where = " AND ".join(route_filters)
     fts_query = fts_query_from_user(query)
+    conn: sqlite3.Connection | None = None
     try:
+        conn = connect_existing_search_db(db_path)
         body_overrides: dict[int, str] = {}
         if route_where:
             conn.execute("CREATE TEMP TABLE search_route_filter(doc_rowid INTEGER PRIMARY KEY)")
@@ -22570,7 +22662,9 @@ def search_sessions(
         metadata = search_index_metadata(conn)
         body_overrides = search_document_bodies_for_rows(conn, rows)
     except sqlite3.Error as exc:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        status = sqlite_error_status(exc)
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_results",
@@ -22581,10 +22675,12 @@ def search_sessions(
             "db_path": str(db_path),
             "result_count": 0,
             "results": [],
-            "diagnostics": [f"sqlite_error:{exc}"],
+            "provider": {"selected": provider, "status": status},
+            "diagnostics": [sqlite_error_diagnostic(exc)],
         }
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     results = [
         compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
         for row in rows
@@ -22763,10 +22859,6 @@ def search_agent_event_documents(
             "diagnostics": ["search index missing; run search-index"],
         }
 
-    schema_conn = init_search_db(db_path, rebuild=False)
-    schema_conn.close()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
     filters = ["documents.doc_type = ?"]
     params: list[Any] = ["event"]
     exact_column, exact_value = exact_session_filter_for_search(aoa_root, session)
@@ -22789,7 +22881,9 @@ def search_agent_event_documents(
         params.append("%agent_event_source:event_msg_stream%")
     where = " AND ".join(filters)
     fts_query = fts_query_from_user(query)
+    conn: sqlite3.Connection | None = None
     try:
+        conn = connect_existing_search_db(db_path)
         if fts_query:
             sql = (
                 "SELECT documents.*, bm25(documents_fts) AS rank, "
@@ -22812,7 +22906,9 @@ def search_agent_event_documents(
         metadata = search_index_metadata(conn)
         body_overrides = search_document_bodies_for_rows(conn, rows)
     except sqlite3.Error as exc:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        status = sqlite_error_status(exc)
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_results",
@@ -22824,10 +22920,12 @@ def search_agent_event_documents(
             "db_path": str(db_path),
             "result_count": 0,
             "results": [],
-            "diagnostics": [f"sqlite_error:{exc}"],
+            "provider": {"selected": provider, "status": status},
+            "diagnostics": [sqlite_error_diagnostic(exc)],
         }
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     provider_payload = (
         search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
@@ -29387,8 +29485,7 @@ def evidence_ref_integrity_state(aoa_root: Path, *, sample_limit: int = 200) -> 
     broken: list[dict[str, Any]] = []
     checked = 0
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        conn = connect_existing_search_db(db_path)
         rows = conn.execute(
             """
             SELECT id, doc_type, manifest_path, segment_id, event_id, segment_ref, segment_index_path, raw_path, raw_ref, raw_block_ref
@@ -29401,7 +29498,8 @@ def evidence_ref_integrity_state(aoa_root: Path, *, sample_limit: int = 200) -> 
         ).fetchall()
         conn.close()
     except sqlite3.Error as exc:
-        return {"status": "sqlite_error", "ok": False, "sample_limit": sample_limit, "checked_count": 0, "broken_count": 0, "broken_refs": [], "diagnostics": [f"sqlite_error:{exc}"]}
+        status = sqlite_error_status(exc)
+        return {"status": status, "ok": False, "sample_limit": sample_limit, "checked_count": 0, "broken_count": 0, "broken_refs": [], "diagnostics": [sqlite_error_diagnostic(exc)]}
     for row in rows:
         checked += 1
         missing: list[str] = []
@@ -30912,9 +31010,9 @@ def entity_usage_scenario_candidates(
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return [], ["search_index_missing"]
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    conn: sqlite3.Connection | None = None
     try:
+        conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
         if str(metadata.get("schema_version") or "") != str(SEARCH_SCHEMA_VERSION):
             diagnostics.append("search_schema_mismatch")
@@ -30942,10 +31040,12 @@ def entity_usage_scenario_candidates(
             [*selected_layers, max(1, int_value(min_postings, 1))],
         ).fetchall()
     except sqlite3.Error as exc:
-        conn.close()
-        return [], diagnostics + [f"sqlite_error:{exc}"]
+        if conn is not None:
+            conn.close()
+        return [], diagnostics + [sqlite_error_diagnostic(exc)]
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     candidates = [
         {
             "route_id": int(row["route_id"]),
