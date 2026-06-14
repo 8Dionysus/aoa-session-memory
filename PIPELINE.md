@@ -394,6 +394,11 @@ maintenance pass, and delegates actual route/search/atlas/graph work to
   budget.
 - `backlog`: wider recent archive window, medium resource route, search/atlas
   repair, larger graph backlog batch, and medium aggregate refresh chunks.
+- `catchup`: full archive search/atlas repair through bounded dirty-session
+  batches, medium resource route, no inline graph repair, and explicit
+  deferred graph follow-up. Use this after classifier or projection changes
+  when `search-provider-status` reports many dirty historical sessions and a
+  full repair would exceed the interactive or unattended budget.
 - `deep`: full archive, heavy resource route, full repair and
   calibration-capable batch with larger aggregate refresh chunks.
 
@@ -403,6 +408,12 @@ read paths light while allowing the machine resource layer to use available CPU,
 memory, IO, and thermal headroom. `aoa_session_memory` MCP remains read-only and
 plan-only; it may report freshness and the maintenance route, but it must not
 run maintenance.
+
+Use `auto-maintenance catchup --apply` or
+`index-maintenance --repair-limit <n> --skip-graph-repair --apply` when a live
+archive needs historical search/atlas catch-up but graph repair must stay
+deferred. The report must show candidate counts, selected repair counts,
+remaining counts, and `*_repair_limited=true` while backlog remains.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.

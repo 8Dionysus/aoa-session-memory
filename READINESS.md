@@ -75,8 +75,9 @@ Build the `.aoa` session-memory mechanism end to end:
 - Resource-gated unattended maintenance route: `auto-maintenance` /
   `maintain-auto` profiles `hot` (`probe`, recent route/search/atlas repair
   plus a small bounded graph tick with explicit graph remainder deferral),
-  `backlog` (`medium`, recent index+graph repair), and `deep` (`heavy`, full
-  repair); MCP remains read-only and plan-only
+  `backlog` (`medium`, recent index+graph repair), `catchup` (`medium`,
+  full-scope bounded search/atlas catch-up without graph repair), and `deep`
+  (`heavy`, full repair); MCP remains read-only and plan-only
 - Hot route-cache maintenance avoids graph scans on the gate path:
   `route-cache-freshness-gates` checks route/search/atlas state while the
   maintenance pass advances graph state in small batches; search projection
@@ -408,6 +409,17 @@ Last observed result:
   (`dirty=183`, `missing=6`, `clean=6`). Reports:
   `diagnostics/20260614T025525Z__auto-maintenance-hot.json` and
   `diagnostics/20260614T025625Z__graph-maintenance.json`.
+- 2026-06-14 bounded catch-up proof: a full dry maintenance scan found
+  classifier/projection drift across the archive, with `261` dirty search
+  sessions before the first foreground repair and `209` dirty search sessions
+  still remaining after a budgeted medium run. `auto-maintenance catchup
+  --repair-limit 3` planned a bounded follow-up with
+  `search_reindex_candidate_count=209`, `search_reindex_session_count=3`,
+  `search_repair_remaining_count=206`, `atlas_dirty_session_count=261`,
+  `atlas_repair_session_count=3`, and both repair-limited flags set. Source
+  `doctor` and standalone bundle validation pass; live `audit` remains
+  honestly blocked on `portable_sqlite:stale` until the catch-up batches
+  finish.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

@@ -117,6 +117,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "hot": {
         "since_days": 2,
         "limit": None,
+        "repair_limit": None,
         "max_raw_mb": 16,
         "token_max_raw_mb": 512,
         "graph_batch_limit": GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
@@ -136,6 +137,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "backlog": {
         "since_days": 30,
         "limit": None,
+        "repair_limit": None,
         "max_raw_mb": 16,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 100,
@@ -152,9 +154,30 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_kind": "indexing",
         "timeout_sec": 3600,
     },
+    "catchup": {
+        "since_days": None,
+        "limit": None,
+        "repair_limit": 25,
+        "max_raw_mb": 16,
+        "token_max_raw_mb": 512,
+        "graph_batch_limit": 0,
+        "graph_refresh_chunk_size": 64,
+        "graph_max_refresh_nodes": 0,
+        "graph_max_refresh_edges": 0,
+        "ref_sample_limit": 400,
+        "sample_audit": False,
+        "repair_indexes": True,
+        "repair_graph": False,
+        "allow_deferred_graph": True,
+        "deferred_graph_job_budget_seconds": 600,
+        "resource_class": "medium",
+        "resource_kind": "indexing",
+        "timeout_sec": 1800,
+    },
     "deep": {
         "since_days": None,
         "limit": None,
+        "repair_limit": None,
         "max_raw_mb": 16,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 250,
@@ -14657,6 +14680,7 @@ def maintain_indexes(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    repair_limit: int | None = None,
     apply: bool = False,
     max_raw_bytes: int | None = None,
     token_max_raw_bytes: int | None = None,
@@ -14777,19 +14801,35 @@ def maintain_indexes(
     atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
     atlas_dirty_records = [] if atlas_rebuild_required else records_matching_projection_states(records, atlas_dirty_selector if isinstance(atlas_dirty_selector, list) else [])
-    search_state_refresh_records: list[dict[str, Any]] = []
-    search_reindex_records = search_dirty_records
+    effective_repair_limit = None if repair_limit is None or int_value(repair_limit) <= 0 else int_value(repair_limit)
+    search_state_refresh_candidate_records: list[dict[str, Any]] = []
+    search_reindex_candidate_records = search_dirty_records
     search_reasons = set(str(reason) for reason in search_state.get("reasons", []) if reason)
     search_non_projection_repair_needed = bool(search_reasons - {"session_projection_dirty"})
     if not search_rebuild_required and not route_drift and not token_backfill_needed and search_dirty_records:
-        search_state_refresh_records, search_reindex_records = refreshable_search_projection_records(
+        search_state_refresh_candidate_records, search_reindex_candidate_records = refreshable_search_projection_records(
             aoa_root,
             records,
             search_dirty_records,
             search_projection_fingerprints,
             search_state,
         )
+    remaining_repair_slots = effective_repair_limit
+    if remaining_repair_slots is None:
+        search_state_refresh_records = search_state_refresh_candidate_records
+        search_reindex_records = search_reindex_candidate_records
+        atlas_repair_records = atlas_dirty_records
+    else:
+        search_state_refresh_records = search_state_refresh_candidate_records[:remaining_repair_slots]
+        remaining_repair_slots = max(0, remaining_repair_slots - len(search_state_refresh_records))
+        search_reindex_records = search_reindex_candidate_records[:remaining_repair_slots]
+        atlas_repair_records = atlas_dirty_records[:effective_repair_limit]
     search_state_refresh_fingerprints = search_projection_fingerprints_for_records(search_state_refresh_records)
+    search_repair_limited = effective_repair_limit is not None and (
+        len(search_state_refresh_records) + len(search_reindex_records)
+        < len(search_state_refresh_candidate_records) + len(search_reindex_candidate_records)
+    )
+    atlas_repair_limited = effective_repair_limit is not None and len(atlas_repair_records) < len(atlas_dirty_records)
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     maintenance_readiness_sample_limit = 0
@@ -14848,7 +14888,7 @@ def maintain_indexes(
         maintenance_action(
             "rebuild_agent_atlas",
             reason="atlas_missing_or_stale",
-            needed=repair_indexes and (bool(atlas_state.get("needs_refresh")) or bool(route_drift) or token_backfill_needed),
+            needed=repair_indexes and (bool(atlas_repair_records) or atlas_rebuild_required or bool(route_drift) or token_backfill_needed),
             command=atlas_command,
         ),
         maintenance_action(
@@ -15035,7 +15075,7 @@ def maintain_indexes(
                 atlas_action["status"] = "deferred_budget_exhausted"
                 action_results.append(atlas_action)
             else:
-                selected_atlas_records = None if atlas_rebuild_required else (atlas_dirty_records or (records if reindex_ran or token_backfill_ran else []))
+                selected_atlas_records = None if atlas_rebuild_required else (atlas_repair_records or (records if reindex_ran or token_backfill_ran else []))
                 result = build_agent_atlas(
                     aoa_root=aoa_root,
                     target="all",
@@ -15059,7 +15099,7 @@ def maintain_indexes(
                 post_maintenance_states["post_projection_latest_source_mtime"] = refreshed_latest_source_mtime
                 post_maintenance_states["post_projection_latest_source_paths"] = refreshed_latest_source_paths
                 post_maintenance_states["post_projection_search_index"] = refreshed_search_state
-                if refreshed_search_state.get("needs_refresh"):
+                if refreshed_search_state.get("needs_refresh") and not search_repair_limited:
                     refreshed_search_rebuild_required = search_rebuild_required_for(refreshed_search_state)
                     refreshed_search_dirty_selector = (
                         refreshed_search_state.get("dirty_session_ids")
@@ -15074,6 +15114,8 @@ def maintain_indexes(
                             refreshed_search_dirty_selector if isinstance(refreshed_search_dirty_selector, list) else [],
                         )
                     )
+                    if effective_repair_limit is not None:
+                        refreshed_search_dirty_records = refreshed_search_dirty_records[:effective_repair_limit]
                     post_search_action = maintenance_action(
                         "reconcile_search_index",
                         reason="post_mutation_search_freshness_recheck",
@@ -15110,7 +15152,7 @@ def maintain_indexes(
                 refreshed_latest_source_mtime, refreshed_latest_source_paths = latest_index_source_mtime(aoa_root, refreshed_records)
                 refreshed_atlas_state = atlas_index_state(aoa_root, refreshed_latest_source_mtime, refreshed_records)
                 post_maintenance_states["post_projection_atlas_index"] = refreshed_atlas_state
-                if refreshed_atlas_state.get("needs_refresh"):
+                if refreshed_atlas_state.get("needs_refresh") and not atlas_repair_limited:
                     refreshed_atlas_rebuild_required = atlas_rebuild_required_for(refreshed_atlas_state)
                     refreshed_atlas_dirty_selector = (
                         refreshed_atlas_state.get("dirty_session_ids")
@@ -15125,6 +15167,8 @@ def maintain_indexes(
                             refreshed_atlas_dirty_selector if isinstance(refreshed_atlas_dirty_selector, list) else [],
                         )
                     )
+                    if effective_repair_limit is not None:
+                        refreshed_atlas_dirty_records = refreshed_atlas_dirty_records[:effective_repair_limit]
                     post_atlas_action = maintenance_action(
                         "reconcile_agent_atlas",
                         reason="post_mutation_atlas_freshness_recheck",
@@ -15303,6 +15347,7 @@ def maintain_indexes(
         "repair_graph": repair_graph,
         "index_repair_needed": index_repair_needed,
         "graph_repair_needed": graph_repair_needed,
+        "repair_limit": effective_repair_limit,
         "selected_count": len(records),
         "max_raw_bytes": max_raw_bytes,
         "token_max_raw_bytes": effective_token_max_raw_bytes,
@@ -15327,13 +15372,26 @@ def maintain_indexes(
         "route_drift_count": len(route_drift),
         "route_drift": route_drift,
         "search_dirty_session_count": len(search_dirty_records),
+        "search_state_refresh_candidate_count": len(search_state_refresh_candidate_records),
         "search_state_refresh_count": len(search_state_refresh_records),
+        "search_reindex_candidate_count": len(search_reindex_candidate_records),
         "search_reindex_session_count": len(search_reindex_records),
+        "search_repair_remaining_count": max(
+            0,
+            len(search_state_refresh_candidate_records)
+            + len(search_reindex_candidate_records)
+            - len(search_state_refresh_records)
+            - len(search_reindex_records),
+        ),
+        "search_repair_limited": search_repair_limited,
         "search_dirty_sessions": [
             {"session_id": item.get("session_id"), "session_label": item.get("session_label"), "reasons": item.get("reasons", [])}
             for item in (search_state.get("dirty_sessions", []) if isinstance(search_state.get("dirty_sessions"), list) else [])[:20]
         ],
         "atlas_dirty_session_count": len(atlas_dirty_records),
+        "atlas_repair_session_count": len(atlas_repair_records),
+        "atlas_repair_remaining_count": max(0, len(atlas_dirty_records) - len(atlas_repair_records)),
+        "atlas_repair_limited": atlas_repair_limited,
         "atlas_dirty_sessions": [
             {"session_id": item.get("session_id"), "session_label": item.get("session_label"), "reasons": item.get("reasons", [])}
             for item in (atlas_state.get("dirty_sessions", []) if isinstance(atlas_state.get("dirty_sessions"), list) else [])[:20]
@@ -15377,6 +15435,7 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- repair_graph: `{payload.get('repair_graph')}`",
         f"- index_repair_needed: `{payload.get('index_repair_needed')}`",
         f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
+        f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
         f"- remaining_count: `{payload.get('remaining_count')}`",
@@ -15390,9 +15449,16 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- route_drift_count: `{payload.get('route_drift_count')}`",
         f"- search_dirty_session_count: `{payload.get('search_dirty_session_count')}`",
+        f"- search_state_refresh_candidate_count: `{payload.get('search_state_refresh_candidate_count')}`",
         f"- search_state_refresh_count: `{payload.get('search_state_refresh_count')}`",
+        f"- search_reindex_candidate_count: `{payload.get('search_reindex_candidate_count')}`",
         f"- search_reindex_session_count: `{payload.get('search_reindex_session_count')}`",
+        f"- search_repair_remaining_count: `{payload.get('search_repair_remaining_count')}`",
+        f"- search_repair_limited: `{payload.get('search_repair_limited')}`",
         f"- atlas_dirty_session_count: `{payload.get('atlas_dirty_session_count')}`",
+        f"- atlas_repair_session_count: `{payload.get('atlas_repair_session_count')}`",
+        f"- atlas_repair_remaining_count: `{payload.get('atlas_repair_remaining_count')}`",
+        f"- atlas_repair_limited: `{payload.get('atlas_repair_limited')}`",
         f"- deferred_session_count: `{payload.get('deferred_session_count')}`",
         f"- token_backfill_counts: `{json.dumps((payload.get('token_backfill') or {}).get('counts', {}) if isinstance(payload.get('token_backfill'), dict) else {}, ensure_ascii=False)}`",
         f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
@@ -15495,6 +15561,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- since: `{payload.get('since')}`",
         f"- until: `{payload.get('until')}`",
         f"- limit: `{payload.get('limit')}`",
+        f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- resource_class: `{payload.get('resource_class')}`",
         f"- resource_kind: `{payload.get('resource_kind')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
@@ -15572,11 +15639,19 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "repair_graph",
                 "index_repair_needed",
                 "graph_repair_needed",
+                "repair_limit",
                 "route_drift_count",
                 "search_dirty_session_count",
+                "search_state_refresh_candidate_count",
                 "search_state_refresh_count",
+                "search_reindex_candidate_count",
                 "search_reindex_session_count",
+                "search_repair_remaining_count",
+                "search_repair_limited",
                 "atlas_dirty_session_count",
+                "atlas_repair_session_count",
+                "atlas_repair_remaining_count",
+                "atlas_repair_limited",
                 "deferred_session_count",
                 "graph_max_refresh_nodes",
                 "graph_max_refresh_edges",
@@ -15637,6 +15712,7 @@ def auto_maintenance(
     since_days: int | None = None,
     until: str | None = None,
     limit: int | None = None,
+    repair_limit: int | None = None,
     apply: bool = False,
     max_raw_bytes: int | None = None,
     token_max_raw_bytes: int | None = None,
@@ -15660,6 +15736,9 @@ def auto_maintenance(
     effective_since_days = since_days if since_days is not None else (int_value(profile_since_days) if profile_since_days is not None else None)
     effective_since = since if since is not None else since_date_from_args(None, effective_since_days)
     effective_limit = limit if limit is not None else settings.get("limit")
+    profile_repair_limit = settings.get("repair_limit")
+    effective_repair_limit = repair_limit if repair_limit is not None else (int_value(profile_repair_limit) if profile_repair_limit is not None else None)
+    effective_repair_limit = None if effective_repair_limit is None or int_value(effective_repair_limit) <= 0 else int_value(effective_repair_limit)
     effective_max_raw_bytes = max_raw_bytes if max_raw_bytes is not None else int(float(settings["max_raw_mb"]) * 1024 * 1024)
     effective_token_max_raw_bytes = token_max_raw_bytes if token_max_raw_bytes is not None else int(float(settings["token_max_raw_mb"]) * 1024 * 1024)
     effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit if graph_batch_limit is not None else settings["graph_batch_limit"], GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
@@ -15719,6 +15798,7 @@ def auto_maintenance(
                         "resource_kind": effective_resource_kind,
                         "timeout_sec": effective_timeout_sec,
                         "budget_seconds": effective_budget_seconds,
+                        "repair_limit": effective_repair_limit,
                         "repair_indexes": effective_repair_indexes,
                         "repair_graph": effective_repair_graph,
                         "allow_deferred_graph": allow_deferred_graph,
@@ -15764,6 +15844,7 @@ def auto_maintenance(
             since=effective_since,
             until=until,
             limit=effective_limit,
+            repair_limit=effective_repair_limit,
             apply=apply,
             max_raw_bytes=effective_max_raw_bytes,
             token_max_raw_bytes=effective_token_max_raw_bytes,
@@ -15827,6 +15908,7 @@ def auto_maintenance(
             "since": effective_since,
             "until": until,
             "limit": effective_limit,
+            "repair_limit": effective_repair_limit,
             "resource_class": effective_resource_class,
             "resource_kind": effective_resource_kind,
             "timeout_sec": effective_timeout_sec,
@@ -31574,6 +31656,7 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             since=since,
             until=args.until,
             limit=args.limit,
+            repair_limit=getattr(args, "repair_limit", None),
             apply=args.apply,
             max_raw_bytes=max_raw_bytes,
             token_max_raw_bytes=token_max_raw_bytes,
@@ -31613,6 +31696,7 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
         since_days=None if args.since is not None else args.since_days,
         until=args.until,
         limit=args.limit,
+        repair_limit=getattr(args, "repair_limit", None),
         apply=args.apply,
         max_raw_bytes=max_raw_bytes,
         token_max_raw_bytes=token_max_raw_bytes,
@@ -35731,6 +35815,7 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     index_maintenance.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     index_maintenance.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    index_maintenance.add_argument("--repair-limit", type=int, help="Limit dirty session repairs after full freshness detection; useful for recurring catch-up batches.")
     index_maintenance.add_argument("--apply", action="store_true", help="Execute planned maintenance actions. Default only plans.")
     index_maintenance.add_argument("--max-raw-mb", type=float, default=16, help="Skip raw-text extraction/reindexing above this many MiB where supported.")
     index_maintenance.add_argument(
@@ -35768,6 +35853,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_maintenance_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all; defaults to profile.")
     auto_maintenance_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     auto_maintenance_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    auto_maintenance_parser.add_argument("--repair-limit", type=int, help="Override the profile dirty session repair batch size after full freshness detection.")
     auto_maintenance_parser.add_argument("--apply", action="store_true", help="Apply maintenance actions. Default plans and reports only.")
     auto_maintenance_parser.add_argument("--max-raw-mb", type=float, help="Override profile raw-text extraction limit for search/route reindexing.")
     auto_maintenance_parser.add_argument("--token-max-raw-mb", type=float, help="Override profile raw limit for token-ledger backfill.")

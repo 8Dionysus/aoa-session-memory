@@ -3866,6 +3866,74 @@ def test_index_maintenance_uses_fingerprints_to_update_only_dirty_sessions(tmp_p
     assert refreshed["atlas_index"]["status"] == "current"
 
 
+def test_index_maintenance_repair_limit_batches_dirty_sessions(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_ids = ["batch-alpha", "batch-beta", "batch-gamma"]
+    for index, session_id in enumerate(session_ids):
+        transcript = tmp_path / f"rollout-2026-06-03T00-0{index}-00-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": f"2026-06-03T00:0{index}:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo)}},
+                {"timestamp": f"2026-06-03T00:0{index}:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"Batch repair {session_id}"}]}},
+                {"timestamp": f"2026-06-03T00:0{index}:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Batch repair indexed."}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    for session_id in session_ids:
+        semantic = module.set_session_semantic_name(
+            aoa_root=aoa_root,
+            target=session_id,
+            name=f"{session_id} updated route",
+            scope="session",
+            kind="session_essence",
+            evidence_refs=["raw:line:2"],
+            from_line=1,
+            to_line=3,
+            apply=True,
+            verify_raw_hash=True,
+        )
+        assert semantic["status"] == "applied"
+
+    plan = module.maintain_indexes(aoa_root=aoa_root, target="all", repair_limit=1, repair_graph=False)
+    assert plan["search_dirty_session_count"] == 3
+    assert plan["search_reindex_candidate_count"] == 3
+    assert plan["search_reindex_session_count"] == 1
+    assert plan["search_repair_remaining_count"] == 2
+    assert plan["search_repair_limited"] is True
+    assert plan["atlas_dirty_session_count"] == 3
+    assert plan["atlas_repair_session_count"] == 1
+    assert plan["atlas_repair_remaining_count"] == 2
+    assert plan["atlas_repair_limited"] is True
+
+    applied = module.maintain_indexes(aoa_root=aoa_root, target="all", repair_limit=1, repair_graph=False, apply=True)
+    actions = {action["id"]: action for action in applied["actions"]}
+    assert actions["rebuild_search_index"]["result"]["selected_count"] == 1
+    assert actions["rebuild_agent_atlas"]["result"]["selected_count"] == 1
+    assert "reconcile_search_index" not in actions
+    assert "reconcile_agent_atlas" not in actions
+
+    remaining = module.maintain_indexes(aoa_root=aoa_root, target="all", repair_limit=1, repair_graph=False)
+    assert remaining["search_dirty_session_count"] == 2
+    assert remaining["atlas_dirty_session_count"] == 2
+
+
 def test_index_maintenance_refreshes_search_state_without_reindexing_when_documents_are_current(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -4232,6 +4300,57 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert "aoa_session_memory MCP remains read-only" in payload["mcp_boundary"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls.setdefault("freshness", []).append(kwargs)
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 3,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": False,
+            "diagnostics": ["index_maintenance_needed"],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 3,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "repair_limit": kwargs["repair_limit"],
+            "index_repair_needed": True,
+            "graph_repair_needed": False,
+            "search_dirty_session_count": 3,
+            "search_reindex_candidate_count": 3,
+            "search_reindex_session_count": 1,
+            "search_repair_remaining_count": 2,
+            "action_counts": {"applied": 1},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_: (_ for _ in ()).throw(AssertionError("catchup should use route-cache freshness")))
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="catchup", apply=True)
+
+    assert payload["profile"] == "catchup"
+    assert payload["repair_limit"] == module.AUTO_MAINTENANCE_PROFILES["catchup"]["repair_limit"]
+    assert payload["repair_graph"] is False
+    assert calls["maintenance"]["repair_limit"] == module.AUTO_MAINTENANCE_PROFILES["catchup"]["repair_limit"]
+    assert calls["maintenance"]["repair_graph"] is False
+    assert len(calls["freshness"]) == 2
 
 
 def test_hot_auto_maintenance_repairs_route_cache_and_advances_graph(tmp_path: Path, monkeypatch: Any) -> None:
