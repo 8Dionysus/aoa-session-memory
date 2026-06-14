@@ -5231,6 +5231,60 @@ def test_search_provider_status_detects_session_projection_drift(tmp_path: Path)
     assert provider["freshness"]["dirty_session_count"] == 1
 
 
+def test_search_provider_status_cli_can_scope_freshness_to_session(tmp_path: Path, capsys: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-session-scope.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-session-scope", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find scoped freshness evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-session-scope",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "provider-session-scope")
+    session_dir = module.session_dir_from_record(record)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index_payload = json.loads(session_index_path.read_text(encoding="utf-8"))
+    session_index_payload["test_search_drift"] = "Generated source drift."
+    session_index_path.write_text(json.dumps(session_index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    args = module.build_parser().parse_args(
+        [
+            "search-provider-status",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--provider",
+            "portable_sqlite",
+            "--session",
+            "provider-session-scope",
+        ]
+    )
+    rc = module.command_search_provider_status(args)
+    payload = json.loads(capsys.readouterr().out)
+    freshness = payload["providers"]["portable_sqlite"]["freshness"]
+
+    assert rc == 1
+    assert freshness["scope"] == "selected_records"
+    assert freshness["selected_session_state_count"] == 1
+    assert freshness["dirty_session_count"] == 1
+    assert freshness["dirty_session_ids"] == ["provider-session-scope"]
+
+
 def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

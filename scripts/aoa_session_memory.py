@@ -31871,12 +31871,14 @@ def command_search_index(args: argparse.Namespace) -> int:
 def command_search_provider_status(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    freshness_records = [resolve_session_record(root, args.session)] if args.session else None
     payload = search_provider_status(
         aoa_root=root,
         provider_name=args.provider,
         include_host=args.include_host,
         refresh_host=args.refresh_host,
         refresh_host_index=args.refresh_host_index,
+        freshness_records=freshness_records,
         timeout=args.timeout,
         write_report=args.write_report,
     )
@@ -36001,6 +36003,7 @@ def build_parser() -> argparse.ArgumentParser:
     provider_status.add_argument("--include-host", action="store_true", help="Run optional host provider gates such as abyss-machine quality audit.")
     provider_status.add_argument("--refresh-host", action="store_true", help="Use the host deterministic refresh quality gate where configured.")
     provider_status.add_argument("--refresh-host-index", action="store_true", help="Use the host refresh-index quality gate where configured.")
+    provider_status.add_argument("--session", help="Limit portable SQLite freshness to one session id, label, semantic name, or latest.")
     provider_status.add_argument("--timeout", type=int, default=45)
     provider_status.add_argument("--write-report", action="store_true", help="Write JSON and Markdown provider reports under .aoa/diagnostics.")
     provider_status.set_defaults(func=command_search_provider_status)
