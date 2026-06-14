@@ -26321,6 +26321,13 @@ def graph_source_maintenance_recommendation(
             "python3 scripts/aoa_session_memory.py graph-build all "
             f"{root_args} --write --store-only --in-place --progress-every 10"
         )
+    elif source_total and graph_missing >= max(500, int(source_total * 0.5)):
+        route = "store_only_rebuild"
+        reason = "graph_store_missing_sources_dominate"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-build all "
+            f"{root_args} --write --store-only --in-place --progress-every 10"
+        )
     elif actionable_count <= 100:
         route = "bounded_graph_maintenance"
         reason = "small_incremental_backlog"

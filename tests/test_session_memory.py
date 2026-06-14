@@ -2147,6 +2147,26 @@ def test_graph_source_recommendation_routes_mass_classifier_drift_to_store_rebui
     assert "blocked_sources_need_lower_layer_repair" in recommendation["notes"]
 
 
+def test_graph_source_recommendation_routes_mass_missing_sources_to_store_rebuild() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4200,
+        dirty_count=0,
+        missing_count=4100,
+        orphaned_count=0,
+        blocked_count=62,
+        reason_group_counts={
+            "graph_source_missing": 4100,
+            "missing_graph_source_path": 62,
+        },
+    )
+
+    assert recommendation["route"] == "store_only_rebuild"
+    assert recommendation["reason"] == "graph_store_missing_sources_dominate"
+    assert "--store-only --in-place" in recommendation["command"]
+    assert "missing_sources_can_be_inserted_by_incremental_or_rebuild_route" in recommendation["notes"]
+    assert "missing_graph_source_paths_are_blocked_evidence_sources" in recommendation["notes"]
+
+
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
