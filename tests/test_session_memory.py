@@ -342,6 +342,17 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert progress_route["result_count"] == 2
     assert {item["event_id"] for item in progress_route["results"]} == {"000005", "000008"}
     assert all(item["agent_event_source"] != "event_msg_stream" for item in progress_route["results"])
+    progress_hit = progress_route["results"][0]
+    assert progress_hit["raw_ref"] == progress_hit["refs"]["raw"]
+    assert progress_hit["raw_line"] == int(progress_hit["raw_ref"].split(":")[-1])
+    assert progress_hit["segment_ref"] == progress_hit["refs"]["segment"]
+    assert progress_hit["segment_index"] == progress_hit["refs"]["segment_index"]
+    assert progress_hit["session_ref"] == progress_hit["refs"]["session"]
+    assert progress_hit["preview"] == progress_hit["bounded_preview"]
+    assert progress_hit["preview_source"] == "raw_semantic_text"
+    assert "route_signal" not in progress_hit["bounded_preview"]
+    assert progress_hit["bounded_preview"]
+    assert any(text in progress_hit["bounded_preview"] for text in ["Сейчас проверяю", "Почти готово"])
     progress_with_stream = module.agent_event_route_search(
         aoa_root=aoa_root,
         session=session_dir.name,
@@ -362,6 +373,17 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     )
     assert windows["window_count"] == 1
     assert windows["windows"][0]["ok"] is True
+    reasoning_window = windows["windows"][0]
+    assert reasoning_window["raw_ref"] == reasoning_window["refs"]["raw"]
+    assert reasoning_window["raw_line"] == int(reasoning_window["raw_ref"].split(":")[-1])
+    assert reasoning_window["segment_ref"] == reasoning_window["refs"]["segment"]
+    assert reasoning_window["segment_index"] == reasoning_window["refs"]["segment_index"]
+    assert reasoning_window["session_ref"] == reasoning_window["refs"]["session"]
+    assert reasoning_window["anchor"]["event_id"] == reasoning_window["event_id"]
+    assert reasoning_window["center"]["event_id"] == reasoning_window["event_id"]
+    assert reasoning_window["preview_source"] == "raw_semantic_text"
+    assert reasoning_window["bounded_preview"]
+    assert "Need inspect source" in reasoning_window["bounded_preview"]
 
 
 def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path: Path) -> None:
@@ -412,6 +434,44 @@ def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path
     assert windows["windows"][0]["ok"] is True
     assert windows["windows"][0]["events"][0]["agent_event"] == "assistant_reasoning_boundary"
     assert windows["windows"][0]["bridge"]["source"] == "query_matched_agent_event_neighborhood"
+
+
+def test_agent_event_windows_mark_encrypted_reasoning_boundary_preview(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-encrypted-reasoning.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "encrypted-reasoning", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь reasoning boundary"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [], "encrypted_content": "opaque"}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Reasoning boundary checked."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "encrypted-reasoning",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    windows = module.agent_event_windows(
+        aoa_root=aoa_root,
+        agent_events=["assistant_reasoning_boundary"],
+        limit=1,
+        before=0,
+        after=1,
+    )
+    assert windows["window_count"] == 1
+    assert windows["windows"][0]["preview_source"] == "encrypted_reasoning_boundary"
+    assert "summary empty" in windows["windows"][0]["bounded_preview"]
 
 
 def test_prompt_only_task_episode_is_interrupted_not_quality_gap(tmp_path: Path) -> None:

@@ -22495,6 +22495,21 @@ def resolve_search_result_refs(row: sqlite3.Row) -> tuple[dict[str, str], dict[s
     return refs, resolution
 
 
+def route_result_ref_fields(refs: dict[str, Any]) -> dict[str, Any]:
+    raw_ref = str(refs.get("raw") or "")
+    segment_ref = str(refs.get("segment") or "")
+    segment_index_ref = str(refs.get("segment_index") or "")
+    return {
+        "session_ref": str(refs.get("session") or ""),
+        "segment_ref": segment_ref,
+        "segment_index": segment_index_ref,
+        "segment_index_ref": segment_index_ref,
+        "raw_ref": raw_ref,
+        "raw_line": line_from_raw_ref(raw_ref),
+        "raw_block_ref": str(refs.get("raw_block") or ""),
+    }
+
+
 def search_result_freshness(
     row: sqlite3.Row,
     *,
@@ -22569,6 +22584,10 @@ def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tupl
 def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "", full_body: str | None = None) -> dict[str, Any]:
     refs, ref_resolution = resolve_search_result_refs(row)
     freshness = search_result_freshness(row, resolved_refs=refs, ref_resolution=ref_resolution)
+    snippet = short_text(full_body if full_body is not None else row["body"], max_chars=420)
+    semantic_preview = route_raw_semantic_preview(row, refs, max_chars=420)
+    preview = semantic_preview.get("text") or snippet
+    preview_source = semantic_preview.get("status") if semantic_preview.get("text") else "search_body"
     result = {
         "rank": row["rank"] if "rank" in row.keys() else 0,
         "doc_id": row["id"],
@@ -22594,8 +22613,12 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
         "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
         "route_signals": row["route_signals"] if "route_signals" in row.keys() else "",
         "title": row["title"],
-        "snippet": short_text(full_body if full_body is not None else row["body"], max_chars=420),
+        "snippet": snippet,
+        "preview": preview,
+        "bounded_preview": preview,
+        "preview_source": preview_source,
         "refs": refs,
+        **route_result_ref_fields(refs),
         "freshness": freshness,
     }
     if ref_resolution.get("resolved"):
@@ -23257,18 +23280,29 @@ def event_window_for_search_result(hit: dict[str, Any], *, before: int = 3, afte
         for event in events[start:end]
         if isinstance(event, dict)
     ]
+    anchor_offset = position - start
+    anchor = window_events[anchor_offset] if 0 <= anchor_offset < len(window_events) else {}
+    semantic_preview = route_refs_raw_semantic_preview(refs, max_chars=420)
+    preview = semantic_preview.get("text") or short_text(anchor.get("title") if isinstance(anchor, dict) else "", max_chars=420)
+    preview_source = semantic_preview.get("status") if semantic_preview.get("text") else "window_anchor_title"
     return {
         "ok": True,
         "doc_id": hit.get("doc_id"),
         "session_label": hit.get("session_label"),
         "segment_id": hit.get("segment_id"),
         "event_id": event_id,
-        "target_offset": position - start,
+        "target_offset": anchor_offset,
         "window_scope": "segment_index",
         "before": before,
         "after": after,
         "events": window_events,
         "refs": refs,
+        **route_result_ref_fields(refs),
+        "anchor": anchor,
+        "center": anchor,
+        "preview": preview,
+        "bounded_preview": preview,
+        "preview_source": preview_source,
     }
 
 
@@ -34462,6 +34496,62 @@ def raw_line_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 360) -> d
             if current_line > line_no:
                 break
     return {"status": "raw_line_not_found", "line": line_no, "text": ""}
+
+
+def raw_semantic_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 420) -> dict[str, Any]:
+    line_no = line_from_raw_ref(raw_ref)
+    if not line_no:
+        return {"status": "missing_raw_ref", "line": None, "text": ""}
+    if not raw_path.is_file():
+        return {"status": "raw_unavailable", "line": line_no, "text": ""}
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for current_line, line in enumerate(handle, start=1):
+            if current_line != line_no:
+                if current_line > line_no:
+                    break
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                return {"status": "invalid_json", "line": line_no, "text": ""}
+            if not isinstance(row, dict):
+                return {"status": "non_object_json", "line": line_no, "text": ""}
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            text = semantic_text_for_classification(str(row.get("type") or ""), payload, max_chars=max_chars)
+            if not text and str(row.get("type") or "") == "response_item" and str(payload.get("type") or "") == "reasoning" and payload.get("encrypted_content"):
+                return {
+                    "status": "encrypted_reasoning_boundary",
+                    "line": line_no,
+                    "text": "Reasoning boundary: encrypted content present; summary empty.",
+                }
+            return {
+                "status": "raw_semantic_text" if text else "semantic_text_empty",
+                "line": line_no,
+                "text": short_text(text, max_chars=max_chars),
+            }
+    return {"status": "raw_line_not_found", "line": line_no, "text": ""}
+
+
+def route_raw_semantic_preview(row: sqlite3.Row, refs: dict[str, Any], *, max_chars: int = 420) -> dict[str, Any]:
+    raw_ref = str(refs.get("raw") or "")
+    raw_path_value = str(search_row_value(row, "raw_path", "") or "")
+    if not raw_path_value or not raw_ref:
+        return {"status": "missing_raw_path_or_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
+    return raw_semantic_preview(Path(raw_path_value), raw_ref, max_chars=max_chars)
+
+
+def route_refs_raw_semantic_preview(refs: dict[str, Any], *, max_chars: int = 420) -> dict[str, Any]:
+    raw_ref = str(refs.get("raw") or "")
+    manifest_ref = str(refs.get("session") or "")
+    if not raw_ref or not manifest_ref:
+        return {"status": "missing_session_ref_or_raw_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.exists():
+        return {"status": "session_manifest_unavailable", "line": line_from_raw_ref(raw_ref), "text": ""}
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict):
+        return {"status": "session_manifest_invalid", "line": line_from_raw_ref(raw_ref), "text": ""}
+    return raw_semantic_preview(manifest_raw_path(manifest_path.parent, manifest), raw_ref, max_chars=max_chars)
 
 
 def raw_event_shape(raw_path: Path, raw_ref: Any) -> dict[str, Any]:
