@@ -432,6 +432,17 @@ Last observed result:
   repair `3` selected / `255` remaining. `search-provider-status` still reports
   `portable_sqlite:stale` with `dirty_session_count=203`, so the timer is
   working as a bounded queue rather than pretending the archive is complete.
+- 2026-06-14 search read-availability proof: a live hot maintenance run opened
+  a long rollback-journal write window on `search/aoa-search.sqlite3`; during
+  that window both `agent-responses` and `search` returned
+  `sqlite_locked`. Incremental search writers now use SQLite WAL, full rebuilds
+  remove stale sidecars before atomic replacement, and regression coverage
+  holds an uncommitted writer while `search-provider-status`, `search`, and
+  `agent_event` routes keep returning ready results from the last committed
+  snapshot. Live proof repeated the scenario with a held WAL writer and during
+  real `index-maintenance --repair-limit 2 --skip-graph-repair`; read routes
+  stayed `ok=true`. Source and standalone bundle passed py_compile, `135`
+  pytest tests, `validate`, and portable audit.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

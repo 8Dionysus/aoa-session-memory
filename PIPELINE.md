@@ -424,6 +424,13 @@ The report must expose `defer_graph_repair` when graph sources are dirty, so a
 future hot/backlog/deep pass can repair graph state without pretending the
 route cache is incomplete.
 
+Incremental portable SQLite search updates must not make read-only CLI or MCP
+routes unavailable. Existing search DB updates use WAL so readers keep seeing
+the last committed snapshot while a maintenance writer replaces dirty session
+documents. Full rebuilds still build a temporary DB and atomically replace the
+main DB; stale SQLite sidecars are removed around that replacement so an old
+WAL file cannot attach to a fresh main database.
+
 The hot profile uses a route-cache freshness gate, not full graph freshness.
 It checks route drift, portable SQLite search, and atlas projection state while
 allowing graph remainder to stay deferred after the bounded graph tick. When
