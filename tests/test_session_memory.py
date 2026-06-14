@@ -5687,6 +5687,63 @@ def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> Non
     assert "document_count" not in provider
 
 
+def test_search_read_routes_remain_available_during_wal_writer(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-14T00-00-00-wal-writer-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-14T00:00:00Z", "type": "session_meta", "payload": {"id": "wal-writer-session", "cwd": str(repo)}},
+            {"timestamp": "2026-06-14T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep search reads available"}]}},
+            {"timestamp": "2026-06-14T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "wal answer committed for readers"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "wal-writer-session",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+
+    baseline = module.search_sessions(aoa_root=aoa_root, query="wal answer", limit=1)
+    assert baseline["ok"] is True
+    assert baseline["result_count"] == 1
+
+    writer: sqlite3.Connection | None = None
+    try:
+        writer = module.init_search_db(module.search_db_path(aoa_root), rebuild=False)
+        journal_mode = str(writer.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        assert journal_mode == "wal"
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('concurrent_writer_probe', 'open')")
+
+        status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+        search = module.search_sessions(aoa_root=aoa_root, query="wal answer", limit=1)
+        agent_events = module.search_agent_event_documents(aoa_root=aoa_root, session="wal-writer-session", limit=1)
+    finally:
+        if writer is not None:
+            writer.rollback()
+            writer.close()
+
+    assert status["providers"]["portable_sqlite"]["status"] == "ready"
+    assert search["ok"] is True
+    assert search["provider"]["status"]["providers"]["portable_sqlite"]["status"] == "ready"
+    assert search["result_count"] == 1
+    assert agent_events["ok"] is True
+    assert agent_events["provider"]["status"]["providers"]["portable_sqlite"]["status"] == "ready"
+    assert agent_events["result_count"] == 1
+
+
 def test_search_read_routes_report_locked_search_db_without_traceback(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)

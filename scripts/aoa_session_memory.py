@@ -20946,6 +20946,16 @@ def create_search_db_indexes(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def sqlite_sidecar_paths(db_path: Path) -> list[Path]:
+    return [Path(str(db_path) + suffix) for suffix in ("-journal", "-wal", "-shm")]
+
+
+def cleanup_sqlite_sidecars(db_path: Path) -> None:
+    for path in sqlite_sidecar_paths(db_path):
+        if path.exists():
+            path.unlink()
+
+
 def init_search_db(
     db_path: Path,
     *,
@@ -20955,10 +20965,18 @@ def init_search_db(
 ) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if rebuild and db_path.exists():
+        cleanup_sqlite_sidecars(db_path)
         db_path.unlink()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA busy_timeout=5000")
+    journal_mode = "DELETE" if rebuild else "WAL"
+    try:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
+    except sqlite3.Error:
+        if rebuild:
+            raise
+        conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=FILE")
     conn.execute("PRAGMA cache_size=-64000")
@@ -22114,7 +22132,9 @@ def search_index_sessions(
     }
     if rebuild and temp_db_path is not None:
         if payload["ok"]:
+            cleanup_sqlite_sidecars(db_path)
             os.replace(temp_db_path, db_path)
+            cleanup_search_rebuild_temp(temp_db_path)
             payload["replaced_db_path"] = str(db_path)
         else:
             cleanup_search_rebuild_temp(temp_db_path)
