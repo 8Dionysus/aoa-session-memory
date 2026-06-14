@@ -15582,6 +15582,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- needs_graph_after: `{after.get('needs_graph_maintenance')}`",
         f"- deferred_graph_after: `{payload.get('deferred_graph_after')}`",
         f"- graph_deferred_by_budget: `{payload.get('graph_deferred_by_budget')}`",
+        f"- expected_catchup_remaining: `{payload.get('expected_catchup_remaining')}`",
         f"- deferred_graph_job: `{payload.get('deferred_graph_job')}`",
         f"- action_counts: `{maintenance.get('action_counts') if isinstance(maintenance, dict) else {}}`",
         "",
@@ -15664,6 +15665,8 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
             )
         }
     compact["graph_deferred_by_budget"] = compact.get("graph_deferred_by_budget")
+    compact["expected_catchup_remaining"] = compact.get("expected_catchup_remaining")
+    compact["hard_diagnostics"] = compact.get("hard_diagnostics")
     compact["deferred_graph_job"] = compact.get("deferred_graph_job")
     compact["deferred_graph_next"] = compact.get("deferred_graph_next")
     compact["deferred_graph_job_budget_seconds"] = compact.get("deferred_graph_job_budget_seconds")
@@ -15700,6 +15703,41 @@ def auto_maintenance_freshness_blockers(freshness: dict[str, Any], *, allow_defe
     if not allow_deferred_graph:
         diagnostics.extend(graph_blockers)
     return sorted(set(diagnostics))
+
+
+def expected_catchup_remaining_diagnostic(diagnostic: str) -> bool:
+    if diagnostic in {
+        "index_maintenance_needed",
+        "session_projection_dirty",
+        "atlas_projection_dirty",
+        "portable_sqlite:stale",
+    }:
+        return True
+    return diagnostic.endswith(":route_signal_classifier_mismatch")
+
+
+def auto_maintenance_expected_catchup_remaining(
+    *,
+    profile: str,
+    apply: bool,
+    maintenance: dict[str, Any],
+    diagnostics: list[str],
+) -> tuple[bool, list[str]]:
+    if profile != "catchup" or not apply:
+        return False, diagnostics
+    action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+    if int_value(action_counts.get("failed")) or int_value(action_counts.get("deferred_budget_exhausted")):
+        return False, diagnostics
+    expected_remaining = bool(
+        maintenance.get("search_repair_limited")
+        or maintenance.get("atlas_repair_limited")
+        or int_value(maintenance.get("search_repair_remaining_count")) > 0
+        or int_value(maintenance.get("atlas_repair_remaining_count")) > 0
+    )
+    if not expected_remaining:
+        return False, diagnostics
+    hard_diagnostics = [item for item in diagnostics if not expected_catchup_remaining_diagnostic(str(item))]
+    return not hard_diagnostics, hard_diagnostics
 
 
 def auto_maintenance(
@@ -15895,12 +15933,24 @@ def auto_maintenance(
                 max_refresh_edges=effective_graph_max_refresh_edges,
                 budget_seconds=deferred_graph_job_budget_seconds,
             )
+        diagnostics = sorted(set(diagnostics))
+        expected_catchup_remaining, hard_diagnostics = auto_maintenance_expected_catchup_remaining(
+            profile=profile,
+            apply=apply,
+            maintenance=maintenance,
+            diagnostics=diagnostics,
+        )
+        payload_ok = (not diagnostics and bool(maintenance.get("ok"))) or expected_catchup_remaining
         payload = {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_auto_maintenance",
             "generated_at": now,
-            "ok": not diagnostics and bool(maintenance.get("ok")),
-            "status": "applied_with_deferred_graph" if apply and deferred_graph_after else ("applied" if apply else "planned"),
+            "ok": payload_ok,
+            "status": (
+                "applied_with_remaining_backlog"
+                if expected_catchup_remaining
+                else ("applied_with_deferred_graph" if apply and deferred_graph_after else ("applied" if apply else "planned"))
+            ),
             "mutates": bool(apply),
             "apply": apply,
             "profile": profile,
@@ -15934,13 +15984,15 @@ def auto_maintenance(
             "freshness_after": freshness_after,
             "deferred_graph_after": deferred_graph_after,
             "graph_deferred_by_budget": graph_deferred_by_budget,
+            "expected_catchup_remaining": expected_catchup_remaining,
+            "hard_diagnostics": hard_diagnostics,
             "deferred_graph_job": str(deferred_graph_job_path) if deferred_graph_job_path else "",
             "deferred_graph_next": (
                 "hook-worker will run the queued bounded graph maintenance job"
                 if deferred_graph_job_path
                 else ""
             ),
-            "diagnostics": sorted(set(diagnostics)),
+            "diagnostics": diagnostics,
             "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
             "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
         }

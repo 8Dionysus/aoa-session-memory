@@ -4322,7 +4322,7 @@ def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: P
     def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
         calls["maintenance"] = kwargs
         return {
-            "ok": True,
+            "ok": False,
             "apply": kwargs["apply"],
             "target": kwargs["target"],
             "selected_count": 3,
@@ -4335,8 +4335,13 @@ def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: P
             "search_reindex_candidate_count": 3,
             "search_reindex_session_count": 1,
             "search_repair_remaining_count": 2,
-            "action_counts": {"applied": 1},
-            "diagnostics": [],
+            "search_repair_limited": True,
+            "atlas_dirty_session_count": 3,
+            "atlas_repair_session_count": 1,
+            "atlas_repair_remaining_count": 2,
+            "atlas_repair_limited": True,
+            "action_counts": {"applied": 2, "remaining": 1, "deferred": 1},
+            "diagnostics": ["2026-06-03__001__batch-alpha:route_signal_classifier_mismatch"],
         }
 
     monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
@@ -4348,9 +4353,56 @@ def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: P
     assert payload["profile"] == "catchup"
     assert payload["repair_limit"] == module.AUTO_MAINTENANCE_PROFILES["catchup"]["repair_limit"]
     assert payload["repair_graph"] is False
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_remaining_backlog"
+    assert payload["expected_catchup_remaining"] is True
+    assert payload["hard_diagnostics"] == []
+    assert "index_maintenance_needed" in payload["diagnostics"]
     assert calls["maintenance"]["repair_limit"] == module.AUTO_MAINTENANCE_PROFILES["catchup"]["repair_limit"]
     assert calls["maintenance"]["repair_graph"] is False
     assert len(calls["freshness"]) == 2
+
+
+def test_catchup_auto_maintenance_does_not_hide_hard_failures(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 3,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": False,
+            "diagnostics": ["index_maintenance_needed"],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 3,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "repair_limit": kwargs["repair_limit"],
+            "search_repair_limited": True,
+            "search_repair_remaining_count": 2,
+            "atlas_repair_limited": True,
+            "atlas_repair_remaining_count": 2,
+            "action_counts": {"applied": 1, "failed": 1},
+            "diagnostics": ["search_index_failed"],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="catchup", apply=True)
+
+    assert payload["ok"] is False
+    assert payload["expected_catchup_remaining"] is False
+    assert "search_index_failed" in payload["diagnostics"]
 
 
 def test_hot_auto_maintenance_repairs_route_cache_and_advances_graph(tmp_path: Path, monkeypatch: Any) -> None:
