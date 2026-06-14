@@ -666,9 +666,16 @@ python3 scripts/aoa_session_memory.py reindex-sessions all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
   --max-raw-mb 16 \
+  --budget-seconds 300 \
   --dry-run \
   --write-report
 ```
+
+The `latest` target resolves by transcript/raw-source activity before generated
+maintenance timestamps, so a historical archive refreshed by reindexing does
+not become the active-session route. For broad foreground reindexing,
+`--budget-seconds` defers remaining sessions between rewrites; it does not
+interrupt a selected session halfway through regeneration.
 
 Build the portable SQLite search index from the generated archive layers:
 

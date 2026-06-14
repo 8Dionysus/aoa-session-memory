@@ -12365,12 +12365,44 @@ def registry_sessions(aoa_root: Path) -> list[dict[str, Any]]:
     return [item for item in sessions if isinstance(item, dict)]
 
 
+def session_record_activity_mtime(record: dict[str, Any]) -> float:
+    """Return the best live transcript clock for latest-session resolution."""
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    candidates = [
+        record.get("transcript_path"),
+        raw.get("source_path"),
+        raw.get("path"),
+    ]
+    newest = 0.0
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            path = Path(str(candidate)).expanduser()
+            if path.is_file():
+                newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def latest_session_sort_key(record: dict[str, Any]) -> tuple[float, str, int, str, str]:
+    activity_mtime = session_record_activity_mtime(record)
+    return (
+        activity_mtime,
+        session_record_date(record),
+        session_record_sequence(record),
+        str(record.get("session_label") or ""),
+        str(record.get("session_id") or ""),
+    )
+
+
 def resolve_session_record(aoa_root: Path, target: str | None) -> dict[str, Any]:
     sessions = registry_sessions(aoa_root)
     if not sessions:
         raise ValueError("session registry is empty")
     if not target or target == "latest":
-        return sorted(sessions, key=lambda item: str(item.get("updated_at", "")), reverse=True)[0]
+        return sorted(sessions, key=latest_session_sort_key, reverse=True)[0]
     target_text = target.strip()
     for item in sessions:
         candidates = [
@@ -13162,8 +13194,12 @@ def reindex_sessions(
     max_raw_bytes: int | None = None,
     stale_route_indexes: bool = False,
     write_report: bool = False,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
 ) -> dict[str, Any]:
     now = utc_now()
+    started = time.monotonic()
+    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     try:
         if target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
@@ -13183,8 +13219,12 @@ def reindex_sessions(
             "limit": limit,
             "max_raw_bytes": max_raw_bytes,
             "stale_route_indexes": stale_route_indexes,
+            "budget_seconds": budget_seconds,
+            "budget_exhausted": False,
             "candidate_selected_count": 0,
             "selected_count": 0,
+            "processed_count": 0,
+            "remaining_count": 0,
             "segment_count": 0,
             "event_count": 0,
             "eligible_event_count": 0,
@@ -13201,7 +13241,11 @@ def reindex_sessions(
             records = records[: max(0, limit)]
     counts: Counter[str] = Counter()
     results: list[dict[str, Any]] = []
-    for record in records:
+    budget_exhausted = False
+    for record_index, record in enumerate(records, start=1):
+        if deadline is not None and record_index > 1 and time.monotonic() >= deadline:
+            budget_exhausted = True
+            break
         if stale_route_indexes:
             result = refresh_route_indexes_from_raw(
                 aoa_root,
@@ -13218,11 +13262,26 @@ def reindex_sessions(
             )
         counts[str(result.get("status") or "unknown")] += 1
         results.append(result)
+        if progress_every > 0 and record_index % progress_every == 0:
+            print(
+                json.dumps(
+                    {
+                        "event": "reindex_sessions_progress",
+                        "processed": record_index,
+                        "selected_count": len(records),
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+    processed_count = len(results)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_reindex",
         "generated_at": now,
-        "ok": counts.get("diagnostic", 0) == 0,
+        "ok": counts.get("diagnostic", 0) == 0 and not budget_exhausted,
         "aoa_root": str(aoa_root),
         "target": target,
         "since": since,
@@ -13231,8 +13290,12 @@ def reindex_sessions(
         "dry_run": dry_run,
         "max_raw_bytes": max_raw_bytes,
         "stale_route_indexes": stale_route_indexes,
+        "budget_seconds": budget_seconds,
+        "budget_exhausted": budget_exhausted,
         "candidate_selected_count": candidate_selected_count,
         "selected_count": len(records),
+        "processed_count": processed_count,
+        "remaining_count": max(0, len(records) - processed_count),
         "counts": dict(counts),
         "results": results,
     }
@@ -13263,8 +13326,12 @@ def reindex_sessions_markdown(payload: dict[str, Any]) -> str:
         f"- dry_run: `{payload.get('dry_run')}`",
         f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
         f"- stale_route_indexes: `{payload.get('stale_route_indexes')}`",
+        f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- candidate_selected_count: `{payload.get('candidate_selected_count')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
+        f"- processed_count: `{payload.get('processed_count')}`",
+        f"- remaining_count: `{payload.get('remaining_count')}`",
         f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
         "",
         "| status | session | events | segments | diagnostics |",
@@ -14870,11 +14937,14 @@ def maintain_indexes(
                     max_raw_bytes=max_raw_bytes,
                     stale_route_indexes=True,
                     write_report=write_report,
+                    budget_seconds=budget_remaining(),
+                    progress_every=progress_every,
                 )
-                reindex_action["status"] = "applied" if result.get("ok") else "failed"
-                reindex_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
+                reindex_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                reindex_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "counts", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(reindex_action)
                 reindex_ran = bool(result.get("selected_count"))
+                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_state_refresh_action["needed"] and not reindex_ran and not token_backfill_ran:
@@ -31205,6 +31275,8 @@ def command_reindex_sessions(args: argparse.Namespace) -> int:
         max_raw_bytes=max_raw_bytes,
         stale_route_indexes=args.stale_route_indexes,
         write_report=args.write_report,
+        budget_seconds=args.budget_seconds,
+        progress_every=args.progress_every,
     )
     print(json.dumps(reindex_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -35372,6 +35444,8 @@ def build_parser() -> argparse.ArgumentParser:
     reindex.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     reindex.add_argument("--max-raw-mb", type=float, help="Skip sessions whose raw JSONL is larger than this many MiB.")
     reindex.add_argument("--stale-route-indexes", action="store_true", help="Only select reindexable archives whose session route-signal index is missing or stale.")
+    reindex.add_argument("--budget-seconds", type=float, help="Stop after this wall-clock budget; never interrupts an in-flight session rewrite.")
+    reindex.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N processed sessions.")
     reindex.add_argument("--dry-run", action="store_true", help="Only report which archives would be regenerated.")
     reindex.add_argument("--write-report", action="store_true", help="Write JSON and Markdown reindex reports under .aoa/diagnostics.")
     reindex.add_argument("--full", action="store_true", help="Print complete reindex results to stdout.")

@@ -500,6 +500,12 @@ It is a naming aid and retrieval route, not reviewed ownership truth.
 It also carries generated `route_signal_counts`, which are search and atlas
 routes over event facets, not reviewed distillation.
 
+The `latest` target is a live-session convenience route, not a generated-cache
+rewrite route. It resolves by readable transcript or raw-source activity first,
+then falls back to session date/sequence. Maintenance timestamps such as
+`manifest.updated_at` must not make a historical archive look like the active
+session just because reindexing refreshed generated files.
+
 `maps/` is the source-owned atlas skeleton. Atlas generation writes entries
 under `maps/by-*/entries/` plus per-axis `INDEX.md` / `index.json` files and
 root `maps/INDEX.md` / `maps/index.json`. These files are navigation
@@ -835,13 +841,16 @@ python3 scripts/aoa_session_memory.py reindex-sessions all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
   --max-raw-mb 16 \
+  --budget-seconds 300 \
   --dry-run \
   --write-report
 ```
 
 Remove `--dry-run` for a bounded pass. Keep `--max-raw-mb` on broad archive
-runs; large raw sessions should use an explicit heavy-session route instead of
-silent unbounded regeneration.
+runs and set `--budget-seconds` for foreground maintenance. The budget is
+checked between session rewrites so a selected session is not left
+half-regenerated; large raw sessions should use an explicit heavy-session route
+instead of silent unbounded regeneration.
 
 Build a first-wave conveyor for many historical sessions:
 

@@ -409,6 +409,57 @@ def test_agent_event_route_resolves_latest_and_filters_stream_copies_before_limi
     assert "event_msg_stream" in {item["agent_event_source"] for item in with_stream["results"]}
 
 
+def test_latest_session_prefers_transcript_activity_over_generated_update_time(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    old_dir = aoa_root / "sessions" / "2026-05-04__001__old-maintenance-rewrite"
+    active_dir = aoa_root / "sessions" / "2026-06-04__001__active-transcript"
+    old_raw = old_dir / "raw" / "session.raw.jsonl"
+    active_raw = active_dir / "raw" / "session.raw.jsonl"
+    old_transcript = tmp_path / "rollout-2026-05-04T00-00-00-old.jsonl"
+    active_transcript = tmp_path / "rollout-2026-06-04T00-00-00-active.jsonl"
+    for path, session_id in [(old_raw, "old-maintenance"), (active_raw, "active-transcript"), (old_transcript, "old-maintenance"), (active_transcript, "active-transcript")]:
+        write_jsonl(path, [{"timestamp": "2026-06-01T00:00:00Z", "type": "session_meta", "payload": {"id": session_id}}])
+    os.utime(old_transcript, (100.0, 100.0))
+    os.utime(old_raw, (100.0, 100.0))
+    os.utime(active_transcript, (200.0, 200.0))
+    os.utime(active_raw, (150.0, 150.0))
+
+    old_manifest = {
+        "schema_version": 1,
+        "session_id": "old-maintenance",
+        "created_at": "2026-05-04T00:00:00Z",
+        "updated_at": "2026-06-14T01:21:57Z",
+        "source": {"transcript_path": str(old_transcript)},
+        "archive_status": "indexed",
+        "distillation_status": "raw_archived",
+        "raw": {"path": str(old_raw), "source_path": str(old_transcript)},
+        "segments": [],
+        "latest_event_count": 1,
+        "display": {"date": "2026-05-04", "sequence": 1, "label": old_dir.name, "navigation_path": str(old_dir)},
+        "session_label": old_dir.name,
+    }
+    active_manifest = {
+        **old_manifest,
+        "session_id": "active-transcript",
+        "created_at": "2026-06-04T00:00:00Z",
+        "updated_at": "2026-06-13T00:00:00Z",
+        "source": {"transcript_path": str(active_transcript)},
+        "raw": {"path": str(active_raw), "source_path": str(active_transcript)},
+        "display": {"date": "2026-06-04", "sequence": 1, "label": active_dir.name, "navigation_path": str(active_dir)},
+        "session_label": active_dir.name,
+    }
+    old_dir.mkdir(parents=True, exist_ok=True)
+    active_dir.mkdir(parents=True, exist_ok=True)
+    module.write_json(old_dir / "session.manifest.json", old_manifest)
+    module.write_json(active_dir / "session.manifest.json", active_manifest)
+    module.update_registry(aoa_root, old_manifest, old_dir)
+    module.update_registry(aoa_root, active_manifest, active_dir)
+
+    latest = module.resolve_session_record(aoa_root, "latest")
+
+    assert latest["session_id"] == "active-transcript"
+
+
 def test_token_accounting_records_provider_usage_and_estimates(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -3751,6 +3802,62 @@ def test_refresh_search_projection_states_respects_expired_budget(tmp_path: Path
     assert result["budget_exhausted"] is True
     assert result["updated_count"] == 0
     assert result["skipped_count"] == 0
+
+
+def test_reindex_sessions_defers_remaining_records_when_budget_expires(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    records = []
+    for index, label in enumerate(["2026-06-01__001__stale-route-one", "2026-06-01__002__stale-route-two"], start=1):
+        session_dir = aoa_root / "sessions" / label
+        raw_path = session_dir / "raw" / "session.raw.jsonl"
+        write_jsonl(raw_path, [{"timestamp": f"2026-06-01T00:00:0{index}Z", "type": "session_meta", "payload": {"id": label}}])
+        manifest = {
+            "schema_version": module.SCHEMA_VERSION,
+            "session_id": label,
+            "created_at": f"2026-06-01T00:00:0{index}Z",
+            "updated_at": f"2026-06-01T00:00:0{index}Z",
+            "source": {"transcript_path": str(raw_path)},
+            "archive_status": "indexed",
+            "distillation_status": "raw_archived",
+            "raw": {"path": str(raw_path), "source_path": str(raw_path)},
+            "segments": [],
+            "latest_event_count": 1,
+            "display": {"date": "2026-06-01", "sequence": index, "label": label, "navigation_path": str(session_dir)},
+            "session_label": label,
+        }
+        module.write_json(session_dir / "session.manifest.json", manifest)
+        module.write_json(session_dir / module.SESSION_INDEX_JSON, {"route_signal_classifier_version": 0})
+        module.update_registry(aoa_root, manifest, session_dir)
+        records.append(label)
+
+    calls: list[str] = []
+
+    def fake_refresh(_aoa_root: Path, record: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        calls.append(str(record["session_label"]))
+        return {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "reindexed",
+            "event_count": 1,
+            "segment_count": 1,
+        }
+
+    monkeypatch.setattr(module, "refresh_route_indexes_from_raw", fake_refresh)
+
+    result = module.reindex_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        stale_route_indexes=True,
+        budget_seconds=0.000001,
+    )
+
+    assert calls == [records[0]]
+    assert result["selected_count"] == 2
+    assert result["processed_count"] == 1
+    assert result["remaining_count"] == 1
+    assert result["budget_exhausted"] is True
+    assert result["ok"] is False
 
 
 def test_build_agent_atlas_defers_remaining_records_when_budget_expires(tmp_path: Path, monkeypatch: Any) -> None:
