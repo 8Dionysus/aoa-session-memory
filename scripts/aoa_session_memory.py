@@ -37533,7 +37533,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retrieve.add_argument(
         "recipe",
-        choices=sorted(RETRIEVAL_RECIPE_QUERIES),
         help="Evidence packet recipe.",
     )
     retrieve.add_argument("--query", help="Override the recipe query.")

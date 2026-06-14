@@ -6457,6 +6457,17 @@ def test_retrieval_packet_routes_continuation_to_refs_and_phase_candidates(tmp_p
     assert any("phase-review-assist" in route for route in packet["next_routes"])
 
 
+def test_retrieval_packet_unknown_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
+    aoa_root = tmp_path / "AbyssOS/.aoa"
+
+    packet = module.retrieval_packet(aoa_root=aoa_root, recipe="review", query="decision review")
+
+    assert packet["ok"] is False
+    assert packet["artifact_type"] == "retrieval_packet"
+    assert packet["recipe"] == "review"
+    assert packet["diagnostics"] == ["unknown recipe: review"]
+
+
 def test_archive_compaction_audit_retries_when_archive_changes_mid_read(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
