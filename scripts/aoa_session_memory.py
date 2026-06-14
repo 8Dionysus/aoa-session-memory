@@ -14424,6 +14424,64 @@ def search_document_count_from_prefetched_counts(counts: dict[str, int], project
     return 0
 
 
+def search_projection_documents_freshness(
+    conn: sqlite3.Connection,
+    projection_state: dict[str, Any],
+    *,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    session_id = str(projection_state.get("session_id") or "")
+    session_label = str(projection_state.get("session_label") or "")
+    clauses: list[str] = []
+    values: list[str] = []
+    if session_id:
+        clauses.append("session_id = ?")
+        values.append(session_id)
+    if session_label:
+        clauses.append("session_label = ?")
+        values.append(session_label)
+    if not clauses:
+        return {"ok": False, "status": "unverifiable", "checked_ref_count": 0, "stale_ref_count": 0, "diagnostics": ["projection_identity_missing"]}
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT segment_index_path, segment_index_sha256
+        FROM documents
+        WHERE ({' OR '.join(clauses)})
+          AND COALESCE(segment_index_path, '') <> ''
+        """,
+        values,
+    ).fetchall()
+    stale_refs: list[dict[str, Any]] = []
+    stale_count = 0
+    checked = 0
+    for row in rows:
+        checked += 1
+        path = Path(str(row["segment_index_path"] or ""))
+        expected_sha = str(row["segment_index_sha256"] or "")
+        freshness = segment_index_freshness(path, expected_sha)
+        if freshness.get("status") == "fresh":
+            continue
+        stale_count += 1
+        if len(stale_refs) < max(0, sample_limit):
+            stale_refs.append(
+                {
+                    "segment_index_path": str(path),
+                    "expected_sha256": expected_sha,
+                    "status": freshness.get("status"),
+                    "reasons": freshness.get("reasons", []),
+                    "current_segment_index_sha256": freshness.get("current_segment_index_sha256"),
+                }
+            )
+    return {
+        "ok": stale_count == 0,
+        "status": "fresh" if stale_count == 0 else "stale",
+        "checked_ref_count": checked,
+        "stale_ref_count": stale_count,
+        "stale_refs": stale_refs,
+        "diagnostics": [] if stale_count == 0 else ["search_documents_stale_segment_refs"],
+    }
+
+
 def refresh_search_projection_states(
     aoa_root: Path,
     projections: list[dict[str, Any]],
@@ -14457,6 +14515,17 @@ def refresh_search_projection_states(
             if document_count <= 0:
                 skipped += 1
                 item["status"] = "skipped_missing_documents"
+                sessions.append(item)
+                continue
+            document_freshness = search_projection_documents_freshness(conn, projection)
+            item["document_freshness"] = {
+                key: document_freshness.get(key)
+                for key in ("status", "checked_ref_count", "stale_ref_count", "diagnostics")
+            }
+            if not document_freshness.get("ok"):
+                skipped += 1
+                item["status"] = "skipped_stale_documents"
+                diagnostics.extend(str(reason) for reason in document_freshness.get("diagnostics", []) if reason)
                 sessions.append(item)
                 continue
             upsert_search_session_state(conn, projection_state=projection, indexed_at=indexed_at, document_count=document_count)
@@ -14503,10 +14572,18 @@ def refreshable_search_projection_records(
     projection_by_label = {str(item.get("session_label") or ""): item for item in fingerprints if item.get("session_label")}
     refreshable: list[dict[str, Any]] = []
     remaining: list[dict[str, Any]] = []
+    conn: sqlite3.Connection | None = None
+
+    def documents_are_current(projection: dict[str, Any]) -> bool:
+        nonlocal conn
+        if conn is None:
+            conn = init_search_db(search_db_path(aoa_root), rebuild=False)
+        return bool(search_projection_documents_freshness(conn, projection).get("ok"))
+
     for session_id in sorted(dirty_ids):
         projection = projection_by_id.get(session_id)
         record = record_by_id.get(session_id)
-        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime:
+        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime and documents_are_current(projection):
             refreshable.append(record)
         elif record:
             remaining.append(record)
@@ -14515,10 +14592,12 @@ def refreshable_search_projection_records(
             continue
         projection = projection_by_label.get(session_label)
         record = record_by_label.get(session_label)
-        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime:
+        if projection and record and float(projection.get("latest_source_mtime") or 0.0) <= db_mtime and documents_are_current(projection):
             refreshable.append(record)
         elif record:
             remaining.append(record)
+    if conn is not None:
+        conn.close()
     return refreshable, remaining
 
 
@@ -14763,8 +14842,17 @@ def maintain_indexes(
     atlas_projection_fingerprints = projection_fingerprints_for_records(records)
     search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=search_projection_fingerprints)
     atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=atlas_projection_fingerprints)
+    stable_selected_records_global = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
     if repair_graph:
-        graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+        graph_state = graph_store_state(
+            aoa_root=aoa_root,
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+            selected_records=records,
+            selected_records_global=stable_selected_records_global,
+        )
     else:
         graph_state = {
             "status": "deferred_not_checked",
@@ -14811,7 +14899,7 @@ def maintain_indexes(
         )
 
     def current_selected_records() -> list[dict[str, Any]]:
-        return [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+        return list(records)
 
     search_rebuild_required = search_rebuild_required_for(search_state)
     atlas_rebuild_required = atlas_rebuild_required_for(atlas_state)
@@ -15212,7 +15300,15 @@ def maintain_indexes(
                         diagnostics.extend(str(item) for item in result.get("diagnostics", []))
 
                 refreshed_graph_state = (
-                    graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
+                    graph_store_state(
+                        aoa_root=aoa_root,
+                        target=target,
+                        since=since,
+                        until=until,
+                        limit=limit,
+                        selected_records=refreshed_records,
+                        selected_records_global=stable_selected_records_global,
+                    )
                     if repair_graph
                     else {
                         "status": "deferred_not_checked",
@@ -15287,6 +15383,7 @@ def maintain_indexes(
                     limit=limit,
                     sample_limit=maintenance_readiness_sample_limit,
                     write_report=write_report,
+                    selected_records=current_selected_records(),
                 )
                 readiness_action["status"] = "applied" if result.get("ok") else "remaining"
                 readiness_action["result"] = {
@@ -15347,7 +15444,19 @@ def maintain_indexes(
         final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
         final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
         final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
-        final_graph_state = graph_store_state(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit) if repair_graph else graph_state
+        final_graph_state = (
+            graph_store_state(
+                aoa_root=aoa_root,
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+                selected_records=final_records,
+                selected_records_global=stable_selected_records_global,
+            )
+            if repair_graph
+            else graph_state
+        )
     except ValueError as exc:
         diagnostics.append(f"final_freshness_snapshot_failed:{exc}")
     payload = {
@@ -33084,10 +33193,11 @@ def route_layer_readiness(
     limit: int | None = None,
     sample_limit: int = 2,
     write_report: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     try:
-        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+        records = selected_records if selected_records is not None else ([resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit))
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,

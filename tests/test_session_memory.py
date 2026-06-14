@@ -4013,6 +4013,108 @@ def test_index_maintenance_refreshes_search_state_without_reindexing_when_docume
     assert refreshed["final_search_index"]["status"] == "current"
 
 
+def test_refresh_search_projection_states_skips_stale_document_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-02T00-00-00-stale-search-docs.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-02T00:00:00Z", "type": "session_meta", "payload": {"id": "stale-search-docs", "cwd": str(repo)}},
+            {"timestamp": "2026-06-02T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Stale search docs"}]}},
+            {"timestamp": "2026-06-02T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Search docs must be rebuilt."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "stale-search-docs",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "stale-search-docs")
+    session_dir = module.session_dir_from_record(record)
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    segment_index_path = Path(str(manifest["segments"][0]["index"]))
+    segment_index = module.read_json(segment_index_path, {})
+    segment_index["stale_marker"] = True
+    module.write_json(segment_index_path, segment_index)
+
+    projection = module.session_projection_fingerprint(record, include_rendered_markdown=False)
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    conn.row_factory = sqlite3.Row
+    freshness_without_samples = module.search_projection_documents_freshness(conn, projection, sample_limit=0)
+    conn.close()
+    assert freshness_without_samples["ok"] is False
+    assert freshness_without_samples["stale_ref_count"] >= 1
+    assert freshness_without_samples["stale_refs"] == []
+
+    result = module.refresh_search_projection_states(
+        aoa_root,
+        [projection],
+        indexed_at=module.utc_now(),
+    )
+
+    assert result["ok"] is False
+    assert result["updated_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["sessions"][0]["status"] == "skipped_stale_documents"
+    assert "search_documents_stale_segment_refs" in result["diagnostics"]
+
+
+def test_index_maintenance_rebuilds_search_when_documents_are_stale_even_if_db_is_newer(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-02T00-00-00-stale-doc-maintenance.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-02T00:00:00Z", "type": "session_meta", "payload": {"id": "stale-doc-maintenance", "cwd": str(repo)}},
+            {"timestamp": "2026-06-02T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Stale docs maintenance"}]}},
+            {"timestamp": "2026-06-02T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Maintenance must rebuild search docs."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "stale-doc-maintenance",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "stale-doc-maintenance")
+    session_dir = module.session_dir_from_record(record)
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    segment_index_path = Path(str(manifest["segments"][0]["index"]))
+    segment_index = module.read_json(segment_index_path, {})
+    segment_index["stale_marker"] = True
+    module.write_json(segment_index_path, segment_index)
+
+    future = time.time() + 60
+    os.utime(module.search_db_path(aoa_root), (future, future))
+
+    plan = module.maintain_indexes(aoa_root=aoa_root, target="stale-doc-maintenance", repair_graph=False)
+    actions = {action["id"]: action for action in plan["actions"]}
+    assert plan["search_dirty_session_count"] == 1
+    assert plan["search_state_refresh_count"] == 0
+    assert plan["search_reindex_session_count"] == 1
+    assert "refresh_search_projection_state" not in actions
+    assert actions["rebuild_search_index"]["needed"] is True
+
+
 def test_refresh_search_projection_states_respects_expired_budget(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -5283,6 +5385,102 @@ def test_search_provider_status_cli_can_scope_freshness_to_session(tmp_path: Pat
     assert freshness["selected_session_state_count"] == 1
     assert freshness["dirty_session_count"] == 1
     assert freshness["dirty_session_ids"] == ["provider-session-scope"]
+
+
+def test_index_maintenance_stabilizes_latest_selection_for_post_checks(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    first_dir = aoa_root / "sessions" / "2026-06-04__001__first-live-session"
+    second_dir = aoa_root / "sessions" / "2026-06-13__001__second-live-session"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    first_record = {
+        "session_id": "first-session",
+        "session_label": first_dir.name,
+        "session_dir": str(first_dir),
+        "display": {"path": str(first_dir)},
+    }
+    second_record = {
+        "session_id": "second-session",
+        "session_label": second_dir.name,
+        "session_dir": str(second_dir),
+        "display": {"path": str(second_dir)},
+    }
+    calls: dict[str, Any] = {"resolve_count": 0, "readiness_records": []}
+
+    def floating_latest_resolver(_aoa_root: Path, target: str | None) -> dict[str, Any]:
+        calls["resolve_count"] += 1
+        assert target == "latest"
+        return first_record if calls["resolve_count"] == 1 else second_record
+
+    def fake_projection(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "session_id": record["session_id"],
+                "session_label": record["session_label"],
+                "fingerprint": f"fingerprint:{record['session_id']}",
+                "latest_source_mtime": 100.0,
+            }
+            for record in records
+        ]
+
+    search_state_calls = 0
+
+    def fake_search_state(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal search_state_calls
+        search_state_calls += 1
+        if search_state_calls == 1:
+            return {
+                "status": "stale",
+                "needs_refresh": True,
+                "db_mtime": 0.0,
+                "dirty_session_ids": ["first-session"],
+                "dirty_sessions": [{**first_record, "reasons": ["source_fingerprint_changed"]}],
+                "reasons": ["session_projection_dirty"],
+                "diagnostics": [],
+            }
+        return {
+            "status": "current",
+            "needs_refresh": False,
+            "db_mtime": 200.0,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": [],
+            "diagnostics": [],
+        }
+
+    def fake_route_readiness(**kwargs: Any) -> dict[str, Any]:
+        calls["readiness_records"].append(kwargs.get("selected_records"))
+        return {
+            "ok": True,
+            "target": kwargs["target"],
+            "selected_count": len(kwargs.get("selected_records") or []),
+            "covered_requirement_count": 1,
+            "required_requirement_count": 1,
+            "remaining": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "resolve_session_record", floating_latest_resolver)
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, records: (100.0, [str(module.session_dir_from_record(records[0]) / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "token_accounting_backfill", lambda **_kwargs: {"ok": True, "selected_count": 1, "counts": {"current": 1}, "diagnostics": []})
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", fake_projection)
+    monkeypatch.setattr(module, "projection_fingerprints_for_records", fake_projection)
+    monkeypatch.setattr(module, "sqlite_search_index_state", fake_search_state)
+    monkeypatch.setattr(module, "atlas_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "graph_store_state", lambda **_kwargs: {"status": "deferred_not_checked", "needs_maintenance": None, "needs_full_rebuild": False, "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "search_index_sessions", lambda **_kwargs: {"ok": True, "selected_count": 1, "processed_count": 1, "remaining_count": 0, "budget_exhausted": False, "diagnostics": []})
+    monkeypatch.setattr(module, "build_agent_atlas", lambda **_kwargs: {"ok": True, "selected_count": 0, "processed_count": 0, "remaining_count": 0, "budget_exhausted": False, "diagnostics": []})
+    monkeypatch.setattr(module, "route_layer_readiness", fake_route_readiness)
+
+    payload = module.maintain_indexes(aoa_root=aoa_root, target="latest", apply=True, repair_graph=False)
+
+    assert payload["ok"] is True
+    assert calls["resolve_count"] == 1
+    assert calls["readiness_records"]
+    assert calls["readiness_records"][0][0]["session_id"] == "first-session"
+    assert payload["final_search_index"]["status"] == "current"
 
 
 def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> None:
