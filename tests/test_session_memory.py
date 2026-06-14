@@ -1778,6 +1778,82 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert Path(dossier["report_json"]).exists()
 
 
+def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shared_node_id = module.graph_route_node_id("entity", "shared_graph_anchor")
+    shared_edge_id = module.graph_edge_id("session:first", shared_node_id, "mentions_route_signal")
+
+    def contribution(source_key: str, session_id: str, raw_ref: str, *, title: str = "") -> dict[str, Any]:
+        refs = {"raw": raw_ref, "session": f"sessions/{session_id}/session.manifest.json"}
+        node = {
+            "id": shared_node_id,
+            "type": "route_entity",
+            "route_layer": "entity",
+            "route_key": "shared_graph_anchor",
+            "route_signal": "entity:shared_graph_anchor",
+            "evidence_refs": [{"session_id": session_id, "refs": refs}],
+        }
+        if title:
+            node["title"] = title
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": session_id,
+                "session_label": session_id,
+                "segment_id": "000",
+                "source_path": f"sessions/{session_id}/segments/000.index.json",
+                "source_paths": [f"sessions/{session_id}/segments/000.index.json"],
+                "source_sha": f"sha-{session_id}",
+                "source_mtime": 1,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [node],
+            "edges": [
+                {
+                    "id": shared_edge_id,
+                    "source": "session:first",
+                    "target": shared_node_id,
+                    "type": "mentions_route_signal",
+                    "evidence_refs": [{"session_id": session_id, "refs": refs}],
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        rebuilt = store.rebuild(
+            [
+                contribution("segment:first:000", "first", "raw:line:1"),
+                contribution("segment:second:000", "second", "raw:line:2", title="second anchor title"),
+            ]
+        )
+        node_row = store.conn.execute("SELECT payload_json, count FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()
+        edge_row = store.conn.execute("SELECT payload_json, count FROM edges WHERE id = ?", (shared_edge_id,)).fetchone()
+        assert node_row is not None
+        assert edge_row is not None
+        stored_node = json.loads(str(node_row["payload_json"]))
+        stored_edge = json.loads(str(edge_row["payload_json"]))
+        hydrated_node = next(payload for payload in store.iter_payloads("nodes") if payload["id"] == shared_node_id)
+        hydrated_edge = next(payload for payload in store.iter_payloads("edges") if payload["id"] == shared_edge_id)
+    finally:
+        store.close()
+
+    assert rebuilt["duplicate_node_refresh"]["requested_count"] == 1
+    assert rebuilt["duplicate_edge_refresh"]["requested_count"] == 1
+    assert int(node_row["count"]) == 2
+    assert int(edge_row["count"]) == 2
+    assert stored_node["count"] == 2
+    assert stored_node["evidence_ref_count"] == 2
+    assert stored_node["title"] == "second anchor title"
+    assert stored_edge["count"] == 2
+    assert stored_edge["evidence_ref_count"] == 2
+    assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
+    assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
+
+
 def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"

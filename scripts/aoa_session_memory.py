@@ -25118,14 +25118,32 @@ class GraphSqliteStore:
         for table in ("graph_sources", "node_contribs", "edge_contribs", "nodes", "edges"):
             self.conn.execute(f"DELETE FROM {table}")
         results = []
+        seen_node_ids: set[str] = set()
+        seen_edge_ids: set[str] = set()
+        duplicate_node_ids: set[str] = set()
+        duplicate_edge_ids: set[str] = set()
         for contribution in contributions:
+            node_ids, edge_ids = graph_contribution_id_sets(contribution)
+            duplicate_node_ids.update(seen_node_ids & node_ids)
+            duplicate_edge_ids.update(seen_edge_ids & edge_ids)
+            seen_node_ids.update(node_ids)
+            seen_edge_ids.update(edge_ids)
             results.append(self.replace_source(contribution, bulk=True))
+        duplicate_node_refresh = self._refresh_nodes(duplicate_node_ids)
+        duplicate_edge_refresh = self._refresh_edges(duplicate_edge_ids)
         now = utc_now()
         self._upsert_metadata("generated_at", now)
         self._upsert_metadata("updated_at", now)
         self._upsert_metadata("graph_store_aggregate_payload_mode", GRAPH_STORE_AGGREGATE_PAYLOAD_MODE)
         self.conn.commit()
-        return {"status": "rebuilt", "result_count": len(results), "results": results[:20], "generated_at": now}
+        return {
+            "status": "rebuilt",
+            "result_count": len(results),
+            "results": results[:20],
+            "generated_at": now,
+            "duplicate_node_refresh": duplicate_node_refresh,
+            "duplicate_edge_refresh": duplicate_edge_refresh,
+        }
 
     def state_counts(self) -> dict[str, int]:
         row = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()
