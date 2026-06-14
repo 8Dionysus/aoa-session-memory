@@ -36,6 +36,14 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 SCHEMA_VERSION = 1
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
+
+
+class SearchSqliteConnection(sqlite3.Connection):
+    """SQLite connection subclass that can carry per-connection route caches."""
+
+    __slots__ = ("aoa_route_term_cache",)
+
+
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
@@ -14316,7 +14324,7 @@ def sqlite_error_diagnostic(exc: sqlite3.Error) -> str:
 
 
 def connect_existing_search_db(db_path: Path, *, timeout: float = 1.0) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout, factory=SearchSqliteConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -20956,6 +20964,25 @@ def cleanup_sqlite_sidecars(db_path: Path) -> None:
             path.unlink()
 
 
+def search_route_term_cache(conn: sqlite3.Connection) -> dict[tuple[str, str], int]:
+    cache = getattr(conn, "aoa_route_term_cache", None)
+    if isinstance(cache, dict):
+        return cache
+    cache = {}
+    try:
+        setattr(conn, "aoa_route_term_cache", cache)
+        return cache
+    except AttributeError:
+        return {}
+
+
+def clear_search_route_term_cache(conn: sqlite3.Connection) -> None:
+    cache = getattr(conn, "aoa_route_term_cache", None)
+    if isinstance(cache, dict):
+        cache.clear()
+    SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+
+
 def init_search_db(
     db_path: Path,
     *,
@@ -20967,7 +20994,7 @@ def init_search_db(
     if rebuild and db_path.exists():
         cleanup_sqlite_sidecars(db_path)
         db_path.unlink()
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), factory=SearchSqliteConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     journal_mode = "DELETE" if rebuild else "WAL"
@@ -21039,13 +21066,13 @@ def init_search_db(
     if existing_route_columns and not {"doc_rowid", "route_id"}.issubset(existing_route_columns):
         conn.execute("DROP TABLE IF EXISTS document_routes")
         conn.execute("DROP TABLE IF EXISTS route_terms")
-        SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+        clear_search_route_term_cache(conn)
         existing_route_columns = set()
         existing_term_columns = set()
     if existing_term_columns and not {"layer", "key", "route_signal"}.issubset(existing_term_columns):
         conn.execute("DROP TABLE IF EXISTS document_routes")
         conn.execute("DROP TABLE IF EXISTS route_terms")
-        SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+        clear_search_route_term_cache(conn)
         existing_route_columns = set()
         existing_term_columns = set()
     conn.execute(
@@ -21130,7 +21157,7 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM documents")
     conn.execute("DELETE FROM session_index_state")
     conn.execute("DELETE FROM meta")
-    SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+    clear_search_route_term_cache(conn)
 
 
 def delete_search_documents_for_session(
@@ -21293,7 +21320,7 @@ def route_term_id(conn: sqlite3.Connection, entry: dict[str, str]) -> int:
     layer = str(entry.get("layer") or "")
     key = str(entry.get("key") or "")
     route_signal = str(entry.get("route_signal") or route_signal_token(layer, key))
-    cache = SEARCH_ROUTE_TERM_CACHE.setdefault(id(conn), {})
+    cache = search_route_term_cache(conn)
     token = (layer, key)
     cached = cache.get(token)
     if cached is not None:
@@ -25655,8 +25682,9 @@ def build_session_graph(
             tmp_store_path = paths["store"].with_name(f".{paths['store'].name}.{os.getpid()}.rebuild.tmp")
             remove_existing_paths([tmp_store_path, *sqlite_companion_paths(tmp_store_path)])
         store = GraphSqliteStore(aoa_root, reset=True, db_path=tmp_store_path)
-        sidecar_removed: list[str] = []
+        payload: dict[str, Any] = {}
         replace_tmp_store = False
+        prune_sidecar_after_store_success = False
         started_at = time.monotonic()
         try:
             rebuild_result = store.rebuild(iter_contributions())
@@ -25685,8 +25713,7 @@ def build_session_graph(
             if export_sidecar:
                 write_json(paths["index"], index_payload)
             else:
-                sidecar_removed = remove_graph_sidecar_artifacts(aoa_root)
-                index_payload["sidecar_removed"] = sidecar_removed
+                index_payload["sidecar_removed"] = []
             payload = dict(index_payload)
             if include_rows:
                 payload["nodes"] = store.all_payloads("nodes")
@@ -25695,16 +25722,21 @@ def build_session_graph(
                 payload["nodes_sample"] = store.sample("nodes", limit=20)
                 payload["edges_sample"] = store.sample("edges", limit=20)
             replace_tmp_store = tmp_store_path is not None and not diagnostics
+            prune_sidecar_after_store_success = not export_sidecar and (tmp_store_path is None or replace_tmp_store)
             return payload
         finally:
             store.close()
+            store_ready = tmp_store_path is None
             if tmp_store_path is not None:
                 if replace_tmp_store and tmp_store_path.exists():
                     remove_existing_paths(sqlite_companion_paths(paths["store"]))
                     tmp_store_path.replace(paths["store"])
                     remove_existing_paths(sqlite_companion_paths(tmp_store_path))
+                    store_ready = True
                 else:
                     remove_existing_paths([tmp_store_path, *sqlite_companion_paths(tmp_store_path)])
+            if prune_sidecar_after_store_success and store_ready:
+                payload["sidecar_removed"] = remove_graph_sidecar_artifacts(aoa_root)
 
     contributions: list[dict[str, Any]] = []
     for record in records:

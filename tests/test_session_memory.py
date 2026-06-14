@@ -2475,6 +2475,56 @@ def test_graph_build_store_only_rebuilds_sqlite_without_sidecar(tmp_path: Path) 
     assert not (aoa_root / "graph" / "nodes.jsonl").exists()
 
 
+def test_graph_build_store_only_keeps_sidecar_when_atomic_rebuild_is_not_promoted(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-26T00-36-00-store-only-diagnostic.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-26T00:36:00Z", "type": "session_meta", "payload": {"id": "store-only-diagnostic", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-26T00:36:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep the old sidecar if the store rebuild is diagnostic-only."}]}},
+            {"timestamp": "2026-05-26T00:36:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The graph sidecar must survive a discarded atomic rebuild."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "store-only-diagnostic",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    full = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert full["ok"] is True
+
+    sidecars = module.graph_sidecar_artifact_paths(aoa_root)
+    sidecar_snapshots = {name: path.read_bytes() for name, path in sidecars.items()}
+    manifest_path = next((aoa_root / "sessions").glob("*/session.manifest.json"))
+    manifest_path.unlink()
+
+    store_only = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+
+    assert store_only["ok"] is False
+    assert any("missing session manifest" in item for item in store_only["diagnostics"])
+    assert store_only["atomic_store_rebuild"] is True
+    assert store_only["sidecar_removed"] == []
+    for name, path in sidecars.items():
+        assert path.exists(), name
+        assert path.read_bytes() == sidecar_snapshots[name]
+
+
 def test_graph_store_reports_blocked_sources_without_requesting_maintenance(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -5282,6 +5332,33 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
         is not None
     )
     conn.close()
+
+
+def test_route_term_cache_is_scoped_to_search_connection(tmp_path: Path) -> None:
+    entry = {"layer": "entity", "key": "shared", "route_signal": "entity:shared"}
+
+    first = module.init_search_db(tmp_path / "first.sqlite3", rebuild=True)
+    first_route_id = module.route_term_id(first, entry)
+    first_cache = getattr(first, "aoa_route_term_cache")
+
+    assert first_route_id == 1
+    assert first_cache[("entity", "shared")] == first_route_id
+    assert module.SEARCH_ROUTE_TERM_CACHE == {}
+    first.close()
+
+    second = module.init_search_db(tmp_path / "second.sqlite3", rebuild=True)
+    second.execute(
+        "INSERT INTO route_terms(id, layer, key, route_signal) VALUES (?, ?, ?, ?)",
+        (77, "entity", "shared", "entity:shared"),
+    )
+    second.commit()
+    second_route_id = module.route_term_id(second, entry)
+    second_cache = getattr(second, "aoa_route_term_cache")
+
+    assert second_route_id == 77
+    assert second_cache[("entity", "shared")] == second_route_id
+    assert second_route_id != first_route_id
+    second.close()
 
 
 def test_trace_route_resolves_operational_anchors_to_evidence(tmp_path: Path) -> None:
