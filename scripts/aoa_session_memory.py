@@ -119,15 +119,16 @@ AUTO_MAINTENANCE_PROFILES = {
         "limit": None,
         "max_raw_mb": 16,
         "token_max_raw_mb": 512,
-        "graph_batch_limit": 0,
+        "graph_batch_limit": GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
         "graph_refresh_chunk_size": 32,
         "graph_max_refresh_nodes": 20000,
         "graph_max_refresh_edges": 60000,
         "ref_sample_limit": 200,
         "sample_audit": False,
         "repair_indexes": True,
-        "repair_graph": False,
+        "repair_graph": True,
         "allow_deferred_graph": True,
+        "deferred_graph_job_budget_seconds": 120,
         "resource_class": "probe",
         "resource_kind": "indexing",
         "timeout_sec": 900,
@@ -146,6 +147,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "repair_indexes": True,
         "repair_graph": True,
         "allow_deferred_graph": False,
+        "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 3600,
@@ -164,6 +166,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "repair_indexes": True,
         "repair_graph": True,
         "allow_deferred_graph": False,
+        "deferred_graph_job_budget_seconds": 1800,
         "resource_class": "heavy",
         "resource_kind": "indexing",
         "timeout_sec": 7200,
@@ -7482,11 +7485,44 @@ def enqueue_graph_maintenance_job(
     target: str = "all",
     batch_limit: int = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+    max_refresh_nodes: int | None = None,
+    max_refresh_edges: int | None = None,
+    budget_seconds: float | None = None,
 ) -> Path | None:
     if not hook_sync_queue_enabled():
         return None
     pending_root = aoa_root / HOOK_JOBS_ROOT / "pending"
     pending_root.mkdir(parents=True, exist_ok=True)
+    desired = {
+        "reason": reason,
+        "batch_limit": batch_limit,
+        "refresh_chunk_size": refresh_chunk_size,
+    }
+    if max_refresh_nodes is not None:
+        desired["max_refresh_nodes"] = max_refresh_nodes
+    if max_refresh_edges is not None:
+        desired["max_refresh_edges"] = max_refresh_edges
+    if budget_seconds is not None:
+        desired["budget_seconds"] = budget_seconds
+    for existing_path in sorted(pending_root.glob("*.json")):
+        existing = read_json(existing_path, {})
+        if not isinstance(existing, dict):
+            continue
+        if existing.get("job_type") == "graph_maintenance" and str(existing.get("target") or "all") == target:
+            updated = False
+            for key, value in desired.items():
+                if key == "budget_seconds":
+                    current_budget = float(existing.get(key) or 0.0)
+                    next_budget = float(value)
+                    if current_budget >= next_budget:
+                        continue
+                if existing.get(key) != value:
+                    existing[key] = value
+                    updated = True
+            if updated:
+                existing["updated_at"] = utc_now()
+                write_json(existing_path, existing)
+            return existing_path
     job_path = pending_root / f"{hook_job_id('GraphMaintenance', target)}.json"
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -7495,9 +7531,7 @@ def enqueue_graph_maintenance_job(
         "event_name": "GraphMaintenance",
         "session_id": target,
         "target": target,
-        "reason": reason,
-        "batch_limit": batch_limit,
-        "refresh_chunk_size": refresh_chunk_size,
+        **desired,
     }
     write_json(job_path, payload)
     return job_path
@@ -15471,6 +15505,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- graph_batch_limit: `{payload.get('graph_batch_limit')}`",
         f"- graph_max_refresh_nodes: `{payload.get('graph_max_refresh_nodes')}`",
         f"- graph_max_refresh_edges: `{payload.get('graph_max_refresh_edges')}`",
+        f"- deferred_graph_job_budget_seconds: `{payload.get('deferred_graph_job_budget_seconds')}`",
         f"- progress_every: `{payload.get('progress_every')}`",
         f"- before_ok: `{before.get('ok')}`",
         f"- after_ok: `{after.get('ok')}`",
@@ -15479,6 +15514,8 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- needs_index_after: `{after.get('needs_index_maintenance')}`",
         f"- needs_graph_after: `{after.get('needs_graph_maintenance')}`",
         f"- deferred_graph_after: `{payload.get('deferred_graph_after')}`",
+        f"- graph_deferred_by_budget: `{payload.get('graph_deferred_by_budget')}`",
+        f"- deferred_graph_job: `{payload.get('deferred_graph_job')}`",
         f"- action_counts: `{maintenance.get('action_counts') if isinstance(maintenance, dict) else {}}`",
         "",
         "## Boundary",
@@ -15551,6 +15588,10 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "diagnostics",
             )
         }
+    compact["graph_deferred_by_budget"] = compact.get("graph_deferred_by_budget")
+    compact["deferred_graph_job"] = compact.get("deferred_graph_job")
+    compact["deferred_graph_next"] = compact.get("deferred_graph_next")
+    compact["deferred_graph_job_budget_seconds"] = compact.get("deferred_graph_job_budget_seconds")
     return compact
 
 
@@ -15636,11 +15677,12 @@ def auto_maintenance(
     effective_graph_max_refresh_edges = graph_max_refresh_edges if graph_max_refresh_edges is not None else settings.get("graph_max_refresh_edges")
     effective_graph_max_refresh_nodes = None if effective_graph_max_refresh_nodes is None or int_value(effective_graph_max_refresh_nodes) <= 0 else int_value(effective_graph_max_refresh_nodes)
     effective_graph_max_refresh_edges = None if effective_graph_max_refresh_edges is None or int_value(effective_graph_max_refresh_edges) <= 0 else int_value(effective_graph_max_refresh_edges)
+    deferred_graph_job_budget_seconds = float(settings.get("deferred_graph_job_budget_seconds") or 0.0) or None
     effective_ref_sample_limit = max(1, int_value(ref_sample_limit if ref_sample_limit is not None else settings["ref_sample_limit"], 200))
     effective_sample_audit = bool(settings["sample_audit"] if sample_audit is None else sample_audit)
     effective_repair_indexes = bool(settings["repair_indexes"] if repair_indexes is None else repair_indexes)
     effective_repair_graph = bool(settings.get("repair_graph", True) if repair_graph is None else repair_graph)
-    allow_deferred_graph = bool(settings.get("allow_deferred_graph", False)) and not effective_repair_graph
+    allow_deferred_graph = bool(settings.get("allow_deferred_graph", False))
     effective_resource_class = str(settings["resource_class"])
     effective_resource_kind = str(settings["resource_kind"])
     effective_timeout_sec = int_value(settings["timeout_sec"], 0)
@@ -15686,6 +15728,7 @@ def auto_maintenance(
                         "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
                         "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
                         "graph_max_refresh_edges": effective_graph_max_refresh_edges,
+                        "deferred_graph_job_budget_seconds": deferred_graph_job_budget_seconds,
                         "ref_sample_limit": effective_ref_sample_limit,
                         "lock_path": str(lock_path),
                         "resource_launcher": resource_launcher,
@@ -15750,6 +15793,27 @@ def auto_maintenance(
             )
             and not freshness_after.get("needs_index_maintenance")
         )
+        maintenance_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+        graph_deferred_by_budget = bool(
+            deferred_graph_after
+            and effective_repair_graph
+            and (
+                maintenance.get("budget_exhausted")
+                or int_value(maintenance_counts.get("deferred_budget_exhausted")) > 0
+            )
+        )
+        deferred_graph_job_path: Path | None = None
+        if apply and graph_deferred_by_budget:
+            deferred_graph_job_path = enqueue_graph_maintenance_job(
+                aoa_root,
+                reason=f"auto_maintenance:{profile}:deferred_graph_budget",
+                target=target,
+                batch_limit=effective_graph_batch_limit,
+                refresh_chunk_size=effective_graph_refresh_chunk_size,
+                max_refresh_nodes=effective_graph_max_refresh_nodes,
+                max_refresh_edges=effective_graph_max_refresh_edges,
+                budget_seconds=deferred_graph_job_budget_seconds,
+            )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_auto_maintenance",
@@ -15776,6 +15840,7 @@ def auto_maintenance(
             "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
             "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
             "graph_max_refresh_edges": effective_graph_max_refresh_edges,
+            "deferred_graph_job_budget_seconds": deferred_graph_job_budget_seconds,
             "ref_sample_limit": effective_ref_sample_limit,
             "sample_audit": effective_sample_audit,
             "progress_every": progress_every,
@@ -15786,6 +15851,13 @@ def auto_maintenance(
             "maintenance": maintenance,
             "freshness_after": freshness_after,
             "deferred_graph_after": deferred_graph_after,
+            "graph_deferred_by_budget": graph_deferred_by_budget,
+            "deferred_graph_job": str(deferred_graph_job_path) if deferred_graph_job_path else "",
+            "deferred_graph_next": (
+                "hook-worker will run the queued bounded graph maintenance job"
+                if deferred_graph_job_path
+                else ""
+            ),
             "diagnostics": sorted(set(diagnostics)),
             "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
             "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
@@ -25550,7 +25622,12 @@ def graph_maintenance(
         key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")),
     )
     selected = cheap_sorted_actionable[:batch_limit]
-    candidate_pool_limit = min(len(cheap_sorted_actionable), max(batch_limit * 10, batch_limit, 50))
+    candidate_pool_floor = batch_limit if apply else 50
+    candidate_pool_multiplier = 3 if apply else 10
+    candidate_pool_limit = min(
+        len(cheap_sorted_actionable),
+        max(batch_limit * candidate_pool_multiplier, batch_limit, candidate_pool_floor),
+    )
     candidate_pool = cheap_sorted_actionable[:candidate_pool_limit]
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     diagnostics.extend(f"requested_graph_source_not_found:{source_key}" for source_key in missing_requested_source_keys)

@@ -2007,6 +2007,90 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     conn.close()
 
 
+def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__graph-pool"
+    session_dir.mkdir(parents=True)
+    observed: dict[str, Any] = {}
+    states = [
+        {
+            "source_key": f"segment:session-1:{index:03d}",
+            "source_type": "segment",
+            "session_id": "session-1",
+            "session_label": "graph-pool",
+            "segment_id": f"{index:03d}",
+            "session_dir": str(session_dir),
+            "status": "dirty",
+            "stored_node_count": index,
+            "stored_edge_count": index,
+        }
+        for index in range(20)
+    ]
+
+    class FakeConn:
+        def commit(self) -> None:
+            observed["committed"] = True
+
+        def rollback(self) -> None:
+            observed["rolled_back"] = True
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.conn = FakeConn()
+
+        def source_contribution_ids(self, source_key: str) -> tuple[set[str], set[str]]:
+            return {f"old:{source_key}"}, set()
+
+        def replace_sources(self, contributions: list[dict[str, Any]], *, budget_deadline: float | None = None) -> dict[str, Any]:
+            return {
+                "results": [
+                    {"source_key": item["source"]["source_key"], "status": "updated", "diagnostics": []}
+                    for item in contributions
+                ],
+                "refreshed_node_count": len(contributions),
+                "refreshed_edge_count": 0,
+                "node_refresh": {"requested_count": len(contributions), "chunk_count": 1, "row_count": len(contributions), "missing_count": 0},
+                "edge_refresh": {"requested_count": 0, "chunk_count": 0, "row_count": 0, "missing_count": 0},
+                "refresh_chunk_size": 64,
+            }
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    def fake_graph_source_states(**_: Any) -> dict[str, Any]:
+        return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
+
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        keys = sorted(source_keys or [])
+        observed["source_key_count"] = len(keys)
+        return (
+            [
+                {
+                    "source": {"source_key": source_key, "source_type": "segment"},
+                    "nodes": [{"id": f"new:{source_key}"}],
+                    "edges": [],
+                }
+                for source_key in keys
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+    monkeypatch.setattr(module, "graph_contributions_for_record", fake_graph_contributions_for_record)
+
+    payload = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=3)
+
+    assert payload["ok"] is True
+    assert payload["selected_count"] == 3
+    assert payload["remaining_count"] == 17
+    assert payload["maintenance_detail"]["candidate_pool_count"] == 9
+    assert observed["source_key_count"] == 9
+    assert observed["committed"] is True
+    assert observed["closed"] is True
+
+
 def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -4067,7 +4151,7 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert Path(payload["report_markdown"]).exists()
 
 
-def test_hot_auto_maintenance_repairs_route_cache_and_defers_graph(tmp_path: Path, monkeypatch: Any) -> None:
+def test_hot_auto_maintenance_repairs_route_cache_and_advances_graph(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -4119,15 +4203,76 @@ def test_hot_auto_maintenance_repairs_route_cache_and_defers_graph(tmp_path: Pat
     assert payload["ok"] is True
     assert payload["status"] == "applied_with_deferred_graph"
     assert payload["repair_indexes"] is True
-    assert payload["repair_graph"] is False
+    assert payload["repair_graph"] is True
     assert payload["allow_deferred_graph"] is True
     assert payload["deferred_graph_after"] is True
     assert "search_stale" in payload["preflight_diagnostics"]
     assert payload["diagnostics"] == []
     assert payload["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
     assert calls["maintenance"]["repair_indexes"] is True
-    assert calls["maintenance"]["repair_graph"] is False
+    assert calls["maintenance"]["repair_graph"] is True
     assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
+
+
+def test_hot_auto_maintenance_queues_bounded_graph_job_when_budget_starves_tick(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {"freshness_count": 0}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness_count"] += 1
+        return {
+            "ok": calls["freshness_count"] > 1,
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "needs_index_maintenance": calls["freshness_count"] == 1,
+            "needs_graph_maintenance": True,
+            "diagnostics": ["index_maintenance_needed"] if calls["freshness_count"] == 1 else [],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 1,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "index_repair_needed": True,
+            "graph_repair_needed": True,
+            "budget_seconds": kwargs["budget_seconds"],
+            "budget_exhausted": True,
+            "action_counts": {"applied": 2, "deferred_budget_exhausted": 2},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="latest",
+        apply=True,
+        budget_seconds=1,
+    )
+
+    job_path = Path(payload["deferred_graph_job"])
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_deferred_graph"
+    assert payload["graph_deferred_by_budget"] is True
+    assert payload["deferred_graph_next"]
+    assert payload["deferred_graph_job_budget_seconds"] == 120
+    assert job["job_type"] == "graph_maintenance"
+    assert job["target"] == "latest"
+    assert job["batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
+    assert job["refresh_chunk_size"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_refresh_chunk_size"]
+    assert job["max_refresh_nodes"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_max_refresh_nodes"]
+    assert job["max_refresh_edges"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_max_refresh_edges"]
+    assert job["budget_seconds"] == 120
 
 
 def test_auto_maintenance_skips_when_lock_is_held(tmp_path: Path, monkeypatch: Any) -> None:
