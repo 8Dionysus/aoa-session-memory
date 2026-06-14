@@ -52,9 +52,10 @@ Build the `.aoa` session-memory mechanism end to end:
   `graph-quality-audit` / `graph-quality-review`
 - Large-archive graph maintenance controls: store-only / in-place
   `graph-build`, progress heartbeat, optional sidecar export, grouped
-  dirty/missing source repair by session, streamed aggregate refresh, and
-  profile-level refresh chunk sizes plus aggregate refresh budget guards for
-  `index-maintenance` / `auto-maintenance`
+  dirty/missing source repair by session, streamed aggregate refresh,
+  `graph-maintenance --budget-seconds`, and profile-level refresh chunk sizes
+  plus aggregate refresh budget guards for `index-maintenance` /
+  `auto-maintenance`
 - Storage weight controls: `storage-audit`, compact graph aggregate payloads
   with evidence hydration from contribution rows, and search body storage with
   full-text FTS plus compressed selected-hit hydration

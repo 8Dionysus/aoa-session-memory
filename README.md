@@ -212,6 +212,7 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --aoa-root /path/to/workspace/.aoa \
   --apply \
   --batch-limit 3 \
+  --budget-seconds 300 \
   --refresh-chunk-size 64 \
   --write-report
 ```
@@ -229,6 +230,9 @@ batches and profile-level refresh chunks because one dirty historical session
 can touch thousands of edges. Maintenance plans exact old-plus-new aggregate
 node/edge refresh cost before mutating, sorts actionable sources cheap-first,
 and then selects only sources that fit the current batch and refresh budgets.
+`--budget-seconds` bounds live wall-clock work; if the deadline expires before
+or during a mutation pass, the command records `deferred_time_budget` sources
+and rolls back the in-flight mutation instead of leaving a half-refreshed graph.
 `index-maintenance` and `auto-maintenance` also use
 `graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; individually
 oversized sources are reported under `oversized_sources`, while sources that

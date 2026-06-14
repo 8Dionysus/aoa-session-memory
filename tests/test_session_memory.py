@@ -1761,7 +1761,7 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
-def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path) -> None:
+def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
@@ -1879,6 +1879,52 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     assert heavy_deferred["maintenance_detail"]["matched_source_keys"] == [heavy_source_key]
     assert heavy_deferred["maintenance_detail"]["oversized_plan"][0]["source_key"] == heavy_source_key
     assert heavy_deferred["unfiltered_source_state"]["source_count"] >= 2
+
+    with monkeypatch.context() as time_patch:
+        ticks = iter([0.0, 1.0, 2.0])
+        time_patch.setattr(module.time, "monotonic", lambda: next(ticks, 2.0))
+        timed_deferred = module.graph_maintenance(
+            aoa_root=aoa_root,
+            source_keys=[heavy_source_key],
+            apply=True,
+            batch_limit=10,
+            budget_seconds=0.5,
+            write_report=True,
+        )
+    assert timed_deferred["ok"] is True
+    assert timed_deferred["budget_exhausted"] is True
+    assert timed_deferred["selected_count"] == 0
+    assert timed_deferred["remaining_count"] == 1
+    assert timed_deferred["time_budget_deferred_source_count"] == 1
+    assert timed_deferred["maintenance_detail"]["time_budget_deferred_sources"] == [heavy_source_key]
+    assert any(item["source_key"] == heavy_source_key and item["status"] == "deferred_time_budget" for item in timed_deferred["results"])
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
+    conn.close()
+
+    with monkeypatch.context() as rollback_patch:
+        def exhausted_replace_sources(self: Any, contributions: Any, *, budget_deadline: float | None = None) -> dict[str, Any]:
+            raise module.GraphMaintenanceBudgetExceeded("test budget exhausted")
+
+        rollback_patch.setattr(module.GraphSqliteStore, "replace_sources", exhausted_replace_sources)
+        rolled_back = module.graph_maintenance(
+            aoa_root=aoa_root,
+            source_keys=[heavy_source_key],
+            apply=True,
+            batch_limit=10,
+            budget_seconds=60,
+            write_report=True,
+        )
+    assert rolled_back["ok"] is True
+    assert rolled_back["budget_exhausted"] is True
+    assert rolled_back["mutation_rolled_back"] is True
+    assert rolled_back["selected_count"] == 0
+    assert rolled_back["maintenance_detail"]["selected_sources"] == []
+    assert rolled_back["maintenance_detail"]["rolled_back_sources"] == [heavy_source_key]
+    assert rolled_back["maintenance_detail"]["time_budget_deferred_sources"] == [heavy_source_key]
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
+    conn.close()
 
     missing_source = module.graph_maintenance(
         aoa_root=aoa_root,
@@ -4062,6 +4108,9 @@ def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, 
         apply=True,
         batch_limit=1,
         refresh_chunk_size=8,
+        max_refresh_nodes=None,
+        max_refresh_edges=None,
+        budget_seconds=12.0,
         export_sidecar=False,
         write_report=False,
     )
@@ -4119,6 +4168,7 @@ def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, 
     assert calls["graph_build"]["export_sidecar"] is False
     assert calls["graph_build"]["atomic_store_rebuild"] is False
     assert calls["graph_maintenance"]["apply"] is True
+    assert calls["graph_maintenance"]["budget_seconds"] == 12.0
     assert calls["index_maintenance"]["apply"] is True
     assert calls["atlas_build"]["clean"] is True
 

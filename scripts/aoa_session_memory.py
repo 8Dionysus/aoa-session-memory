@@ -7583,8 +7583,10 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                     elif job_type == "index_maintenance":
                         max_raw_mb = job.get("max_raw_mb")
                         token_max_raw_mb = job.get("token_max_raw_mb")
+                        budget_seconds_value = job.get("budget_seconds")
                         max_raw_bytes = int(float(max_raw_mb) * 1024 * 1024) if max_raw_mb is not None else None
                         token_max_raw_bytes = int(float(token_max_raw_mb) * 1024 * 1024) if token_max_raw_mb is not None else None
+                        budget_seconds = float(budget_seconds_value) if budget_seconds_value is not None else None
                         graph_batch_limit = int_value(job.get("graph_batch_limit"), GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT)
                         graph_refresh_chunk_size = int_value(job.get("graph_refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE)
                         maintained = maintain_indexes(
@@ -7596,6 +7598,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             sample_audit=bool(job.get("sample_audit")),
                             graph_batch_limit=graph_batch_limit,
                             graph_refresh_chunk_size=graph_refresh_chunk_size,
+                            budget_seconds=budget_seconds,
                             write_report=True,
                             reason=str(job.get("reason") or "queued_index_maintenance"),
                         )
@@ -7605,18 +7608,24 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             "target": maintained.get("target"),
                             "reason": maintained.get("reason"),
                             "action_counts": maintained.get("action_counts"),
+                            "budget_seconds": maintained.get("budget_seconds"),
+                            "budget_exhausted": maintained.get("budget_exhausted"),
                             "graph_batch_limit": maintained.get("graph_batch_limit"),
                             "graph_refresh_chunk_size": maintained.get("graph_refresh_chunk_size"),
                             "report_json": maintained.get("report_json"),
                             "diagnostics": maintained.get("diagnostics", []),
                         }
                     elif job_type == "graph_maintenance":
+                        budget_seconds_value = job.get("budget_seconds")
                         maintained = graph_maintenance(
                             aoa_root=aoa_root,
                             target=str(job.get("target") or "all"),
                             apply=True,
                             batch_limit=int_value(job.get("batch_limit"), GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT),
                             refresh_chunk_size=int_value(job.get("refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
+                            max_refresh_nodes=job.get("max_refresh_nodes") if job.get("max_refresh_nodes") is not None else None,
+                            max_refresh_edges=job.get("max_refresh_edges") if job.get("max_refresh_edges") is not None else None,
+                            budget_seconds=float(budget_seconds_value) if budget_seconds_value is not None else None,
                             write_report=True,
                             reason=str(job.get("reason") or "queued_graph_maintenance"),
                         )
@@ -7628,6 +7637,8 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             "source_state": maintained.get("source_state"),
                             "selected_count": maintained.get("selected_count"),
                             "remaining_count": maintained.get("remaining_count"),
+                            "budget_seconds": maintained.get("budget_seconds"),
+                            "budget_exhausted": maintained.get("budget_exhausted"),
                             "refresh_chunk_size": maintained.get("refresh_chunk_size"),
                             "maintenance_detail": maintained.get("maintenance_detail"),
                             "report_json": maintained.get("report_json"),
@@ -14632,6 +14643,7 @@ def maintain_indexes(
     )
     max_raw_mb_text = str(max_raw_bytes / (1024 * 1024)) if max_raw_bytes is not None else None
     token_max_raw_mb_text = str(effective_token_max_raw_bytes / (1024 * 1024)) if effective_token_max_raw_bytes is not None else None
+    budget_seconds_text = str(budget_seconds) if budget_seconds is not None and budget_seconds > 0 else None
     base = ["python3", "scripts/aoa_session_memory.py"]
     root_args = ["--workspace-root", "<workspace>", "--aoa-root", str(aoa_root)]
     selection_args = (
@@ -14760,6 +14772,7 @@ def maintain_indexes(
                 str(effective_graph_refresh_chunk_size),
                 *(["--max-refresh-nodes", str(effective_graph_max_refresh_nodes)] if effective_graph_max_refresh_nodes is not None else []),
                 *(["--max-refresh-edges", str(effective_graph_max_refresh_edges)] if effective_graph_max_refresh_edges is not None else []),
+                *(["--budget-seconds", budget_seconds_text] if budget_seconds_text else []),
                 "--write-report",
             ],
         ),
@@ -15079,13 +15092,19 @@ def maintain_indexes(
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
                     max_refresh_nodes=effective_graph_max_refresh_nodes,
                     max_refresh_edges=effective_graph_max_refresh_edges,
+                    budget_seconds=budget_remaining(),
                     write_report=write_report,
                     reason="index_maintenance",
                 )
-                graph_action["status"] = "applied" if result.get("ok") else "remaining"
-                graph_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "remaining_count", "source_state", "maintenance_detail", "report_json", "report_markdown", "diagnostics")}
+                graph_action["status"] = (
+                    "deferred_budget_exhausted"
+                    if result.get("budget_exhausted") and not result.get("selected_count")
+                    else ("applied_partial_budget_exhausted" if result.get("budget_exhausted") else ("applied" if result.get("ok") else "remaining"))
+                )
+                graph_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "remaining_count", "budget_seconds", "elapsed_ms", "budget_exhausted", "source_state", "maintenance_detail", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(graph_action)
                 graph_ran = True
+                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if readiness_action["needed"] or reindex_ran or token_backfill_ran or post_index_ran or graph_ran:
@@ -23323,6 +23342,15 @@ def graph_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+class GraphMaintenanceBudgetExceeded(RuntimeError):
+    """Raised to roll back one graph maintenance mutation pass cleanly."""
+
+
+def graph_check_budget(budget_deadline: float | None) -> None:
+    if budget_deadline is not None and time.monotonic() >= budget_deadline:
+        raise GraphMaintenanceBudgetExceeded("graph_maintenance_budget_exhausted")
+
+
 def graph_aggregate_evidence_limit(table_or_kind: str) -> int:
     value = str(table_or_kind or "")
     return 20 if value in {"edge", "edges", "edge_contribs"} else 30
@@ -24011,9 +24039,10 @@ class GraphSqliteStore:
         if cursor.rowcount == 0:
             self.conn.execute("UPDATE edges SET count = count + ? WHERE id = ?", (int_value(payload.get("count"), 1), payload["id"]))
 
-    def _refresh_nodes(self, node_ids: set[str]) -> dict[str, int]:
+    def _refresh_nodes(self, node_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, int]:
         stats = {"requested_count": len({value for value in node_ids if value}), "chunk_count": 0, "row_count": 0, "missing_count": 0}
         for chunk in self._id_chunks(node_ids):
+            graph_check_budget(budget_deadline)
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
             cursor = self.conn.execute(
@@ -24047,6 +24076,8 @@ class GraphSqliteStore:
 
             for row in cursor:
                 stats["row_count"] += 1
+                if stats["row_count"] % 1000 == 0:
+                    graph_check_budget(budget_deadline)
                 row_node_id = str(row["node_id"])
                 if current_node_id and row_node_id != current_node_id:
                     flush_current()
@@ -24063,9 +24094,10 @@ class GraphSqliteStore:
                 self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         return stats
 
-    def _refresh_edges(self, edge_ids: set[str]) -> dict[str, int]:
+    def _refresh_edges(self, edge_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, int]:
         stats = {"requested_count": len({value for value in edge_ids if value}), "chunk_count": 0, "row_count": 0, "missing_count": 0}
         for chunk in self._id_chunks(edge_ids):
+            graph_check_budget(budget_deadline)
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
             cursor = self.conn.execute(
@@ -24101,6 +24133,8 @@ class GraphSqliteStore:
 
             for row in cursor:
                 stats["row_count"] += 1
+                if stats["row_count"] % 1000 == 0:
+                    graph_check_budget(budget_deadline)
                 row_edge_id = str(row["edge_id"])
                 if current_edge_id and row_edge_id != current_edge_id:
                     flush_current()
@@ -24136,11 +24170,17 @@ class GraphSqliteStore:
         }
         return old_node_ids, old_edge_ids
 
-    def replace_sources(self, contributions: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    def replace_sources(
+        self,
+        contributions: Iterable[dict[str, Any]],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
         touched_node_ids: set[str] = set()
         touched_edge_ids: set[str] = set()
         results: list[dict[str, Any]] = []
         for contribution in contributions:
+            graph_check_budget(budget_deadline)
             source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
             source_key = str(source.get("source_key") or "")
             if not source_key:
@@ -24160,8 +24200,9 @@ class GraphSqliteStore:
             touched_node_ids.update(node_ids)
             touched_edge_ids.update(edge_ids)
             results.append({"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []})
-        node_refresh = self._refresh_nodes(touched_node_ids)
-        edge_refresh = self._refresh_edges(touched_edge_ids)
+        graph_check_budget(budget_deadline)
+        node_refresh = self._refresh_nodes(touched_node_ids, budget_deadline=budget_deadline)
+        edge_refresh = self._refresh_edges(touched_edge_ids, budget_deadline=budget_deadline)
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
@@ -24175,11 +24216,17 @@ class GraphSqliteStore:
             "edge_refresh": edge_refresh,
         }
 
-    def remove_sources(self, source_keys: Iterable[str]) -> dict[str, Any]:
+    def remove_sources(
+        self,
+        source_keys: Iterable[str],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
         touched_node_ids: set[str] = set()
         touched_edge_ids: set[str] = set()
         results: list[dict[str, Any]] = []
         for source_key_value in source_keys:
+            graph_check_budget(budget_deadline)
             source_key = str(source_key_value or "")
             if not source_key:
                 results.append({"source_key": "", "status": "skipped", "diagnostics": ["missing_source_key"]})
@@ -24191,8 +24238,9 @@ class GraphSqliteStore:
             touched_node_ids.update(old_node_ids)
             touched_edge_ids.update(old_edge_ids)
             results.append({"source_key": source_key, "status": "removed", "node_count": len(old_node_ids), "edge_count": len(old_edge_ids)})
-        node_refresh = self._refresh_nodes(touched_node_ids)
-        edge_refresh = self._refresh_edges(touched_edge_ids)
+        graph_check_budget(budget_deadline)
+        node_refresh = self._refresh_nodes(touched_node_ids, budget_deadline=budget_deadline)
+        edge_refresh = self._refresh_edges(touched_edge_ids, budget_deadline=budget_deadline)
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         return {
@@ -25388,11 +25436,18 @@ def graph_maintenance(
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
     max_refresh_nodes: int | None = None,
     max_refresh_edges: int | None = None,
+    budget_seconds: float | None = None,
     export_sidecar: bool = False,
     write_report: bool = False,
     reason: str = "operator_requested",
 ) -> dict[str, Any]:
     now = utc_now()
+    started = time.monotonic()
+    if budget_seconds is not None:
+        budget_seconds = float(budget_seconds)
+        if budget_seconds <= 0:
+            budget_seconds = None
+    deadline = started + budget_seconds if budget_seconds is not None else None
     states_payload = graph_source_states(aoa_root=aoa_root, target=target, since=since, until=until, limit=limit)
     states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
@@ -25445,176 +25500,267 @@ def graph_maintenance(
     oversized_plan: list[dict[str, Any]] = []
     batch_deferred_source_keys: list[str] = []
     batch_deferred_plan: list[dict[str, Any]] = []
+    time_budget_deferred_source_keys: list[str] = []
+    time_budget_deferred_plan: list[dict[str, Any]] = []
+    time_budget_deferred_seen: set[str] = set()
+    budget_exhausted = False
+    mutation_rolled_back = False
     selected_plan: list[dict[str, Any]] = []
+
+    def has_time_budget() -> bool:
+        return deadline is None or time.monotonic() < deadline
+
+    def defer_for_time_budget(items: Iterable[dict[str, Any]]) -> None:
+        nonlocal budget_exhausted
+        budget_exhausted = True
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source_key = str(item.get("source_key") or "")
+            if not source_key or source_key in time_budget_deferred_seen:
+                continue
+            time_budget_deferred_seen.add(source_key)
+            summary = graph_maintenance_plan_summary(item) if "operation" in item else {
+                "source_key": source_key,
+                "source_type": item.get("source_type"),
+                "session_id": item.get("session_id"),
+                "session_label": item.get("session_label"),
+                "segment_id": item.get("segment_id"),
+                "status": item.get("status"),
+                "operation": "defer",
+            }
+            time_budget_deferred_source_keys.append(source_key)
+            time_budget_deferred_plan.append(summary)
+            results.append({**summary, "status": "deferred_time_budget"})
+
+    sidecar: dict[str, Any] = {}
     if apply and candidate_pool:
-        store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
-        try:
-            plan_entries: list[dict[str, Any]] = []
-            for state in candidate_pool:
-                if state.get("status") != "orphaned":
-                    continue
-                source_key = str(state.get("source_key") or "")
-                old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
-                plan_entries.append(
-                    graph_maintenance_plan_entry(
-                        state=state,
-                        operation="remove",
-                        old_node_ids=old_node_ids,
-                        old_edge_ids=old_edge_ids,
-                    )
-                )
-
-            grouped_states: dict[str, list[dict[str, Any]]] = {}
-            for state in candidate_pool:
-                if state.get("status") == "orphaned":
-                    continue
-                session_dir_value = str(state.get("session_dir") or "")
-                session_id = str(state.get("session_id") or "")
-                group_key = session_dir_value or session_id or str(state.get("source_key") or "")
-                grouped_states.setdefault(group_key, []).append(state)
-
-            for group in grouped_states.values():
-                if not group:
-                    continue
-                first_state = group[0]
-                group_source_keys = {str(state.get("source_key") or "") for state in group if state.get("source_key")}
-                session_id = str(first_state.get("session_id") or "")
-                session_dir_value = str(first_state.get("session_dir") or "")
-                if session_dir_value:
-                    record = {"session_id": session_id, "path": session_dir_value}
-                else:
-                    try:
-                        record = resolve_session_record(aoa_root, session_id)
-                    except ValueError as exc:
-                        group_diagnostics = [str(exc)]
-                        diagnostics.extend(group_diagnostics)
-                        for state in group:
-                            results.append({"source_key": state.get("source_key"), "status": "blocked", "diagnostics": group_diagnostics})
+        if not has_time_budget():
+            defer_for_time_budget(candidate_pool)
+            selected = []
+        else:
+            store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
+            try:
+                plan_entries: list[dict[str, Any]] = []
+                for state_index, state in enumerate(candidate_pool):
+                    if not has_time_budget():
+                        defer_for_time_budget(candidate_pool[state_index:])
+                        break
+                    if state.get("status") != "orphaned":
                         continue
-                record_contributions, record_diagnostics = graph_contributions_for_record(record, source_keys=group_source_keys)
-                diagnostics.extend(record_diagnostics)
-                by_source_key: dict[str, dict[str, Any]] = {}
-                for contribution in record_contributions:
-                    source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
-                    source_key = str(source.get("source_key") or "")
-                    if source_key:
-                        by_source_key[source_key] = contribution
-                for state in group:
                     source_key = str(state.get("source_key") or "")
-                    contribution = by_source_key.get(source_key)
-                    if contribution is None:
-                        missing_diagnostic = f"graph contribution not found for source: {source_key}"
-                        diagnostics.append(missing_diagnostic)
-                        results.append({"source_key": source_key, "status": "blocked", "diagnostics": [missing_diagnostic]})
-                        continue
                     old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
                     plan_entries.append(
                         graph_maintenance_plan_entry(
                             state=state,
-                            operation="replace",
+                            operation="remove",
                             old_node_ids=old_node_ids,
                             old_edge_ids=old_edge_ids,
-                            contribution=contribution,
                         )
                     )
 
-            planned_node_ids: set[str] = set()
-            planned_edge_ids: set[str] = set()
-            for entry in sorted(plan_entries, key=graph_maintenance_plan_sort_key):
-                source_key = str(entry.get("source_key") or "")
-                source_node_ids = set(entry.get("refresh_node_ids") or set())
-                source_edge_ids = set(entry.get("refresh_edge_ids") or set())
-                individual_over_node_budget = max_refresh_nodes is not None and len(source_node_ids) > max_refresh_nodes
-                individual_over_edge_budget = max_refresh_edges is not None and len(source_edge_ids) > max_refresh_edges
-                if individual_over_node_budget or individual_over_edge_budget:
-                    oversized_source_keys.append(source_key)
-                    oversized_plan.append(graph_maintenance_plan_summary(entry))
-                    results.append(
-                        {
-                            **graph_maintenance_plan_summary(entry),
-                            "status": "oversized_refresh_budget",
-                            "max_refresh_nodes": max_refresh_nodes,
-                            "max_refresh_edges": max_refresh_edges,
-                        }
-                    )
-                    continue
-                if len(selected_plan) >= batch_limit:
-                    batch_deferred_source_keys.append(source_key)
-                    batch_deferred_plan.append(graph_maintenance_plan_summary(entry))
-                    continue
-                next_node_ids = planned_node_ids | source_node_ids
-                next_edge_ids = planned_edge_ids | source_edge_ids
-                over_node_budget = max_refresh_nodes is not None and len(next_node_ids) > max_refresh_nodes
-                over_edge_budget = max_refresh_edges is not None and len(next_edge_ids) > max_refresh_edges
-                if over_node_budget or over_edge_budget:
-                    budget_deferred_source_keys.append(source_key)
-                    budget_deferred_plan.append(graph_maintenance_plan_summary(entry))
-                    results.append(
-                        {
-                            **graph_maintenance_plan_summary(entry),
-                            "status": "deferred_refresh_budget",
-                            "combined_planned_refresh_node_count": len(next_node_ids),
-                            "combined_planned_refresh_edge_count": len(next_edge_ids),
-                            "max_refresh_nodes": max_refresh_nodes,
-                            "max_refresh_edges": max_refresh_edges,
-                        }
-                    )
-                    continue
-                selected_plan.append(entry)
-                planned_node_ids = next_node_ids
-                planned_edge_ids = next_edge_ids
+                grouped_states: dict[str, list[dict[str, Any]]] = {}
+                for state in candidate_pool:
+                    if state.get("status") == "orphaned":
+                        continue
+                    session_dir_value = str(state.get("session_dir") or "")
+                    session_id = str(state.get("session_id") or "")
+                    group_key = session_dir_value or session_id or str(state.get("source_key") or "")
+                    grouped_states.setdefault(group_key, []).append(state)
 
-            selected = [entry["state"] for entry in selected_plan if isinstance(entry.get("state"), dict)]
-            orphaned_source_keys = [str(entry.get("source_key") or "") for entry in selected_plan if entry.get("operation") == "remove"]
-            replacements = [entry.get("contribution") for entry in selected_plan if entry.get("operation") == "replace" and isinstance(entry.get("contribution"), dict)]
-            replacement_group_count = len({
-                str((entry.get("state") or {}).get("session_dir") or (entry.get("state") or {}).get("session_id") or entry.get("source_key") or "")
-                for entry in selected_plan
-                if entry.get("operation") == "replace" and isinstance(entry.get("state"), dict)
-            })
-            maintenance_detail.update(
-                {
-                    "planned_candidate_count": len(plan_entries),
-                    "candidate_pool_count": len(candidate_pool),
-                    "candidate_pool_limit": candidate_pool_limit,
-                    "selected_planned_refresh_node_count": len(planned_node_ids),
-                    "selected_planned_refresh_edge_count": len(planned_edge_ids),
-                    "selected_sources": [str(entry.get("source_key") or "") for entry in selected_plan[:40]],
-                    "selected_plan": [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]],
-                    "budget_deferred_source_count": len(budget_deferred_source_keys),
-                    "budget_deferred_sources": budget_deferred_source_keys[:40],
-                    "budget_deferred_plan": budget_deferred_plan[:40],
-                    "oversized_source_count": len(oversized_source_keys),
-                    "oversized_sources": oversized_source_keys[:40],
-                    "oversized_plan": oversized_plan[:40],
-                    "batch_deferred_source_count": len(batch_deferred_source_keys),
-                    "batch_deferred_sources": batch_deferred_source_keys[:40],
-                    "batch_deferred_plan": batch_deferred_plan[:40],
-                }
-            )
+                grouped_values = list(grouped_states.values())
+                for group_index, group in enumerate(grouped_values):
+                    if not group:
+                        continue
+                    if not has_time_budget():
+                        remaining_groups = [
+                            state
+                            for deferred_group in grouped_values[group_index:]
+                            for state in deferred_group
+                        ]
+                        defer_for_time_budget(remaining_groups)
+                        break
+                    first_state = group[0]
+                    group_source_keys = {str(state.get("source_key") or "") for state in group if state.get("source_key")}
+                    session_id = str(first_state.get("session_id") or "")
+                    session_dir_value = str(first_state.get("session_dir") or "")
+                    if session_dir_value:
+                        record = {"session_id": session_id, "path": session_dir_value}
+                    else:
+                        try:
+                            record = resolve_session_record(aoa_root, session_id)
+                        except ValueError as exc:
+                            group_diagnostics = [str(exc)]
+                            diagnostics.extend(group_diagnostics)
+                            for state in group:
+                                results.append({"source_key": state.get("source_key"), "status": "blocked", "diagnostics": group_diagnostics})
+                            continue
+                    record_contributions, record_diagnostics = graph_contributions_for_record(record, source_keys=group_source_keys)
+                    diagnostics.extend(record_diagnostics)
+                    by_source_key: dict[str, dict[str, Any]] = {}
+                    for contribution in record_contributions:
+                        source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
+                        source_key = str(source.get("source_key") or "")
+                        if source_key:
+                            by_source_key[source_key] = contribution
+                    for state_index, state in enumerate(group):
+                        if not has_time_budget():
+                            defer_for_time_budget(group[state_index:])
+                            break
+                        source_key = str(state.get("source_key") or "")
+                        contribution = by_source_key.get(source_key)
+                        if contribution is None:
+                            missing_diagnostic = f"graph contribution not found for source: {source_key}"
+                            diagnostics.append(missing_diagnostic)
+                            results.append({"source_key": source_key, "status": "blocked", "diagnostics": [missing_diagnostic]})
+                            continue
+                        old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
+                        plan_entries.append(
+                            graph_maintenance_plan_entry(
+                                state=state,
+                                operation="replace",
+                                old_node_ids=old_node_ids,
+                                old_edge_ids=old_edge_ids,
+                                contribution=contribution,
+                            )
+                        )
 
-            if orphaned_source_keys:
-                removed = store.remove_sources(orphaned_source_keys)
-                results.extend(removed.get("results", []))
-                maintenance_detail["removed_refreshed_node_count"] = removed.get("refreshed_node_count", 0)
-                maintenance_detail["removed_refreshed_edge_count"] = removed.get("refreshed_edge_count", 0)
-                maintenance_detail["removed_node_refresh"] = removed.get("node_refresh", {})
-                maintenance_detail["removed_edge_refresh"] = removed.get("edge_refresh", {})
-            if replacements:
-                replaced = store.replace_sources(replacements)
-                results.extend(replaced.get("results", []))
-                maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
-                maintenance_detail["replaced_refreshed_edge_count"] = replaced.get("refreshed_edge_count", 0)
-                maintenance_detail["replaced_node_refresh"] = replaced.get("node_refresh", {})
-                maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
-                maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
-                maintenance_detail["replacement_group_count"] = replacement_group_count
-            sidecar = store.write_sidecar() if export_sidecar else {}
-            store.conn.commit()
-        finally:
-            store.close()
-    else:
-        sidecar = {}
+                planned_node_ids: set[str] = set()
+                planned_edge_ids: set[str] = set()
+                sorted_plan_entries = sorted(plan_entries, key=graph_maintenance_plan_sort_key)
+                for entry_index, entry in enumerate(sorted_plan_entries):
+                    if not has_time_budget():
+                        defer_for_time_budget(sorted_plan_entries[entry_index:])
+                        break
+                    source_key = str(entry.get("source_key") or "")
+                    source_node_ids = set(entry.get("refresh_node_ids") or set())
+                    source_edge_ids = set(entry.get("refresh_edge_ids") or set())
+                    individual_over_node_budget = max_refresh_nodes is not None and len(source_node_ids) > max_refresh_nodes
+                    individual_over_edge_budget = max_refresh_edges is not None and len(source_edge_ids) > max_refresh_edges
+                    if individual_over_node_budget or individual_over_edge_budget:
+                        oversized_source_keys.append(source_key)
+                        oversized_plan.append(graph_maintenance_plan_summary(entry))
+                        results.append(
+                            {
+                                **graph_maintenance_plan_summary(entry),
+                                "status": "oversized_refresh_budget",
+                                "max_refresh_nodes": max_refresh_nodes,
+                                "max_refresh_edges": max_refresh_edges,
+                            }
+                        )
+                        continue
+                    if len(selected_plan) >= batch_limit:
+                        batch_deferred_source_keys.append(source_key)
+                        batch_deferred_plan.append(graph_maintenance_plan_summary(entry))
+                        continue
+                    next_node_ids = planned_node_ids | source_node_ids
+                    next_edge_ids = planned_edge_ids | source_edge_ids
+                    over_node_budget = max_refresh_nodes is not None and len(next_node_ids) > max_refresh_nodes
+                    over_edge_budget = max_refresh_edges is not None and len(next_edge_ids) > max_refresh_edges
+                    if over_node_budget or over_edge_budget:
+                        budget_deferred_source_keys.append(source_key)
+                        budget_deferred_plan.append(graph_maintenance_plan_summary(entry))
+                        results.append(
+                            {
+                                **graph_maintenance_plan_summary(entry),
+                                "status": "deferred_refresh_budget",
+                                "combined_planned_refresh_node_count": len(next_node_ids),
+                                "combined_planned_refresh_edge_count": len(next_edge_ids),
+                                "max_refresh_nodes": max_refresh_nodes,
+                                "max_refresh_edges": max_refresh_edges,
+                            }
+                        )
+                        continue
+                    selected_plan.append(entry)
+                    planned_node_ids = next_node_ids
+                    planned_edge_ids = next_edge_ids
+
+                if selected_plan and not has_time_budget():
+                    defer_for_time_budget(selected_plan)
+                    selected_plan = []
+                    planned_node_ids = set()
+                    planned_edge_ids = set()
+
+                selected = [entry["state"] for entry in selected_plan if isinstance(entry.get("state"), dict)]
+                orphaned_source_keys = [str(entry.get("source_key") or "") for entry in selected_plan if entry.get("operation") == "remove"]
+                replacements = [entry.get("contribution") for entry in selected_plan if entry.get("operation") == "replace" and isinstance(entry.get("contribution"), dict)]
+                replacement_group_count = len({
+                    str((entry.get("state") or {}).get("session_dir") or (entry.get("state") or {}).get("session_id") or entry.get("source_key") or "")
+                    for entry in selected_plan
+                    if entry.get("operation") == "replace" and isinstance(entry.get("state"), dict)
+                })
+                maintenance_detail.update(
+                    {
+                        "planned_candidate_count": len(plan_entries),
+                        "candidate_pool_count": len(candidate_pool),
+                        "candidate_pool_limit": candidate_pool_limit,
+                        "selected_planned_refresh_node_count": len(planned_node_ids),
+                        "selected_planned_refresh_edge_count": len(planned_edge_ids),
+                        "selected_sources": [str(entry.get("source_key") or "") for entry in selected_plan[:40]],
+                        "selected_plan": [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]],
+                        "budget_deferred_source_count": len(budget_deferred_source_keys),
+                        "budget_deferred_sources": budget_deferred_source_keys[:40],
+                        "budget_deferred_plan": budget_deferred_plan[:40],
+                        "oversized_source_count": len(oversized_source_keys),
+                        "oversized_sources": oversized_source_keys[:40],
+                        "oversized_plan": oversized_plan[:40],
+                        "batch_deferred_source_count": len(batch_deferred_source_keys),
+                        "batch_deferred_sources": batch_deferred_source_keys[:40],
+                        "batch_deferred_plan": batch_deferred_plan[:40],
+                    }
+                )
+
+                try:
+                    if orphaned_source_keys:
+                        removed = store.remove_sources(orphaned_source_keys, budget_deadline=deadline)
+                        results.extend(removed.get("results", []))
+                        maintenance_detail["removed_refreshed_node_count"] = removed.get("refreshed_node_count", 0)
+                        maintenance_detail["removed_refreshed_edge_count"] = removed.get("refreshed_edge_count", 0)
+                        maintenance_detail["removed_node_refresh"] = removed.get("node_refresh", {})
+                        maintenance_detail["removed_edge_refresh"] = removed.get("edge_refresh", {})
+                    if replacements:
+                        replaced = store.replace_sources(replacements, budget_deadline=deadline)
+                        results.extend(replaced.get("results", []))
+                        maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
+                        maintenance_detail["replaced_refreshed_edge_count"] = replaced.get("refreshed_edge_count", 0)
+                        maintenance_detail["replaced_node_refresh"] = replaced.get("node_refresh", {})
+                        maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
+                        maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
+                        maintenance_detail["replacement_group_count"] = replacement_group_count
+                    if export_sidecar:
+                        graph_check_budget(deadline)
+                        sidecar = store.write_sidecar()
+                    else:
+                        sidecar = {}
+                    store.conn.commit()
+                except GraphMaintenanceBudgetExceeded:
+                    store.conn.rollback()
+                    mutation_rolled_back = True
+                    rolled_back_plan = [graph_maintenance_plan_summary(entry) for entry in selected_plan[:40]]
+                    maintenance_detail["rolled_back_source_count"] = len(selected_plan)
+                    maintenance_detail["rolled_back_sources"] = [str(entry.get("source_key") or "") for entry in selected_plan[:40]]
+                    maintenance_detail["rolled_back_plan"] = rolled_back_plan
+                    maintenance_detail["selected_planned_refresh_node_count"] = 0
+                    maintenance_detail["selected_planned_refresh_edge_count"] = 0
+                    maintenance_detail["selected_sources"] = []
+                    maintenance_detail["selected_plan"] = []
+                    defer_for_time_budget(selected_plan)
+                    selected_plan = []
+                    selected = []
+            finally:
+                store.close()
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    maintenance_detail.update(
+        {
+            "budget_seconds": budget_seconds,
+            "elapsed_ms": elapsed_ms,
+            "budget_exhausted": budget_exhausted,
+            "mutation_rolled_back": mutation_rolled_back,
+            "time_budget_deferred_source_count": len(time_budget_deferred_source_keys),
+            "time_budget_deferred_sources": time_budget_deferred_source_keys[:40],
+            "time_budget_deferred_plan": time_budget_deferred_plan[:40],
+        }
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_maintenance",
@@ -25633,6 +25779,9 @@ def graph_maintenance(
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
+        "budget_seconds": budget_seconds,
+        "elapsed_ms": elapsed_ms,
+        "budget_exhausted": budget_exhausted,
         "reason": reason,
         "source_state": graph_source_state_summary(states, states_payload=states_payload, filtered=bool(requested_source_keys)),
         "unfiltered_source_state": (
@@ -25648,6 +25797,8 @@ def graph_maintenance(
         "budget_deferred_source_count": len(budget_deferred_source_keys),
         "oversized_source_count": len(oversized_source_keys),
         "batch_deferred_source_count": len(batch_deferred_source_keys),
+        "time_budget_deferred_source_count": len(time_budget_deferred_source_keys),
+        "mutation_rolled_back": mutation_rolled_back,
         "selected": selected,
         "results": results,
         "maintenance_detail": maintenance_detail,
@@ -25682,11 +25833,16 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- refresh_chunk_size: `{payload.get('refresh_chunk_size')}`",
         f"- max_refresh_nodes: `{payload.get('max_refresh_nodes')}`",
         f"- max_refresh_edges: `{payload.get('max_refresh_edges')}`",
+        f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
+        f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- remaining_count: `{payload.get('remaining_count')}`",
         f"- budget_deferred_source_count: `{payload.get('budget_deferred_source_count')}`",
         f"- oversized_source_count: `{payload.get('oversized_source_count')}`",
         f"- batch_deferred_source_count: `{payload.get('batch_deferred_source_count')}`",
+        f"- time_budget_deferred_source_count: `{payload.get('time_budget_deferred_source_count')}`",
+        f"- mutation_rolled_back: `{payload.get('mutation_rolled_back')}`",
         f"- status_counts: `{state.get('status_counts')}`",
         "",
         "## Selected Sources",
@@ -25707,6 +25863,10 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- refresh_chunk_size: `{detail.get('refresh_chunk_size')}`",
                 f"- max_refresh_nodes: `{detail.get('max_refresh_nodes')}`",
                 f"- max_refresh_edges: `{detail.get('max_refresh_edges')}`",
+                f"- budget_seconds: `{detail.get('budget_seconds')}`",
+                f"- elapsed_ms: `{detail.get('elapsed_ms')}`",
+                f"- budget_exhausted: `{detail.get('budget_exhausted')}`",
+                f"- mutation_rolled_back: `{detail.get('mutation_rolled_back')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_keys: `{json.dumps(detail.get('matched_source_keys', []), ensure_ascii=False)}`",
@@ -25715,9 +25875,11 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- selected_planned_refresh_node_count: `{detail.get('selected_planned_refresh_node_count')}`",
                 f"- selected_planned_refresh_edge_count: `{detail.get('selected_planned_refresh_edge_count')}`",
                 f"- selected_sources: `{json.dumps(detail.get('selected_sources', []), ensure_ascii=False)}`",
+                f"- rolled_back_sources: `{json.dumps(detail.get('rolled_back_sources', []), ensure_ascii=False)}`",
                 f"- budget_deferred_sources: `{json.dumps(detail.get('budget_deferred_sources', []), ensure_ascii=False)}`",
                 f"- oversized_sources: `{json.dumps(detail.get('oversized_sources', []), ensure_ascii=False)}`",
                 f"- batch_deferred_sources: `{json.dumps(detail.get('batch_deferred_sources', []), ensure_ascii=False)}`",
+                f"- time_budget_deferred_sources: `{json.dumps(detail.get('time_budget_deferred_sources', []), ensure_ascii=False)}`",
                 f"- replaced_node_refresh: `{json.dumps(detail.get('replaced_node_refresh', {}), ensure_ascii=False)}`",
                 f"- replaced_edge_refresh: `{json.dumps(detail.get('replaced_edge_refresh', {}), ensure_ascii=False)}`",
                 f"- removed_node_refresh: `{json.dumps(detail.get('removed_node_refresh', {}), ensure_ascii=False)}`",
@@ -25728,6 +25890,14 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         if selected_plan:
             lines.extend(["", "### Selected Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
             for item in selected_plan:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
+                    )
+        rolled_back_plan = detail.get("rolled_back_plan") if isinstance(detail.get("rolled_back_plan"), list) else []
+        if rolled_back_plan:
+            lines.extend(["", "### Rolled Back Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
+            for item in rolled_back_plan:
                 if isinstance(item, dict):
                     lines.append(
                         f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
@@ -25744,6 +25914,14 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         if budget_deferred_plan:
             lines.extend(["", "### Budget Deferred Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
             for item in budget_deferred_plan:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
+                    )
+        time_budget_deferred_plan = detail.get("time_budget_deferred_plan") if isinstance(detail.get("time_budget_deferred_plan"), list) else []
+        if time_budget_deferred_plan:
+            lines.extend(["", "### Time Budget Deferred Plan", "", "| source | operation | nodes | edges |", "| --- | --- | --- | --- |"])
+            for item in time_budget_deferred_plan:
                 if isinstance(item, dict):
                     lines.append(
                         f"| `{item.get('source_key')}` | `{item.get('operation')}` | `{item.get('planned_refresh_node_count')}` | `{item.get('planned_refresh_edge_count')}` |"
@@ -31460,6 +31638,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             refresh_chunk_size=args.refresh_chunk_size,
             max_refresh_nodes=getattr(args, "max_refresh_nodes", None),
             max_refresh_edges=getattr(args, "max_refresh_edges", None),
+            budget_seconds=getattr(args, "budget_seconds", None),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             reason="operator_requested",
@@ -35552,6 +35731,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--refresh-chunk-size", type=int, default=GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE, help="Aggregate refresh IN-list chunk size for node/edge recomputation.")
     graph_maintenance_parser.add_argument("--max-refresh-nodes", type=int, help="Defer source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
     graph_maintenance_parser.add_argument("--max-refresh-edges", type=int, help="Defer source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
+    graph_maintenance_parser.add_argument("--budget-seconds", type=float, help="Stop planning or roll back the current mutation pass once this wall-clock budget is exhausted.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--write-report", action="store_true", help="Write graph maintenance reports under .aoa/diagnostics.")

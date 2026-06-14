@@ -654,6 +654,7 @@ For normal growth, use the incremental maintenance route:
 python3 scripts/aoa_session_memory.py graph-maintenance all \
   --apply \
   --batch-limit 3 \
+  --budget-seconds 300 \
   --refresh-chunk-size 64 \
   --write-report
 ```
@@ -669,7 +670,10 @@ and missing aggregates. Automated maintenance keeps both source batches and
 refresh chunks intentionally bounded; large historical sessions can still be
 expensive without a full rebuild because a few source slices may touch many
 aggregate edges. `--batch-limit` is a source-count bound, not a strict cost
-bound. Incremental maintenance plans exact old-plus-new refresh cost, sorts
+bound. `--budget-seconds` is the wall-clock bound for live and unattended
+passes; budget exhaustion defers unstarted sources as `deferred_time_budget`,
+and an exhausted in-flight SQLite mutation is rolled back before reporting.
+Incremental maintenance plans exact old-plus-new refresh cost, sorts
 actionable sources cheap-first, and isolates individually oversized sources so
 one historical session does not block smaller repairs. `index-maintenance` and
 `auto-maintenance` also use `graph_max_refresh_nodes` /
