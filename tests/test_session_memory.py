@@ -4351,6 +4351,63 @@ def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: P
     assert provider["freshness"]["dirty_session_count"] == 0
 
 
+def test_search_index_partial_update_reports_budget_exhausted_on_sqlite_interrupt(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-14T00-00-00-budgeted-search.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-14T00:00:00Z", "type": "session_meta", "payload": {"id": "budgeted-search", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-06-14T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Index this session."}]},
+            },
+            {
+                "timestamp": "2026-06-14T00:00:02Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Indexed."}]},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "budgeted-search",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    def interrupting_delete(*_: Any, **__: Any) -> int:
+        raise sqlite3.OperationalError("interrupted")
+
+    ticks = iter([0.0, 1.0, 1.0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks, 1.0))
+    monkeypatch.setattr(module, "delete_search_documents_for_session", interrupting_delete)
+
+    result = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="budgeted-search",
+        rebuild=False,
+        budget_seconds=0.1,
+    )
+
+    assert result["ok"] is False
+    assert result["budget_exhausted"] is True
+    assert result["partial"] is True
+    assert result["processed_count"] == 0
+    assert result["remaining_count"] == 1
+    assert result["diagnostics"] == ["search_index_budget_exhausted"]
+
+
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -5628,6 +5685,39 @@ def test_search_sessions_use_fast_provider_presence_probe(tmp_path: Path) -> Non
     assert provider["has_route_index"] is True
     assert provider["has_route_terms"] is True
     assert "document_count" not in provider
+
+
+def test_search_read_routes_report_locked_search_db_without_traceback(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+    real_connect = sqlite3.connect
+    search_connects: list[str] = []
+
+    def locked_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        database_text = str(database)
+        if database_text.startswith("file:") and "mode=ro" in database_text:
+            search_connects.append(database_text)
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, "connect", locked_connect)
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+    search = module.search_sessions(aoa_root=aoa_root, query="anything", limit=1)
+    agent_events = module.search_agent_event_documents(aoa_root=aoa_root, limit=1)
+
+    assert provider["status"] == "sqlite_locked"
+    assert provider["diagnostics"] == ["sqlite_locked:database is locked"]
+    assert search["ok"] is False
+    assert search["provider"]["status"] == "sqlite_locked"
+    assert search["diagnostics"] == ["sqlite_locked:database is locked"]
+    assert agent_events["ok"] is False
+    assert agent_events["provider"]["status"] == "sqlite_locked"
+    assert agent_events["diagnostics"] == ["sqlite_locked:database is locked"]
+    assert search_connects
 
 
 def test_search_provider_status_detects_structural_schema_drift(tmp_path: Path) -> None:
