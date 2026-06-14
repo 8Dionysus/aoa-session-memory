@@ -2070,6 +2070,13 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     maintained = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, write_report=True)
     assert maintained["ok"] is True
     assert maintained["selected_count"] >= 1
+    assert maintained["state_window"] == "post_apply"
+    assert maintained["pre_source_state"]["dirty_count"] >= 1
+    assert maintained["post_source_state"]["dirty_count"] == 0
+    assert maintained["pre_actionable_count"] >= 1
+    assert maintained["post_actionable_count"] == 0
+    assert maintained["remaining_count"] == 0
+    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is True
     assert Path(maintained["report_json"]).exists()
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 0
@@ -2255,6 +2262,10 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     assert maintained["maintenance_detail"]["selection_strategy"] == "cheap_first_exact_refresh_cost"
     assert any(item["source_key"] == light_source_key and item["status"] == "updated" for item in maintained["results"])
     assert not any(item["source_key"] == heavy_source_key and item["status"] == "updated" for item in maintained["results"])
+    assert maintained["state_window"] == "post_apply"
+    assert maintained["pre_actionable_count"] > maintained["post_actionable_count"]
+    assert maintained["post_remaining_count"] == maintained["remaining_count"]
+    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is True
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "light_cost_anchor"),)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
@@ -2348,6 +2359,11 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     )
     assert heavy_maintained["ok"] is True
     assert heavy_maintained["selected_count"] == 1
+    assert heavy_maintained["state_window"] == "post_apply"
+    assert heavy_maintained["pre_actionable_count"] == 1
+    assert heavy_maintained["pre_remaining_count"] == 0
+    assert heavy_maintained["post_actionable_count"] == 0
+    assert heavy_maintained["post_remaining_count"] == 0
     assert heavy_maintained["remaining_count"] == 0
     assert heavy_maintained["maintenance_detail"]["selected_sources"] == [heavy_source_key]
     assert any(item["source_key"] == heavy_source_key and item["status"] == "updated" for item in heavy_maintained["results"])
@@ -2408,6 +2424,14 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
             observed["closed"] = True
 
     def fake_graph_source_states(**_: Any) -> dict[str, Any]:
+        if observed.get("committed"):
+            post_states = []
+            for index, state in enumerate(states):
+                post_state = dict(state)
+                if index < 3:
+                    post_state["status"] = "clean"
+                post_states.append(post_state)
+            return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
     def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
@@ -2434,6 +2458,11 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     assert payload["ok"] is True
     assert payload["selected_count"] == 3
     assert payload["remaining_count"] == 17
+    assert payload["state_window"] == "post_apply"
+    assert payload["pre_actionable_count"] == 20
+    assert payload["post_actionable_count"] == 17
+    assert payload["pre_remaining_count"] == 17
+    assert payload["post_remaining_count"] == 17
     assert payload["maintenance_detail"]["candidate_pool_count"] == 9
     assert payload["maintenance_detail"]["matched_source_key_count"] == 20
     assert payload["maintenance_detail"]["matched_source_key_sample"] == [

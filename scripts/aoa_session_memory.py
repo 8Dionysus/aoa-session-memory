@@ -26768,6 +26768,29 @@ def graph_source_state_summary(
     }
 
 
+def filter_graph_source_states_by_key(
+    states: list[dict[str, Any]],
+    source_keys: Iterable[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    state_by_source_key = {
+        str(item.get("source_key") or ""): item
+        for item in states
+        if isinstance(item, dict) and item.get("source_key")
+    }
+    missing_source_keys = [
+        source_key for source_key in source_keys
+        if source_key not in state_by_source_key
+    ]
+    return (
+        [
+            state_by_source_key[source_key]
+            for source_key in source_keys
+            if source_key in state_by_source_key
+        ],
+        missing_source_keys,
+    )
+
+
 def graph_maintenance(
     *,
     aoa_root: Path,
@@ -26809,20 +26832,7 @@ def graph_maintenance(
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
     missing_requested_source_keys: list[str] = []
     if requested_source_keys:
-        state_by_source_key = {
-            str(item.get("source_key") or ""): item
-            for item in states
-            if isinstance(item, dict) and item.get("source_key")
-        }
-        missing_requested_source_keys = [
-            source_key for source_key in requested_source_keys
-            if source_key not in state_by_source_key
-        ]
-        states = [
-            state_by_source_key[source_key]
-            for source_key in requested_source_keys
-            if source_key in state_by_source_key
-        ]
+        states, missing_requested_source_keys = filter_graph_source_states_by_key(states, requested_source_keys)
     actionable = [
         item for item in states
         if isinstance(item, dict) and item.get("status") in {"dirty", "missing", "orphaned"}
@@ -27136,6 +27146,79 @@ def graph_maintenance(
             "time_budget_deferred_plan": time_budget_deferred_plan[:40],
         }
     )
+    pre_source_state = graph_source_state_summary(states, states_payload=states_payload, filtered=bool(requested_source_keys))
+    pre_unfiltered_source_state = (
+        graph_source_state_summary(
+            states_payload.get("states") if isinstance(states_payload.get("states"), list) else [],
+            states_payload=states_payload,
+            filtered=False,
+        )
+        if requested_source_keys else {}
+    )
+    pre_remaining_count = max(0, len(actionable) - len(selected))
+    pre_actionable_count = len(actionable)
+    post_source_state: dict[str, Any] = {}
+    post_unfiltered_source_state: dict[str, Any] = {}
+    post_remaining_count: int | None = None
+    post_actionable_count: int | None = None
+    state_window = "pre_apply"
+    mutation_applied = bool(
+        apply
+        and selected
+        and not mutation_rolled_back
+        and any(item.get("status") in {"updated", "removed"} for item in results if isinstance(item, dict))
+    )
+    if mutation_applied:
+        post_states_payload = graph_source_states(
+            aoa_root=aoa_root,
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+            selected_records=selected_records,
+            selected_records_global=selected_records_global,
+        )
+        post_states_all = (
+            post_states_payload.get("states")
+            if isinstance(post_states_payload.get("states"), list)
+            else []
+        )
+        post_states = post_states_all
+        if requested_source_keys:
+            post_states, _post_missing_requested_source_keys = filter_graph_source_states_by_key(post_states, requested_source_keys)
+        post_source_state = graph_source_state_summary(
+            post_states,
+            states_payload=post_states_payload,
+            filtered=bool(requested_source_keys),
+        )
+        post_unfiltered_source_state = (
+            graph_source_state_summary(
+                post_states_all,
+                states_payload=post_states_payload,
+                filtered=False,
+            )
+            if requested_source_keys else {}
+        )
+        post_actionable = [
+            item for item in post_states
+            if isinstance(item, dict) and item.get("status") in {"dirty", "missing", "orphaned"}
+        ]
+        post_actionable_count = len(post_actionable)
+        post_remaining_count = post_actionable_count
+        state_window = "post_apply"
+    maintenance_detail.update(
+        {
+            "state_window": state_window,
+            "post_source_state_refreshed": mutation_applied,
+            "pre_actionable_count": pre_actionable_count,
+            "post_actionable_count": post_actionable_count,
+            "pre_remaining_count": pre_remaining_count,
+            "post_remaining_count": post_remaining_count,
+        }
+    )
+    source_state = post_source_state if mutation_applied else pre_source_state
+    unfiltered_source_state = post_unfiltered_source_state if mutation_applied else pre_unfiltered_source_state
+    remaining_count = post_remaining_count if post_remaining_count is not None else pre_remaining_count
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_maintenance",
@@ -27159,17 +27242,19 @@ def graph_maintenance(
         "elapsed_ms": elapsed_ms,
         "budget_exhausted": budget_exhausted,
         "reason": reason,
-        "source_state": graph_source_state_summary(states, states_payload=states_payload, filtered=bool(requested_source_keys)),
-        "unfiltered_source_state": (
-            graph_source_state_summary(
-                states_payload.get("states") if isinstance(states_payload.get("states"), list) else [],
-                states_payload=states_payload,
-                filtered=False,
-            )
-            if requested_source_keys else {}
-        ),
+        "state_window": state_window,
+        "source_state": source_state,
+        "pre_source_state": pre_source_state,
+        "post_source_state": post_source_state,
+        "unfiltered_source_state": unfiltered_source_state,
+        "pre_unfiltered_source_state": pre_unfiltered_source_state,
+        "post_unfiltered_source_state": post_unfiltered_source_state,
         "selected_count": len(selected),
-        "remaining_count": max(0, len(actionable) - len(selected)),
+        "pre_actionable_count": pre_actionable_count,
+        "post_actionable_count": post_actionable_count,
+        "remaining_count": remaining_count,
+        "pre_remaining_count": pre_remaining_count,
+        "post_remaining_count": post_remaining_count,
         "budget_deferred_source_count": len(budget_deferred_source_keys),
         "oversized_source_count": len(oversized_source_keys),
         "batch_deferred_source_count": len(batch_deferred_source_keys),
@@ -27213,8 +27298,13 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- plan_refresh_costs: `{payload.get('plan_refresh_costs')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
+        f"- state_window: `{payload.get('state_window')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
+        f"- pre_actionable_count: `{payload.get('pre_actionable_count')}`",
+        f"- post_actionable_count: `{payload.get('post_actionable_count')}`",
         f"- remaining_count: `{payload.get('remaining_count')}`",
+        f"- pre_remaining_count: `{payload.get('pre_remaining_count')}`",
+        f"- post_remaining_count: `{payload.get('post_remaining_count')}`",
         f"- budget_deferred_source_count: `{payload.get('budget_deferred_source_count')}`",
         f"- oversized_source_count: `{payload.get('oversized_source_count')}`",
         f"- batch_deferred_source_count: `{payload.get('batch_deferred_source_count')}`",
@@ -27247,6 +27337,12 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- budget_exhausted: `{detail.get('budget_exhausted')}`",
                 f"- mutation_rolled_back: `{detail.get('mutation_rolled_back')}`",
                 f"- planned_only: `{detail.get('planned_only')}`",
+                f"- state_window: `{detail.get('state_window')}`",
+                f"- post_source_state_refreshed: `{detail.get('post_source_state_refreshed')}`",
+                f"- pre_actionable_count: `{detail.get('pre_actionable_count')}`",
+                f"- post_actionable_count: `{detail.get('post_actionable_count')}`",
+                f"- pre_remaining_count: `{detail.get('pre_remaining_count')}`",
+                f"- post_remaining_count: `{detail.get('post_remaining_count')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_key_count: `{detail.get('matched_source_key_count')}`",
