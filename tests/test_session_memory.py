@@ -351,6 +351,56 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert windows["windows"][0]["ok"] is True
 
 
+def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-reasoning-bridge.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "reasoning-bridge", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь MCP"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need a bounded route check."}]}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "aoa-session-memory-mcp route checked."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "reasoning-bridge",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    direct = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        query="aoa-session-memory-mcp",
+        agent_events=["assistant_reasoning_boundary"],
+        limit=3,
+    )
+    assert direct["result_count"] == 0
+
+    windows = module.agent_event_windows(
+        aoa_root=aoa_root,
+        query="aoa-session-memory-mcp",
+        agent_events=["assistant_reasoning_boundary"],
+        limit=3,
+        before=0,
+        after=1,
+    )
+    assert windows["query_bridge"]["enabled"] is True
+    assert windows["query_bridge"]["used"] is True
+    assert windows["window_count"] == 1
+    assert windows["windows"][0]["ok"] is True
+    assert windows["windows"][0]["events"][0]["agent_event"] == "assistant_reasoning_boundary"
+    assert windows["windows"][0]["bridge"]["source"] == "query_matched_agent_event_neighborhood"
+
+
 def test_agent_event_windows_resolve_renamed_latest_segment_refs(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

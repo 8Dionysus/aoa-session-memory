@@ -23136,13 +23136,14 @@ def agent_event_windows(
     provider: str = "portable_sqlite",
     include_stream_copies: bool = False,
 ) -> dict[str, Any]:
+    classes = [item for item in (agent_events or []) if item]
     payload = agent_event_route_search(
         aoa_root=aoa_root,
         query=query,
         limit=limit,
         session=session,
         task_episode_id=task_episode_id,
-        agent_events=agent_events,
+        agent_events=classes,
         provider=provider,
         explain=True,
         include_stream_copies=include_stream_copies,
@@ -23151,7 +23152,90 @@ def agent_event_windows(
         event_window_for_search_result(hit, before=before, after=after)
         for hit in payload.get("results", []) if isinstance(hit, dict)
     ]
+    bridge: dict[str, Any] = {
+        "enabled": False,
+        "used": False,
+        "source_agent_events": [],
+        "candidate_result_count": 0,
+        "reasoning_window_count": 0,
+        "diagnostics": [],
+    }
+    if query and classes == ["assistant_reasoning_boundary"] and not windows:
+        bridge["enabled"] = True
+        bridge["source_agent_events"] = list(AGENT_RESPONSE_ROUTE_CLASSES)
+        bridge_payload = agent_event_route_search(
+            aoa_root=aoa_root,
+            query=query,
+            limit=max(limit * 3, limit, 10),
+            session=session,
+            task_episode_id=task_episode_id,
+            agent_events=AGENT_RESPONSE_ROUTE_CLASSES,
+            provider=provider,
+            explain=True,
+            include_stream_copies=include_stream_copies,
+        )
+        bridge_results = [
+            hit for hit in bridge_payload.get("results", [])
+            if isinstance(hit, dict)
+        ]
+        bridge["candidate_result_count"] = len(bridge_results)
+        seen_reasoning: set[tuple[str, str, str]] = set()
+        for hit in bridge_results:
+            local = event_window_for_search_result(
+                hit,
+                before=max(before, 6),
+                after=max(after, 6),
+            )
+            if not local.get("ok"):
+                bridge["diagnostics"].extend(str(item) for item in local.get("diagnostics", []) if item)
+                continue
+            refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+            segment_index = refs.get("segment_index")
+            for event in local.get("events", []) if isinstance(local.get("events"), list) else []:
+                if not isinstance(event, dict) or event.get("agent_event") != "assistant_reasoning_boundary":
+                    continue
+                event_id = str(event.get("event_id") or "")
+                segment_id = str(local.get("segment_id") or hit.get("segment_id") or "")
+                session_label = str(local.get("session_label") or hit.get("session_label") or "")
+                key = (session_label, segment_id, event_id)
+                if not event_id or key in seen_reasoning:
+                    continue
+                seen_reasoning.add(key)
+                bridged_refs = dict(refs)
+                if event.get("raw_ref"):
+                    bridged_refs["raw"] = event.get("raw_ref")
+                if event.get("segment_ref"):
+                    bridged_refs["segment"] = event.get("segment_ref")
+                if segment_index:
+                    bridged_refs["segment_index"] = segment_index
+                bridged_hit = {
+                    **hit,
+                    "doc_id": f"{hit.get('doc_id')}#reasoning:{event_id}",
+                    "event_id": event_id,
+                    "refs": bridged_refs,
+                }
+                bridged_window = event_window_for_search_result(bridged_hit, before=before, after=after)
+                if not bridged_window.get("ok"):
+                    bridge["diagnostics"].extend(str(item) for item in bridged_window.get("diagnostics", []) if item)
+                    continue
+                bridged_window["bridge"] = {
+                    "source": "query_matched_agent_event_neighborhood",
+                    "source_doc_id": hit.get("doc_id"),
+                    "source_event_id": hit.get("event_id"),
+                    "source_agent_event": hit.get("agent_event"),
+                    "query": query,
+                }
+                windows.append(bridged_window)
+                if len(windows) >= max(1, limit):
+                    break
+            if len(windows) >= max(1, limit):
+                break
+        bridge["used"] = bool(windows)
+        bridge["reasoning_window_count"] = len(windows)
+        if not windows:
+            bridge["diagnostics"].append("query_bridge_no_reasoning_boundary_near_matched_agent_events")
     payload["artifact_type"] = "agent_event_windows"
+    payload["query_bridge"] = bridge
     payload["window_count"] = len(windows)
     payload["windows"] = windows
     return payload
