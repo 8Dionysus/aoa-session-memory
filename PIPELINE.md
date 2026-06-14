@@ -398,7 +398,10 @@ maintenance pass, and delegates actual route/search/atlas/graph work to
   batches, medium resource route, no inline graph repair, and explicit
   deferred graph follow-up. Use this after classifier or projection changes
   when `search-provider-status` reports many dirty historical sessions and a
-  full repair would exceed the interactive or unattended budget.
+  full repair would exceed the interactive or unattended budget. While backlog
+  remains, a successful catch-up batch reports
+  `applied_with_remaining_backlog` and `expected_catchup_remaining=true`;
+  failed actions or hard diagnostics still keep the run red.
 - `deep`: full archive, heavy resource route, full repair and
   calibration-capable batch with larger aggregate refresh chunks.
 

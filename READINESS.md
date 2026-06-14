@@ -420,6 +420,18 @@ Last observed result:
   `doctor` and standalone bundle validation pass; live `audit` remains
   honestly blocked on `portable_sqlite:stale` until the catch-up batches
   finish.
+- 2026-06-14 host catch-up timer proof: user systemd now has
+  `aoa-session-memory-catchup-maintenance.timer` and service. The service runs
+  through `abyss-machine resource launch --class medium --kind indexing
+  --unattended --force` with medium MemoryHigh/MemoryMax, `--repair-limit 3`,
+  and `--budget-seconds 900`. A live manual start finished with systemd
+  `status=0/SUCCESS` in `5min 18s`, peak memory `987.8 MiB`, and wrote
+  `diagnostics/20260614T044241Z__auto-maintenance-catchup.json` with
+  `ok=true`, `status=applied_with_remaining_backlog`,
+  `expected_catchup_remaining=true`, search dirty `206 -> 203`, and atlas
+  repair `3` selected / `255` remaining. `search-provider-status` still reports
+  `portable_sqlite:stale` with `dirty_session_count=203`, so the timer is
+  working as a bounded queue rather than pretending the archive is complete.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

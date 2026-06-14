@@ -367,7 +367,11 @@ full-scope dirty search/atlas repair in bounded batches without graph repair),
 and `deep` (`heavy`, full archive repair, larger refresh chunks). Use `catchup`
 when classifier or projection changes leave many historical sessions dirty and
 the archive needs to converge through repeated safe batches instead of one
-large rebuild. For a live route-cache repair without graph cost, run
+large rebuild. A successful bounded catch-up pass may report
+`applied_with_remaining_backlog` with `expected_catchup_remaining=true`; this
+means the selected repair batch landed and the remaining dirty sessions are the
+next automatic queue, not a failed service. For a live route-cache repair
+without graph cost, run
 `index-maintenance --skip-graph-repair`; the report keeps graph follow-up
 visible through `defer_graph_repair`. The hot profile uses
 `route-cache-freshness-gates` before and after maintenance, so it does not scan
