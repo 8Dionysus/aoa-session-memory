@@ -1151,6 +1151,15 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
                     "content": [{"type": "output_text", "text": "Готово: tests green, bundle exported, not pushed. Осталось открыть PR."}],
                 },
             },
+            {
+                "timestamp": "2026-05-24T00:00:08Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Действуй: чини полноценно и делай landing."}],
+                },
+            },
         ],
     )
 
@@ -1184,7 +1193,17 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     assert "scope_contract:no_external_connectors" in prompt_signals
     assert "operator_preference:russian_language" in prompt_signals
     assert "operator_preference:preserve_before_distill" in prompt_signals
+    action_signals = {
+        f"{signal['layer']}:{signal['key']}"
+        for signal in records["000009"]["facets"]["route_signals"]
+    }
+    assert "scope_contract:implementation_requested" in action_signals
+    assert "scope_contract:repair_requested" in action_signals
+    assert "scope_contract:landing_requested" in action_signals
     assert segment_index["by_route_layer"]["scope_contract"]["analysis_only"] == ["000002"]
+    assert segment_index["by_route_layer"]["scope_contract"]["implementation_requested"] == ["000009"]
+    assert segment_index["by_route_layer"]["scope_contract"]["repair_requested"] == ["000009"]
+    assert segment_index["by_route_layer"]["scope_contract"]["landing_requested"] == ["000009"]
     assert segment_index["by_route_layer"]["operator_preference"]["russian_language"] == ["000002"]
     assert segment_index["by_route_layer"]["verification_state"]["green_proof"] == ["000006"]
     assert "permission" in segment_index["by_route_layer"]["failure_mode"]
@@ -1192,6 +1211,9 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     assert module.env_entity_candidate("ADD") is False
     assert module.env_entity_candidate("CREATE") is False
     assert session_index["route_signal_counts"]["scope_contract"]["analysis_only"] == 1
+    assert session_index["route_signal_counts"]["scope_contract"]["implementation_requested"] == 1
+    assert session_index["route_signal_counts"]["scope_contract"]["repair_requested"] == 1
+    assert session_index["route_signal_counts"]["scope_contract"]["landing_requested"] == 1
     assert session_index["route_signal_counts"]["delivery_state"]["tests_green"] >= 1
     assert session_index["route_signal_counts"]["runtime_environment"]["model"] == 1
 

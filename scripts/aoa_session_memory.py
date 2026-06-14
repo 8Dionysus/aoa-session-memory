@@ -76,7 +76,7 @@ TASK_EPISODE_SCHEMA_VERSION = 1
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 25
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 26
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
@@ -3230,6 +3230,12 @@ def route_signals_for_event(
             add("scope_contract", "no_external_connectors", confidence="high", source="operator_prompt")
         if re.search(r"\b(сначала погруз|сначала прочит|first read|start by reading|orient first)\b", haystack):
             add("scope_contract", "orient_first", confidence="high", source="operator_prompt")
+        if re.search(r"\b(делай|сделай|действуй|продолжай|реализуй|надо делать|do it|go ahead|continue|implement)\b", haystack):
+            add("scope_contract", "implementation_requested", confidence="high", source="operator_prompt")
+        if re.search(r"\b(чини|почини|исправь|repair|fix)\b", haystack):
+            add("scope_contract", "repair_requested", confidence="high", source="operator_prompt")
+        if re.search(r"\b(landing|посадить|сажай|land it|land this)\b", haystack):
+            add("scope_contract", "landing_requested", confidence="high", source="operator_prompt")
         if re.search(r"\b(commit|коммит|коммить)\b", haystack):
             add("scope_contract", "commit_requested", confidence="medium", source="operator_prompt")
         if re.search(r"\b(push|пуш)\b", haystack):
