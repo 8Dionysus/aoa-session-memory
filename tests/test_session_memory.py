@@ -216,7 +216,7 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry_record["raw_blocks"]["block_count"] == 2
 
 
-def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) -> None:
+def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-06-13T00-00-00-agent-events.jsonl"
@@ -307,6 +307,14 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) ->
     assert audit["stream_canonical_neighbor_pair_count"] >= 1
     assert audit["stream_canonical_retrieval_guard_ok"] is True
     assert audit["quality_ok"] is True
+    monkeypatch.setattr(module, "compact_stamp", lambda: "20260614T000000Z")
+    first_report = module.agent_event_audit(aoa_root=aoa_root, target="latest", write_report=True)
+    second_report = module.agent_event_audit(aoa_root=aoa_root, target="latest", write_report=True)
+    assert first_report["report_json"] != second_report["report_json"]
+    assert first_report["report_json"].endswith("__agent-event-audit.json")
+    assert second_report["report_json"].endswith("__agent-event-audit__01.json")
+    assert Path(first_report["report_json"]).exists()
+    assert Path(second_report["report_json"]).exists()
     closeouts = module.search_sessions(aoa_root=aoa_root, doc_type="event", agent_event="assistant_final_closeout", limit=5)
     assert closeouts["result_count"] == 1
     assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
@@ -866,7 +874,7 @@ def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path
     assert "mechanics_candidate" not in profile["lanes"]
 
 
-def test_segment_index_records_conversation_acts(tmp_path: Path) -> None:
+def test_segment_index_records_conversation_acts(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-conversation-acts.jsonl"
@@ -918,6 +926,14 @@ def test_segment_index_records_conversation_acts(tmp_path: Path) -> None:
     assert audit["counts"]["verification_result"] == 1
     assert Path(audit["report_json"]).exists()
     assert Path(audit["report_markdown"]).exists()
+    monkeypatch.setattr(module, "compact_stamp", lambda: "20260614T000000Z")
+    first_report = module.conversation_act_audit(aoa_root=aoa_root, target="conversation-acts", write_report=True)
+    second_report = module.conversation_act_audit(aoa_root=aoa_root, target="conversation-acts", write_report=True)
+    assert first_report["report_json"] != second_report["report_json"]
+    assert first_report["report_json"].endswith("__conversation-act-audit.json")
+    assert second_report["report_json"].endswith("__conversation-act-audit__01.json")
+    assert Path(first_report["report_json"]).exists()
+    assert Path(second_report["report_json"]).exists()
 
 
 def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> None:

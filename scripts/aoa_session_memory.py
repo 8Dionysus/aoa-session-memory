@@ -1671,6 +1671,24 @@ def write_markdown(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def reserve_diagnostic_report_paths(diagnostics_dir: Path, stem: str) -> tuple[Path, Path]:
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    for counter in range(1000):
+        suffix = "" if counter == 0 else f"__{counter:02d}"
+        report_json = diagnostics_dir / f"{stem}{suffix}.json"
+        report_md = diagnostics_dir / f"{stem}{suffix}.md"
+        if report_md.exists():
+            continue
+        try:
+            fd = os.open(report_json, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return report_json, report_md
+    fallback = f"{stem}__p{os.getpid()}__t{threading.get_ident()}"
+    return reserve_diagnostic_report_paths(diagnostics_dir, fallback)
+
+
 def sha256_file(path: Path) -> str:
     stat = path.stat()
     key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
@@ -19330,10 +19348,8 @@ def conversation_act_audit(
     }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
-        diagnostics_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{compact_stamp()}__conversation-act-audit"
-        report_json = diagnostics_dir / f"{stem}.json"
-        report_md = diagnostics_dir / f"{stem}.md"
+        report_json, report_md = reserve_diagnostic_report_paths(diagnostics_dir, stem)
         write_json(report_json, payload)
         write_markdown(report_md, conversation_act_audit_markdown(payload))
         payload["report_json"] = str(report_json)
@@ -19704,10 +19720,8 @@ def agent_event_audit(
     }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
-        diagnostics_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{compact_stamp()}__agent-event-audit"
-        report_json = diagnostics_dir / f"{stem}.json"
-        report_md = diagnostics_dir / f"{stem}.md"
+        report_json, report_md = reserve_diagnostic_report_paths(diagnostics_dir, stem)
         write_json(report_json, payload)
         write_markdown(report_md, agent_event_audit_markdown(payload))
         payload["report_json"] = str(report_json)
