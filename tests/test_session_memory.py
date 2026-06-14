@@ -7305,7 +7305,7 @@ def test_hook_worker_recovers_orphaned_running_job(tmp_path: Path) -> None:
     assert (session_dir / "session.manifest.json").exists()
 
 
-def test_hook_worker_respects_job_limit(tmp_path: Path) -> None:
+def test_hook_worker_drains_pending_jobs_in_batches(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
 
@@ -7340,9 +7340,69 @@ def test_hook_worker_respects_job_limit(tmp_path: Path) -> None:
     payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=2)
 
     assert payload["ok"] is True
+    assert payload["processed"] == 7
+    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 7
+
+
+def test_hook_worker_drains_jobs_queued_during_run(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    first_transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-first.jsonl"
+    second_transcript = tmp_path / "rollout-2026-05-12T00-00-01-session-worker-second.jsonl"
+    write_jsonl(
+        first_transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-first"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker first"}]}},
+        ],
+    )
+    write_jsonl(
+        second_transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-second"}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker second"}]}},
+        ],
+    )
+    first_job = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="SessionStart",
+        event={"session_id": "session-worker-first", "transcript_path": str(first_transcript), "cwd": str(workspace)},
+        session_id="session-worker-first",
+        transcript_path=first_transcript,
+        reason="test_worker_drain_during_run",
+    )
+    assert first_job is not None
+
+    original_sync = module.sync_session_from_transcript
+    queued_followup = {"done": False}
+
+    def sync_and_enqueue_followup(*args, **kwargs):
+        result = original_sync(*args, **kwargs)
+        if not queued_followup["done"]:
+            queued_followup["done"] = True
+            followup_job = module.enqueue_hook_sync_job(
+                aoa_root,
+                event_name="SessionStart",
+                event={"session_id": "session-worker-second", "transcript_path": str(second_transcript), "cwd": str(workspace)},
+                session_id="session-worker-second",
+                transcript_path=second_transcript,
+                reason="test_worker_drain_during_run_followup",
+            )
+            assert followup_job is not None
+        return result
+
+    monkeypatch.setattr(module, "sync_session_from_transcript", sync_and_enqueue_followup)
+
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=1)
+
+    assert payload["ok"] is True
     assert payload["processed"] == 2
-    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))) == 5
+    assert [result["status"] for result in payload["results"]] == ["synced", "synced"]
+    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
     assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 2
+    assert (aoa_root / "sessions" / "2026-05-12__001__worker-first" / "session.manifest.json").exists()
+    assert (aoa_root / "sessions" / "2026-05-12__002__worker-second" / "session.manifest.json").exists()
 
 
 def test_hook_worker_defers_sync_jobs_over_raw_budget(tmp_path: Path, monkeypatch) -> None:
