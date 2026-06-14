@@ -139,6 +139,52 @@ limit used by search indexing. Host consumers such as
 `abyss-machine ai token-accounting aoa-summary --json` must use only generated
 summaries and must not read raw transcripts or mutate `.aoa`.
 
+## Agent Answers And Task Episodes
+
+Use the generated agent-event routes when the question is what the assistant
+answered, how a task interval unfolded, or where a live session moved between
+analysis, action, verification, and closeout. These routes are navigation
+packets, not reviewed truth; promote or cite claims only after opening the
+packet's `raw_ref`, `segment_ref`, or `segment_index_ref`.
+
+Start with the route that matches the question:
+
+```bash
+python3 scripts/aoa_session_memory.py agent-responses --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-closeouts --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-progress-updates --session latest --limit 20
+python3 scripts/aoa_session_memory.py agent-reasoning-windows --session latest --limit 10
+python3 scripts/aoa_session_memory.py task-episodes latest --limit 20 --order recent
+python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --limit 10
+```
+
+`agent-responses` is for assistant answers and reports. `agent-closeouts` is
+for final task handoff/completion packets. `agent-progress-updates` keeps
+in-flight status separate from real answers. `agent-reasoning-windows` locates
+reasoning boundaries and nearby context; it must not be treated as hidden
+reasoning content. When a packet says
+`preview_source=encrypted_reasoning_boundary`, the encrypted content is
+unavailable by design.
+
+Use `task-episodes` to reconstruct a bounded task interval with the user
+prompt, plans, tool/action refs, verification refs, errors/blockers, and
+closeout refs. Use `answer-neighborhood` when the answer itself is not enough
+and the before/after context matters.
+
+The MCP surface may expose these routes through read-only tools such as
+`aoa_session_search` filters (`agent_event`, `doc_type=task_episode`) or
+dedicated agent-event tools. MCP payloads are route packets with evidence refs;
+raw/session files remain authoritative. If a Codex-hosted MCP tool returns
+`Transport closed`, verify the service plane with the stdio smoke first:
+
+```bash
+python3 /srv/AbyssOS/8Dionysus/scripts/smoke_aoa_session_memory_mcp.py --workspace-root /srv/AbyssOS
+```
+
+A green stdio smoke proves the package/launcher path, not that the already
+running Codex MCP host handle has recovered. Restart the Codex MCP host/session
+before claiming live MCP tool availability.
+
 ## Agent Atlas
 
 `maps/` is the source-owned skeleton for the generated agent atlas.
