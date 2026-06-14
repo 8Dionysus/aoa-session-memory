@@ -2311,6 +2311,8 @@ def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) 
     assert strict["truth_status"] == "strict_full_selection_freshness_gate"
     assert strict["search_index"]["dirty_session_count"] == 1
     assert strict["graph_store"]["status"] == "dirty"
+    assert strict["graph_store"]["source_state"]["reason_group_counts"]["source_sha_mismatch"] >= 1
+    assert strict["graph_store"]["source_state"]["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance"}
     assert strict["needs_index_maintenance"] is True
     assert strict["needs_graph_maintenance"] is True
     assert stable["ok"] is True

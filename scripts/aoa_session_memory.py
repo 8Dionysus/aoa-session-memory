@@ -26221,6 +26221,12 @@ def graph_store_state(
                 "out_of_scope_existing_count",
                 "orphan_scope",
                 "selection_scope",
+                "workspace_root",
+                "aoa_root",
+                "reason_counts",
+                "reason_group_counts",
+                "reason_examples",
+                "maintenance_recommendation",
             )
         },
         "reasons": reasons,
