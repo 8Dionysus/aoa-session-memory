@@ -709,6 +709,9 @@ aggregate edges. `--batch-limit` is a source-count bound, not a strict cost
 bound. `--budget-seconds` is the wall-clock bound for live and unattended
 passes; budget exhaustion defers unstarted sources as `deferred_time_budget`,
 and an exhausted in-flight SQLite mutation is rolled back before reporting.
+For unfiltered `all` runs, graph-maintenance reports keep matched source lists
+bounded as `matched_source_key_count` plus `matched_source_key_sample`; the full
+`matched_source_keys` list is retained only for explicit `--source-key` runs.
 Incremental maintenance plans exact old-plus-new refresh cost, sorts
 actionable sources cheap-first, and isolates individually oversized sources so
 one historical session does not block smaller repairs. `index-maintenance` and

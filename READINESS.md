@@ -409,6 +409,23 @@ Last observed result:
   (`dirty=183`, `missing=6`, `clean=6`). Reports:
   `diagnostics/20260614T025525Z__auto-maintenance-hot.json` and
   `diagnostics/20260614T025625Z__graph-maintenance.json`.
+- 2026-06-14 graph/search live-maintenance proof: incremental search writes use
+  WAL while full rebuilds clean SQLite sidecars before atomic replacement, so
+  `agent-responses` and `search` stay readable during maintenance instead of
+  returning `sqlite_locked`. Source and portable bundle tests both passed
+  `135` pytest cases, `validate`, and portable audit. Stable freshness showed
+  map/search can be current on the quiescent subset while live sessions are
+  explicitly deferred; graph remains the bounded heavy lane with thousands of
+  dirty sources and must not be hidden behind search/MCP readiness. A bounded
+  graph-maintenance batch updated `3` missing sources in `76.226s`, growing the
+  graph store to `3165723` nodes and `19490742` edges while leaving `4077`
+  dirty, `21` missing, and `61` blocked sources. Current storage snapshot is
+  `.aoa=112.4 GiB`, `graph=66.2 GiB`, `sessions=30.5 GiB`, `search=15.1 GiB`.
+  `storage-audit --deep-dbstat --row-counts` is a heavy offline profile for this
+  graph size; use the normal storage snapshot for interactive gates. Unfiltered
+  graph-maintenance reports now keep matched source evidence bounded as
+  `matched_source_key_count` plus `matched_source_key_sample`, preserving full
+  `matched_source_keys` only for explicit `--source-key` probes.
 - 2026-06-14 bounded catch-up proof: a full dry maintenance scan found
   classifier/projection drift across the archive, with `261` dirty search
   sessions before the first foreground repair and `209` dirty search sessions

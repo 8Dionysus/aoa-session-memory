@@ -224,12 +224,15 @@ session and refreshes touched aggregate nodes/edges in batches, so a large
 session is not reparsed once per source. Aggregate node/edge refresh is streamed
 from SQLite and chunked by `--refresh-chunk-size`; reports include
 `maintenance_detail` stats for requested ids, chunks, rows, and missing
-aggregates. Foreground hooks only enqueue/background graph work; they do not run
-heavy graph maintenance inline. Automated graph maintenance uses small source
-batches and profile-level refresh chunks because one dirty historical session
-can touch thousands of edges. Maintenance plans exact old-plus-new aggregate
-node/edge refresh cost before mutating, sorts actionable sources cheap-first,
-and then selects only sources that fit the current batch and refresh budgets.
+aggregates. Unfiltered reports keep matched graph source evidence bounded as a
+count plus sample; the full matched-source list is reserved for explicit
+`--source-key` probes. Foreground hooks only enqueue/background graph work; they
+do not run heavy graph maintenance inline. Automated graph maintenance uses
+small source batches and profile-level refresh chunks because one dirty
+historical session can touch thousands of edges. Maintenance plans exact
+old-plus-new aggregate node/edge refresh cost before mutating, sorts actionable
+sources cheap-first, and then selects only sources that fit the current batch and
+refresh budgets.
 `--budget-seconds` bounds live wall-clock work; if the deadline expires before
 or during a mutation pass, the command records `deferred_time_budget` sources
 and rolls back the in-flight mutation instead of leaving a half-refreshed graph.
