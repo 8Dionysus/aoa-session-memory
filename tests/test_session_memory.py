@@ -343,6 +343,89 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path) ->
     assert windows["windows"][0]["ok"] is True
 
 
+def test_agent_event_windows_resolve_renamed_latest_segment_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-renamed-latest.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "renamed-latest", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь reasoning window"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need a bounded live route check."}]}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю окно рассуждения."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "renamed-latest",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
+    old_index = next((session_dir / "segments").glob("*to-latest.index.json"))
+    old_md = old_index.with_name(old_index.name.replace(".index.json", ".md"))
+    old_raw_block = session_dir / "raw" / "blocks" / old_index.name.replace(".index.json", ".raw.jsonl")
+    new_index = old_index.with_name(old_index.name.replace("to-latest", "to-compaction"))
+    new_md = old_md.with_name(old_md.name.replace("to-latest", "to-compaction"))
+    new_raw_block = old_raw_block.with_name(old_raw_block.name.replace("to-latest", "to-compaction"))
+
+    old_index.rename(new_index)
+    old_md.rename(new_md)
+    old_raw_block.rename(new_raw_block)
+
+    segment_index = json.loads(new_index.read_text(encoding="utf-8"))
+    segment_index["markdown"] = str(segment_index.get("markdown", "")).replace(old_md.name, new_md.name)
+    for event in segment_index.get("events", []):
+        if isinstance(event, dict) and event.get("md_anchor"):
+            event["md_anchor"] = str(event["md_anchor"]).replace(old_md.name, new_md.name)
+    new_index.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for segment in manifest.get("segments", []):
+        if isinstance(segment, dict) and str(segment.get("index") or "") == str(old_index):
+            segment["index"] = str(new_index)
+            segment["markdown"] = str(new_md)
+            raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
+            raw_block["path"] = str(new_raw_block)
+            raw_block["rel"] = f"raw/blocks/{new_raw_block.name}"
+            segment["raw_block"] = raw_block
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_reasoning_boundary"],
+        limit=1,
+    )
+    assert route["result_count"] == 1
+    hit = route["results"][0]
+    assert hit["refs"]["segment_index"] == str(new_index)
+    assert "segment_index_ref_resolved_by_segment_id" in hit["ref_resolution"]["diagnostics"]
+
+    windows = module.agent_event_windows(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_reasoning_boundary"],
+        limit=1,
+        before=1,
+        after=1,
+    )
+    assert windows["windows"][0]["ok"] is True
+    assert windows["windows"][0]["refs"]["segment_index"] == str(new_index)
+
+    refs = module.evidence_ref_integrity_state(aoa_root, sample_limit=20)
+    assert refs["ok"] is True
+
+
 def test_agent_event_route_resolves_latest_and_filters_stream_copies_before_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

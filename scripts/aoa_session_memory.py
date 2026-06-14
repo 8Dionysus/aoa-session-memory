@@ -21684,7 +21684,150 @@ def cleanup_search_rebuild_temp(temp_db_path: Path) -> None:
             path.unlink()
 
 
-def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
+def search_row_value(row: sqlite3.Row, key: str, default: Any = "") -> Any:
+    return row[key] if key in row.keys() else default
+
+
+def search_row_session_dir(row: sqlite3.Row) -> Path | None:
+    manifest_path = Path(str(search_row_value(row, "manifest_path", "") or ""))
+    if manifest_path.name == "session.manifest.json":
+        return manifest_path.parent
+    raw_path = Path(str(search_row_value(row, "raw_path", "") or ""))
+    if raw_path.parent.name == "raw":
+        return raw_path.parent.parent
+    return None
+
+
+def segment_id_from_artifact_ref(value: Any) -> str:
+    name = path_without_anchor(value).name
+    if "__" in name:
+        prefix = name.split("__", 1)[0]
+        if prefix.isdigit():
+            return prefix
+    return ""
+
+
+def search_row_segment_id(row: sqlite3.Row) -> str:
+    segment_id = str(search_row_value(row, "segment_id", "") or "")
+    if segment_id:
+        return segment_id
+    for key in ("segment_index_path", "segment_ref", "raw_block_ref"):
+        segment_id = segment_id_from_artifact_ref(search_row_value(row, key, ""))
+        if segment_id:
+            return segment_id
+    return ""
+
+
+def search_ref_for_session_path(path: Path, session_dir: Path, *, prefer_basename: bool = False) -> str:
+    if prefer_basename:
+        return path.name
+    try:
+        return path.relative_to(session_dir).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def ref_anchor_suffix(value: Any) -> str:
+    text = str(value or "")
+    return "#" + text.split("#", 1)[1] if "#" in text else ""
+
+
+def segment_event_from_index(index_path: Path, event_id: str) -> dict[str, Any] | None:
+    if not event_id or not index_path.exists():
+        return None
+    segment_index = read_json(index_path, {})
+    events = segment_index.get("events") if isinstance(segment_index, dict) and isinstance(segment_index.get("events"), list) else []
+    for event in events:
+        if isinstance(event, dict) and str(event.get("event_id") or "") == event_id:
+            return event
+    return None
+
+
+def live_segment_index_candidate(session_dir: Path, segment_id: str, event_id: str = "") -> tuple[Path | None, dict[str, Any] | None]:
+    if not segment_id:
+        return None, None
+    candidates = sorted((session_dir / "segments").glob(f"{segment_id}__*.index.json"))
+    if event_id:
+        for candidate in candidates:
+            event = segment_event_from_index(candidate, event_id)
+            if event:
+                return candidate, event
+    if len(candidates) == 1:
+        return candidates[0], None
+    return None, None
+
+
+def live_segment_artifact_candidate(session_dir: Path, segment_id: str, *, subdir: str, suffix: str) -> Path | None:
+    if not segment_id:
+        return None
+    candidates = sorted((session_dir / subdir).glob(f"{segment_id}__*{suffix}"))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def resolve_search_result_refs(row: sqlite3.Row) -> tuple[dict[str, str], dict[str, Any]]:
+    refs = {
+        "session": str(search_row_value(row, "manifest_path", "") or ""),
+        "segment": str(search_row_value(row, "segment_ref", "") or ""),
+        "segment_index": str(search_row_value(row, "segment_index_path", "") or ""),
+        "raw": str(search_row_value(row, "raw_ref", "") or ""),
+        "raw_block": str(search_row_value(row, "raw_block_ref", "") or ""),
+    }
+    resolution: dict[str, Any] = {"resolved": False, "diagnostics": []}
+    session_dir = search_row_session_dir(row)
+    segment_id = search_row_segment_id(row)
+    event_id = str(search_row_value(row, "event_id", "") or "")
+    if not session_dir or not segment_id:
+        return refs, resolution
+
+    original_segment_index = refs["segment_index"]
+    segment_index_path = Path(original_segment_index) if original_segment_index else Path()
+    event: dict[str, Any] | None = None
+    if original_segment_index and not segment_index_path.exists():
+        candidate, event = live_segment_index_candidate(session_dir, segment_id, event_id)
+        if candidate:
+            refs["segment_index"] = str(candidate)
+            resolution["resolved"] = True
+            resolution["original_segment_index"] = original_segment_index
+            resolution["segment_index"] = str(candidate)
+            resolution["diagnostics"].append("segment_index_ref_resolved_by_segment_id")
+
+    segment_ref_path = resolve_evidence_ref_path(refs["segment"], raw_path_value=search_row_value(row, "raw_path", ""))
+    if refs["segment"] and not segment_ref_path.exists():
+        if event is None and refs["segment_index"]:
+            event = segment_event_from_index(Path(refs["segment_index"]), event_id)
+        event_anchor = str(event.get("md_anchor") or "") if isinstance(event, dict) else ""
+        if event_anchor:
+            refs["segment"] = event_anchor
+            resolution["resolved"] = True
+            resolution["diagnostics"].append("segment_ref_resolved_from_live_event_anchor")
+        else:
+            candidate = live_segment_artifact_candidate(session_dir, segment_id, subdir="segments", suffix=".md")
+            if candidate:
+                refs["segment"] = f"{candidate.name}{ref_anchor_suffix(search_row_value(row, 'segment_ref', ''))}"
+                resolution["resolved"] = True
+                resolution["diagnostics"].append("segment_ref_resolved_by_segment_id")
+
+    raw_block_ref = refs["raw_block"]
+    raw_block_path = resolve_evidence_ref_path(raw_block_ref, raw_path_value=search_row_value(row, "raw_path", ""))
+    if raw_block_ref and not raw_block_path.exists():
+        candidate = live_segment_artifact_candidate(session_dir, segment_id, subdir="raw/blocks", suffix=".raw.jsonl")
+        if candidate:
+            refs["raw_block"] = search_ref_for_session_path(candidate, session_dir)
+            resolution["resolved"] = True
+            resolution["diagnostics"].append("raw_block_ref_resolved_by_segment_id")
+
+    resolution["diagnostics"] = sorted(set(str(item) for item in resolution["diagnostics"] if item))
+    return refs, resolution
+
+
+def search_result_freshness(
+    row: sqlite3.Row,
+    *,
+    resolved_refs: dict[str, str] | None = None,
+    ref_resolution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     status = str(row["freshness_status"] or "unverifiable")
     reasons = [reason for reason in str(row["stale_reason"] or "").split(",") if reason]
     payload = {
@@ -21693,10 +21836,16 @@ def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
         "basis": "indexed_snapshot",
         "live_verification": "not_checked_fast_route",
     }
-    segment_path_value = row["segment_index_path"] if "segment_index_path" in row.keys() else ""
+    segment_path_value = (resolved_refs or {}).get("segment_index") or (row["segment_index_path"] if "segment_index_path" in row.keys() else "")
     segment_sha = row["segment_index_sha256"] if "segment_index_sha256" in row.keys() else ""
     if segment_path_value:
         segment_check = segment_index_freshness(Path(str(segment_path_value)), segment_sha)
+        if ref_resolution and ref_resolution.get("resolved"):
+            segment_check["ref_resolution"] = {
+                "diagnostics": ref_resolution.get("diagnostics", []),
+                "original_segment_index": ref_resolution.get("original_segment_index", ""),
+                "segment_index": ref_resolution.get("segment_index", ""),
+            }
         payload["segment_index_live_check"] = segment_check.get("status")
         if segment_check.get("status") != "fresh":
             return {
@@ -21704,6 +21853,12 @@ def search_result_freshness(row: sqlite3.Row) -> dict[str, Any]:
                 "basis": "segment_index_live_check",
                 "raw_live_verification": "not_checked_fast_route",
             }
+    if ref_resolution and ref_resolution.get("resolved"):
+        payload["ref_resolution"] = {
+            "diagnostics": ref_resolution.get("diagnostics", []),
+            "original_segment_index": ref_resolution.get("original_segment_index", ""),
+            "segment_index": ref_resolution.get("segment_index", ""),
+        }
     return payload
 
 
@@ -21739,14 +21894,8 @@ def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tupl
 
 
 def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "", full_body: str | None = None) -> dict[str, Any]:
-    freshness = search_result_freshness(row)
-    refs = {
-        "session": row["manifest_path"],
-        "segment": row["segment_ref"],
-        "segment_index": row["segment_index_path"],
-        "raw": row["raw_ref"],
-        "raw_block": row["raw_block_ref"],
-    }
+    refs, ref_resolution = resolve_search_result_refs(row)
+    freshness = search_result_freshness(row, resolved_refs=refs, ref_resolution=ref_resolution)
     result = {
         "rank": row["rank"] if "rank" in row.keys() else 0,
         "doc_id": row["id"],
@@ -21776,6 +21925,12 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
         "refs": refs,
         "freshness": freshness,
     }
+    if ref_resolution.get("resolved"):
+        result["ref_resolution"] = {
+            "diagnostics": ref_resolution.get("diagnostics", []),
+            "original_segment_index": ref_resolution.get("original_segment_index", ""),
+            "segment_index": ref_resolution.get("segment_index", ""),
+        }
     if explain:
         result["explain"] = {
             "query": query,
@@ -28843,7 +28998,7 @@ def evidence_ref_integrity_state(aoa_root: Path, *, sample_limit: int = 200) -> 
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT id, doc_type, manifest_path, segment_ref, segment_index_path, raw_path, raw_ref, raw_block_ref
+            SELECT id, doc_type, manifest_path, segment_id, event_id, segment_ref, segment_index_path, raw_path, raw_ref, raw_block_ref
             FROM documents
             WHERE doc_type IN ('event', 'segment', 'incident')
             ORDER BY rowid DESC
@@ -28857,8 +29012,15 @@ def evidence_ref_integrity_state(aoa_root: Path, *, sample_limit: int = 200) -> 
     for row in rows:
         checked += 1
         missing: list[str] = []
+        resolved_refs, _resolution = resolve_search_result_refs(row)
+        ref_values = {
+            "manifest_path": row["manifest_path"],
+            "segment_ref": resolved_refs.get("segment", row["segment_ref"]),
+            "segment_index_path": resolved_refs.get("segment_index", row["segment_index_path"]),
+            "raw_block_ref": resolved_refs.get("raw_block", row["raw_block_ref"]),
+        }
         for column in ("manifest_path", "segment_ref", "segment_index_path", "raw_block_ref"):
-            value = row[column]
+            value = ref_values[column]
             if not value:
                 continue
             path = resolve_evidence_ref_path(value, raw_path_value=row["raw_path"])
