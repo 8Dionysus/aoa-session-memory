@@ -488,9 +488,12 @@ python3 scripts/aoa_session_memory.py graph-freshness-check all \
 ```
 
 The default command remains strict full-selection truth. `--stable` checks only
-sessions whose projection sources have been quiet for the selected window and
-reports recent live writes under `deferred_live_sessions`; deferred sessions
-are visible but not treated as checked.
+sessions whose projection sources and live Codex transcript source have been
+quiet for the selected window. If `~/.codex/sessions/.../rollout-*.jsonl` is
+still being written, the session is reported under `deferred_live_sessions`
+even when the archive projection itself is older; that means
+live-not-yet-archived, not stable corruption. Deferred sessions are visible but
+not treated as checked.
 
 Scoped readiness is a truth gate for the selected window, not for the full
 archive unless the command selected the full archive. Portable SQLite freshness

@@ -107,6 +107,11 @@ GRAPH_NODES_JSONL = "nodes.jsonl"
 GRAPH_EDGES_JSONL = "edges.jsonl"
 GRAPH_INDEX_JSON = "index.json"
 GRAPH_STORE_SQLITE = "graph.sqlite3"
+GRAPH_SOURCE_STATE_LEDGER_JSON = "source-state-ledger.json"
+GRAPH_MAINTENANCE_QUEUE_JSON = "maintenance-queue.json"
+GRAPH_SOURCE_STATE_LEDGER_SCHEMA_VERSION = 1
+GRAPH_MAINTENANCE_QUEUE_SCHEMA_VERSION = 1
+GRAPH_HOT_LIVE_DEFER_SECONDS = 600.0
 GRAPH_STORE_SCHEMA_VERSION = 2
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
@@ -7642,9 +7647,10 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                 "results": [],
             }
         recovered_running = recover_orphaned_running_hook_jobs(dirs)
-        batch_size = max(0, limit)
-        while batch_size > 0:
-            pending_jobs = sorted(dirs["pending"].glob("*.json"))[:batch_size]
+        batch_limit = max(0, limit)
+        initial_pending_names = {path.name for path in dirs["pending"].glob("*.json")}
+        while batch_limit > 0:
+            pending_jobs = [path for path in sorted(dirs["pending"].glob("*.json")) if path.name in initial_pending_names][:batch_limit]
             if not pending_jobs:
                 break
             for job_path in pending_jobs:
@@ -7827,6 +7833,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                     )
                     running_path.unlink(missing_ok=True)
                     results.append({"job": str(job_path), "status": "failed", "error": f"{exc.__class__.__name__}: {exc}"})
+                batch_limit -= 1
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": all(result.get("status") != "failed" for result in results),
@@ -13297,7 +13304,7 @@ def reindex_sessions(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "session_reindex",
+            "artifact_type": "conversation_act_audit",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -13305,7 +13312,6 @@ def reindex_sessions(
             "since": since,
             "until": until,
             "limit": limit,
-            "dry_run": dry_run,
             "max_raw_bytes": max_raw_bytes,
             "stale_route_indexes": stale_route_indexes,
             "budget_seconds": budget_seconds,
@@ -13314,8 +13320,13 @@ def reindex_sessions(
             "selected_count": 0,
             "processed_count": 0,
             "remaining_count": 0,
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
             "counts": {},
-            "results": [],
+            "samples": {},
             "diagnostics": [str(exc)],
         }
     candidate_selected_count = len(records)
@@ -14028,6 +14039,11 @@ def path_mtime(path: Path) -> float:
         return 0.0
 
 
+def path_is_codex_live_transcript(path: Path) -> bool:
+    parts = path.parts
+    return path.name.startswith("rollout-") and path.suffix == ".jsonl" and ".codex" in parts and "sessions" in parts
+
+
 def latest_index_source_mtime(aoa_root: Path, records: list[dict[str, Any]]) -> tuple[float, list[str]]:
     # Root aggregate indexes are generated views; using them as source clocks
     # makes search/atlas stale after every sweep that rewrites those views.
@@ -14182,7 +14198,11 @@ def projection_quiescence_split(
     for record, fingerprint in zip(records, fingerprints):
         latest = float(fingerprint.get("latest_source_mtime") or 0.0)
         age_seconds = max(0.0, now_value - latest) if latest > 0 else None
-        if quiet_seconds > 0 and latest > threshold:
+        session_dir_text = str(fingerprint.get("session_dir") or "")
+        live_transcript = session_live_transcript_path(Path(session_dir_text)) if session_dir_text else None
+        live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
+        if quiet_seconds > 0 and (latest > threshold or live_mtime > threshold):
+            reasons = ["recent_live_write"] if latest > threshold else ["recent_live_codex_transcript_not_yet_archived"]
             deferred.append(
                 {
                     "session_id": fingerprint.get("session_id"),
@@ -14192,7 +14212,9 @@ def projection_quiescence_split(
                     "age_seconds": age_seconds,
                     "quiet_seconds": quiet_seconds,
                     "source_paths": fingerprint.get("source_paths", [])[:8],
-                    "reasons": ["recent_live_write"],
+                    "live_transcript_path": str(live_transcript) if live_transcript else "",
+                    "live_transcript_mtime": live_mtime,
+                    "reasons": reasons,
                 }
             )
             continue
@@ -14209,6 +14231,72 @@ def projection_quiescence_split(
         "deferred_live_session_count": len(deferred),
     }
     return stable_records, stable_fingerprints, deferred, summary
+
+
+def session_live_transcript_path(session_dir: Path) -> Path | None:
+    candidates: list[Path] = []
+    raw_source = read_json(session_dir / "raw" / RAW_SOURCE_JSON, {})
+    if isinstance(raw_source, dict) and raw_source.get("source_path"):
+        candidates.append(Path(str(raw_source.get("source_path"))))
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if isinstance(manifest, dict):
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        for value in (raw.get("source_path"), source.get("transcript_path")):
+            if value:
+                candidates.append(Path(str(value)))
+    for candidate in candidates:
+        if candidate.exists() and path_is_codex_live_transcript(candidate):
+            return candidate
+    return None
+
+
+def projection_recent_live_session_summary(
+    dirty_sessions: list[dict[str, Any]],
+    *,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - max(0.0, float(quiet_seconds))
+    deferred: list[dict[str, Any]] = []
+    actionable: list[dict[str, Any]] = []
+    for item in dirty_sessions:
+        session_dir_text = str(item.get("session_dir") or "")
+        session_dir = Path(session_dir_text) if session_dir_text else Path()
+        live_transcript = session_live_transcript_path(session_dir) if session_dir_text else None
+        live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
+        try:
+            source_mtime = float(item.get("latest_source_mtime") or 0.0)
+        except (TypeError, ValueError):
+            source_mtime = 0.0
+        if live_transcript is not None and live_mtime > threshold:
+            reason = "recent_live_codex_transcript_update"
+            if source_mtime <= threshold:
+                reason = "recent_live_codex_transcript_not_yet_archived"
+            deferred.append(
+                {
+                    "session_id": item.get("session_id"),
+                    "session_label": item.get("session_label"),
+                    "session_dir": session_dir_text,
+                    "latest_source_mtime": source_mtime,
+                    "live_transcript_path": str(live_transcript),
+                    "live_transcript_mtime": live_mtime,
+                    "age_seconds": max(0.0, now_value - max(source_mtime, live_mtime)),
+                    "quiet_seconds": quiet_seconds,
+                    "reasons": [reason],
+                }
+            )
+        else:
+            actionable.append(item)
+    return {
+        "quiet_seconds": quiet_seconds,
+        "dirty_session_count": len(dirty_sessions),
+        "deferred_live_session_count": len(deferred),
+        "actionable_dirty_session_count": len(actionable),
+        "deferred_live_sessions": deferred,
+        "actionable_dirty_sessions": actionable,
+    }
 
 
 def records_by_session_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -14787,6 +14875,174 @@ def atlas_index_state(
         "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
         "reasons": reasons,
+        "diagnostics": [],
+    }
+
+
+def sqlite_search_index_hot_state(aoa_root: Path) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "db_path": str(db_path),
+            "truth_status": "hot_search_index_missing_no_source_scan",
+            "source_scan": False,
+            "diagnostics": ["search_index_missing"],
+        }
+    try:
+        conn = connect_existing_search_db(db_path)
+        metadata = search_index_metadata(conn)
+        schema_diagnostics = search_schema_diagnostics(conn)
+        has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
+        has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
+        has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+        indexed_session_state_count = 0
+        min_search_schema_version = ""
+        max_search_schema_version = ""
+        min_route_signal_classifier_version = 0
+        max_route_signal_classifier_version = 0
+        if sqlite_table_exists(conn, "session_index_state"):
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count,
+                       MIN(search_schema_version) AS min_search_schema_version,
+                       MAX(search_schema_version) AS max_search_schema_version,
+                       MIN(route_signal_classifier_version) AS min_route_signal_classifier_version,
+                       MAX(route_signal_classifier_version) AS max_route_signal_classifier_version
+                FROM session_index_state
+                """
+            ).fetchone()
+            if row:
+                indexed_session_state_count = int(row["count"] or 0)
+                min_search_schema_version = str(row["min_search_schema_version"] or "")
+                max_search_schema_version = str(row["max_search_schema_version"] or "")
+                min_route_signal_classifier_version = int_value(row["min_route_signal_classifier_version"])
+                max_route_signal_classifier_version = int_value(row["max_route_signal_classifier_version"])
+        conn.close()
+    except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        return {
+            "status": status,
+            "needs_refresh": status != "sqlite_locked",
+            "db_path": str(db_path),
+            "truth_status": "hot_search_index_sqlite_error_no_source_scan",
+            "source_scan": False,
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    schema_version = str(metadata.get("schema_version") or "")
+    reasons: list[str] = list(schema_diagnostics)
+    if schema_version != str(SEARCH_SCHEMA_VERSION):
+        reasons.append("search_schema_mismatch")
+    if not has_documents:
+        reasons.append("search_index_empty")
+    if has_documents and not has_routes:
+        reasons.append("search_route_index_empty")
+    if has_routes and not has_route_terms:
+        reasons.append("search_route_terms_empty")
+    if indexed_session_state_count <= 0:
+        reasons.append("search_session_state_empty")
+    if indexed_session_state_count > 0 and (
+        min_search_schema_version != str(SEARCH_SCHEMA_VERSION)
+        or max_search_schema_version != str(SEARCH_SCHEMA_VERSION)
+    ):
+        reasons.append("search_session_state_schema_mismatch")
+    if indexed_session_state_count > 0 and (
+        min_route_signal_classifier_version != ROUTE_SIGNAL_CLASSIFIER_VERSION
+        or max_route_signal_classifier_version != ROUTE_SIGNAL_CLASSIFIER_VERSION
+    ):
+        reasons.append("route_signal_classifier_version_changed")
+    status = "current" if not reasons else ("empty" if reasons == ["search_index_empty"] else "stale")
+    return {
+        "status": status,
+        "needs_refresh": bool(reasons),
+        "db_path": str(db_path),
+        "db_mtime": path_mtime(db_path),
+        "index_generated_at": metadata.get("generated_at"),
+        "search_schema_version": schema_version,
+        "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
+        "has_documents": has_documents,
+        "has_route_index": has_routes,
+        "has_route_terms": has_route_terms,
+        "indexed_session_state_count": indexed_session_state_count,
+        "session_state_search_schema_versions": sorted({value for value in (min_search_schema_version, max_search_schema_version) if value}),
+        "session_state_route_signal_classifier_versions": sorted(
+            {
+                value
+                for value in (min_route_signal_classifier_version, max_route_signal_classifier_version)
+                if value
+            }
+        ),
+        "dirty_session_count": None,
+        "dirty_sessions": [],
+        "reasons": reasons,
+        "truth_status": "hot_search_index_cached_projection_state_no_source_scan",
+        "source_scan": False,
+        "diagnostics": [],
+    }
+
+
+def atlas_index_hot_state(aoa_root: Path) -> dict[str, Any]:
+    index_path = aoa_root / ATLAS_ROOT / "index.json"
+    projection_path = atlas_projection_state_path(aoa_root)
+    payload = read_json(index_path, {})
+    if not index_path.exists():
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "index": str(index_path),
+            "projection_state": str(projection_path),
+            "truth_status": "hot_atlas_index_missing_no_source_scan",
+            "source_scan": False,
+            "diagnostics": ["atlas_index_missing"],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "invalid",
+            "needs_refresh": True,
+            "index": str(index_path),
+            "projection_state": str(projection_path),
+            "truth_status": "hot_atlas_index_invalid_no_source_scan",
+            "source_scan": False,
+            "diagnostics": ["atlas_index_invalid"],
+        }
+    projection_state = read_atlas_projection_state(aoa_root)
+    sessions = projection_state.get("sessions") if isinstance(projection_state.get("sessions"), dict) else {}
+    entry_count = int_value(payload.get("entry_count"))
+    session_count = int_value(projection_state.get("session_count") if isinstance(projection_state, dict) else 0)
+    reasons: list[str] = []
+    if int_value(payload.get("schema_version")) != ATLAS_SCHEMA_VERSION:
+        reasons.append("atlas_schema_mismatch")
+    if entry_count <= 0:
+        reasons.append("atlas_index_empty")
+    if not projection_path.exists() or not isinstance(projection_state, dict) or not projection_state:
+        reasons.append("atlas_projection_state_missing")
+    elif int_value(projection_state.get("atlas_schema_version")) != ATLAS_SCHEMA_VERSION:
+        reasons.append("atlas_projection_state_schema_mismatch")
+    if projection_state and int_value(projection_state.get("route_signal_classifier_version")) != ROUTE_SIGNAL_CLASSIFIER_VERSION:
+        reasons.append("route_signal_classifier_version_changed")
+    if projection_state and session_count <= 0 and not sessions:
+        reasons.append("atlas_projection_state_empty")
+    status = "current" if not reasons else ("empty" if reasons == ["atlas_index_empty"] else "stale")
+    return {
+        "status": status,
+        "needs_refresh": bool(reasons),
+        "index": str(index_path),
+        "projection_state": str(projection_path),
+        "index_mtime": path_mtime(index_path),
+        "projection_state_mtime": path_mtime(projection_path),
+        "entry_count": entry_count,
+        "axis_count": int_value(payload.get("axis_count")),
+        "schema_version": payload.get("schema_version"),
+        "expected_schema_version": ATLAS_SCHEMA_VERSION,
+        "projection_session_count": session_count or len(sessions),
+        "projection_atlas_schema_version": projection_state.get("atlas_schema_version") if isinstance(projection_state, dict) else None,
+        "projection_route_signal_classifier_version": projection_state.get("route_signal_classifier_version") if isinstance(projection_state, dict) else None,
+        "dirty_session_count": None,
+        "dirty_sessions": [],
+        "reasons": reasons,
+        "truth_status": "hot_atlas_cached_projection_state_no_source_scan",
+        "source_scan": False,
         "diagnostics": [],
     }
 
@@ -15610,6 +15866,9 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- ok: `{payload.get('ok')}`",
         f"- apply: `{payload.get('apply')}`",
+        f"- use_queue: `{payload.get('use_queue')}`",
+        f"- write_queue: `{payload.get('write_queue')}`",
+        f"- write_ledger: `{payload.get('write_ledger')}`",
         f"- target: `{payload.get('target')}`",
         f"- reason: `{payload.get('reason')}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
@@ -16349,7 +16608,7 @@ def repair_session_titles(
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
-            "artifact_type": "session_title_repair",
+            "artifact_type": "conversation_act_audit",
             "generated_at": now,
             "ok": False,
             "aoa_root": str(aoa_root),
@@ -16357,10 +16616,14 @@ def repair_session_titles(
             "since": since,
             "until": until,
             "limit": limit,
-            "apply": apply,
             "selected_count": 0,
+            "segment_count": 0,
+            "event_count": 0,
+            "eligible_event_count": 0,
+            "missing_eligible_conversation_act": 0,
+            "missing_samples": [],
             "counts": {},
-            "results": [],
+            "samples": {},
             "diagnostics": [str(exc)],
         }
     results: list[dict[str, Any]] = []
@@ -20504,26 +20767,55 @@ def sqlite_provider_status(
             records = freshness_records if freshness_records is not None else chronological_session_records(aoa_root)
             projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records)
             dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
+            live_defer_summary = projection_recent_live_session_summary(dirty_sessions)
+            actionable_dirty_sessions = (
+                live_defer_summary.get("actionable_dirty_sessions")
+                if isinstance(live_defer_summary.get("actionable_dirty_sessions"), list)
+                else dirty_sessions
+            )
             latest_source_mtime = max(
                 (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
                 default=0.0,
             )
             db_mtime = path_mtime(db_path)
             freshness_reasons: list[str] = []
-            if dirty_sessions:
+            if actionable_dirty_sessions:
                 freshness_reasons.append("session_projection_dirty")
+            elif dirty_sessions:
+                freshness_reasons.append("recent_live_projection_updates_deferred")
             elif latest_source_mtime > 0 and db_mtime < latest_source_mtime:
                 freshness_reasons.append("source_newer_than_search_index")
-            diagnostics.extend(reason for reason in freshness_reasons if reason not in diagnostics)
+            diagnostics.extend(
+                reason
+                for reason in freshness_reasons
+                if reason not in diagnostics and reason != "recent_live_projection_updates_deferred"
+            )
+            freshness_status = "current"
+            if actionable_dirty_sessions or "source_newer_than_search_index" in freshness_reasons:
+                freshness_status = "stale"
+            elif dirty_sessions:
+                freshness_status = "current_with_deferred_live_updates"
             freshness = {
-                "status": "current" if not freshness_reasons else "stale",
+                "status": freshness_status,
                 "checked": True,
                 "scope": "selected_records" if freshness_records is not None or projection_fingerprints is not None else "all_sessions",
                 "selected_session_state_count": len(projection_fingerprints),
                 "indexed_session_state_count": len(indexed_session_states),
                 "dirty_session_count": len(dirty_sessions),
+                "actionable_dirty_session_count": len(actionable_dirty_sessions),
+                "deferred_live_session_count": int_value(live_defer_summary.get("deferred_live_session_count")),
                 "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
+                "actionable_dirty_session_ids": [
+                    str(item.get("session_id") or "") for item in actionable_dirty_sessions if item.get("session_id")
+                ],
                 "dirty_sessions": dirty_sessions[:8],
+                "actionable_dirty_sessions": actionable_dirty_sessions[:8],
+                "deferred_live_sessions": (
+                    live_defer_summary.get("deferred_live_sessions", [])[:8]
+                    if isinstance(live_defer_summary.get("deferred_live_sessions"), list)
+                    else []
+                ),
+                "live_defer_quiet_seconds": live_defer_summary.get("quiet_seconds"),
                 "latest_source_mtime": latest_source_mtime,
                 "db_mtime": db_mtime,
                 "reasons": freshness_reasons,
@@ -20536,7 +20828,11 @@ def sqlite_provider_status(
                 "error": short_text(str(exc), max_chars=300),
             }
     ok = total > 0 and not diagnostics
-    status = "ready" if ok else ("empty" if total <= 0 else "stale")
+    status = (
+        "ready_with_deferred_live_updates"
+        if ok and freshness.get("status") == "current_with_deferred_live_updates"
+        else ("ready" if ok else ("empty" if total <= 0 else "stale"))
+    )
     return {
         "provider": "portable_sqlite",
         "ok": ok,
@@ -21606,12 +21902,6 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
     route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
     route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
     route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
-    existing_row = conn.execute("SELECT rowid FROM documents WHERE id = ?", (doc.get("id"),)).fetchone()
-    if existing_row:
-        existing_rowid = int_value(existing_row[0])
-        conn.execute("DELETE FROM document_routes WHERE doc_rowid = ?", (existing_rowid,))
-        conn.execute("DELETE FROM document_bodies WHERE doc_rowid = ?", (existing_rowid,))
-        conn.execute("DELETE FROM documents_fts WHERE rowid = ?", (existing_rowid,))
     cursor = conn.execute(
         """
         INSERT INTO documents (
@@ -21632,45 +21922,6 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
             :payload_json
         )
-        ON CONFLICT(id) DO UPDATE SET
-            doc_type = excluded.doc_type,
-            session_id = excluded.session_id,
-            session_label = excluded.session_label,
-            session_title = excluded.session_title,
-            session_date = excluded.session_date,
-            cwd = excluded.cwd,
-            archive_status = excluded.archive_status,
-            distillation_status = excluded.distillation_status,
-            review_status = excluded.review_status,
-            segment_id = excluded.segment_id,
-            event_id = excluded.event_id,
-            event_type = excluded.event_type,
-            family = excluded.family,
-            phase = excluded.phase,
-            actor = excluded.actor,
-            action = excluded.action,
-            object = excluded.object,
-            outcome = excluded.outcome,
-            conversation_act = excluded.conversation_act,
-            session_act = excluded.session_act,
-            agent_event = excluded.agent_event,
-            task_episode_id = excluded.task_episode_id,
-            route_layers = excluded.route_layers,
-            route_signals = excluded.route_signals,
-            tags = excluded.tags,
-            raw_ref = excluded.raw_ref,
-            raw_block_ref = excluded.raw_block_ref,
-            segment_ref = excluded.segment_ref,
-            manifest_path = excluded.manifest_path,
-            raw_path = excluded.raw_path,
-            segment_index_path = excluded.segment_index_path,
-            raw_sha256 = excluded.raw_sha256,
-            segment_index_sha256 = excluded.segment_index_sha256,
-            freshness_status = excluded.freshness_status,
-            stale_reason = excluded.stale_reason,
-            title = excluded.title,
-            body = excluded.body,
-            payload_json = excluded.payload_json
         """,
         {
             **{key: doc.get(key) for key in [
@@ -21717,8 +21968,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
             "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
         },
     )
-    row = conn.execute("SELECT rowid FROM documents WHERE id = ?", (doc.get("id"),)).fetchone()
-    rowid = int_value(row[0]) if row else int_value(cursor.lastrowid)
+    rowid = cursor.lastrowid
     conn.execute(
         "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
         (rowid, doc.get("title") or "", full_body, doc.get("session_label") or "", doc.get("session_title") or ""),
@@ -22850,6 +23100,7 @@ def search_sessions(
         ("documents.agent_event", agent_event),
         ("documents.task_episode_id", task_episode_id),
         ("documents.archive_status", archive_status),
+        ("documents.freshness_status", freshness_status),
     ]:
         if value:
             filters.append(f"{column} = ?")
@@ -22901,20 +23152,16 @@ def search_sessions(
             if where:
                 sql += " AND " + where
                 query_params.extend(params)
-            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC"
-            if not freshness_status:
-                sql += " LIMIT ?"
-                query_params.append(limit)
+            sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
             query_params = [*params]
             if where:
                 sql += " WHERE " + where
-            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC"
-            if not freshness_status:
-                sql += " LIMIT ?"
-                query_params.append(limit)
+            sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            query_params.append(limit)
             rows = conn.execute(sql, query_params).fetchall()
         metadata = search_index_metadata(conn)
         body_overrides = search_document_bodies_for_rows(conn, rows)
@@ -22942,13 +23189,6 @@ def search_sessions(
         compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
         for row in rows
     ]
-    if freshness_status:
-        results = [
-            result
-            for result in results
-            if isinstance(result.get("freshness"), dict)
-            and result["freshness"].get("status") == freshness_status
-        ][: max(0, int_value(limit, 20))]
     accelerator_provider = provider if provider != "portable_sqlite" else "abyss_machine_nervous"
     if provider == "portable_sqlite" and not include_host_context:
         provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
@@ -24150,7 +24390,278 @@ def graph_paths(aoa_root: Path) -> dict[str, Path]:
         "edges": root / GRAPH_EDGES_JSONL,
         "index": root / GRAPH_INDEX_JSON,
         "store": root / GRAPH_STORE_SQLITE,
+        "source_state_ledger": root / GRAPH_SOURCE_STATE_LEDGER_JSON,
+        "maintenance_queue": root / GRAPH_MAINTENANCE_QUEUE_JSON,
     }
+
+
+GRAPH_RETIRED_SOURCE_STATUSES = {
+    "retired_unavailable",
+    "retired_partial_evidence",
+    "tombstoned_evidence_source",
+}
+GRAPH_PARTIAL_SOURCE_STATUSES = {
+    "hook_partial",
+    "memory_writer",
+    "title_helper",
+    "suspected_raw_loss",
+    "post_backup_pending",
+}
+GRAPH_ACTIONABLE_SOURCE_STATUSES = {"dirty", "missing", "orphaned"}
+
+
+def graph_retired_source_count_from_counts(counts: dict[str, Any]) -> int:
+    return sum(int_value(counts.get(status)) for status in GRAPH_RETIRED_SOURCE_STATUSES)
+
+
+def graph_partial_evidence_count_from_counts(counts: dict[str, Any]) -> int:
+    partial_statuses = set(GRAPH_PARTIAL_SOURCE_STATUSES) | {"retired_partial_evidence"}
+    return sum(int_value(counts.get(status)) for status in partial_statuses)
+
+
+def graph_actionable_source_count_from_counts(counts: dict[str, Any]) -> int:
+    return sum(int_value(counts.get(status)) for status in GRAPH_ACTIONABLE_SOURCE_STATUSES)
+
+
+def empty_graph_source_state_ledger() -> dict[str, Any]:
+    return {
+        "schema_version": GRAPH_SOURCE_STATE_LEDGER_SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_source_state_ledger",
+        "generated_at": utc_now(),
+        "updated_at": utc_now(),
+        "sources": {},
+    }
+
+
+def read_graph_source_state_ledger(aoa_root: Path) -> dict[str, Any]:
+    path = graph_paths(aoa_root)["source_state_ledger"]
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    sources = payload.get("sources")
+    if isinstance(sources, list):
+        sources = {
+            str(item.get("source_key") or ""): item
+            for item in sources
+            if isinstance(item, dict) and item.get("source_key")
+        }
+    if not isinstance(sources, dict):
+        sources = {}
+    return {
+        **empty_graph_source_state_ledger(),
+        **payload,
+        "sources": {
+            str(key): value
+            for key, value in sources.items()
+            if key and isinstance(value, dict)
+        },
+    }
+
+
+def write_graph_source_state_ledger(aoa_root: Path, ledger: dict[str, Any]) -> None:
+    payload = dict(ledger)
+    payload["schema_version"] = GRAPH_SOURCE_STATE_LEDGER_SCHEMA_VERSION
+    payload["artifact_type"] = "session_memory_graph_source_state_ledger"
+    payload["updated_at"] = utc_now()
+    payload.setdefault("generated_at", payload["updated_at"])
+    sources = payload.get("sources") if isinstance(payload.get("sources"), dict) else {}
+    payload["sources"] = {
+        str(key): value
+        for key, value in sorted(sources.items())
+        if key and isinstance(value, dict)
+    }
+    write_json(graph_paths(aoa_root)["source_state_ledger"], payload)
+
+
+def graph_source_state_ledger_entry(ledger: dict[str, Any], source_key: str) -> dict[str, Any]:
+    sources = ledger.get("sources") if isinstance(ledger.get("sources"), dict) else {}
+    entry = sources.get(source_key) if isinstance(sources, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def graph_source_state_is_retired(entry: dict[str, Any]) -> bool:
+    status = str(entry.get("status") or "")
+    return status in GRAPH_RETIRED_SOURCE_STATUSES or bool(entry.get("retired_at"))
+
+
+def graph_source_state_is_partial(entry: dict[str, Any]) -> bool:
+    status = str(entry.get("status") or "")
+    classification = str(entry.get("classification") or "")
+    return status in GRAPH_PARTIAL_SOURCE_STATUSES or classification in GRAPH_PARTIAL_SOURCE_STATUSES
+
+
+def update_graph_source_state_ledger_from_states(
+    aoa_root: Path,
+    states: list[dict[str, Any]],
+    *,
+    reason: str = "graph_source_state_refresh",
+) -> dict[str, Any]:
+    ledger = read_graph_source_state_ledger(aoa_root)
+    sources = ledger.setdefault("sources", {})
+    now = utc_now()
+    counts: Counter[str] = Counter()
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        source_key = str(state.get("source_key") or "")
+        if not source_key:
+            continue
+        status = str(state.get("status") or "unknown")
+        existing = sources.get(source_key) if isinstance(sources.get(source_key), dict) else {}
+        entry = {
+            **existing,
+            "source_key": source_key,
+            "source_type": state.get("source_type"),
+            "session_id": state.get("session_id"),
+            "session_label": state.get("session_label"),
+            "segment_id": state.get("segment_id"),
+            "session_dir": state.get("session_dir"),
+            "source_path": state.get("source_path"),
+            "source_sha": state.get("source_sha"),
+            "source_mtime": state.get("source_mtime"),
+            "status": status,
+            "reason": reason,
+            "reasons": state.get("reasons", []) if isinstance(state.get("reasons"), list) else [],
+            "last_checked": now,
+        }
+        if status == "clean":
+            entry["last_clean_at"] = now
+        elif status in GRAPH_ACTIONABLE_SOURCE_STATUSES:
+            entry["last_dirty_at"] = now
+        if status == "blocked" and graph_source_state_is_retired(existing):
+            entry["status"] = str(existing.get("status") or "retired_unavailable")
+            entry["retired_at"] = existing.get("retired_at") or now
+            entry["classification"] = existing.get("classification") or entry.get("classification")
+            entry["evidence_refs"] = existing.get("evidence_refs", [])
+            entry["reason"] = existing.get("reason") or entry["reason"]
+        elif status != "blocked":
+            entry.pop("retired_at", None)
+        sources[source_key] = entry
+        counts[str(entry.get("status") or status)] += 1
+    write_graph_source_state_ledger(aoa_root, ledger)
+    return {
+        "path": str(graph_paths(aoa_root)["source_state_ledger"]),
+        "updated_source_count": sum(counts.values()),
+        "status_counts": dict(counts),
+    }
+
+
+def read_graph_maintenance_queue(aoa_root: Path) -> dict[str, Any]:
+    payload = read_json(graph_paths(aoa_root)["maintenance_queue"], {})
+    if not isinstance(payload, dict):
+        payload = {}
+    items = payload.get("items")
+    if isinstance(items, list):
+        items = {
+            str(item.get("source_key") or ""): item
+            for item in items
+            if isinstance(item, dict) and item.get("source_key")
+        }
+    if not isinstance(items, dict):
+        items = {}
+    return {
+        "schema_version": GRAPH_MAINTENANCE_QUEUE_SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_maintenance_queue",
+        "generated_at": payload.get("generated_at") or utc_now(),
+        "updated_at": payload.get("updated_at") or utc_now(),
+        "items": {
+            str(key): value
+            for key, value in sorted(items.items())
+            if key and isinstance(value, dict)
+        },
+    }
+
+
+def write_graph_maintenance_queue(aoa_root: Path, queue_payload: dict[str, Any]) -> None:
+    payload = dict(queue_payload)
+    payload["schema_version"] = GRAPH_MAINTENANCE_QUEUE_SCHEMA_VERSION
+    payload["artifact_type"] = "session_memory_graph_maintenance_queue"
+    payload["updated_at"] = utc_now()
+    payload.setdefault("generated_at", payload["updated_at"])
+    items = payload.get("items") if isinstance(payload.get("items"), dict) else {}
+    payload["items"] = {
+        str(key): value
+        for key, value in sorted(items.items())
+        if key and isinstance(value, dict)
+    }
+    payload["source_keys"] = sorted(payload["items"])
+    payload["queued_count"] = len(payload["items"])
+    write_json(graph_paths(aoa_root)["maintenance_queue"], payload)
+
+
+def update_graph_maintenance_queue_from_states(
+    aoa_root: Path,
+    states: list[dict[str, Any]],
+    *,
+    reason: str = "graph_source_state_refresh",
+) -> dict[str, Any]:
+    queue_payload = read_graph_maintenance_queue(aoa_root)
+    items = queue_payload.setdefault("items", {})
+    now = utc_now()
+    enqueued = 0
+    removed = 0
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        source_key = str(state.get("source_key") or "")
+        if not source_key:
+            continue
+        status = str(state.get("status") or "")
+        if status in GRAPH_ACTIONABLE_SOURCE_STATUSES:
+            existing = items.get(source_key) if isinstance(items.get(source_key), dict) else {}
+            items[source_key] = {
+                **existing,
+                "source_key": source_key,
+                "source_type": state.get("source_type"),
+                "session_id": state.get("session_id"),
+                "session_label": state.get("session_label"),
+                "segment_id": state.get("segment_id"),
+                "session_dir": state.get("session_dir"),
+                "source_path": state.get("source_path"),
+                "source_sha": state.get("source_sha"),
+                "source_mtime": state.get("source_mtime"),
+                "status": status,
+                "reasons": state.get("reasons", []) if isinstance(state.get("reasons"), list) else [],
+                "reason": reason,
+                "queued_at": existing.get("queued_at") or now,
+                "last_seen_at": now,
+            }
+            enqueued += 1
+        elif source_key in items:
+            items.pop(source_key, None)
+            removed += 1
+    write_graph_maintenance_queue(aoa_root, queue_payload)
+    return {
+        "path": str(graph_paths(aoa_root)["maintenance_queue"]),
+        "queued_count": len(items),
+        "enqueued_or_refreshed_count": enqueued,
+        "removed_count": removed,
+    }
+
+
+def graph_queue_source_records(aoa_root: Path, queue_payload: dict[str, Any], source_keys: list[str]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen_session_ids: set[str] = set()
+    items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
+    for source_key in source_keys:
+        item = items.get(source_key) if isinstance(items, dict) else None
+        if not isinstance(item, dict):
+            continue
+        session_id = str(item.get("session_id") or "")
+        if not session_id or session_id in seen_session_ids:
+            continue
+        session_dir_value = str(item.get("session_dir") or "")
+        if session_dir_value and Path(session_dir_value).exists():
+            records.append({"session_id": session_id, "path": session_dir_value})
+            seen_session_ids.add(session_id)
+            continue
+        try:
+            record = resolve_session_record(aoa_root, session_id)
+        except ValueError:
+            continue
+        records.append(record)
+        seen_session_ids.add(session_id)
+    return records
 
 
 def graph_sidecar_artifact_paths(aoa_root: Path) -> dict[str, Path]:
@@ -25567,6 +26078,10 @@ class GraphSqliteStore:
         source_count = int(row[0] or 0) if row else 0
         return {"node_count": node_count, "edge_count": edge_count, "source_count": source_count}
 
+    def source_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM graph_sources").fetchone()
+        return int(row[0] or 0) if row else 0
+
     def metadata(self) -> dict[str, str]:
         return {str(row["key"]): str(row["value"]) for row in self.conn.execute("SELECT key, value FROM metadata").fetchall()}
 
@@ -26226,8 +26741,474 @@ def read_jsonl_records(path: Path, *, limit: int | None = None) -> tuple[list[di
                 if isinstance(value, dict):
                     rows.append(value)
     except OSError as exc:
-        diagnostics.append(f"{path}: {exc}")
+            diagnostics.append(f"{path}: {exc}")
     return rows, diagnostics
+
+
+def default_recovery_audit_roots(aoa_root: Path) -> dict[str, list[Path]]:
+    return {
+        "codex_sessions": [
+            Path.home() / ".codex" / "sessions",
+            Path("/abyss/Backups/archive/codex/home-codex/sessions"),
+        ],
+        "aoa_vault_sessions": [
+            Path("/abyss/Backups/archive/aoa/live-root/sessions"),
+        ],
+        "logs": [
+            Path("/abyss/Backups/archive/codex/home-codex/log/codex-tui.log"),
+        ],
+        "live_aoa_sessions": [
+            aoa_root / SESSION_ROOT,
+        ],
+    }
+
+
+def raw_unavailable_graph_sources(aoa_root: Path, *, target: str = "all") -> tuple[list[dict[str, Any]], list[str]]:
+    diagnostics: list[str] = []
+    try:
+        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root)
+    except ValueError as exc:
+        return [], [str(exc)]
+    sources: list[dict[str, Any]] = []
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest_path = session_dir / "session.manifest.json"
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict) or not manifest:
+            continue
+        archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "")
+        session_index_path = session_dir / SESSION_INDEX_JSON
+        if archive_status != "raw_unavailable":
+            continue
+        if session_index_path.exists():
+            continue
+        session_id = str(manifest.get("session_id") or record.get("session_id") or session_dir.name)
+        sources.append(
+            {
+                "source_key": graph_source_key("session", session_id),
+                "source_type": "session",
+                "session_id": session_id,
+                "session_label": str(manifest.get("session_label") or record.get("session_label") or session_dir.name),
+                "session_title": str(manifest.get("session_title") or record.get("session_title") or ""),
+                "session_dir": str(session_dir),
+                "manifest_path": str(manifest_path),
+                "missing_graph_source_path": str(session_index_path),
+                "created_at": manifest.get("created_at"),
+                "updated_at": manifest.get("updated_at"),
+                "manifest": manifest,
+                "record": record,
+            }
+        )
+    return sources, diagnostics
+
+
+def path_contains_text(path: Path, needle: str, *, max_bytes: int | None = None) -> bool:
+    if not needle or not path.is_file():
+        return False
+    remaining = max_bytes if max_bytes is not None and max_bytes > 0 else None
+    needle_bytes = needle.encode("utf-8")
+    try:
+        with path.open("rb") as handle:
+            previous = b""
+            while True:
+                if remaining is not None and remaining <= 0:
+                    return False
+                chunk_size = 1024 * 1024 if remaining is None else min(1024 * 1024, remaining)
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    return False
+                if remaining is not None:
+                    remaining -= len(chunk)
+                haystack = previous + chunk
+                if needle_bytes in haystack:
+                    return True
+                previous = haystack[-len(needle_bytes):] if len(needle_bytes) > 1 else b""
+    except OSError:
+        return False
+
+
+def session_jsonl_matches_id(path: Path, session_id: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle, start=1):
+                if index > 80:
+                    break
+                if session_id not in line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    return True
+                payload = parsed.get("payload") if isinstance(parsed, dict) and isinstance(parsed.get("payload"), dict) else {}
+                if payload.get("id") == session_id or parsed.get("session_id") == session_id:
+                    return True
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def parse_utc_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            return datetime.fromisoformat(text[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def raw_candidate_paths_for_source(
+    source: dict[str, Any],
+    *,
+    codex_session_roots: list[Path],
+) -> list[Path]:
+    manifest = source.get("manifest") if isinstance(source.get("manifest"), dict) else {}
+    session_dir = Path(str(source.get("session_dir") or ""))
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    manifest_source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    candidates: list[Path] = []
+    for value in (
+        raw.get("path"),
+        raw.get("source_path"),
+        manifest_source.get("transcript_path"),
+        session_dir / "raw" / "session.raw.jsonl",
+    ):
+        if not value:
+            continue
+        path = Path(str(value)).expanduser()
+        if path not in candidates:
+            candidates.append(path)
+    session_id = str(source.get("session_id") or "")
+    for root in codex_session_roots:
+        if not root.exists():
+            continue
+        try:
+            for path in root.glob(f"**/*{session_id}*.jsonl"):
+                if path not in candidates:
+                    candidates.append(path)
+        except OSError:
+            continue
+    return candidates
+
+
+def build_aoa_vault_session_index(vault_roots: list[Path]) -> tuple[dict[str, list[dict[str, Any]]], float]:
+    index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    latest_mtime = 0.0
+    for root in vault_roots:
+        if not root.exists():
+            continue
+        for manifest_path in sorted(root.glob("*/session.manifest.json")):
+            manifest = read_json(manifest_path, {})
+            if not isinstance(manifest, dict) or not manifest:
+                continue
+            session_id = str(manifest.get("session_id") or "")
+            if not session_id:
+                continue
+            latest_mtime = max(latest_mtime, path_mtime(manifest_path))
+            session_dir = manifest_path.parent
+            index[session_id].append(
+                {
+                    "session_dir": str(session_dir),
+                    "manifest_path": str(manifest_path),
+                    "archive_status": manifest.get("archive_status"),
+                    "session_index_path": str(session_dir / SESSION_INDEX_JSON),
+                    "session_index_exists": (session_dir / SESSION_INDEX_JSON).exists(),
+                    "raw_path": (manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}).get("path"),
+                    "manifest": manifest,
+                }
+            )
+    return dict(index), latest_mtime
+
+
+def hook_evidence_for_source(source: dict[str, Any], vault_index: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], str, str]:
+    session_id = str(source.get("session_id") or "")
+    session_dirs = [Path(str(source.get("session_dir") or ""))]
+    for vault_item in vault_index.get(session_id, []):
+        session_dirs.append(Path(str(vault_item.get("session_dir") or "")))
+    evidence: list[dict[str, Any]] = []
+    prompt_samples: list[str] = []
+    assistant_samples: list[str] = []
+    seen_paths: set[str] = set()
+    for session_dir in session_dirs:
+        events_path = session_dir / "hooks" / "events.jsonl"
+        if not events_path.is_file() or str(events_path) in seen_paths:
+            continue
+        seen_paths.add(str(events_path))
+        rows, diagnostics = read_jsonl_records(events_path, limit=200)
+        if diagnostics and not rows:
+            evidence.append({"layer": "hooks", "path": str(events_path), "status": "unreadable", "diagnostics": diagnostics[:3]})
+            continue
+        hook_names: Counter[str] = Counter()
+        for row in rows:
+            hook_name = str(row.get("hook_event_name") or "")
+            if hook_name:
+                hook_names[hook_name] += 1
+            event = row.get("event") if isinstance(row.get("event"), dict) else {}
+            prompt = event.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                prompt_samples.append(prompt)
+            last_assistant = event.get("last_assistant_message")
+            if isinstance(last_assistant, str) and last_assistant.strip():
+                assistant_samples.append(last_assistant)
+        evidence.append(
+            {
+                "layer": "hooks",
+                "path": str(events_path),
+                "status": "present",
+                "row_count": len(rows),
+                "hook_counts": dict(hook_names),
+            }
+        )
+    prompt_text = "\n".join(prompt_samples)
+    assistant_text = "\n".join(assistant_samples)
+    return evidence, prompt_text, assistant_text
+
+
+def log_evidence_for_sources(sources: list[dict[str, Any]], log_paths: list[Path]) -> dict[str, list[dict[str, Any]]]:
+    session_ids = [str(source.get("session_id") or "") for source in sources if source.get("session_id")]
+    if not session_ids:
+        return {}
+    found: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    rg = shutil.which("rg")
+    if not rg:
+        return {}
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        pattern_path = Path(handle.name)
+        handle.write("\n".join(session_ids) + "\n")
+    try:
+        for log_path in log_paths:
+            if not log_path.is_file():
+                continue
+            try:
+                completed = subprocess.run(
+                    [rg, "--fixed-strings", "--line-number", "--max-count", "200", "--file", str(pattern_path), str(log_path)],
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            for line in completed.stdout.splitlines():
+                for session_id in session_ids:
+                    if session_id in line:
+                        found[session_id].append({"layer": "log", "path": str(log_path), "match": short_text(line, max_chars=300)})
+                        break
+    finally:
+        pattern_path.unlink(missing_ok=True)
+    return dict(found)
+
+
+def recovery_class_from_evidence(
+    *,
+    source: dict[str, Any],
+    raw_evidence: list[dict[str, Any]],
+    vault_evidence: list[dict[str, Any]],
+    hook_evidence: list[dict[str, Any]],
+    log_evidence: list[dict[str, Any]],
+    prompt_text: str,
+    assistant_text: str,
+    vault_latest_mtime: float,
+) -> tuple[str, str]:
+    if raw_evidence or any(item.get("session_index_exists") and item.get("archive_status") != "raw_unavailable" for item in vault_evidence):
+        return "recoverable_raw", "raw_or_index_evidence_found"
+    prompt_lower = prompt_text.lower()
+    assistant_lower = assistant_text.lower()
+    if "memory writing agent" in prompt_lower or prompt_text.lstrip().startswith("## Memory Writing Agent"):
+        return "memory_writer", "hook_prompt_is_memory_writer_helper"
+    if prompt_text.startswith("You are a helpful assistant. You will be presented with a user prompt") or '"title"' in assistant_lower:
+        return "title_helper", "hook_prompt_is_task_title_helper"
+    if hook_evidence:
+        return "hook_partial", "hook_events_present_without_raw_transcript"
+    created_at = parse_utc_timestamp(str(source.get("created_at") or ""))
+    if created_at is not None and vault_latest_mtime and created_at.timestamp() > vault_latest_mtime:
+        return "post_backup_pending", "session_created_after_latest_vault_snapshot"
+    if log_evidence:
+        return "suspected_raw_loss", "log_mentions_session_but_raw_not_found"
+    return "unrecoverable", "no_raw_index_hook_or_log_evidence_found"
+
+
+def recovery_ledger_status(classification: str) -> str:
+    if classification == "recoverable_raw":
+        return "recoverable_raw"
+    if classification == "hook_partial":
+        return "retired_partial_evidence"
+    if classification in {"memory_writer", "title_helper"}:
+        return "tombstoned_evidence_source"
+    if classification == "post_backup_pending":
+        return "post_backup_pending"
+    return "retired_unavailable"
+
+
+def raw_unavailable_recovery_audit(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    scan_logs: bool = False,
+    write_report: bool = False,
+    write_ledger: bool = False,
+    extra_codex_session_root: list[Path] | None = None,
+    extra_aoa_vault_root: list[Path] | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    roots = default_recovery_audit_roots(aoa_root)
+    codex_roots = [path for path in roots["codex_sessions"] + list(extra_codex_session_root or []) if path.exists()]
+    vault_roots = [path for path in roots["aoa_vault_sessions"] + list(extra_aoa_vault_root or []) if path.exists()]
+    log_paths = [path for path in roots["logs"] if path.exists()]
+    sources, diagnostics = raw_unavailable_graph_sources(aoa_root, target=target)
+    vault_index, vault_latest_mtime = build_aoa_vault_session_index(vault_roots)
+    logs_by_session = log_evidence_for_sources(sources, log_paths) if scan_logs else {}
+    results: list[dict[str, Any]] = []
+    for source in sources:
+        session_id = str(source.get("session_id") or "")
+        raw_evidence: list[dict[str, Any]] = []
+        for path in raw_candidate_paths_for_source(source, codex_session_roots=codex_roots):
+            if not path.is_file():
+                continue
+            if path.name.endswith(".jsonl") and not session_jsonl_matches_id(path, session_id):
+                if not path_contains_text(path, session_id, max_bytes=4 * 1024 * 1024):
+                    continue
+            raw_evidence.append({"layer": "raw_candidate", "path": str(path), "status": "present", "size_bytes": path.stat().st_size if path.exists() else 0})
+        vault_evidence = vault_index.get(session_id, [])
+        hook_evidence, prompt_text, assistant_text = hook_evidence_for_source(source, vault_index)
+        log_evidence = logs_by_session.get(session_id, [])
+        classification, reason = recovery_class_from_evidence(
+            source=source,
+            raw_evidence=raw_evidence,
+            vault_evidence=vault_evidence,
+            hook_evidence=hook_evidence,
+            log_evidence=log_evidence,
+            prompt_text=prompt_text,
+            assistant_text=assistant_text,
+            vault_latest_mtime=vault_latest_mtime,
+        )
+        evidence_refs = raw_evidence + vault_evidence + hook_evidence + log_evidence
+        checked_layers = {
+            "live_aoa_manifest": True,
+            "live_aoa_session_index": Path(str(source.get("missing_graph_source_path") or "")).exists(),
+            "codex_session_roots": [str(path) for path in codex_roots],
+            "aoa_vault_roots": [str(path) for path in vault_roots],
+            "hooks": bool(hook_evidence),
+            "logs": "scanned" if scan_logs else "skipped_by_default_large_log",
+        }
+        results.append(
+            {
+                "source_key": source.get("source_key"),
+                "source_type": "session",
+                "session_id": session_id,
+                "session_label": source.get("session_label"),
+                "session_title": source.get("session_title"),
+                "session_dir": source.get("session_dir"),
+                "manifest_path": source.get("manifest_path"),
+                "missing_graph_source_path": source.get("missing_graph_source_path"),
+                "classification": classification,
+                "ledger_status": recovery_ledger_status(classification),
+                "reason": reason,
+                "evidence_refs": evidence_refs,
+                "evidence_ref_count": len(evidence_refs),
+                "checked_layers": checked_layers,
+            }
+        )
+    class_counts = dict(Counter(str(item.get("classification") or "unknown") for item in results))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_raw_unavailable_recovery_audit",
+        "generated_at": now,
+        "ok": not diagnostics,
+        "mutates": bool(write_ledger),
+        "target": target,
+        "source_count": len(results),
+        "classification_counts": class_counts,
+        "checked_roots": {
+            "codex_session_roots": [str(path) for path in codex_roots],
+            "aoa_vault_roots": [str(path) for path in vault_roots],
+            "logs": [str(path) for path in log_paths],
+            "logs_scanned": scan_logs,
+        },
+        "results": results,
+        "diagnostics": diagnostics,
+    }
+    if write_ledger:
+        ledger = read_graph_source_state_ledger(aoa_root)
+        sources_payload = ledger.setdefault("sources", {})
+        retired_at = utc_now()
+        for item in results:
+            source_key = str(item.get("source_key") or "")
+            if not source_key:
+                continue
+            status = str(item.get("ledger_status") or recovery_ledger_status(str(item.get("classification") or "")))
+            existing = sources_payload.get(source_key) if isinstance(sources_payload.get(source_key), dict) else {}
+            entry = {
+                **existing,
+                "source_key": source_key,
+                "source_type": item.get("source_type"),
+                "session_id": item.get("session_id"),
+                "session_label": item.get("session_label"),
+                "source_path": item.get("missing_graph_source_path"),
+                "status": status,
+                "classification": item.get("classification"),
+                "reason": item.get("reason"),
+                "evidence_refs": item.get("evidence_refs", []),
+                "last_checked": retired_at,
+            }
+            if status in GRAPH_RETIRED_SOURCE_STATUSES:
+                entry["retired_at"] = existing.get("retired_at") or retired_at
+            sources_payload[source_key] = entry
+        write_graph_source_state_ledger(aoa_root, ledger)
+        payload["ledger"] = {
+            "path": str(graph_paths(aoa_root)["source_state_ledger"]),
+            "updated_source_count": len(results),
+        }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__raw-unavailable-recovery-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, raw_unavailable_recovery_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def raw_unavailable_recovery_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Raw-Unavailable Recovery Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- source_count: `{payload.get('source_count')}`",
+        f"- classification_counts: `{json.dumps(payload.get('classification_counts', {}), ensure_ascii=False)}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        "",
+        "| source | class | reason | evidence refs | missing graph path |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "| `{source}` | `{klass}` | `{reason}` | {refs} | `{missing}` |".format(
+                source=item.get("source_key"),
+                klass=item.get("classification"),
+                reason=item.get("reason"),
+                refs=item.get("evidence_ref_count"),
+                missing=item.get("missing_graph_source_path"),
+            )
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def graph_source_candidates_for_record(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -26424,8 +27405,10 @@ def graph_source_maintenance_recommendation(
     notes: list[str] = []
     if blocked:
         notes.append("blocked_sources_need_lower_layer_repair")
-    if missing_paths:
+    if missing_paths and blocked:
         notes.append("missing_graph_source_paths_are_blocked_evidence_sources")
+    elif missing_paths:
+        notes.append("missing_graph_source_paths_are_retired_or_non_actionable")
     if graph_missing:
         notes.append("missing_sources_can_be_inserted_by_incremental_or_rebuild_route")
     return {
@@ -26458,6 +27441,7 @@ def graph_source_states(
         selected_records=selected_records,
     )
     existing, existing_diagnostics = graph_store_existing_sources(aoa_root)
+    ledger = read_graph_source_state_ledger(aoa_root)
     diagnostics.extend(existing_diagnostics if existing_diagnostics != ["graph_store_missing"] else [])
     states: list[dict[str, Any]] = []
     candidate_keys = {str(item.get("source_key") or "") for item in candidates}
@@ -26471,10 +27455,15 @@ def graph_source_states(
     for candidate in candidates:
         source_key = str(candidate.get("source_key") or "")
         row = existing.get(source_key)
+        ledger_entry = graph_source_state_ledger_entry(ledger, source_key)
         reasons: list[str] = []
         if candidate.get("status") == "blocked":
-            status = "blocked"
             reasons.extend(str(item) for item in candidate.get("diagnostics", []) if item)
+            if graph_source_state_is_retired(ledger_entry):
+                status = str(ledger_entry.get("status") or "retired_unavailable")
+                reasons.append(f"retired_evidence_source:{ledger_entry.get('classification') or status}")
+            else:
+                status = "blocked"
         elif row is None:
             status = "missing"
             reasons.append("graph_source_missing")
@@ -26505,6 +27494,10 @@ def graph_source_states(
                 "stored_edge_count": int_value(row.get("edge_count")) if isinstance(row, dict) else 0,
                 "status": status,
                 "reasons": reasons,
+                "ledger_status": ledger_entry.get("status"),
+                "classification": ledger_entry.get("classification"),
+                "retired_at": ledger_entry.get("retired_at"),
+                "evidence_refs": ledger_entry.get("evidence_refs", []) if isinstance(ledger_entry.get("evidence_refs"), list) else [],
             }
         )
     for source_key, row in sorted(existing.items()):
@@ -26531,6 +27524,8 @@ def graph_source_states(
             }
         )
     counts = dict(Counter(str(item.get("status") or "unknown") for item in states))
+    retired_count = graph_retired_source_count_from_counts(counts)
+    partial_evidence_count = graph_partial_evidence_count_from_counts(counts)
     reason_summary = graph_source_reason_summary(states)
     workspace_root = str(aoa_root.parent)
     recommendation = graph_source_maintenance_recommendation(
@@ -26562,6 +27557,8 @@ def graph_source_states(
         "dirty_count": counts.get("dirty", 0),
         "missing_count": counts.get("missing", 0),
         "blocked_count": counts.get("blocked", 0),
+        "retired_count": retired_count,
+        "partial_evidence_count": partial_evidence_count,
         "orphaned_count": counts.get("orphaned", 0),
         "out_of_scope_existing_count": out_of_scope_existing_count,
         "orphan_scope": "global" if global_selection else "selected_sessions",
@@ -26625,10 +27622,13 @@ def graph_store_state(
         reasons.append("graph_store_edges_empty")
     dirty_total = sum(int_value(status_counts.get(key)) for key in ("dirty", "missing", "orphaned"))
     blocked_total = int_value(status_counts.get("blocked"))
+    retired_total = graph_retired_source_count_from_counts(status_counts)
     if dirty_total:
         reasons.append("dirty_graph_sources")
     if blocked_total:
         reasons.append("blocked_graph_sources")
+    if retired_total:
+        reasons.append("retired_graph_sources")
     full_rebuild_reasons = [reason for reason in reasons if reason in {"graph_store_schema_mismatch", "graph_schema_mismatch", "graph_store_nodes_empty", "graph_store_edges_empty"}]
     if full_rebuild_reasons:
         status = "stale"
@@ -26636,6 +27636,8 @@ def graph_store_state(
         status = "dirty"
     elif blocked_total:
         status = "current_with_blocked_sources"
+    elif retired_total:
+        status = "current_with_retired_sources"
     else:
         status = "current"
     return {
@@ -26655,6 +27657,8 @@ def graph_store_state(
                 "dirty_count",
                 "missing_count",
                 "blocked_count",
+                "retired_count",
+                "partial_evidence_count",
                 "orphaned_count",
                 "out_of_scope_existing_count",
                 "orphan_scope",
@@ -26814,19 +27818,23 @@ def graph_source_state_summary(
                 "dirty_count",
                 "missing_count",
                 "blocked_count",
-            "orphaned_count",
-            "out_of_scope_existing_count",
-            "orphan_scope",
-            "selection_scope",
-            "workspace_root",
-            "aoa_root",
-            "reason_counts",
-            "reason_group_counts",
-            "reason_examples",
+                "retired_count",
+                "partial_evidence_count",
+                "orphaned_count",
+                "out_of_scope_existing_count",
+                "orphan_scope",
+                "selection_scope",
+                "workspace_root",
+                "aoa_root",
+                "reason_counts",
+                "reason_group_counts",
+                "reason_examples",
                 "maintenance_recommendation",
             )
         }
     counts = dict(Counter(str(item.get("status") or "unknown") for item in states if isinstance(item, dict)))
+    retired_count = graph_retired_source_count_from_counts(counts)
+    partial_evidence_count = graph_partial_evidence_count_from_counts(counts)
     reason_summary = graph_source_reason_summary(states)
     return {
         "source_count": len(states),
@@ -26835,6 +27843,8 @@ def graph_source_state_summary(
         "dirty_count": counts.get("dirty", 0),
         "missing_count": counts.get("missing", 0),
         "blocked_count": counts.get("blocked", 0),
+        "retired_count": retired_count,
+        "partial_evidence_count": partial_evidence_count,
         "orphaned_count": counts.get("orphaned", 0),
         "out_of_scope_existing_count": states_payload.get("out_of_scope_existing_count"),
         "orphan_scope": states_payload.get("orphan_scope"),
@@ -26894,6 +27904,9 @@ def graph_maintenance(
     plan_refresh_costs: bool = False,
     export_sidecar: bool = False,
     write_report: bool = False,
+    use_queue: bool = False,
+    write_queue: bool = False,
+    write_ledger: bool = False,
     reason: str = "operator_requested",
     selected_records: list[dict[str, Any]] | None = None,
     selected_records_global: bool | None = None,
@@ -26905,6 +27918,124 @@ def graph_maintenance(
         if budget_seconds <= 0:
             budget_seconds = None
     deadline = started + budget_seconds if budget_seconds is not None else None
+    batch_limit = max(1, min(int_value(batch_limit, GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT), 500))
+    requested_source_keys = normalize_graph_source_key_filters(source_keys)
+    queue_payload: dict[str, Any] | None = None
+    queue_selected_source_keys: list[str] = []
+    if use_queue and not requested_source_keys and selected_records is None:
+        queue_payload = read_graph_maintenance_queue(aoa_root)
+        queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
+        queue_selected_source_keys = sorted(str(key) for key in queue_items if key)[: max(batch_limit * 10, batch_limit)]
+        if queue_selected_source_keys:
+            requested_source_keys = queue_selected_source_keys
+            selected_records = graph_queue_source_records(aoa_root, queue_payload, queue_selected_source_keys)
+            selected_records_global = False
+        else:
+            graph_hot_state = graph_store_hot_state(aoa_root)
+            source_state = graph_hot_source_state_summary(aoa_root, graph_hot_state)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            diagnostics = list(graph_hot_state.get("diagnostics", []) if isinstance(graph_hot_state.get("diagnostics"), list) else [])
+            pre_actionable_count = (
+                int_value(source_state.get("dirty_count"))
+                + int_value(source_state.get("missing_count"))
+                + int_value(source_state.get("orphaned_count"))
+            )
+            maintenance_detail = {
+                "refresh_chunk_size": refresh_chunk_size,
+                "max_refresh_nodes": max_refresh_nodes,
+                "max_refresh_edges": max_refresh_edges,
+                "selection_strategy": "queue_empty_no_source_scan",
+                "requested_source_keys": [],
+                "use_queue": True,
+                "queue_selected_source_count": 0,
+                "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
+                "matched_source_key_count": 0,
+                "matched_source_key_sample": [],
+                "missing_source_keys": [],
+                "state_window": "queue_empty_hot_state",
+                "post_source_state_refreshed": False,
+                "pre_actionable_count": pre_actionable_count,
+                "post_actionable_count": None,
+                "pre_remaining_count": pre_actionable_count,
+                "post_remaining_count": None,
+                "budget_seconds": budget_seconds,
+                "elapsed_ms": elapsed_ms,
+                "budget_exhausted": False,
+                "mutation_rolled_back": False,
+                "time_budget_deferred_source_count": 0,
+                "time_budget_deferred_sources": [],
+                "time_budget_deferred_plan": [],
+            }
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "session_memory_graph_maintenance",
+                "graph_schema_version": GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+                "generated_at": now,
+                "ok": not diagnostics and pre_actionable_count == 0 and not graph_hot_state.get("needs_full_rebuild"),
+                "mutates": False,
+                "apply": apply,
+                "use_queue": True,
+                "write_queue": write_queue,
+                "write_ledger": write_ledger,
+                "target": target,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "source_keys": [],
+                "batch_limit": batch_limit,
+                "refresh_chunk_size": refresh_chunk_size,
+                "max_refresh_nodes": max_refresh_nodes,
+                "max_refresh_edges": max_refresh_edges,
+                "budget_seconds": budget_seconds,
+                "plan_refresh_costs": bool(plan_refresh_costs),
+                "elapsed_ms": elapsed_ms,
+                "budget_exhausted": False,
+                "reason": reason,
+                "state_window": "queue_empty_hot_state",
+                "source_state": source_state,
+                "pre_source_state": source_state,
+                "post_source_state": {},
+                "unfiltered_source_state": {},
+                "pre_unfiltered_source_state": {},
+                "post_unfiltered_source_state": {},
+                "selected_count": 0,
+                "pre_actionable_count": pre_actionable_count,
+                "post_actionable_count": None,
+                "remaining_count": pre_actionable_count,
+                "pre_remaining_count": pre_actionable_count,
+                "post_remaining_count": None,
+                "budget_deferred_source_count": 0,
+                "oversized_source_count": 0,
+                "batch_deferred_source_count": 0,
+                "time_budget_deferred_source_count": 0,
+                "mutation_rolled_back": False,
+                "selected": [],
+                "results": [],
+                "maintenance_detail": maintenance_detail,
+                "ledger_update": {},
+                "queue_update": {
+                    "path": str(graph_paths(aoa_root)["maintenance_queue"]),
+                    "queued_count": 0,
+                    "enqueued_or_refreshed_count": 0,
+                    "removed_count": 0,
+                    "reason": "queue_empty_no_source_scan",
+                },
+                "sidecar": {},
+                "diagnostics": diagnostics,
+                "next_route": "Queue is empty; use graph-freshness-check --mode deep or graph-maintenance without --use-queue when a full source audit is needed.",
+            }
+            if write_report:
+                diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                stem = f"{compact_stamp()}__graph-maintenance"
+                report_json = diagnostics_dir / f"{stem}.json"
+                report_md = diagnostics_dir / f"{stem}.md"
+                write_json(report_json, payload)
+                write_markdown(report_md, graph_maintenance_markdown(payload))
+                payload["report_json"] = str(report_json)
+                payload["report_markdown"] = str(report_md)
+            return payload
     states_payload = graph_source_states(
         aoa_root=aoa_root,
         target=target,
@@ -26915,7 +28046,6 @@ def graph_maintenance(
         selected_records_global=selected_records_global,
     )
     states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
-    requested_source_keys = normalize_graph_source_key_filters(source_keys)
     missing_requested_source_keys: list[str] = []
     if requested_source_keys:
         states, missing_requested_source_keys = filter_graph_source_states_by_key(states, requested_source_keys)
@@ -26923,7 +28053,6 @@ def graph_maintenance(
         item for item in states
         if isinstance(item, dict) and item.get("status") in {"dirty", "missing", "orphaned"}
     ]
-    batch_limit = max(1, min(int_value(batch_limit, GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT), 500))
     refresh_chunk_size = max(1, min(int_value(refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     max_refresh_nodes = None if max_refresh_nodes is None or int_value(max_refresh_nodes) <= 0 else int_value(max_refresh_nodes)
     max_refresh_edges = None if max_refresh_edges is None or int_value(max_refresh_edges) <= 0 else int_value(max_refresh_edges)
@@ -26954,6 +28083,9 @@ def graph_maintenance(
             else "cheap_first_stored_counts"
         ),
         "requested_source_keys": requested_source_keys,
+        "use_queue": bool(use_queue),
+        "queue_selected_source_count": len(queue_selected_source_keys),
+        "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "matched_source_key_count": sum(
             1 for item in states if isinstance(item, dict) and item.get("source_key")
         ),
@@ -27305,6 +28437,21 @@ def graph_maintenance(
     source_state = post_source_state if mutation_applied else pre_source_state
     unfiltered_source_state = post_unfiltered_source_state if mutation_applied else pre_unfiltered_source_state
     remaining_count = post_remaining_count if post_remaining_count is not None else pre_remaining_count
+    state_rows_for_persistence = post_states_all if mutation_applied else states
+    ledger_update: dict[str, Any] = {}
+    queue_update: dict[str, Any] = {}
+    if write_ledger:
+        ledger_update = update_graph_source_state_ledger_from_states(
+            aoa_root,
+            state_rows_for_persistence,
+            reason=f"graph_maintenance:{reason}",
+        )
+    if write_queue:
+        queue_update = update_graph_maintenance_queue_from_states(
+            aoa_root,
+            state_rows_for_persistence,
+            reason=f"graph_maintenance:{reason}",
+        )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_maintenance",
@@ -27312,8 +28459,11 @@ def graph_maintenance(
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
         "generated_at": now,
         "ok": not diagnostics and not any(item.get("status") == "blocked" for item in results),
-        "mutates": bool(apply),
+        "mutates": bool(apply or write_ledger or write_queue),
         "apply": apply,
+        "use_queue": bool(use_queue),
+        "write_queue": bool(write_queue),
+        "write_ledger": bool(write_ledger),
         "target": target,
         "since": since,
         "until": until,
@@ -27349,6 +28499,8 @@ def graph_maintenance(
         "selected": selected,
         "results": results,
         "maintenance_detail": maintenance_detail,
+        "ledger_update": ledger_update,
+        "queue_update": queue_update,
         "sidecar": sidecar,
         "diagnostics": diagnostics,
         "next_route": "Run again while remaining_count is nonzero; use graph-build --write --force-large-export for full rebuild or schema/corruption recovery.",
@@ -27399,6 +28551,8 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- status_counts: `{state.get('status_counts')}`",
         f"- reason_group_counts: `{state.get('reason_group_counts')}`",
         f"- maintenance_recommendation: `{json.dumps(state.get('maintenance_recommendation', {}), ensure_ascii=False)}`",
+        f"- queue_update: `{json.dumps(payload.get('queue_update', {}), ensure_ascii=False)}`",
+        f"- ledger_update: `{json.dumps(payload.get('ledger_update', {}), ensure_ascii=False)}`",
         "",
         "## Selected Sources",
         "",
@@ -30447,7 +31601,7 @@ def graph_freshness_gates(
         expected_session_count=len(gate_records) if graph_selection_global else None,
     )
     refs_state = evidence_ref_integrity_state(aoa_root, sample_limit=ref_sample_limit)
-    graph_store_current_statuses = {"current", "current_with_blocked_sources"}
+    graph_store_current_statuses = {"current", "current_with_blocked_sources", "current_with_retired_sources"}
     needs_index_maintenance = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh"))
     needs_graph_maintenance = bool(store_state.get("needs_maintenance")) or store_state.get("status") == "missing"
     needs_sidecar_export = bool(graph_state.get("needs_snapshot_refresh")) and store_state.get("status") in graph_store_current_statuses
@@ -30572,54 +31726,79 @@ def route_cache_freshness_gates(
     selection_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
-    try:
-        records = (
-            list(selected_records)
-            if selected_records is not None
-            else ([resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit))
+    source_scan = selected_records is not None
+    records: list[dict[str, Any]] = []
+    latest_source_mtime = 0.0
+    latest_source_paths: list[str] = []
+    route_drift: list[dict[str, Any]] = []
+    if source_scan:
+        try:
+            records = list(selected_records or [])
+        except ValueError as exc:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "session_memory_route_cache_freshness_gates",
+                "generated_at": now,
+                "ok": False,
+                "target": target,
+                "selected_count": 0,
+                "needs_index_maintenance": True,
+                "needs_graph_maintenance": True,
+                "needs_sidecar_export": False,
+                "needs_offline_graph_build": False,
+                "truth_status": "hot_route_cache_projection_scan_failed",
+                "source_scan": True,
+                "diagnostics": [str(exc)],
+                "gates": [],
+            }
+        latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
+        route_drift = route_index_drift_records(records)
+        search_state = sqlite_search_index_state(
+            aoa_root,
+            latest_source_mtime,
+            records,
+            projection_fingerprints=search_projection_fingerprints_for_records(records),
         )
-    except ValueError as exc:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "artifact_type": "session_memory_route_cache_freshness_gates",
-            "generated_at": now,
-            "ok": False,
-            "target": target,
-            "selected_count": 0,
-            "needs_index_maintenance": True,
-            "needs_graph_maintenance": True,
-            "needs_sidecar_export": False,
-            "needs_offline_graph_build": False,
-            "diagnostics": [str(exc)],
-            "gates": [],
-        }
-    latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
-    route_drift = route_index_drift_records(records)
-    search_state = sqlite_search_index_state(
-        aoa_root,
-        latest_source_mtime,
-        records,
-        projection_fingerprints=search_projection_fingerprints_for_records(records),
-    )
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+        atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+        truth_status = "hot_route_cache_bounded_projection_scan"
+        selection_source = "provided_records"
+        selected_count = len(records)
+    else:
+        search_state = sqlite_search_index_hot_state(aoa_root)
+        atlas_state = atlas_index_hot_state(aoa_root)
+        truth_status = "hot_route_cache_cached_state_no_source_scan"
+        selection_source = "cached_projection_state"
+        selected_count = max(
+            int_value(search_state.get("indexed_session_state_count")),
+            int_value(atlas_state.get("projection_session_count")),
+        )
+    graph_hot_state = graph_store_hot_state(aoa_root)
     needs_index_maintenance = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh"))
+    needs_graph_maintenance = bool(graph_hot_state.get("needs_maintenance")) or graph_hot_state.get("status") in {"missing", "stale"}
     diagnostics = ["index_maintenance_needed"] if needs_index_maintenance else []
+    if needs_graph_maintenance:
+        diagnostics.append("graph_maintenance_needed")
+    diagnostics.extend(str(item) for item in search_state.get("diagnostics", []) if item)
+    diagnostics.extend(str(item) for item in atlas_state.get("diagnostics", []) if item)
+    diagnostics.extend(str(item) for item in graph_hot_state.get("diagnostics", []) if item)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_route_cache_freshness_gates",
         "generated_at": now,
-        "ok": not needs_index_maintenance,
+        "ok": not needs_index_maintenance and not needs_graph_maintenance,
+        "truth_status": truth_status,
+        "source_scan": source_scan,
         "target": target,
         "since": since,
         "until": until,
         "limit": limit,
-        "selection_source": "provided_records" if selected_records is not None else "target_filters",
-        "selection_scope": selection_scope or {},
-        "selected_count": len(records),
+        "selection_source": selection_source,
+        "selection_scope": selection_scope or ({} if source_scan else {"mode": "cached_projection_state_all_hot", "source_filters_applied": False}),
+        "selected_count": selected_count,
         "needs_index_maintenance": needs_index_maintenance,
-        "needs_graph_maintenance": True,
+        "needs_graph_maintenance": needs_graph_maintenance,
         "needs_sidecar_export": False,
-        "needs_offline_graph_build": False,
+        "needs_offline_graph_build": bool(graph_hot_state.get("needs_full_rebuild")),
         "search_vs_graph": None,
         "latest_source_mtime": latest_source_mtime,
         "latest_source_paths": latest_source_paths,
@@ -30627,13 +31806,7 @@ def route_cache_freshness_gates(
         "route_drift": route_drift[:40],
         "search_index": search_state,
         "atlas_index": atlas_state,
-        "graph_store": {
-            "status": "deferred_not_checked",
-            "needs_maintenance": None,
-            "needs_full_rebuild": False,
-            "reasons": ["graph_state_check_skipped_by_profile"],
-            "diagnostics": [],
-        },
+        "graph_store": graph_hot_state,
         "diagnostics": diagnostics,
     }
     if write_report:
@@ -30647,6 +31820,284 @@ def route_cache_freshness_gates(
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
+
+
+def graph_state_item_source_mtime(item: dict[str, Any]) -> float:
+    try:
+        explicit_mtime = float(item.get("source_mtime") or 0.0)
+    except (TypeError, ValueError):
+        explicit_mtime = 0.0
+    if explicit_mtime > 0:
+        return explicit_mtime
+    source_path = str(item.get("source_path") or "")
+    if not source_path:
+        candidate_paths: list[Path] = []
+    else:
+        source = Path(source_path)
+        candidate_paths = [source]
+        if source.parent.name == "segments":
+            inferred_session_dir = source.parent.parent
+            candidate_paths.extend(
+                [
+                    inferred_session_dir / SESSION_INDEX_JSON,
+                    inferred_session_dir / SESSION_INDEX_MARKDOWN,
+                    inferred_session_dir / "session.manifest.json",
+                ]
+            )
+    session_dir_value = str(item.get("session_dir") or "")
+    if session_dir_value:
+        session_dir = Path(session_dir_value)
+        candidate_paths.extend(
+            [
+                session_dir / SESSION_INDEX_JSON,
+                session_dir / SESSION_INDEX_MARKDOWN,
+                session_dir / "session.manifest.json",
+            ]
+        )
+    try:
+        existing_mtimes = [path.stat().st_mtime for path in candidate_paths if path.exists()]
+        if existing_mtimes:
+            return max(existing_mtimes)
+    except OSError:
+        return 0.0
+    return 0.0
+
+
+def graph_state_item_session_dir(item: dict[str, Any]) -> Path | None:
+    session_dir_value = str(item.get("session_dir") or "")
+    if session_dir_value:
+        return Path(session_dir_value)
+    source_path = str(item.get("source_path") or "")
+    if not source_path:
+        return None
+    source = Path(source_path)
+    if source.parent.name == "segments":
+        return source.parent.parent
+    if source.name in {SESSION_INDEX_JSON, SESSION_INDEX_MARKDOWN, "session.manifest.json"}:
+        return source.parent
+    return None
+
+
+def graph_path_is_codex_live_transcript(path: Path) -> bool:
+    return path_is_codex_live_transcript(path)
+
+
+def graph_state_item_live_transcript_mtime(item: dict[str, Any]) -> tuple[float, str]:
+    session_dir = graph_state_item_session_dir(item)
+    if session_dir is None:
+        return 0.0, ""
+    candidates: list[str] = []
+    raw_source = read_json(session_dir / "raw" / RAW_SOURCE_JSON, {})
+    if isinstance(raw_source, dict):
+        candidates.extend(
+            str(raw_source.get(key) or "")
+            for key in ("source_path", "transcript_path")
+            if raw_source.get(key)
+        )
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if isinstance(manifest, dict):
+        source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        candidates.extend(
+            str(value or "")
+            for value in (
+                source.get("transcript_path"),
+                raw.get("source_path"),
+            )
+            if value
+        )
+    for value in candidates:
+        path = Path(value).expanduser()
+        if not graph_path_is_codex_live_transcript(path):
+            continue
+        try:
+            return path.stat().st_mtime, str(path)
+        except OSError:
+            continue
+    return 0.0, ""
+
+
+def graph_recent_live_source_summary(
+    items: Iterable[dict[str, Any]],
+    *,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+    now_ts: float | None = None,
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - max(0.0, float(quiet_seconds))
+    deferred: list[dict[str, Any]] = []
+    actionable_count = 0
+    total = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        total += 1
+        mtime = graph_state_item_source_mtime(item)
+        live_transcript_mtime, live_transcript_path = graph_state_item_live_transcript_mtime(item)
+        if mtime > threshold and live_transcript_mtime > threshold:
+            if len(deferred) < max(0, sample_limit):
+                deferred.append(
+                    {
+                        "source_key": item.get("source_key"),
+                        "session_id": item.get("session_id"),
+                        "session_label": item.get("session_label"),
+                        "source_path": item.get("source_path"),
+                        "source_mtime": mtime,
+                        "live_transcript_path": live_transcript_path,
+                        "live_transcript_mtime": live_transcript_mtime,
+                        "age_seconds": max(0.0, now_value - mtime),
+                    }
+                )
+            continue
+        actionable_count += 1
+    deferred_count = total - actionable_count
+    return {
+        "quiet_seconds": quiet_seconds,
+        "now_ts": now_value,
+        "threshold_mtime": threshold,
+        "source_count": total,
+        "deferred_live_source_count": deferred_count,
+        "actionable_source_count": actionable_count,
+        "deferred_live_sources_sample": deferred,
+    }
+
+
+def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    hot_state = graph_hot_state if isinstance(graph_hot_state, dict) else graph_store_hot_state(aoa_root)
+    ledger = hot_state.get("ledger") if isinstance(hot_state.get("ledger"), dict) else {}
+    queue = hot_state.get("queue") if isinstance(hot_state.get("queue"), dict) else {}
+    status_counts = ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
+    reason_group_counts: dict[str, int] = {}
+    ledger_actionable_count = graph_actionable_source_count_from_counts(status_counts)
+    queued_count = int_value(queue.get("queued_count"))
+    if ledger_actionable_count and not queued_count:
+        reason_group_counts["ledger_actionable_sources_not_queued"] = ledger_actionable_count
+    recommendation = graph_source_maintenance_recommendation(
+        source_count=int_value(ledger.get("source_count")),
+        dirty_count=int_value(status_counts.get("dirty")),
+        missing_count=int_value(status_counts.get("missing")),
+        orphaned_count=int_value(status_counts.get("orphaned")),
+        blocked_count=int_value(status_counts.get("blocked")),
+        reason_group_counts=reason_group_counts,
+        workspace_root=str(aoa_root.parent),
+        aoa_root=str(aoa_root),
+    )
+    return {
+        "source_count": int_value(ledger.get("source_count")),
+        "existing_source_count": int_value(hot_state.get("source_count")),
+        "status_counts": dict(status_counts),
+        "dirty_count": int_value(status_counts.get("dirty")),
+        "missing_count": int_value(status_counts.get("missing")),
+        "blocked_count": int_value(status_counts.get("blocked")),
+        "retired_count": graph_retired_source_count_from_counts(status_counts),
+        "partial_evidence_count": graph_partial_evidence_count_from_counts(status_counts),
+        "orphaned_count": int_value(status_counts.get("orphaned")),
+        "queued_count": queued_count,
+        "reason_group_counts": reason_group_counts,
+        "reason_examples": {},
+        "maintenance_recommendation": recommendation,
+        "truth_status": "hot_gate_ledger_queue_summary_no_source_scan",
+    }
+
+
+def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
+    paths = graph_paths(aoa_root)
+    if not paths["store"].exists():
+        return {
+            "status": "missing",
+            "needs_maintenance": True,
+            "needs_full_rebuild": False,
+            "db_path": str(paths["store"]),
+            "truth_status": "hot_gate_store_missing",
+            "diagnostics": ["graph_store_missing"],
+        }
+    diagnostics: list[str] = []
+    metadata: dict[str, Any] = {}
+    counts: dict[str, Any] = {}
+    try:
+        store = GraphSqliteStore(aoa_root)
+        metadata = store.metadata()
+        counts = {"source_count": store.source_count()}
+        store.close()
+    except sqlite3.Error as exc:
+        return {
+            "status": "sqlite_error",
+            "needs_maintenance": False,
+            "needs_full_rebuild": True,
+            "db_path": str(paths["store"]),
+            "truth_status": "hot_gate_store_sqlite_error",
+            "diagnostics": [f"graph_store_sqlite_error:{exc}"],
+        }
+    ledger_exists = paths["source_state_ledger"].exists()
+    queue_exists = paths["maintenance_queue"].exists()
+    ledger = read_graph_source_state_ledger(aoa_root)
+    queue_payload = read_graph_maintenance_queue(aoa_root)
+    ledger_sources = ledger.get("sources") if isinstance(ledger.get("sources"), dict) else {}
+    queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
+    ledger_status_counts = Counter(
+        str(item.get("status") or "unknown")
+        for item in ledger_sources.values()
+        if isinstance(item, dict)
+    )
+    retired_count = graph_retired_source_count_from_counts(ledger_status_counts)
+    ledger_actionable_items = [
+        item
+        for item in ledger_sources.values()
+        if isinstance(item, dict) and str(item.get("status") or "") in GRAPH_ACTIONABLE_SOURCE_STATUSES
+    ]
+    queue_live_summary = graph_recent_live_source_summary(queue_items.values())
+    ledger_live_summary = graph_recent_live_source_summary(ledger_actionable_items)
+    queued_actionable_count = int_value(queue_live_summary.get("actionable_source_count"))
+    ledger_actionable_count = int_value(ledger_live_summary.get("actionable_source_count"))
+    deferred_live_source_count = int_value(queue_live_summary.get("deferred_live_source_count")) + int_value(ledger_live_summary.get("deferred_live_source_count"))
+    queued_count = len(queue_items)
+    if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
+        diagnostics.append("graph_store_schema_mismatch")
+    if int_value(metadata.get("graph_schema_version")) != GRAPH_SCHEMA_VERSION:
+        diagnostics.append("graph_schema_mismatch")
+    if ledger_actionable_count and not queued_count:
+        diagnostics.append("maintenance_queue_empty_but_ledger_actionable_sources_present")
+    if queued_actionable_count or ledger_actionable_count:
+        status = "dirty"
+    elif queued_count or deferred_live_source_count:
+        status = "current_with_deferred_live_sources"
+    elif retired_count:
+        status = "current_with_retired_sources"
+    elif ledger_exists and queue_exists:
+        status = "current"
+    else:
+        status = "current_hot_unverified"
+    return {
+        "status": status if not diagnostics else "stale",
+        "needs_maintenance": bool(queued_actionable_count or ledger_actionable_count),
+        "needs_full_rebuild": any(item in diagnostics for item in {"graph_store_schema_mismatch", "graph_schema_mismatch"}),
+        "db_path": str(paths["store"]),
+        "db_mtime": path_mtime(paths["store"]),
+        "metadata": metadata,
+        **counts,
+        "truth_status": "hot_gate_ledger_queue_summary_no_source_scan",
+        "ledger": {
+            "path": str(paths["source_state_ledger"]),
+            "exists": ledger_exists,
+            "source_count": len(ledger_sources),
+            "status_counts": dict(ledger_status_counts),
+            "retired_count": retired_count,
+            "actionable_count": ledger_actionable_count,
+            "deferred_live_source_count": int_value(ledger_live_summary.get("deferred_live_source_count")),
+        },
+        "queue": {
+            "path": str(paths["maintenance_queue"]),
+            "exists": queue_exists,
+            "queued_count": queued_count,
+            "actionable_count": queued_actionable_count,
+            "deferred_live_source_count": int_value(queue_live_summary.get("deferred_live_source_count")),
+            "deferred_live_sources_sample": queue_live_summary.get("deferred_live_sources_sample", []),
+            "source_keys_sample": sorted(str(key) for key in queue_items)[:40],
+        },
+        "deep_audit_recommended": not (ledger_exists and queue_exists),
+        "diagnostics": diagnostics,
+    }
 
 
 def graph_freshness_gates_markdown(payload: dict[str, Any]) -> str:
@@ -32077,17 +33528,90 @@ def command_graph_freshness_gates(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
-    payload = graph_freshness_gates(
+    if getattr(args, "mode", "deep") == "hot":
+        payload = route_cache_freshness_gates(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            write_report=args.write_report,
+        )
+    else:
+        payload = graph_freshness_gates(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            ref_sample_limit=args.ref_sample_limit,
+            stable_quiet_seconds=args.quiet_seconds if args.stable else None,
+            write_report=args.write_report,
+        )
+    stdout_payload = payload if args.full else compact_freshness_stdout_payload(payload)
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def compact_freshness_stdout_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = {key: value for key, value in payload.items() if key not in {"route_drift"}}
+    graph_store = compact.get("graph_store") if isinstance(compact.get("graph_store"), dict) else {}
+    if graph_store:
+        compact_graph_store = dict(graph_store)
+        source_state = compact_graph_store.get("source_state") if isinstance(compact_graph_store.get("source_state"), dict) else {}
+        if source_state:
+            compact_graph_store["source_state"] = {
+                key: source_state.get(key)
+                for key in (
+                    "source_count",
+                    "existing_source_count",
+                    "status_counts",
+                    "dirty_count",
+                    "missing_count",
+                    "blocked_count",
+                    "retired_count",
+                    "partial_evidence_count",
+                    "orphaned_count",
+                    "reason_group_counts",
+                    "reason_examples",
+                    "maintenance_recommendation",
+                )
+            }
+        compact["graph_store"] = compact_graph_store
+    compact_gates: list[dict[str, Any]] = []
+    for gate in compact.get("gates", []) if isinstance(compact.get("gates"), list) else []:
+        if not isinstance(gate, dict):
+            continue
+        state = gate.get("state") if isinstance(gate.get("state"), dict) else {}
+        compact_state: dict[str, Any] = {}
+        for key in ("status", "needed", "route_drift_count", "atlas_status"):
+            if key in state:
+                compact_state[key] = state.get(key)
+        if gate.get("name") == "graph_store_current" and isinstance(state, dict):
+            compact_state["source_state"] = (
+                compact.get("graph_store", {}).get("source_state")
+                if isinstance(compact.get("graph_store"), dict)
+                else {}
+            )
+        compact_gates.append({"name": gate.get("name"), "ok": gate.get("ok"), "state": compact_state})
+    if compact_gates:
+        compact["gates"] = compact_gates
+    return compact
+
+
+def command_raw_unavailable_recovery_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = raw_unavailable_recovery_audit(
         aoa_root=root,
         target=args.session,
-        since=since,
-        until=args.until,
-        limit=args.limit,
-        ref_sample_limit=args.ref_sample_limit,
-        stable_quiet_seconds=args.quiet_seconds if args.stable else None,
+        scan_logs=args.scan_logs,
         write_report=args.write_report,
+        write_ledger=args.write_ledger,
+        extra_codex_session_root=[Path(item).expanduser() for item in args.codex_session_root or []],
+        extra_aoa_vault_root=[Path(item).expanduser() for item in args.aoa_vault_root or []],
     )
-    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"route_drift"}}
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"results"}}
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -33232,12 +34756,108 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             plan_refresh_costs=getattr(args, "plan_refresh_costs", False),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
+            use_queue=getattr(args, "use_queue", False),
+            write_queue=getattr(args, "write_queue", False),
+            write_ledger=getattr(args, "write_ledger", False),
             reason="operator_requested",
         )
 
-    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply or args.export_sidecar else run_maintenance()
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply or args.export_sidecar or args.write_queue or args.write_ledger else run_maintenance()
+    stdout_payload = payload if getattr(args, "full", False) else compact_graph_maintenance_stdout_payload(payload)
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
+
+
+def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "schema_version",
+        "artifact_type",
+        "generated_at",
+        "ok",
+        "mutates",
+        "apply",
+        "use_queue",
+        "write_queue",
+        "write_ledger",
+        "target",
+        "batch_limit",
+        "refresh_chunk_size",
+        "max_refresh_nodes",
+        "max_refresh_edges",
+        "budget_seconds",
+        "elapsed_ms",
+        "budget_exhausted",
+        "state_window",
+        "selected_count",
+        "pre_actionable_count",
+        "post_actionable_count",
+        "remaining_count",
+        "pre_remaining_count",
+        "post_remaining_count",
+        "budget_deferred_source_count",
+        "oversized_source_count",
+        "batch_deferred_source_count",
+        "time_budget_deferred_source_count",
+        "mutation_rolled_back",
+        "maintenance_lock_path",
+        "queue_update",
+        "ledger_update",
+        "report_json",
+        "report_markdown",
+        "diagnostics",
+        "next_route",
+    }
+    compact = {key: payload.get(key) for key in keep_keys if key in payload}
+    source_state = payload.get("source_state") if isinstance(payload.get("source_state"), dict) else {}
+    if source_state:
+        compact["source_state"] = {
+            key: source_state.get(key)
+            for key in (
+                "source_count",
+                "existing_source_count",
+                "status_counts",
+                "dirty_count",
+                "missing_count",
+                "blocked_count",
+                "retired_count",
+                "partial_evidence_count",
+                "orphaned_count",
+                "reason_group_counts",
+                "reason_examples",
+                "maintenance_recommendation",
+            )
+        }
+    detail = payload.get("maintenance_detail") if isinstance(payload.get("maintenance_detail"), dict) else {}
+    if detail:
+        compact["maintenance_detail"] = {
+            key: detail.get(key)
+            for key in (
+                "selection_strategy",
+                "use_queue",
+                "queue_selected_source_count",
+                "matched_source_key_count",
+                "matched_source_key_sample",
+                "candidate_pool_count",
+                "selected_sources",
+                "selected_planned_refresh_node_count",
+                "selected_planned_refresh_edge_count",
+                "replaced_refreshed_node_count",
+                "replaced_refreshed_edge_count",
+                "budget_deferred_source_count",
+                "oversized_source_count",
+                "batch_deferred_source_count",
+                "time_budget_deferred_source_count",
+            )
+            if key in detail
+        }
+    selected = payload.get("selected") if isinstance(payload.get("selected"), list) else []
+    if selected:
+        compact["selected_source_keys"] = [
+            str(item.get("source_key") or "")
+            for item in selected[:40]
+            if isinstance(item, dict) and item.get("source_key")
+        ]
+    return compact
 
 
 def command_graph_prune_sidecar(args: argparse.Namespace) -> int:
@@ -35988,11 +37608,7 @@ def raw_compaction_stats(raw_path: Path) -> dict[str, Any]:
                     payload = loaded.get("payload")
                     if isinstance(payload, dict):
                         payload_type = str(payload.get("type") or "")
-                    boundary = (
-                        source_type == "compacted"
-                        or payload_has_compaction_boundary(payload)
-                        or (source_type == "event_msg" and payload_type == "context_compacted")
-                    )
+                    boundary = source_type == "compacted" or payload_has_compaction_boundary(payload)
             except json.JSONDecodeError:
                 pass
             if source_type == "compacted":
@@ -36106,6 +37722,7 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
             {
                 "session_id": manifest.get("session_id"),
                 "session_label": manifest.get("session_label"),
+                "session_dir": str(session_dir),
                 "archive_status": manifest.get("archive_status"),
                 "raw_exists": raw_exists,
                 "compaction_boundary_count": boundary_count,
@@ -36120,6 +37737,48 @@ def archive_compaction_audit(aoa_root: Path) -> list[dict[str, Any]]:
             }
         )
     return audits
+
+
+def archive_compaction_recent_live_summary(
+    mismatches: list[dict[str, Any]],
+    *,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - max(0.0, float(quiet_seconds))
+    deferred: list[dict[str, Any]] = []
+    actionable: list[dict[str, Any]] = []
+    for item in mismatches:
+        session_dir_text = str(item.get("session_dir") or "")
+        session_dir = Path(session_dir_text) if session_dir_text else Path()
+        live_transcript = session_live_transcript_path(session_dir) if session_dir_text else None
+        live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
+        if live_transcript is not None and live_mtime > threshold:
+            deferred.append(
+                {
+                    "session_id": item.get("session_id"),
+                    "session_label": item.get("session_label"),
+                    "session_dir": session_dir_text,
+                    "expected_segment_count": item.get("expected_segment_count"),
+                    "actual_segment_count": item.get("actual_segment_count"),
+                    "live_transcript_path": str(live_transcript),
+                    "live_transcript_mtime": live_mtime,
+                    "age_seconds": max(0.0, now_value - live_mtime),
+                    "quiet_seconds": quiet_seconds,
+                    "reasons": ["recent_live_codex_transcript_not_yet_resegmented"],
+                }
+            )
+            continue
+        actionable.append(item)
+    return {
+        "quiet_seconds": quiet_seconds,
+        "mismatch_count": len(mismatches),
+        "deferred_live_mismatch_count": len(deferred),
+        "actionable_mismatch_count": len(actionable),
+        "deferred_live_mismatches": deferred,
+        "actionable_mismatches": actionable,
+    }
 
 
 def completion_audit(
@@ -36148,7 +37807,13 @@ def completion_audit(
         item for item in compaction_archives if item.get("archive_status") == "raw_mirrored_index_deferred"
     ]
     real_compaction_archives = [item for item in compaction_archives if int(item.get("compaction_boundary_count", 0) or 0) > 0]
-    segment_mismatches = [item for item in indexed_archives if not item.get("matches_expected_segments")]
+    segment_mismatch_candidates = [item for item in indexed_archives if not item.get("matches_expected_segments")]
+    segment_live_defer_summary = archive_compaction_recent_live_summary(segment_mismatch_candidates)
+    segment_mismatches = (
+        segment_live_defer_summary.get("actionable_mismatches")
+        if isinstance(segment_live_defer_summary.get("actionable_mismatches"), list)
+        else segment_mismatch_candidates
+    )
     segments_match = bool(indexed_archives) and not segment_mismatches
     raw_preserved = bool(indexed_archives) and all(item.get("raw_exists") for item in indexed_archives)
     live_prepost_seen = hook_counts.get("PreCompact", 0) > 0 and hook_counts.get("PostCompact", 0) > 0
@@ -36192,14 +37857,11 @@ def completion_audit(
         if not portable_bundle
         else "Portable bundle has clean runtime topology without bundled segment drift"
     )
-    if portable_bundle:
-        raw_status = "covered" if portable_clean_runtime else "missing"
-        real_compaction_status = "covered" if portable_clean_runtime else "missing"
-        segment_status = "covered" if portable_clean_runtime else "missing"
-    else:
-        raw_status = "covered" if raw_preserved else "missing"
-        real_compaction_status = "covered" if real_compaction_archives else "missing"
-        segment_status = "covered" if segments_match else "missing"
+    raw_status = "covered" if raw_preserved or (portable_bundle and portable_clean_runtime) else "missing"
+    real_compaction_status = (
+        "covered" if real_compaction_archives or (portable_bundle and portable_clean_runtime) else "missing"
+    )
+    segment_status = "covered" if segments_match or (portable_bundle and portable_clean_runtime) else "missing"
     provider_status_ok = (
         bool(provider_config_exists and provider_status.get("ok"))
         if not portable_bundle
@@ -36285,6 +37947,7 @@ def completion_audit(
             {
                 "indexed_archive_count": len(indexed_archives),
                 "mismatch_count": len(segment_mismatches),
+                "live_deferred_mismatch_count": segment_live_defer_summary.get("deferred_live_mismatch_count"),
                 "mismatches": [
                     {
                         "session_label": item["session_label"],
@@ -36310,6 +37973,7 @@ def completion_audit(
                     }
                     for item in deferred_archives
                 ],
+                "live_deferred_mismatches": segment_live_defer_summary.get("deferred_live_mismatches", [])[:20],
                 "portable_bundle": portable_bundle,
                 "portable_clean_runtime": portable_clean_runtime,
             },
@@ -37466,8 +39130,28 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--plan-refresh-costs", action="store_true", help="In dry-run mode, compute exact old-plus-new aggregate refresh costs for the candidate pool without mutating the graph store.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
+    graph_maintenance_parser.add_argument("--use-queue", action="store_true", help="Use graph/maintenance-queue.json as a bounded source-key selector before scanning the full source graph.")
+    graph_maintenance_parser.add_argument("--write-queue", action="store_true", help="Refresh graph/maintenance-queue.json from the current source-state window.")
+    graph_maintenance_parser.add_argument("--write-ledger", action="store_true", help="Refresh graph/source-state-ledger.json checked/clean/dirty timestamps from the current source-state window.")
     graph_maintenance_parser.add_argument("--write-report", action="store_true", help="Write graph maintenance reports under .aoa/diagnostics.")
+    graph_maintenance_parser.add_argument("--full", action="store_true", help="Print selected sources, results, and detailed maintenance plans. Default prints a compact summary.")
     graph_maintenance_parser.set_defaults(func=command_graph_maintenance)
+
+    raw_recovery_parser = sub.add_parser(
+        "raw-unavailable-recovery-audit",
+        aliases=["graph-source-recovery-audit"],
+        help="Classify raw_unavailable graph sources against raw, vault, hook, and optional log evidence.",
+    )
+    raw_recovery_parser.add_argument("session", nargs="?", default="all", help="Session id/label/title or all.")
+    raw_recovery_parser.add_argument("--workspace-root")
+    raw_recovery_parser.add_argument("--aoa-root")
+    raw_recovery_parser.add_argument("--codex-session-root", action="append", help="Additional Codex transcript root to scan for matching JSONL files.")
+    raw_recovery_parser.add_argument("--aoa-vault-root", action="append", help="Additional .aoa sessions vault root to scan for matching session manifests.")
+    raw_recovery_parser.add_argument("--scan-logs", action="store_true", help="Use ripgrep to scan configured large logs for session ids. Slower; intended for deep audit.")
+    raw_recovery_parser.add_argument("--write-ledger", action="store_true", help="Record classifications in graph/source-state-ledger.json without deleting evidence.")
+    raw_recovery_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown recovery audit reports under .aoa/diagnostics.")
+    raw_recovery_parser.add_argument("--full", action="store_true", help="Print all per-source rows and evidence refs.")
+    raw_recovery_parser.set_defaults(func=command_raw_unavailable_recovery_audit)
 
     graph_prune_sidecar_parser = sub.add_parser(
         "graph-prune-sidecar",
@@ -37628,6 +39312,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_freshness_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     graph_freshness_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     graph_freshness_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    graph_freshness_parser.add_argument("--mode", choices=["deep", "hot"], default="deep", help="hot checks route cache plus graph ledger/queue; deep scans graph sources.")
     graph_freshness_parser.add_argument("--ref-sample-limit", type=int, default=200)
     graph_freshness_parser.add_argument("--stable", action="store_true", help="Check only sessions quiet for --quiet-seconds and report recent live writes as deferred.")
     graph_freshness_parser.add_argument("--quiet-seconds", type=float, default=120.0, help="Minimum source quiet period used by --stable.")

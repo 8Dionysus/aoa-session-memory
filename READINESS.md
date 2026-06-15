@@ -477,6 +477,33 @@ Last observed result:
   real `index-maintenance --repair-limit 2 --skip-graph-repair`; read routes
   stayed `ok=true`. Source and standalone bundle passed py_compile, `135`
   pytest tests, `validate`, and portable audit.
+- 2026-06-15 raw-unavailable retirement and hot/deep proof: the historical
+  `63` `raw_unavailable` / `missing_graph_source_path` graph sources were
+  audited against live `.aoa`, Codex sessions, `/abyss` vault roots, hooks, and
+  logs. The recovery report classified `48` as `memory_writer`, `14` as
+  `title_helper`, and `1` as `hook_partial`; all `63` now have explicit
+  retired/tombstoned ledger state instead of actionable blocked backlog.
+  Latest stable graph freshness report
+  `diagnostics/20260615T165551Z__graph-freshness-gates.json` returned
+  `ok=true`, `checked_count=265`, `deferred_live_session_count=8`,
+  search/atlas `current`, graph `current_with_retired_sources`, refs alive,
+  and graph source state `dirty=0`, `missing=0`, `blocked=0`,
+  `retired=63`. The hot route-cache gate
+  `diagnostics/20260615T165124Z__route-cache-freshness-gates.json` returned
+  `ok=true` with `truth_status=hot_route_cache_cached_state_no_source_scan`;
+  queue-empty `graph-maintenance --use-queue` returned `mutates=false` and
+  `selection_strategy=queue_empty_no_source_scan`.
+- 2026-06-15 live-deferred provider/MCP proof: `search-provider-status` now
+  separates actionable projection drift from active Codex transcript churn. A
+  live install can report `ready_with_deferred_live_updates` /
+  `current_with_deferred_live_updates` with `actionable_dirty_session_count=0`
+  while keeping dirty/deferred session samples visible. Completion `audit`
+  passed with provider covered, `actionable=0`, and `deferred=6`; segment
+  topology mismatches from a fresh live transcript are deferred as
+  `recent_live_codex_transcript_not_yet_resegmented` instead of being treated
+  as stable corruption. Source-local MCP smokes: default status `0.06s`,
+  include-live status `19.89s`, entity inventory `1.43s`, graph neighborhood
+  `1.53s`, GraphRAG packet `4.92s`, usage audit `27.95s`.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite
