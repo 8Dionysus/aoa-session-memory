@@ -7276,7 +7276,6 @@ def mirror_transcript_without_indexing(
         legacy_raw_source.unlink()
 
     hooks_seen = sorted(set(existing.get("hooks_seen", [])) | {hook_event_name})
-    segments = existing.get("segments", []) if isinstance(existing.get("segments"), list) else []
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -7300,8 +7299,8 @@ def mirror_transcript_without_indexing(
             "copied_at": now,
             "indexing_status": "deferred_from_hook",
         },
-        "segments": segments,
-        "latest_event_count": existing.get("latest_event_count", 0),
+        "segments": [],
+        "latest_event_count": 0,
     }
     if isinstance(existing.get("semantic_names"), dict):
         manifest["semantic_names"] = existing["semantic_names"]
