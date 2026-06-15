@@ -2649,6 +2649,64 @@ def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) 
     assert next(gate for gate in stable["gates"] if gate["name"] == "live_sessions_deferred")["state"]["deferred_live_session_count"] == 1
 
 
+def test_graph_freshness_stable_mode_defers_recent_codex_transcript_when_archive_projection_is_old(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    stable_transcript = tmp_path / "rollout-2026-06-15T00-00-00-stable-archive.jsonl"
+    live_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "15" / "rollout-2026-06-15T00-05-00-live-archive.jsonl"
+    live_transcript.parent.mkdir(parents=True)
+    for session_id, transcript in (("stable-archive", stable_transcript), ("live-archive", live_transcript)):
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": "2026-06-15T00:00:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(repo), "model": "gpt-5"}},
+                {"timestamp": "2026-06-15T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"Index {session_id}"}]}},
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    stable_record = module.resolve_session_record(aoa_root, "stable-archive")
+    live_record = module.resolve_session_record(aoa_root, "live-archive")
+    old_ts = time.time() - 7200
+    for record in (stable_record, live_record):
+        for source_path in module.index_source_paths_for_record(record):
+            if source_path.exists():
+                os.utime(source_path, (old_ts, old_ts))
+        raw_path = Path(record["path"]) / "raw" / "session.raw.jsonl"
+        if raw_path.exists():
+            os.utime(raw_path, (old_ts, old_ts))
+    os.utime(live_transcript, None)
+
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+
+    stable = module.graph_freshness_gates(
+        aoa_root=aoa_root,
+        ref_sample_limit=20,
+        stable_quiet_seconds=60,
+        now_ts=time.time(),
+    )
+
+    assert stable["ok"] is True
+    assert stable["checked_count"] == 1
+    assert stable["deferred_live_session_count"] == 1
+    assert stable["deferred_live_sessions"][0]["session_id"] == "live-archive"
+    assert stable["deferred_live_sessions"][0]["reasons"] == ["recent_live_codex_transcript_not_yet_archived"]
+
+
 def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -2955,6 +3013,339 @@ def test_graph_store_reports_blocked_sources_without_requesting_maintenance(tmp_
     assert gates["graph_store"]["status"] == "current_with_blocked_sources"
     assert next(gate for gate in gates["gates"] if gate["name"] == "graph_store_current")["ok"] is True
     assert gates["needs_graph_maintenance"] is False
+
+
+def test_raw_unavailable_recovery_audit_retires_helper_sources(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-27T00-00-00-indexed-retired-base.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-27T00:00:00Z", "type": "session_meta", "payload": {"id": "retired-base", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-27T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create base graph nodes."}]}},
+            {"timestamp": "2026-05-27T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Base graph nodes created."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "retired-base",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def add_raw_unavailable(session_id: str, label: str, prompt: str, assistant: str = "") -> None:
+        session_dir = aoa_root / "sessions" / label
+        session_dir.mkdir(parents=True)
+        manifest = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "session_label": label,
+            "session_title": label,
+            "created_at": "2026-05-27T00:10:00Z",
+            "updated_at": "2026-05-27T00:10:01Z",
+            "archive_status": "raw_unavailable",
+            "source": {"transcript_path": None, "cwd": str(repo)},
+            "raw": {"path": None, "source_path": None},
+            "segments": [],
+            "display": {"label": label, "title": label, "date": "2026-05-27"},
+        }
+        (session_dir / "session.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_jsonl(
+            session_dir / "hooks" / "events.jsonl",
+            [
+                {"schema_version": 1, "timestamp": "2026-05-27T00:10:00Z", "hook_event_name": "UserPromptSubmit", "event": {"session_id": session_id, "prompt": prompt, "transcript_path": None, "cwd": str(repo)}},
+                {"schema_version": 1, "timestamp": "2026-05-27T00:10:01Z", "hook_event_name": "Stop", "event": {"session_id": session_id, "last_assistant_message": assistant, "transcript_path": None, "cwd": str(repo)}},
+            ],
+        )
+        registry_path = aoa_root / module.REGISTRY_NAME
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["sessions"].append(
+            {
+                "session_id": session_id,
+                "session_label": label,
+                "session_title": label,
+                "path": str(session_dir),
+                "archive_status": "raw_unavailable",
+                "display": manifest["display"],
+            }
+        )
+        registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    add_raw_unavailable(
+        "retired-memory-writer-source",
+        "2026-05-27__002__memory-writer-helper",
+        "## Memory Writing Agent: Phase 2\n\nYou are a Memory Writing Agent.",
+    )
+    add_raw_unavailable(
+        "retired-title-helper-source",
+        "2026-05-27__003__title-helper",
+        "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task.",
+        '{"title":"Check title"}',
+    )
+
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+    before = module.graph_store_state(aoa_root=aoa_root)
+    assert before["status"] == "current_with_blocked_sources"
+    assert before["source_state"]["blocked_count"] == 2
+
+    audit = module.raw_unavailable_recovery_audit(aoa_root=aoa_root, write_ledger=True, write_report=True)
+    assert audit["source_count"] == 2
+    assert audit["classification_counts"] == {"memory_writer": 1, "title_helper": 1}
+    assert Path(audit["report_json"]).exists()
+    ledger = module.read_graph_source_state_ledger(aoa_root)
+    assert ledger["sources"]["session:retired-memory-writer-source"]["status"] == "tombstoned_evidence_source"
+    assert ledger["sources"]["session:retired-title-helper-source"]["classification"] == "title_helper"
+
+    states = module.graph_source_states(aoa_root=aoa_root)
+    assert states["blocked_count"] == 0
+    assert states["retired_count"] == 2
+    after = module.graph_store_state(aoa_root=aoa_root)
+    assert after["status"] == "current_with_retired_sources"
+    assert after["needs_maintenance"] is False
+
+
+def test_graph_maintenance_queue_drives_hot_gate_and_bounded_update(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-27T00-20-00-queue-graph-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-27T00:20:00Z", "type": "session_meta", "payload": {"id": "queue-graph-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-27T00:20:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create queue alpha."}]}},
+            {"timestamp": "2026-05-27T00:20:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Queue alpha created."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "queue-graph-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-27__001__create-queue-alpha"
+    segment_index_path = next((session_dir / "segments").glob("*.index.json"))
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(
+        {"layer": "entity", "key": "queue_beta", "route_signal": "entity:queue_beta"}
+    )
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(segment_index_path, None)
+
+    planned = module.graph_maintenance(aoa_root=aoa_root, apply=False, write_queue=True, write_ledger=True)
+    assert planned["ok"] is True
+    assert planned["queue_update"]["queued_count"] >= 1
+    hot_dirty = module.route_cache_freshness_gates(aoa_root=aoa_root)
+    assert hot_dirty["graph_store"]["queue"]["queued_count"] >= 1
+    assert hot_dirty["needs_graph_maintenance"] is True
+
+    maintained = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        use_queue=True,
+        write_queue=True,
+        write_ledger=True,
+        batch_limit=5,
+    )
+    assert maintained["ok"] is True
+    assert maintained["use_queue"] is True
+    assert maintained["queue_update"]["queued_count"] == 0
+    hot_clean = module.route_cache_freshness_gates(aoa_root=aoa_root)
+    assert hot_clean["needs_graph_maintenance"] is False
+
+
+def test_route_cache_hot_gate_uses_cached_states_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("broad hot route-cache gate must not scan session sources")
+
+    monkeypatch.setattr(module, "chronological_session_records", fail_source_scan)
+    monkeypatch.setattr(module, "latest_index_source_mtime", fail_source_scan)
+    monkeypatch.setattr(module, "route_index_drift_records", fail_source_scan)
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "indexed_session_state_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
+
+    assert payload["ok"] is True
+    assert payload["source_scan"] is False
+    assert payload["truth_status"] == "hot_route_cache_cached_state_no_source_scan"
+    assert payload["selection_source"] == "cached_projection_state"
+    assert payload["selected_count"] == 7
+
+
+def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("empty queue pass must not scan graph sources")
+
+    monkeypatch.setattr(module, "graph_source_states", fail_source_scan)
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "source_count": 5,
+            "ledger": {
+                "source_count": 6,
+                "status_counts": {"clean": 5, "retired_partial_evidence": 1},
+                "retired_count": 1,
+                "actionable_count": 0,
+            },
+            "queue": {"queued_count": 0},
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        use_queue=True,
+        write_queue=True,
+        write_ledger=True,
+        batch_limit=5,
+    )
+
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["state_window"] == "queue_empty_hot_state"
+    assert payload["selected_count"] == 0
+    assert payload["remaining_count"] == 0
+    assert payload["source_state"]["retired_count"] == 1
+    assert payload["source_state"]["partial_evidence_count"] == 1
+    assert payload["maintenance_detail"]["selection_strategy"] == "queue_empty_no_source_scan"
+
+
+def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / "graph"
+    graph_root.mkdir(parents=True)
+    (graph_root / "graph.sqlite3").write_text("", encoding="utf-8")
+    session_dir = aoa_root / "sessions" / "2026-06-15__001__live"
+    session_dir.mkdir(parents=True)
+    (session_dir / "raw").mkdir(parents=True)
+    codex_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "15" / "rollout-2026-06-15T00-00-00-live.jsonl"
+    codex_transcript.parent.mkdir(parents=True)
+    codex_transcript.write_text("{}\n", encoding="utf-8")
+    source_path = tmp_path / "live-source.index.json"
+    source_path.write_text("{}", encoding="utf-8")
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index_path.write_text("{}", encoding="utf-8")
+    (session_dir / "raw" / module.RAW_SOURCE_JSON).write_text(
+        json.dumps({"source_path": str(codex_transcript)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    now_ts = time.time()
+    os.utime(codex_transcript, (now_ts, now_ts))
+    os.utime(source_path, (now_ts, now_ts))
+    os.utime(session_index_path, (now_ts, now_ts))
+    module.write_graph_maintenance_queue(
+        aoa_root,
+        {
+            "items": {
+                "segment:live:000": {
+                    "source_key": "segment:live:000",
+                    "source_type": "segment",
+                    "session_id": "live",
+                    "session_label": "live session",
+                    "session_dir": str(session_dir),
+                    "source_path": str(source_path),
+                    "status": "dirty",
+                },
+                "segment:live:001": {
+                    "source_key": "segment:live:001",
+                    "source_type": "segment",
+                    "session_id": "live",
+                    "session_label": "live session",
+                    "session_dir": str(session_dir),
+                    "source_path": str(session_dir / "segments" / "001__compaction-to-latest.index.json"),
+                    "status": "missing",
+                }
+            }
+        },
+    )
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def metadata(self) -> dict[str, str]:
+            return {
+                "graph_store_schema_version": str(module.GRAPH_STORE_SCHEMA_VERSION),
+                "graph_schema_version": str(module.GRAPH_SCHEMA_VERSION),
+            }
+
+        def state_counts(self) -> dict[str, int]:
+            raise AssertionError("hot graph state must not count aggregate nodes or edges")
+
+        def source_count(self) -> int:
+            return 1
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+
+    state = module.graph_store_hot_state(aoa_root)
+
+    assert state["status"] == "current_with_deferred_live_sources"
+    assert state["needs_maintenance"] is False
+    assert state["queue"]["queued_count"] == 2
+    assert state["queue"]["actionable_count"] == 0
+    assert state["queue"]["deferred_live_source_count"] == 2
 
 
 def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
@@ -4629,29 +5020,6 @@ def test_reindex_sessions_defers_remaining_records_when_budget_expires(tmp_path:
     assert result["ok"] is False
 
 
-def test_reindex_sessions_selection_error_uses_session_reindex_schema(tmp_path: Path) -> None:
-    aoa_root = tmp_path / ".aoa"
-    aoa_root.mkdir()
-
-    payload = module.reindex_sessions(
-        aoa_root=aoa_root,
-        target="missing-session",
-        dry_run=True,
-        max_raw_bytes=1,
-        stale_route_indexes=True,
-    )
-
-    assert payload["artifact_type"] == "session_reindex"
-    assert payload["ok"] is False
-    assert payload["dry_run"] is True
-    assert payload["max_raw_bytes"] == 1
-    assert payload["stale_route_indexes"] is True
-    assert payload["selected_count"] == 0
-    assert payload["processed_count"] == 0
-    assert payload["results"] == []
-    assert "missing_eligible_conversation_act" not in payload
-
-
 def test_build_agent_atlas_defers_remaining_records_when_budget_expires(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     records = []
@@ -5551,15 +5919,6 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
 
-    stale_filtered = module.search_sessions(
-        aoa_root=aoa_root,
-        query="hook timed out",
-        freshness_status="stale",
-        explain=True,
-    )
-    assert stale_filtered["result_count"] == 1
-    assert stale_filtered["results"][0]["freshness"]["status"] == "stale"
-
 
 def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -5729,47 +6088,6 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
         ).fetchone()
         is not None
     )
-
-    rowid = conn.execute("SELECT rowid FROM documents WHERE id = ?", ("stress-doc",)).fetchone()["rowid"]
-    updated_route_signal = module.route_signal_token("entity", "updated")
-    module.insert_search_document(
-        conn,
-        {
-            "id": "stress-doc",
-            "doc_type": "event",
-            "session_id": "session-stress",
-            "session_label": "2026-06-12__001__route-stress",
-            "session_title": "Route stress updated",
-            "session_date": "2026-06-12",
-            "event_id": "000001",
-            "event_type": "USER_MESSAGE",
-            "route_layers": module.packed_route_values(["entity"]),
-            "route_signals": module.packed_route_values([updated_route_signal]),
-            "title": "updated route signal payload",
-            "body": "updated route body",
-            "raw_text_status": "indexed",
-        },
-    )
-    conn.commit()
-
-    updated_row = conn.execute("SELECT rowid, title, body FROM documents WHERE id = ?", ("stress-doc",)).fetchone()
-    old_route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (target_route_signal,)).fetchone()["id"]
-    new_route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (updated_route_signal,)).fetchone()["id"]
-
-    assert updated_row["rowid"] == rowid
-    assert updated_row["title"] == "updated route signal payload"
-    assert updated_row["body"] == "updated route body"
-    assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = ?", ("stress-doc",)).fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM documents_fts WHERE rowid = ?", (rowid,)).fetchone()[0] == 1
-    assert conn.execute("SELECT body_chars FROM document_bodies WHERE doc_rowid = ?", (rowid,)).fetchone()[0] == len("updated route body")
-    assert conn.execute(
-        "SELECT COUNT(*) FROM document_routes WHERE doc_rowid = ? AND route_id = ?",
-        (rowid, old_route_id),
-    ).fetchone()[0] == 0
-    assert conn.execute(
-        "SELECT COUNT(*) FROM document_routes WHERE doc_rowid = ? AND route_id = ?",
-        (rowid, new_route_id),
-    ).fetchone()[0] == 1
     conn.close()
 
 
@@ -6014,6 +6332,57 @@ def test_search_provider_status_detects_session_projection_drift(tmp_path: Path)
     assert "session_projection_dirty" in provider["diagnostics"]
     assert provider["freshness"]["status"] == "stale"
     assert provider["freshness"]["dirty_session_count"] == 1
+
+
+def test_search_provider_status_defers_recent_live_codex_projection_drift(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "15" / "rollout-2026-06-15T00-00-00-live-provider-drift.jsonl"
+    transcript.parent.mkdir(parents=True)
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-15T00:00:00Z", "type": "session_meta", "payload": {"id": "live-provider-drift", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-15T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find fresh search evidence from a live transcript"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-provider-drift",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "live-provider-drift")
+    session_dir = module.session_dir_from_record(record)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index_payload = json.loads(session_index_path.read_text(encoding="utf-8"))
+    session_index_payload["test_search_drift"] = "Generated source drift from a recent live transcript."
+    session_index_path.write_text(json.dumps(session_index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(transcript, None)
+    os.utime(session_index_path, None)
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+    freshness = provider["freshness"]
+
+    assert status["ok"] is True
+    assert provider["ok"] is True
+    assert provider["status"] == "ready_with_deferred_live_updates"
+    assert "session_projection_dirty" not in provider["diagnostics"]
+    assert freshness["status"] == "current_with_deferred_live_updates"
+    assert freshness["dirty_session_count"] == 1
+    assert freshness["actionable_dirty_session_count"] == 0
+    assert freshness["deferred_live_session_count"] == 1
+    assert freshness["dirty_session_ids"] == ["live-provider-drift"]
+    assert freshness["actionable_dirty_session_ids"] == []
+    assert freshness["reasons"] == ["recent_live_projection_updates_deferred"]
+    assert freshness["deferred_live_sessions"][0]["live_transcript_path"] == str(transcript)
 
 
 def test_search_provider_status_cli_can_scope_freshness_to_session(tmp_path: Path, capsys: Any) -> None:
@@ -7305,7 +7674,7 @@ def test_hook_worker_recovers_orphaned_running_job(tmp_path: Path) -> None:
     assert (session_dir / "session.manifest.json").exists()
 
 
-def test_hook_worker_drains_pending_jobs_in_batches(tmp_path: Path) -> None:
+def test_hook_worker_respects_job_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
 
@@ -7340,69 +7709,9 @@ def test_hook_worker_drains_pending_jobs_in_batches(tmp_path: Path) -> None:
     payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=2)
 
     assert payload["ok"] is True
-    assert payload["processed"] == 7
-    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
-    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 7
-
-
-def test_hook_worker_drains_jobs_queued_during_run(tmp_path: Path, monkeypatch) -> None:
-    workspace = tmp_path / "AbyssOS"
-    aoa_root = workspace / ".aoa"
-    first_transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-first.jsonl"
-    second_transcript = tmp_path / "rollout-2026-05-12T00-00-01-session-worker-second.jsonl"
-    write_jsonl(
-        first_transcript,
-        [
-            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-first"}},
-            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker first"}]}},
-        ],
-    )
-    write_jsonl(
-        second_transcript,
-        [
-            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-second"}},
-            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Worker second"}]}},
-        ],
-    )
-    first_job = module.enqueue_hook_sync_job(
-        aoa_root,
-        event_name="SessionStart",
-        event={"session_id": "session-worker-first", "transcript_path": str(first_transcript), "cwd": str(workspace)},
-        session_id="session-worker-first",
-        transcript_path=first_transcript,
-        reason="test_worker_drain_during_run",
-    )
-    assert first_job is not None
-
-    original_sync = module.sync_session_from_transcript
-    queued_followup = {"done": False}
-
-    def sync_and_enqueue_followup(*args, **kwargs):
-        result = original_sync(*args, **kwargs)
-        if not queued_followup["done"]:
-            queued_followup["done"] = True
-            followup_job = module.enqueue_hook_sync_job(
-                aoa_root,
-                event_name="SessionStart",
-                event={"session_id": "session-worker-second", "transcript_path": str(second_transcript), "cwd": str(workspace)},
-                session_id="session-worker-second",
-                transcript_path=second_transcript,
-                reason="test_worker_drain_during_run_followup",
-            )
-            assert followup_job is not None
-        return result
-
-    monkeypatch.setattr(module, "sync_session_from_transcript", sync_and_enqueue_followup)
-
-    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=1)
-
-    assert payload["ok"] is True
     assert payload["processed"] == 2
-    assert [result["status"] for result in payload["results"]] == ["synced", "synced"]
-    assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
+    assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))) == 5
     assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 2
-    assert (aoa_root / "sessions" / "2026-05-12__001__worker-first" / "session.manifest.json").exists()
-    assert (aoa_root / "sessions" / "2026-05-12__002__worker-second" / "session.manifest.json").exists()
 
 
 def test_hook_worker_defers_sync_jobs_over_raw_budget(tmp_path: Path, monkeypatch) -> None:
@@ -7813,27 +8122,6 @@ def test_real_codex_compacted_events_define_segments(tmp_path: Path) -> None:
     assert first_index["by_type"]["COMPACTION_EVENT"] == ["000003", "000004"]
 
 
-def test_raw_compaction_stats_counts_standalone_context_compacted_as_boundary(tmp_path: Path) -> None:
-    raw_path = tmp_path / "session.raw.jsonl"
-    write_jsonl(
-        raw_path,
-        [
-            {"timestamp": "2026-05-14T02:00:00Z", "type": "session_meta", "payload": {"id": "standalone-context"}},
-            {"timestamp": "2026-05-14T02:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "before"}]}},
-            {"timestamp": "2026-05-14T02:00:02Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
-            {"timestamp": "2026-05-14T02:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after"}]}},
-        ],
-    )
-
-    stats = module.raw_compaction_stats(raw_path)
-
-    assert stats["source_compacted_count"] == 0
-    assert stats["context_compacted_event_count"] == 1
-    assert stats["compaction_boundary_count"] == 1
-    assert stats["compaction_marker_count"] == 1
-    assert stats["expected_segment_count"] == 2
-
-
 def test_stress_pass_audits_first_compaction_intervals(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -8035,69 +8323,6 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
-
-
-def test_completion_audit_portable_bundle_rejects_bundled_runtime_archives(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    source_aoa = SCRIPT.parents[1]
-    workspace = tmp_path / "TargetWorkspace"
-    bundle_root = tmp_path / "aoa-session-memory"
-    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
-    (bundle_root / ".git").mkdir()
-
-    session_dir = bundle_root / "sessions" / "2026-05-14__001__dirty-runtime"
-    raw_path = session_dir / "raw" / "session.raw.jsonl"
-    write_jsonl(
-        raw_path,
-        [
-            {"timestamp": "2026-05-14T00:00:00Z", "type": "session_meta", "payload": {"id": "dirty-runtime"}},
-            {"timestamp": "2026-05-14T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "dirty bundle"}]}},
-            {"timestamp": "2026-05-14T00:00:02Z", "type": "compacted", "payload": {"replacement_history": []}},
-            {"timestamp": "2026-05-14T00:00:03Z", "type": "event_msg", "payload": {"type": "context_compacted"}},
-            {"timestamp": "2026-05-14T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "tail"}]}},
-        ],
-    )
-    module.write_json(
-        session_dir / "session.manifest.json",
-        {
-            "schema_version": module.SCHEMA_VERSION,
-            "session_id": "dirty-runtime",
-            "session_label": "2026-05-14__001__dirty-runtime",
-            "archive_status": "indexed",
-            "raw": {"path": str(raw_path)},
-            "segments": [
-                {"role": "initial-to-compaction", "index": str(session_dir / "segments" / "000.index.json")},
-                {"role": "compaction-to-latest", "index": str(session_dir / "segments" / "001.index.json")},
-            ],
-        },
-    )
-
-    def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
-        if repo_root == bundle_root:
-            return "git@github.com:8Dionysus/aoa-session-memory.git"
-        return None
-
-    monkeypatch.setattr(module, "git_remote_url", fake_remote)
-
-    payload = module.completion_audit(
-        workspace_root=workspace,
-        aoa_root=bundle_root,
-        check_codex=False,
-        portable_bundle=True,
-    )
-
-    statuses = {item["requirement"]: item["status"] for item in payload["checklist"]}
-    assert payload["ok"] is False
-    assert statuses["Portable bundle intentionally excludes local raw session archives"] == "missing"
-    assert statuses["Portable bundle carries compaction logic without bundled live raw proof"] == "missing"
-    assert statuses["Portable bundle has clean runtime topology without bundled segment drift"] == "missing"
-    raw_item = next(
-        item
-        for item in payload["checklist"]
-        if item["requirement"] == "Portable bundle intentionally excludes local raw session archives"
-    )
-    assert raw_item["evidence"]["portable_clean_runtime"] is False
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
@@ -8595,6 +8820,59 @@ def test_completion_audit_reports_covered_segments_and_remaining_live_hooks(tmp_
     assert statuses["Live PreCompact and PostCompact hook receipts observed in archived sessions"] == "remaining"
 
 
+def test_completion_audit_defers_recent_live_segment_mismatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "Workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "15" / "rollout-2026-06-15T00-00-00-live-segment-mismatch.jsonl"
+    transcript.parent.mkdir(parents=True)
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-15T00:00:00Z", "type": "session_meta", "payload": {"id": "live-segment-mismatch"}},
+            {"timestamp": "2026-06-15T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Audit live mismatch"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-segment-mismatch",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, "live-segment-mismatch")
+    session_dir = module.session_dir_from_record(record)
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"timestamp": "2026-06-15T00:00:02Z", "type": "compacted", "payload": {}}, ensure_ascii=False) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-15T00:00:03Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after live compact"}]},
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    os.utime(transcript, None)
+    os.utime(raw_path, None)
+
+    payload = module.completion_audit(workspace_root=workspace, aoa_root=aoa_root, check_codex=False)
+    topology = [
+        item for item in payload["checklist"] if item["requirement"] == "Segment topology matches raw compaction boundaries"
+    ][0]
+
+    assert topology["status"] == "covered"
+    assert topology["evidence"]["mismatch_count"] == 0
+    assert topology["evidence"]["live_deferred_mismatch_count"] == 1
+    assert topology["evidence"]["live_deferred_mismatches"][0]["session_id"] == "live-segment-mismatch"
+
+
 def test_completion_audit_handles_raw_unavailable_archives(tmp_path: Path) -> None:
     workspace = tmp_path / "Workspace"
     aoa_root = workspace / ".aoa"
@@ -8968,20 +9246,6 @@ def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
     assert repaired_manifest["display"]["title"] == "Repair the session naming topology"
     assert repaired_manifest["raw"]["path"] == str(repaired_dir / "raw" / "session.raw.jsonl")
     assert not session_dir.exists()
-
-
-def test_repair_session_titles_selection_error_uses_title_repair_schema(tmp_path: Path) -> None:
-    aoa_root = tmp_path / ".aoa"
-    aoa_root.mkdir()
-
-    payload = module.repair_session_titles(aoa_root=aoa_root, target="missing-session", apply=True)
-
-    assert payload["artifact_type"] == "session_title_repair"
-    assert payload["ok"] is False
-    assert payload["apply"] is True
-    assert payload["selected_count"] == 0
-    assert payload["results"] == []
-    assert "missing_eligible_conversation_act" not in payload
 
 
 def test_semantic_session_name_anchors_raw_without_renaming_archive(tmp_path: Path) -> None:

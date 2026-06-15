@@ -355,7 +355,10 @@ fresh enough for GraphRAG-style synthesis, and whether `index-maintenance`,
 `graph-maintenance`, sidecar export/prune, or offline `graph-build` is needed.
 During active writes, `--stable` reports `truth_status`, `checked_count`, and
 `deferred_live_sessions` so agents do not confuse a stable subset with a strict
-archive-wide gate.
+archive-wide gate. A fresh Codex transcript under
+`~/.codex/sessions/.../rollout-*.jsonl` is enough to defer a session even when
+the archive projection is older; that state means live-not-yet-archived, not
+stable corruption.
 `entity-dossier` builds a human card for one stable anchor with strong refs,
 weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
 questions, and a read-first route.
