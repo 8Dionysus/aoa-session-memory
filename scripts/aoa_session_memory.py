@@ -7643,10 +7643,9 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                 "results": [],
             }
         recovered_running = recover_orphaned_running_hook_jobs(dirs)
-        batch_limit = max(0, limit)
-        initial_pending_names = {path.name for path in dirs["pending"].glob("*.json")}
-        while batch_limit > 0:
-            pending_jobs = [path for path in sorted(dirs["pending"].glob("*.json")) if path.name in initial_pending_names][:batch_limit]
+        batch_size = max(0, limit)
+        while batch_size > 0:
+            pending_jobs = sorted(dirs["pending"].glob("*.json"))[:batch_size]
             if not pending_jobs:
                 break
             for job_path in pending_jobs:
@@ -7829,7 +7828,6 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                     )
                     running_path.unlink(missing_ok=True)
                     results.append({"job": str(job_path), "status": "failed", "error": f"{exc.__class__.__name__}: {exc}"})
-                batch_limit -= 1
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": all(result.get("status") != "failed" for result in results),
