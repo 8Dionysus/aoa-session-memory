@@ -6061,6 +6061,152 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert candidate_count > 200
 
 
+def test_freshness_filter_preserves_search_order_before_stored_hits(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-order.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "search-order-session", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "search order seed"}]},
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-order-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+
+    fresh_index = tmp_path / "rank-order-fresh.index.json"
+    fresh_index.write_text(json.dumps({"status": "fresh"}) + "\n", encoding="utf-8")
+    fresh_sha = module.sha256_file(fresh_index)
+    stale_index = tmp_path / "rank-order-stale.index.json"
+    stale_index.write_text(json.dumps({"status": "before"}) + "\n", encoding="utf-8")
+    stale_sha = module.sha256_file(stale_index)
+    stale_index.write_text(json.dumps({"status": "after"}) + "\n", encoding="utf-8")
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    conn.row_factory = sqlite3.Row
+    try:
+        source_row = conn.execute("SELECT * FROM documents ORDER BY rowid LIMIT 1").fetchone()
+        assert source_row is not None
+        columns = [str(row["name"]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()]
+        insert_columns = [column for column in columns if column != "rowid"]
+        placeholders = ", ".join("?" for _ in insert_columns)
+        column_sql = ", ".join(insert_columns)
+
+        def insert_search_doc(
+            *,
+            doc_id: str,
+            session_date: str,
+            body: str,
+            freshness_status: str,
+            segment_index_path: Path,
+            segment_index_sha256: str,
+            stale_reason: str = "",
+        ) -> None:
+            row_payload = {column: source_row[column] for column in insert_columns}
+            row_payload.update(
+                {
+                    "id": doc_id,
+                    "session_id": "rank-order-session",
+                    "session_label": doc_id,
+                    "session_title": "rank order",
+                    "session_date": session_date,
+                    "segment_index_path": str(segment_index_path),
+                    "segment_index_sha256": segment_index_sha256,
+                    "freshness_status": freshness_status,
+                    "stale_reason": stale_reason,
+                    "title": body,
+                    "body": body,
+                    "payload_json": "{}",
+                }
+            )
+            cursor = conn.execute(
+                f"INSERT INTO documents ({column_sql}) VALUES ({placeholders})",
+                [row_payload[column] for column in insert_columns],
+            )
+            rowid = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
+                (rowid, body, body, row_payload["session_label"], row_payload["session_title"]),
+            )
+            body_bytes = body.encode("utf-8")
+            conn.execute(
+                "INSERT OR REPLACE INTO document_bodies(doc_rowid, body_zlib, body_sha256, body_chars) VALUES (?, ?, ?, ?)",
+                (
+                    rowid,
+                    sqlite3.Binary(module.zlib.compress(body_bytes, level=6)),
+                    module.hashlib.sha256(body_bytes).hexdigest(),
+                    len(body),
+                ),
+            )
+
+        for index in range(200):
+            insert_search_doc(
+                doc_id=f"rank-order-fresh-{index}",
+                session_date="9999-12-31",
+                body=f"rank order fresh filler {index}",
+                freshness_status="current",
+                segment_index_path=fresh_index,
+                segment_index_sha256=fresh_sha,
+            )
+        insert_search_doc(
+            doc_id="rank-order-live-stale",
+            session_date="9999-12-30",
+            body="higher ranked live stale row",
+            freshness_status="current",
+            segment_index_path=stale_index,
+            segment_index_sha256=stale_sha,
+        )
+        insert_search_doc(
+            doc_id="rank-order-stored-stale",
+            session_date="9999-12-29",
+            body="lower ranked stored stale row",
+            freshness_status="stale",
+            segment_index_path=fresh_index,
+            segment_index_sha256=fresh_sha,
+            stale_reason="indexed_stale",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    filtered = module.search_sessions(
+        aoa_root=aoa_root,
+        query="",
+        freshness_status="stale",
+        limit=1,
+        explain=True,
+    )
+
+    assert filtered["ok"] is True
+    assert filtered["result_count"] == 1
+    assert filtered["results"][0]["doc_id"] == "rank-order-live-stale"
+    assert filtered["results"][0]["freshness"]["status"] == "stale"
+    assert "segment_index_sha_mismatch" in filtered["results"][0]["freshness"]["reasons"]
+    candidate_count = next(
+        int(item.split(":", 1)[1])
+        for item in filtered["diagnostics"]
+        if item.startswith("freshness_status_candidate_count:")
+    )
+    assert candidate_count == 201
+
+
 def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

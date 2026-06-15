@@ -23177,16 +23177,6 @@ def search_sessions(
 
         unfiltered_rows = fetch_search_rows(limit_value=query_limit)
         rows = list(unfiltered_rows)
-        if requested_freshness_status:
-            stored_rows = fetch_search_rows(
-                extra_filters=["documents.freshness_status = ?"],
-                extra_params=[requested_freshness_status],
-                limit_value=effective_limit,
-            )
-            rows_by_rowid = {int_value(row["rowid"]): row for row in rows}
-            for row in stored_rows:
-                rows_by_rowid.setdefault(int_value(row["rowid"]), row)
-            rows = list(rows_by_rowid.values())
         metadata = search_index_metadata(conn)
         freshness_filter_diagnostics: list[str] = []
         if requested_freshness_status:
