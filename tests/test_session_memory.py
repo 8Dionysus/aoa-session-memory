@@ -5986,6 +5986,63 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
 
+    fresh_filler_index = tmp_path / "fresh-filler.index.json"
+    fresh_filler_index.write_text(json.dumps({"status": "fresh"}) + "\n", encoding="utf-8")
+    fresh_filler_sha = module.sha256_file(fresh_filler_index)
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    conn.row_factory = sqlite3.Row
+    try:
+        source_row = conn.execute(
+            "SELECT * FROM documents WHERE body LIKE ? ORDER BY rowid DESC LIMIT 1",
+            ("%hook timed out%",),
+        ).fetchone()
+        assert source_row is not None
+        columns = [str(row["name"]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()]
+        insert_columns = [column for column in columns if column != "rowid"]
+        placeholders = ", ".join("?" for _ in insert_columns)
+        column_sql = ", ".join(insert_columns)
+        for index in range(205):
+            body = f"hook timed out fresh filler {index}"
+            row_payload = {column: source_row[column] for column in insert_columns}
+            row_payload.update(
+                {
+                    "id": f"fresh-filler-{index}",
+                    "session_id": "fresh-filler-session",
+                    "session_label": f"9999-12-31__{index:03d}__fresh-filler",
+                    "session_title": "fresh filler",
+                    "session_date": "9999-12-31",
+                    "segment_index_path": str(fresh_filler_index),
+                    "segment_index_sha256": fresh_filler_sha,
+                    "freshness_status": "current",
+                    "stale_reason": "",
+                    "title": body,
+                    "body": body,
+                    "payload_json": "{}",
+                }
+            )
+            cursor = conn.execute(
+                f"INSERT INTO documents ({column_sql}) VALUES ({placeholders})",
+                [row_payload[column] for column in insert_columns],
+            )
+            rowid = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
+                (rowid, body, body, row_payload["session_label"], row_payload["session_title"]),
+            )
+            body_bytes = body.encode("utf-8")
+            conn.execute(
+                "INSERT OR REPLACE INTO document_bodies(doc_rowid, body_zlib, body_sha256, body_chars) VALUES (?, ?, ?, ?)",
+                (
+                    rowid,
+                    sqlite3.Binary(module.zlib.compress(body_bytes, level=6)),
+                    module.hashlib.sha256(body_bytes).hexdigest(),
+                    len(body),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
     live_stale_filtered = module.search_sessions(
         aoa_root=aoa_root,
         query="hook timed out",
@@ -5996,6 +6053,12 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert live_stale_filtered["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in live_stale_filtered["results"][0]["freshness"]["reasons"]
     assert "freshness_status_filter_applied_after_live_check:stale" in live_stale_filtered["diagnostics"]
+    candidate_count = next(
+        int(item.split(":", 1)[1])
+        for item in live_stale_filtered["diagnostics"]
+        if item.startswith("freshness_status_candidate_count:")
+    )
+    assert candidate_count > 200
 
 
 def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:
