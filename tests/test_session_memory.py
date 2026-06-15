@@ -3222,6 +3222,73 @@ def test_route_cache_hot_gate_uses_cached_states_without_source_scan(tmp_path: P
     assert payload["selected_count"] == 7
 
 
+def test_route_cache_hot_gate_scoped_filters_scan_selected_records(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-15__001__scoped-hot-gate"
+    session_dir.mkdir(parents=True)
+    record = {
+        "session_id": "scoped-hot-gate",
+        "session_label": "2026-06-15__001__scoped-hot-gate",
+        "path": str(session_dir),
+    }
+    calls: dict[str, Any] = {}
+
+    def fake_chronological_records(_aoa_root: Path, *, since: str | None = None, until: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        calls["chronological"] = {"since": since, "until": until, "limit": limit}
+        return [record]
+
+    def fail_hot_state(*_: Any, **__: Any) -> Any:
+        raise AssertionError("scoped hot gate must not use all-archive cached state")
+
+    monkeypatch.setattr(module, "chronological_session_records", fake_chronological_records)
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", fail_hot_state)
+    monkeypatch.setattr(module, "atlas_index_hot_state", fail_hot_state)
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, records: (12.0, [records[0]["path"]]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda records: [])
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda records: [{"session_id": records[0]["session_id"]}])
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda _aoa_root, _mtime, records, projection_fingerprints=None: {
+            "status": "current",
+            "needs_refresh": False,
+            "selected_session_state_count": len(records),
+            "projection_fingerprints": projection_fingerprints,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_state",
+        lambda _aoa_root, _mtime, records, projection_fingerprints=None: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": len(records),
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root, since="2026-06-15", limit=1)
+
+    assert calls["chronological"] == {"since": "2026-06-15", "until": None, "limit": 1}
+    assert payload["ok"] is True
+    assert payload["source_scan"] is True
+    assert payload["truth_status"] == "hot_route_cache_bounded_projection_scan"
+    assert payload["selection_source"] == "target_filters"
+    assert payload["selection_scope"] == {"mode": "target_filters", "source_filters_applied": True}
+    assert payload["selected_count"] == 1
+
+
 def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)
@@ -5918,6 +5985,17 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     stale_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert stale_results["results"][0]["freshness"]["status"] == "stale"
     assert "segment_index_sha_mismatch" in stale_results["results"][0]["freshness"]["reasons"]
+
+    live_stale_filtered = module.search_sessions(
+        aoa_root=aoa_root,
+        query="hook timed out",
+        freshness_status="stale",
+        explain=True,
+    )
+    assert live_stale_filtered["result_count"] >= 1
+    assert live_stale_filtered["results"][0]["freshness"]["status"] == "stale"
+    assert "segment_index_sha_mismatch" in live_stale_filtered["results"][0]["freshness"]["reasons"]
+    assert "freshness_status_filter_applied_after_live_check:stale" in live_stale_filtered["diagnostics"]
 
 
 def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Path) -> None:

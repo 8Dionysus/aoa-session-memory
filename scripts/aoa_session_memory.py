@@ -23090,6 +23090,7 @@ def search_sessions(
             filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
             like = f"%{session}%"
             params.extend([session, like, like])
+    requested_freshness_status = str(freshness_status or "").strip()
     for column, value in [
         ("documents.doc_type", doc_type),
         ("documents.event_type", event_type),
@@ -23100,7 +23101,6 @@ def search_sessions(
         ("documents.agent_event", agent_event),
         ("documents.task_episode_id", task_episode_id),
         ("documents.archive_status", archive_status),
-        ("documents.freshness_status", freshness_status),
     ]:
         if value:
             filters.append(f"{column} = ?")
@@ -23141,6 +23141,10 @@ def search_sessions(
                 route_params,
             )
             route_join = " JOIN search_route_filter AS route_filter ON route_filter.doc_rowid = documents.rowid"
+        effective_limit = max(1, int_value(limit, 20))
+        query_limit = effective_limit
+        if requested_freshness_status:
+            query_limit = min(max(effective_limit * 20, 200), 2000)
         if fts_query:
             sql = (
                 "SELECT documents.*, bm25(documents_fts) AS rank "
@@ -23153,7 +23157,7 @@ def search_sessions(
                 sql += " AND " + where
                 query_params.extend(params)
             sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
-            query_params.append(limit)
+            query_params.append(query_limit)
             rows = conn.execute(sql, query_params).fetchall()
         else:
             sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
@@ -23161,8 +23165,40 @@ def search_sessions(
             if where:
                 sql += " WHERE " + where
             sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
-            query_params.append(limit)
+            query_params.append(query_limit)
             rows = conn.execute(sql, query_params).fetchall()
+        if requested_freshness_status:
+            stored_filters = list(filters)
+            stored_params = list(params)
+            stored_filters.append("documents.freshness_status = ?")
+            stored_params.append(requested_freshness_status)
+            stored_where = " AND ".join(stored_filters)
+            if fts_query:
+                stored_sql = (
+                    "SELECT documents.*, bm25(documents_fts) AS rank "
+                    "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid"
+                    f"{route_join} "
+                    "WHERE documents_fts MATCH ?"
+                )
+                stored_query_params: list[Any] = [fts_query]
+                if stored_where:
+                    stored_sql += " AND " + stored_where
+                    stored_query_params.extend(stored_params)
+                stored_sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                stored_query_params.append(effective_limit)
+                stored_rows = conn.execute(stored_sql, stored_query_params).fetchall()
+            else:
+                stored_sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
+                stored_query_params = [*stored_params]
+                if stored_where:
+                    stored_sql += " WHERE " + stored_where
+                stored_sql += " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                stored_query_params.append(effective_limit)
+                stored_rows = conn.execute(stored_sql, stored_query_params).fetchall()
+            rows_by_rowid = {int_value(row["rowid"]): row for row in rows}
+            for row in stored_rows:
+                rows_by_rowid.setdefault(int_value(row["rowid"]), row)
+            rows = list(rows_by_rowid.values())
         metadata = search_index_metadata(conn)
         body_overrides = search_document_bodies_for_rows(conn, rows)
     except sqlite3.Error as exc:
@@ -23189,6 +23225,18 @@ def search_sessions(
         compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
         for row in rows
     ]
+    freshness_filter_diagnostics: list[str] = []
+    if requested_freshness_status:
+        candidate_count = len(results)
+        results = [
+            result
+            for result in results
+            if str((result.get("freshness") if isinstance(result.get("freshness"), dict) else {}).get("status") or "") == requested_freshness_status
+        ][:effective_limit]
+        freshness_filter_diagnostics.append(f"freshness_status_filter_applied_after_live_check:{requested_freshness_status}")
+        freshness_filter_diagnostics.append(f"freshness_status_candidate_count:{candidate_count}")
+        if candidate_count >= query_limit and len(results) < effective_limit:
+            freshness_filter_diagnostics.append("freshness_status_filter_candidate_limit_reached")
     accelerator_provider = provider if provider != "portable_sqlite" else "abyss_machine_nervous"
     if provider == "portable_sqlite" and not include_host_context:
         provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
@@ -23207,7 +23255,7 @@ def search_sessions(
             include_host=True,
             timeout=host_timeout,
         )
-    diagnostics: list[str] = []
+    diagnostics: list[str] = list(freshness_filter_diagnostics)
     provider_overlay: dict[str, Any] | None = None
     semantic_overlay: dict[str, Any] | None = None
     local_rerank: dict[str, Any] | None = None
@@ -31726,14 +31774,19 @@ def route_cache_freshness_gates(
     selection_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
-    source_scan = selected_records is not None
+    explicit_source_filters = target != "all" or since is not None or until is not None or limit is not None
+    source_scan = selected_records is not None or explicit_source_filters
     records: list[dict[str, Any]] = []
     latest_source_mtime = 0.0
     latest_source_paths: list[str] = []
     route_drift: list[dict[str, Any]] = []
     if source_scan:
         try:
-            records = list(selected_records or [])
+            records = (
+                list(selected_records or [])
+                if selected_records is not None
+                else ([resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit))
+            )
         except ValueError as exc:
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -31761,7 +31814,7 @@ def route_cache_freshness_gates(
         )
         atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
         truth_status = "hot_route_cache_bounded_projection_scan"
-        selection_source = "provided_records"
+        selection_source = "provided_records" if selected_records is not None else "target_filters"
         selected_count = len(records)
     else:
         search_state = sqlite_search_index_hot_state(aoa_root)
@@ -31793,7 +31846,12 @@ def route_cache_freshness_gates(
         "until": until,
         "limit": limit,
         "selection_source": selection_source,
-        "selection_scope": selection_scope or ({} if source_scan else {"mode": "cached_projection_state_all_hot", "source_filters_applied": False}),
+        "selection_scope": selection_scope
+        or (
+            {"mode": selection_source, "source_filters_applied": explicit_source_filters}
+            if source_scan
+            else {"mode": "cached_projection_state_all_hot", "source_filters_applied": False}
+        ),
         "selected_count": selected_count,
         "needs_index_maintenance": needs_index_maintenance,
         "needs_graph_maintenance": needs_graph_maintenance,
