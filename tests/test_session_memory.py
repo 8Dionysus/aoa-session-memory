@@ -7737,6 +7737,8 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
     stop_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert stop_manifest["archive_status"] == "raw_mirrored_index_deferred"
     assert stop_manifest["hooks_seen"] == ["HookWorker:PostCompact", "HookWorker:PreCompact", "PostCompact", "PreCompact", "Stop"]
+    assert stop_manifest["segments"] == []
+    assert stop_manifest["latest_event_count"] == 0
 
     deferred_audit = module.completion_audit(workspace_root=workspace, aoa_root=aoa_root, check_codex=False)
     topology = [
