@@ -325,6 +325,11 @@ Use `storage-audit` to measure current weight and reclaim candidates. It is a
 read-only gate; actual shrinkage of graph/search stores requires controlled
 rebuilds, not blind `VACUUM` or file deletion.
 
+Use `storage-maintenance` for the current safe live shrink lane. It only runs
+SQLite WAL checkpoint/truncate for the graph and search stores, reports busy
+readers/writers instead of killing them, and leaves raw evidence, graph rebuilds,
+search rebuilds, and raw-block cleanup outside this route.
+
 Real Codex raw transcripts may express a compaction boundary as:
 
 - top-level `{"type": "compacted", ...}`

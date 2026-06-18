@@ -94,6 +94,7 @@ ATLAS_SCHEMA_VERSION = 1
 SEARCH_SCHEMA_VERSION = 7
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
+SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
 SEARCH_BODY_PREVIEW_CHARS = 700
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
@@ -7185,6 +7186,12 @@ def sync_session_from_transcript(
         legacy_raw_source.unlink()
     write_session_index(session_dir, manifest, events)
     registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
+    search_freshness_state = mark_search_freshness_stale_for_session(
+        aoa_root,
+        session_dir=session_dir,
+        reason="archive_updated_by_sync",
+        checked_at=now,
+    )
     return {
         "session_id": session_id,
         "display_name": display["label"],
@@ -7195,6 +7202,7 @@ def sync_session_from_transcript(
         "raw_path": str(raw_path),
         "manifest_path": str(manifest_path),
         "registry_updated": registry_updated,
+        "search_freshness_state": search_freshness_state,
     }
 
 
@@ -13009,6 +13017,12 @@ def reindex_session_from_raw(
         write_json(raw_source_path, raw_source)
     write_session_index(session_dir, manifest, events)
     update_registry(aoa_root, manifest, session_dir)
+    search_freshness_state = mark_search_freshness_stale_for_session(
+        aoa_root,
+        session_dir=session_dir,
+        reason="archive_reindexed_from_raw",
+        checked_at=now,
+    )
     return {
         "session_id": manifest.get("session_id"),
         "session_label": manifest.get("session_label"),
@@ -13020,6 +13034,7 @@ def reindex_session_from_raw(
         "raw_blocks_index": raw_blocks.get("index"),
         "raw_compaction_events": raw_blocks.get("compaction_events"),
         "token_accounting": token_accounting,
+        "search_freshness_state": search_freshness_state,
     }
 
 
@@ -13238,6 +13253,12 @@ def refresh_route_indexes_from_raw(
     }
     write_json(session_dir / SESSION_INDEX_JSON, session_index_json)
     update_registry(aoa_root, manifest, session_dir)
+    search_freshness_state = mark_search_freshness_stale_for_session(
+        aoa_root,
+        session_dir=session_dir,
+        reason="route_indexes_refreshed_from_raw",
+        checked_at=now,
+    )
     return {
         "session_id": manifest.get("session_id"),
         "session_label": manifest.get("session_label"),
@@ -13248,6 +13269,7 @@ def refresh_route_indexes_from_raw(
         "segment_count": len(refreshed_segments),
         "raw_path": str(raw_path),
         "raw_bytes": raw_bytes,
+        "search_freshness_state": search_freshness_state,
     }
 
 
@@ -14401,6 +14423,41 @@ def sqlite_search_session_states(conn: sqlite3.Connection) -> dict[str, dict[str
     }
 
 
+def sqlite_search_freshness_states(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    if not sqlite_table_exists(conn, "search_freshness_state"):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
+               status, reason, last_checked, last_indexed_at, deferred_live_reason,
+               live_transcript_path, live_transcript_mtime, search_schema_version,
+               route_signal_classifier_version, document_count, updated_at
+        FROM search_freshness_state
+        """
+    ).fetchall()
+    return {
+        str(row["session_id"]): {
+            "session_id": row["session_id"],
+            "session_label": row["session_label"],
+            "session_dir": row["session_dir"],
+            "source_fingerprint": row["source_fingerprint"],
+            "source_latest_mtime": row["source_latest_mtime"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "last_checked": row["last_checked"],
+            "last_indexed_at": row["last_indexed_at"],
+            "deferred_live_reason": row["deferred_live_reason"],
+            "live_transcript_path": row["live_transcript_path"],
+            "live_transcript_mtime": row["live_transcript_mtime"],
+            "search_schema_version": row["search_schema_version"],
+            "route_signal_classifier_version": row["route_signal_classifier_version"],
+            "document_count": row["document_count"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    }
+
+
 def sqlite_error_status(exc: sqlite3.Error) -> str:
     text = str(exc).lower()
     if "database is locked" in text or "database table is locked" in text or "database is busy" in text:
@@ -14468,6 +14525,378 @@ def upsert_search_session_state(
             int_value(document_count),
         ),
     )
+    upsert_search_freshness_state(
+        conn,
+        projection_state=projection_state,
+        status="current",
+        reason="indexed",
+        checked_at=indexed_at,
+        indexed_at=indexed_at,
+        document_count=document_count,
+    )
+
+
+def upsert_search_freshness_state(
+    conn: sqlite3.Connection,
+    *,
+    projection_state: dict[str, Any],
+    status: str,
+    reason: str,
+    checked_at: str,
+    indexed_at: str | None = None,
+    document_count: int | None = None,
+    deferred_live_reason: str = "",
+    live_transcript_path: str = "",
+    live_transcript_mtime: float = 0.0,
+) -> None:
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO search_freshness_state (
+            session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
+            status, reason, last_checked, last_indexed_at, deferred_live_reason,
+            live_transcript_path, live_transcript_mtime, search_schema_version,
+            route_signal_classifier_version, document_count, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(projection_state.get("session_id") or ""),
+            str(projection_state.get("session_label") or ""),
+            str(projection_state.get("session_dir") or ""),
+            str(projection_state.get("fingerprint") or projection_state.get("source_fingerprint") or ""),
+            float(projection_state.get("latest_source_mtime") or projection_state.get("source_latest_mtime") or 0.0),
+            str(status or "unknown"),
+            str(reason or ""),
+            checked_at,
+            indexed_at or "",
+            str(deferred_live_reason or ""),
+            str(live_transcript_path or ""),
+            float(live_transcript_mtime or 0.0),
+            str(SEARCH_SCHEMA_VERSION),
+            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            int_value(document_count),
+            checked_at,
+        ),
+    )
+
+
+def compact_search_freshness_state_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    def get(key: str, default: Any = "") -> Any:
+        if isinstance(row, sqlite3.Row):
+            return row[key] if key in row.keys() else default
+        return row.get(key, default)
+
+    return {
+        "session_id": str(get("session_id") or ""),
+        "session_label": str(get("session_label") or ""),
+        "session_dir": str(get("session_dir") or ""),
+        "source_fingerprint": str(get("source_fingerprint") or ""),
+        "source_latest_mtime": float(get("source_latest_mtime") or 0.0),
+        "status": str(get("status") or ""),
+        "reason": str(get("reason") or ""),
+        "last_checked": str(get("last_checked") or ""),
+        "last_indexed_at": str(get("last_indexed_at") or ""),
+        "deferred_live_reason": str(get("deferred_live_reason") or ""),
+        "live_transcript_path": str(get("live_transcript_path") or ""),
+        "live_transcript_mtime": float(get("live_transcript_mtime") or 0.0),
+        "search_schema_version": str(get("search_schema_version") or ""),
+        "route_signal_classifier_version": int_value(get("route_signal_classifier_version")),
+        "document_count": int_value(get("document_count")),
+        "updated_at": str(get("updated_at") or ""),
+    }
+
+
+def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) -> dict[str, Any]:
+    indexed_session_state_count = 0
+    if sqlite_table_exists(conn, "session_index_state"):
+        indexed_session_state_count = int(conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0] or 0)
+    if not sqlite_table_exists(conn, "search_freshness_state"):
+        return {
+            "status": "current" if indexed_session_state_count > 0 else "unknown",
+            "checked": True,
+            "mode": "hot_persisted_state",
+            "scope": "cached_session_index_compat",
+            "source_scan": False,
+            "freshness_state_schema_version": SEARCH_FRESHNESS_STATE_SCHEMA_VERSION,
+            "freshness_state_present": False,
+            "indexed_session_state_count": indexed_session_state_count,
+            "freshness_state_count": 0,
+            "dirty_session_count": 0,
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 0,
+            "dirty_session_ids": [],
+            "actionable_dirty_session_ids": [],
+            "dirty_sessions": [],
+            "actionable_dirty_sessions": [],
+            "deferred_live_sessions": [],
+            "db_mtime": path_mtime(db_path),
+            "reasons": [] if indexed_session_state_count > 0 else ["search_freshness_state_missing"],
+            "truth_status": "hot_compat_session_index_state_no_source_scan",
+        }
+    status_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM search_freshness_state GROUP BY status"
+    ).fetchall()
+    status_counts = {str(row["status"] or "unknown"): int(row["count"] or 0) for row in status_rows}
+    freshness_state_count = sum(status_counts.values())
+    missing_state_count = 0
+    missing_rows: list[dict[str, Any]] = []
+    if indexed_session_state_count > 0:
+        missing = conn.execute(
+            """
+            SELECT s.session_id, s.session_label, '' AS session_dir, s.source_fingerprint,
+                   s.source_latest_mtime, 'missing_state' AS status,
+                   'search_freshness_state_missing' AS reason,
+                   '' AS last_checked, s.indexed_at AS last_indexed_at,
+                   '' AS deferred_live_reason, '' AS live_transcript_path,
+                   0 AS live_transcript_mtime, s.search_schema_version,
+                   s.route_signal_classifier_version, s.document_count, '' AS updated_at
+            FROM session_index_state AS s
+            LEFT JOIN search_freshness_state AS f ON f.session_id = s.session_id
+            WHERE f.session_id IS NULL
+            ORDER BY s.session_label
+            LIMIT 8
+            """
+        ).fetchall()
+        missing_rows = [compact_search_freshness_state_row(row) for row in missing]
+        missing_state_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM session_index_state AS s
+                LEFT JOIN search_freshness_state AS f ON f.session_id = s.session_id
+                WHERE f.session_id IS NULL
+                """
+            ).fetchone()[0]
+            or 0
+        )
+    actionable_rows = conn.execute(
+        """
+        SELECT *
+        FROM search_freshness_state
+        WHERE status NOT IN ('current', 'deferred_live')
+        ORDER BY updated_at DESC, session_label
+        LIMIT 8
+        """
+    ).fetchall()
+    deferred_rows = conn.execute(
+        """
+        SELECT *
+        FROM search_freshness_state
+        WHERE status = 'deferred_live'
+        ORDER BY updated_at DESC, session_label
+        LIMIT 8
+        """
+    ).fetchall()
+    dirty_rows = conn.execute(
+        """
+        SELECT *
+        FROM search_freshness_state
+        WHERE status <> 'current'
+        ORDER BY updated_at DESC, session_label
+        LIMIT 8
+        """
+    ).fetchall()
+    actionable_sessions = [compact_search_freshness_state_row(row) for row in actionable_rows] + missing_rows
+    deferred_sessions = [compact_search_freshness_state_row(row) for row in deferred_rows]
+    dirty_sessions = [compact_search_freshness_state_row(row) for row in dirty_rows] + missing_rows
+    actionable_count = sum(count for status, count in status_counts.items() if status not in {"current", "deferred_live"}) + missing_state_count
+    deferred_count = status_counts.get("deferred_live", 0)
+    dirty_count = freshness_state_count - status_counts.get("current", 0) + missing_state_count
+    reasons: list[str] = []
+    if actionable_count > 0:
+        reasons.append("session_projection_dirty")
+    if missing_state_count > 0:
+        reasons.append("search_freshness_state_missing")
+    if deferred_count > 0:
+        reasons.append("recent_live_projection_updates_deferred")
+    freshness_status = "current"
+    if actionable_count > 0:
+        freshness_status = "stale"
+    elif deferred_count > 0:
+        freshness_status = "current_with_deferred_live_updates"
+    return {
+        "status": freshness_status,
+        "checked": True,
+        "mode": "hot_persisted_state",
+        "scope": "persisted_freshness_state",
+        "source_scan": False,
+        "freshness_state_schema_version": SEARCH_FRESHNESS_STATE_SCHEMA_VERSION,
+        "freshness_state_present": True,
+        "indexed_session_state_count": indexed_session_state_count,
+        "freshness_state_count": freshness_state_count,
+        "freshness_state_status_counts": dict(sorted(status_counts.items())),
+        "missing_freshness_state_count": missing_state_count,
+        "dirty_session_count": dirty_count,
+        "actionable_dirty_session_count": actionable_count,
+        "deferred_live_session_count": deferred_count,
+        "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
+        "actionable_dirty_session_ids": [
+            str(item.get("session_id") or "") for item in actionable_sessions if item.get("session_id")
+        ],
+        "dirty_sessions": dirty_sessions[:8],
+        "actionable_dirty_sessions": actionable_sessions[:8],
+        "deferred_live_sessions": deferred_sessions[:8],
+        "db_mtime": path_mtime(db_path),
+        "reasons": reasons,
+        "truth_status": "hot_persisted_search_freshness_state_no_source_scan",
+    }
+
+
+def write_search_freshness_probe_state(
+    aoa_root: Path,
+    *,
+    projection_fingerprints: list[dict[str, Any]],
+    dirty_sessions: list[dict[str, Any]],
+    live_defer_summary: dict[str, Any],
+    checked_at: str,
+) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {"ok": False, "updated_count": 0, "diagnostics": ["search_index_missing"]}
+    deferred_items = (
+        live_defer_summary.get("deferred_live_sessions")
+        if isinstance(live_defer_summary.get("deferred_live_sessions"), list)
+        else []
+    )
+    actionable_items = (
+        live_defer_summary.get("actionable_dirty_sessions")
+        if isinstance(live_defer_summary.get("actionable_dirty_sessions"), list)
+        else dirty_sessions
+    )
+    deferred_by_id = {str(item.get("session_id") or ""): item for item in deferred_items if item.get("session_id")}
+    actionable_by_id = {str(item.get("session_id") or ""): item for item in actionable_items if item.get("session_id")}
+    dirty_by_id = {str(item.get("session_id") or ""): item for item in dirty_sessions if item.get("session_id")}
+    diagnostics: list[str] = []
+    updated = 0
+    status_counts: Counter[str] = Counter()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = init_search_db(db_path, rebuild=False)
+        indexed_states = sqlite_search_session_states(conn)
+        conn.execute("BEGIN")
+        for projection in projection_fingerprints:
+            session_id = str(projection.get("session_id") or "")
+            indexed = indexed_states.get(session_id, {})
+            status = "current"
+            reason = "deep_scan_current"
+            deferred_live_reason = ""
+            live_transcript_path = ""
+            live_transcript_mtime = 0.0
+            if session_id in deferred_by_id:
+                deferred = deferred_by_id[session_id]
+                status = "deferred_live"
+                reason = "recent_live_projection_updates_deferred"
+                deferred_reasons = deferred.get("reasons") if isinstance(deferred.get("reasons"), list) else []
+                deferred_live_reason = str(deferred_reasons[0] if deferred_reasons else "recent_live_codex_transcript_update")
+                live_transcript_path = str(deferred.get("live_transcript_path") or "")
+                live_transcript_mtime = float(deferred.get("live_transcript_mtime") or 0.0)
+            elif session_id in actionable_by_id or session_id in dirty_by_id:
+                dirty = actionable_by_id.get(session_id) or dirty_by_id.get(session_id, {})
+                status = "stale"
+                reasons = dirty.get("reasons") if isinstance(dirty.get("reasons"), list) else []
+                reason = ",".join(str(item) for item in reasons if item) or "session_projection_dirty"
+            upsert_search_freshness_state(
+                conn,
+                projection_state=projection,
+                status=status,
+                reason=reason,
+                checked_at=checked_at,
+                indexed_at=str(indexed.get("indexed_at") or ""),
+                document_count=int_value(indexed.get("document_count")),
+                deferred_live_reason=deferred_live_reason,
+                live_transcript_path=live_transcript_path,
+                live_transcript_mtime=live_transcript_mtime,
+            )
+            updated += 1
+            status_counts[status] += 1
+        conn.commit()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+    return {
+        "ok": not diagnostics,
+        "updated_count": updated,
+        "status_counts": dict(sorted(status_counts.items())),
+        "diagnostics": diagnostics,
+    }
+
+
+def mark_search_freshness_stale_for_session(
+    aoa_root: Path,
+    *,
+    session_dir: Path,
+    reason: str,
+    checked_at: str | None = None,
+) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {"ok": True, "status": "skipped_search_index_missing", "updated": False, "diagnostics": []}
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {"ok": False, "status": "missing_manifest", "updated": False, "diagnostics": ["missing_manifest"]}
+    checked = checked_at or utc_now()
+    record = {
+        "path": str(session_dir),
+        "session_id": manifest.get("session_id"),
+        "session_label": manifest.get("session_label") or session_dir.name,
+        "archive_status": manifest.get("archive_status"),
+    }
+    try:
+        projection = session_projection_fingerprint(record, include_rendered_markdown=False)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "projection_failed",
+            "updated": False,
+            "diagnostics": [f"projection_failed:{exc.__class__.__name__}"],
+        }
+    live_transcript = session_live_transcript_path(session_dir)
+    live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
+    source_mtime = float(projection.get("latest_source_mtime") or 0.0)
+    threshold = time.time() - GRAPH_HOT_LIVE_DEFER_SECONDS
+    status = "stale"
+    state_reason = reason
+    deferred_live_reason = ""
+    if live_transcript is not None and live_mtime > threshold:
+        status = "deferred_live"
+        state_reason = "recent_live_projection_updates_deferred"
+        deferred_live_reason = (
+            "recent_live_codex_transcript_update"
+            if source_mtime > threshold
+            else "recent_live_codex_transcript_not_yet_archived"
+        )
+    diagnostics: list[str] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = init_search_db(db_path, rebuild=False)
+        indexed = sqlite_search_session_states(conn).get(str(projection.get("session_id") or ""), {})
+        upsert_search_freshness_state(
+            conn,
+            projection_state=projection,
+            status=status,
+            reason=state_reason,
+            checked_at=checked,
+            indexed_at=str(indexed.get("indexed_at") or ""),
+            document_count=int_value(indexed.get("document_count")),
+            deferred_live_reason=deferred_live_reason,
+            live_transcript_path=str(live_transcript) if live_transcript else "",
+            live_transcript_mtime=live_mtime,
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    finally:
+        if conn is not None:
+            conn.close()
+    return {"ok": not diagnostics, "status": status, "updated": not diagnostics, "diagnostics": diagnostics}
+
 
 
 def search_document_count_for_projection(conn: sqlite3.Connection, projection_state: dict[str, Any]) -> int:
@@ -14897,6 +15326,7 @@ def sqlite_search_index_hot_state(aoa_root: Path) -> dict[str, Any]:
         has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
         has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
         has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+        freshness = sqlite_search_freshness_summary(conn, db_path=db_path)
         indexed_session_state_count = 0
         min_search_schema_version = ""
         max_search_schema_version = ""
@@ -14952,7 +15382,14 @@ def sqlite_search_index_hot_state(aoa_root: Path) -> dict[str, Any]:
         or max_route_signal_classifier_version != ROUTE_SIGNAL_CLASSIFIER_VERSION
     ):
         reasons.append("route_signal_classifier_version_changed")
+    reasons.extend(
+        reason
+        for reason in freshness.get("reasons", [])
+        if reason not in reasons and reason != "recent_live_projection_updates_deferred"
+    )
     status = "current" if not reasons else ("empty" if reasons == ["search_index_empty"] else "stale")
+    if status == "current" and freshness.get("status") == "current_with_deferred_live_updates":
+        status = "current_with_deferred_live_updates"
     return {
         "status": status,
         "needs_refresh": bool(reasons),
@@ -14973,8 +15410,13 @@ def sqlite_search_index_hot_state(aoa_root: Path) -> dict[str, Any]:
                 if value
             }
         ),
-        "dirty_session_count": None,
-        "dirty_sessions": [],
+        "freshness": freshness,
+        "dirty_session_count": freshness.get("dirty_session_count"),
+        "actionable_dirty_session_count": freshness.get("actionable_dirty_session_count"),
+        "deferred_live_session_count": freshness.get("deferred_live_session_count"),
+        "dirty_sessions": freshness.get("dirty_sessions", []),
+        "actionable_dirty_sessions": freshness.get("actionable_dirty_sessions", []),
+        "deferred_live_sessions": freshness.get("deferred_live_sessions", []),
         "reasons": reasons,
         "truth_status": "hot_search_index_cached_projection_state_no_source_scan",
         "source_scan": False,
@@ -20720,10 +21162,13 @@ def sqlite_provider_status(
     aoa_root: Path,
     *,
     check_freshness: bool = True,
+    freshness_mode: str = "deep",
+    record_freshness_state: bool = False,
     freshness_records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
+    effective_freshness_mode = "deep" if freshness_records is not None or projection_fingerprints is not None else freshness_mode
     if not db_path.exists():
         return {
             "provider": "portable_sqlite",
@@ -20736,11 +21181,32 @@ def sqlite_provider_status(
         conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
         schema_diagnostics = search_schema_diagnostics(conn)
-        rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
-        counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
-        total = sum(counts.values())
-        route_counts = search_route_storage_counts(conn)
-        indexed_session_states = sqlite_search_session_states(conn) if check_freshness else {}
+        if effective_freshness_mode == "hot":
+            rows = []
+            counts: dict[str, int] = {}
+            total: int | None = None
+            has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
+            has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
+            has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+            route_counts: dict[str, Any] = {
+                "route_index_count": None,
+                "route_index_document_count": None,
+                "route_term_count": None,
+                "has_route_index": has_routes,
+                "has_route_terms": has_route_terms,
+            }
+            indexed_session_states = {}
+            hot_freshness = sqlite_search_freshness_summary(conn, db_path=db_path) if check_freshness else None
+        else:
+            rows = conn.execute("SELECT doc_type, COUNT(*) AS count FROM documents GROUP BY doc_type").fetchall()
+            counts = {str(row["doc_type"]): int(row["count"]) for row in rows}
+            total = sum(counts.values())
+            has_documents = total > 0
+            route_counts = search_route_storage_counts(conn)
+            has_routes = int_value(route_counts.get("route_index_count")) > 0
+            has_route_terms = int_value(route_counts.get("route_term_count")) > 0
+            indexed_session_states = sqlite_search_session_states(conn) if check_freshness else {}
+            hot_freshness = None
         conn.close()
     except sqlite3.Error as exc:
         status = sqlite_error_status(exc)
@@ -20753,85 +21219,110 @@ def sqlite_provider_status(
         }
     schema_version = str(metadata.get("schema_version") or "")
     diagnostics: list[str] = list(schema_diagnostics)
-    if total <= 0:
+    if not has_documents:
         diagnostics.append("search index has no documents")
     if schema_version != str(SEARCH_SCHEMA_VERSION):
         diagnostics.append("search_schema_mismatch")
-    if total > 0 and int_value(route_counts.get("route_index_count")) <= 0:
+    if has_documents and not has_routes:
         diagnostics.append("search_route_index_empty")
-    if int_value(route_counts.get("route_index_count")) > 0 and int_value(route_counts.get("route_term_count")) <= 0:
+    if has_routes and not has_route_terms:
         diagnostics.append("search_route_terms_empty")
     freshness: dict[str, Any] = {"status": "unchecked", "checked": False}
     if check_freshness:
-        try:
-            records = freshness_records if freshness_records is not None else chronological_session_records(aoa_root)
-            projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records)
-            dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
-            live_defer_summary = projection_recent_live_session_summary(dirty_sessions)
-            actionable_dirty_sessions = (
-                live_defer_summary.get("actionable_dirty_sessions")
-                if isinstance(live_defer_summary.get("actionable_dirty_sessions"), list)
-                else dirty_sessions
-            )
-            latest_source_mtime = max(
-                (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
-                default=0.0,
-            )
-            db_mtime = path_mtime(db_path)
-            freshness_reasons: list[str] = []
-            if actionable_dirty_sessions:
-                freshness_reasons.append("session_projection_dirty")
-            elif dirty_sessions:
-                freshness_reasons.append("recent_live_projection_updates_deferred")
-            elif latest_source_mtime > 0 and db_mtime < latest_source_mtime:
-                freshness_reasons.append("source_newer_than_search_index")
+        if hot_freshness is not None:
+            freshness = hot_freshness
             diagnostics.extend(
                 reason
-                for reason in freshness_reasons
+                for reason in freshness.get("reasons", [])
                 if reason not in diagnostics and reason != "recent_live_projection_updates_deferred"
             )
-            freshness_status = "current"
-            if actionable_dirty_sessions or "source_newer_than_search_index" in freshness_reasons:
-                freshness_status = "stale"
-            elif dirty_sessions:
-                freshness_status = "current_with_deferred_live_updates"
-            freshness = {
-                "status": freshness_status,
-                "checked": True,
-                "scope": "selected_records" if freshness_records is not None or projection_fingerprints is not None else "all_sessions",
-                "selected_session_state_count": len(projection_fingerprints),
-                "indexed_session_state_count": len(indexed_session_states),
-                "dirty_session_count": len(dirty_sessions),
-                "actionable_dirty_session_count": len(actionable_dirty_sessions),
-                "deferred_live_session_count": int_value(live_defer_summary.get("deferred_live_session_count")),
-                "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
-                "actionable_dirty_session_ids": [
-                    str(item.get("session_id") or "") for item in actionable_dirty_sessions if item.get("session_id")
-                ],
-                "dirty_sessions": dirty_sessions[:8],
-                "actionable_dirty_sessions": actionable_dirty_sessions[:8],
-                "deferred_live_sessions": (
-                    live_defer_summary.get("deferred_live_sessions", [])[:8]
-                    if isinstance(live_defer_summary.get("deferred_live_sessions"), list)
-                    else []
-                ),
-                "live_defer_quiet_seconds": live_defer_summary.get("quiet_seconds"),
-                "latest_source_mtime": latest_source_mtime,
-                "db_mtime": db_mtime,
-                "reasons": freshness_reasons,
-            }
-        except Exception as exc:
-            diagnostics.append(f"search_freshness_probe_failed:{exc.__class__.__name__}")
-            freshness = {
-                "status": "unknown",
-                "checked": False,
-                "error": short_text(str(exc), max_chars=300),
-            }
-    ok = total > 0 and not diagnostics
+        else:
+            try:
+                scoped_freshness = freshness_records is not None or projection_fingerprints is not None
+                records = freshness_records if freshness_records is not None else chronological_session_records(aoa_root)
+                projection_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records)
+                dirty_sessions = search_dirty_projection_states(projection_fingerprints, indexed_session_states)
+                live_defer_summary = projection_recent_live_session_summary(dirty_sessions)
+                actionable_dirty_sessions = (
+                    live_defer_summary.get("actionable_dirty_sessions")
+                    if isinstance(live_defer_summary.get("actionable_dirty_sessions"), list)
+                    else dirty_sessions
+                )
+                latest_source_mtime = max(
+                    (float(item.get("latest_source_mtime") or 0.0) for item in projection_fingerprints),
+                    default=0.0,
+                )
+                db_mtime = path_mtime(db_path)
+                freshness_reasons: list[str] = []
+                if actionable_dirty_sessions:
+                    freshness_reasons.append("session_projection_dirty")
+                elif dirty_sessions:
+                    freshness_reasons.append("recent_live_projection_updates_deferred")
+                elif latest_source_mtime > 0 and db_mtime < latest_source_mtime:
+                    freshness_reasons.append("source_newer_than_search_index")
+                diagnostics.extend(
+                    reason
+                    for reason in freshness_reasons
+                    if reason not in diagnostics and reason != "recent_live_projection_updates_deferred"
+                )
+                freshness_status = "current"
+                if actionable_dirty_sessions or "source_newer_than_search_index" in freshness_reasons:
+                    freshness_status = "stale"
+                elif dirty_sessions:
+                    freshness_status = "current_with_deferred_live_updates"
+                state_refresh: dict[str, Any] | None = None
+                if record_freshness_state:
+                    state_refresh = write_search_freshness_probe_state(
+                        aoa_root,
+                        projection_fingerprints=projection_fingerprints,
+                        dirty_sessions=dirty_sessions,
+                        live_defer_summary=live_defer_summary,
+                        checked_at=utc_now(),
+                    )
+                    if state_refresh.get("diagnostics"):
+                        diagnostics.extend(str(item) for item in state_refresh.get("diagnostics", []) if item)
+                freshness = {
+                    "status": freshness_status,
+                    "checked": True,
+                    "mode": "deep_projection_scan",
+                    "scope": "selected_records" if scoped_freshness else "all_sessions",
+                    "source_scan": True,
+                    "selected_session_state_count": len(projection_fingerprints),
+                    "indexed_session_state_count": len(indexed_session_states),
+                    "dirty_session_count": len(dirty_sessions),
+                    "actionable_dirty_session_count": len(actionable_dirty_sessions),
+                    "deferred_live_session_count": int_value(live_defer_summary.get("deferred_live_session_count")),
+                    "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
+                    "actionable_dirty_session_ids": [
+                        str(item.get("session_id") or "") for item in actionable_dirty_sessions if item.get("session_id")
+                    ],
+                    "dirty_sessions": dirty_sessions[:8],
+                    "actionable_dirty_sessions": actionable_dirty_sessions[:8],
+                    "deferred_live_sessions": (
+                        live_defer_summary.get("deferred_live_sessions", [])[:8]
+                        if isinstance(live_defer_summary.get("deferred_live_sessions"), list)
+                        else []
+                    ),
+                    "live_defer_quiet_seconds": live_defer_summary.get("quiet_seconds"),
+                    "latest_source_mtime": latest_source_mtime,
+                    "db_mtime": db_mtime,
+                    "reasons": freshness_reasons,
+                    "state_refresh": state_refresh,
+                }
+            except Exception as exc:
+                diagnostics.append(f"search_freshness_probe_failed:{exc.__class__.__name__}")
+                freshness = {
+                    "status": "unknown",
+                    "checked": False,
+                    "mode": "deep_projection_scan",
+                    "source_scan": True,
+                    "error": short_text(str(exc), max_chars=300),
+                }
+    ok = has_documents and not diagnostics
     status = (
         "ready_with_deferred_live_updates"
         if ok and freshness.get("status") == "current_with_deferred_live_updates"
-        else ("ready" if ok else ("empty" if total <= 0 else "stale"))
+        else ("ready" if ok else ("empty" if not has_documents else "stale"))
     )
     return {
         "provider": "portable_sqlite",
@@ -20843,6 +21334,8 @@ def sqlite_provider_status(
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": total,
         "document_counts": counts,
+        "count_mode": "not_counted_hot" if effective_freshness_mode == "hot" else "counted_deep",
+        "has_documents": has_documents,
         **route_counts,
         "freshness": freshness,
         "diagnostics": diagnostics,
@@ -20867,6 +21360,7 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
         has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone())
         has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
         has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+        freshness = sqlite_search_freshness_summary(conn, db_path=db_path)
         conn.close()
     except sqlite3.Error as exc:
         status = sqlite_error_status(exc)
@@ -20888,8 +21382,17 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
         diagnostics.append("search_route_index_empty")
     if has_routes and not has_route_terms:
         diagnostics.append("search_route_terms_empty")
+    diagnostics.extend(
+        reason
+        for reason in freshness.get("reasons", [])
+        if reason not in diagnostics and reason != "recent_live_projection_updates_deferred"
+    )
     ok = has_documents and not diagnostics
-    status = "ready" if ok else ("empty" if not has_documents else "stale")
+    status = (
+        "ready_with_deferred_live_updates"
+        if ok and freshness.get("status") == "current_with_deferred_live_updates"
+        else ("ready" if ok else ("empty" if not has_documents else "stale"))
+    )
     return {
         "provider": "portable_sqlite",
         "ok": ok,
@@ -20902,6 +21405,7 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
         "has_route_index": has_routes,
         "has_route_terms": has_route_terms,
         "count_mode": "not_counted_fast",
+        "freshness": freshness,
         "diagnostics": diagnostics,
     }
 
@@ -21045,6 +21549,8 @@ def search_provider_status(
     freshness_records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
     timeout: int = 45,
+    freshness_mode: str = "hot",
+    record_freshness_state: bool = False,
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
@@ -21053,10 +21559,13 @@ def search_provider_status(
     selected = sorted(providers) if provider_name == "all" else [provider_name]
     results: dict[str, Any] = {}
     diagnostics: list[str] = []
+    effective_freshness_mode = "deep" if freshness_records is not None or projection_fingerprints is not None else freshness_mode
     for name in selected:
         if name == "portable_sqlite":
             results[name] = sqlite_provider_status(
                 aoa_root,
+                freshness_mode=effective_freshness_mode,
+                record_freshness_state=record_freshness_state,
                 freshness_records=freshness_records,
                 projection_fingerprints=projection_fingerprints,
             )
@@ -21089,6 +21598,8 @@ def search_provider_status(
     default_provider = str(config.get("default_provider") or "portable_sqlite")
     default_status = results.get(default_provider) or sqlite_provider_status(
         aoa_root,
+        freshness_mode=effective_freshness_mode,
+        record_freshness_state=record_freshness_state,
         freshness_records=freshness_records,
         projection_fingerprints=projection_fingerprints,
     )
@@ -21107,6 +21618,8 @@ def search_provider_status(
         "default_provider": default_provider,
         "authority_law": config.get("authority_law"),
         "selected_provider": provider_name,
+        "freshness_mode": effective_freshness_mode,
+        "record_freshness_state": record_freshness_state,
         "providers": results,
         "diagnostics": diagnostics,
     }
@@ -21380,6 +21893,7 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)",
     "CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, route_id)",
     "CREATE INDEX IF NOT EXISTS idx_session_index_state_label ON session_index_state(session_label)",
+    "CREATE INDEX IF NOT EXISTS idx_search_freshness_state_status ON search_freshness_state(status, session_label)",
 ]
 
 
@@ -21415,6 +21929,34 @@ def clear_search_route_term_cache(conn: sqlite3.Connection) -> None:
     if isinstance(cache, dict):
         cache.clear()
     SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
+
+
+def seed_search_freshness_state_from_session_index(conn: sqlite3.Connection, *, updated_at: str) -> None:
+    has_session_state = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_index_state'").fetchone()
+    )
+    has_freshness_state = bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_freshness_state'").fetchone()
+    )
+    if not has_session_state or not has_freshness_state:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO search_freshness_state (
+            session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
+            status, reason, last_checked, last_indexed_at, deferred_live_reason,
+            live_transcript_path, live_transcript_mtime, search_schema_version,
+            route_signal_classifier_version, document_count, updated_at
+        )
+        SELECT
+            session_id, session_label, '', source_fingerprint, source_latest_mtime,
+            'current', 'seeded_from_session_index_state', COALESCE(indexed_at, ?), indexed_at, '',
+            '', 0, search_schema_version, route_signal_classifier_version, document_count, ?
+        FROM session_index_state
+        WHERE COALESCE(session_id, '') <> ''
+        """,
+        (updated_at, updated_at),
+    )
 
 
 def init_search_db(
@@ -21554,6 +22096,29 @@ def init_search_db(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_freshness_state (
+            session_id TEXT PRIMARY KEY,
+            session_label TEXT,
+            session_dir TEXT,
+            source_fingerprint TEXT NOT NULL,
+            source_latest_mtime REAL,
+            status TEXT NOT NULL,
+            reason TEXT,
+            last_checked TEXT,
+            last_indexed_at TEXT,
+            deferred_live_reason TEXT,
+            live_transcript_path TEXT,
+            live_transcript_mtime REAL,
+            search_schema_version TEXT,
+            route_signal_classifier_version INTEGER,
+            document_count INTEGER,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    seed_search_freshness_state_from_session_index(conn, updated_at=utc_now())
     existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
     if "session_act" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN session_act TEXT")
@@ -21590,6 +22155,7 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM route_terms")
     conn.execute("DELETE FROM documents")
     conn.execute("DELETE FROM session_index_state")
+    conn.execute("DELETE FROM search_freshness_state")
     conn.execute("DELETE FROM meta")
     clear_search_route_term_cache(conn)
 
@@ -28837,6 +29403,24 @@ def sqlite_storage_stats(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = storage_size_entry(db_path, label=db_path.name)
     payload.update({"kind": "sqlite", "ok": False, "diagnostics": []})
+    wal_path = Path(str(db_path) + "-wal")
+    shm_path = Path(str(db_path) + "-shm")
+    wal_bytes = path_total_size(wal_path)
+    shm_bytes = path_total_size(shm_path)
+    payload["wal"] = {
+        "path": str(wal_path),
+        "exists": wal_path.exists(),
+        "size_bytes": wal_bytes,
+        "size_human": human_size(wal_bytes),
+    }
+    payload["shm"] = {
+        "path": str(shm_path),
+        "exists": shm_path.exists(),
+        "size_bytes": shm_bytes,
+        "size_human": human_size(shm_bytes),
+    }
+    payload["total_with_wal_bytes"] = int_value(payload.get("size_bytes")) + wal_bytes + shm_bytes
+    payload["total_with_wal_human"] = human_size(payload["total_with_wal_bytes"])
     if not db_path.exists():
         payload["diagnostics"] = ["sqlite_db_missing"]
         return payload
@@ -28896,6 +29480,121 @@ def sqlite_storage_stats(
         conn.close()
     except sqlite3.Error as exc:
         payload["diagnostics"] = [f"sqlite_error:{exc}"]
+    return payload
+
+
+def sqlite_wal_checkpoint(
+    db_path: Path,
+    *,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    wal_path = Path(str(db_path) + "-wal")
+    shm_path = Path(str(db_path) + "-shm")
+    before = {
+        "db_bytes": path_total_size(db_path),
+        "wal_bytes": path_total_size(wal_path),
+        "shm_bytes": path_total_size(shm_path),
+    }
+    diagnostics: list[str] = []
+    result_rows: list[list[int]] = []
+    if not db_path.exists():
+        return {
+            "path": str(db_path),
+            "ok": False,
+            "status": "missing",
+            "mutates": False,
+            "before": before,
+            "after": before,
+            "reclaimed_bytes": 0,
+            "reclaimed_human": "0 B",
+            "diagnostics": ["sqlite_db_missing"],
+        }
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
+        try:
+            result_rows = [[int_value(value) for value in row] for row in conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()]
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    after = {
+        "db_bytes": path_total_size(db_path),
+        "wal_bytes": path_total_size(wal_path),
+        "shm_bytes": path_total_size(shm_path),
+    }
+    busy = bool(result_rows and result_rows[0] and int_value(result_rows[0][0]) != 0)
+    reclaimed = max(0, before["db_bytes"] + before["wal_bytes"] + before["shm_bytes"] - after["db_bytes"] - after["wal_bytes"] - after["shm_bytes"])
+    status = "checkpointed"
+    if diagnostics:
+        status = "sqlite_error"
+    elif busy:
+        status = "busy_deferred"
+        diagnostics.append("sqlite_wal_checkpoint_busy")
+    return {
+        "path": str(db_path),
+        "ok": not diagnostics or busy,
+        "status": status,
+        "mutates": True,
+        "result": result_rows,
+        "before": before,
+        "after": after,
+        "reclaimed_bytes": reclaimed,
+        "reclaimed_human": human_size(reclaimed),
+        "diagnostics": diagnostics,
+    }
+
+
+def storage_maintenance(
+    *,
+    aoa_root: Path,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    targets = {
+        "graph_store": graph_paths(aoa_root)["store"],
+        "search_store": search_db_path(aoa_root),
+    }
+    checkpoints = {
+        name: sqlite_wal_checkpoint(path)
+        for name, path in targets.items()
+    }
+    diagnostics = sorted(
+        {
+            f"{name}:{diag}"
+            for name, item in checkpoints.items()
+            for diag in (item.get("diagnostics", []) if isinstance(item.get("diagnostics"), list) else [])
+            if diag
+        }
+    )
+    reclaimed = sum(int_value(item.get("reclaimed_bytes")) for item in checkpoints.values())
+    busy = any(str(item.get("status") or "") == "busy_deferred" for item in checkpoints.values())
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_storage_maintenance",
+        "generated_at": now,
+        "ok": not any(str(item.get("status") or "") == "sqlite_error" for item in checkpoints.values()),
+        "mutates": True,
+        "status": "deferred_busy" if busy else "checkpointed",
+        "aoa_root": str(aoa_root),
+        "actions": {
+            "sqlite_wal_checkpoint_truncate": checkpoints,
+        },
+        "reclaimed_bytes": reclaimed,
+        "reclaimed_human": human_size(reclaimed),
+        "diagnostics": diagnostics,
+        "stop_line": "Only SQLite WAL files are checkpointed here. Do not delete raw evidence or VACUUM live graph/search stores from this route.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__storage-maintenance"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, storage_maintenance_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
     return payload
 
 
@@ -28966,6 +29665,9 @@ def storage_audit(
     }
     graph_compactable_bytes = table_sizes.get("nodes", 0) + table_sizes.get("edges", 0)
     graph_compactable_measured = bool(table_sizes)
+    sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
+        search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_storage_audit",
@@ -28981,6 +29683,15 @@ def storage_audit(
         "graph_store": graph_store,
         "search_store": search_store,
         "recommendations": [
+            {
+                "id": "sqlite_wal_checkpoint",
+                "status": "safe_live_route",
+                "quality_tradeoff": "none_expected",
+                "speed_tradeoff": "brief SQLite checkpoint lock; defers safely when readers or writers are active",
+                "estimated_reclaimable_bytes": sqlite_wal_reclaimable,
+                "estimated_reclaimable_human": human_size(sqlite_wal_reclaimable),
+                "next_route": "run storage-maintenance --write-report to checkpoint graph/search WAL files",
+            },
             {
                 "id": "graph_compact_aggregate_payload",
                 "status": "implemented_for_new_rebuilds_and_touched_sources",
@@ -29052,7 +29763,18 @@ def storage_audit_markdown(payload: dict[str, Any]) -> str:
         store = payload.get(key) if isinstance(payload.get(key), dict) else {}
         if not store:
             continue
-        lines.extend(["", f"## {key}", "", f"- size: `{store.get('size_human')}`", f"- freelist: `{store.get('freelist_human')}`"])
+        wal = store.get("wal") if isinstance(store.get("wal"), dict) else {}
+        lines.extend(
+            [
+                "",
+                f"## {key}",
+                "",
+                f"- size: `{store.get('size_human')}`",
+                f"- freelist: `{store.get('freelist_human')}`",
+                f"- wal: `{wal.get('size_human')}`",
+                f"- total_with_wal: `{store.get('total_with_wal_human')}`",
+            ]
+        )
         table_sizes = store.get("table_sizes") if isinstance(store.get("table_sizes"), list) else []
         if table_sizes:
             lines.extend(["", "| table | size |", "| --- | ---: |"])
@@ -29063,6 +29785,37 @@ def storage_audit_markdown(payload: dict[str, Any]) -> str:
     for item in payload.get("recommendations", []) if isinstance(payload.get("recommendations"), list) else []:
         if isinstance(item, dict):
             lines.append(f"| `{item.get('id')}` | `{item.get('status')}` | `{item.get('estimated_reclaimable_human')}` | {item.get('next_route')} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def storage_maintenance_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Memory Storage Maintenance",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- reclaimed: `{payload.get('reclaimed_human')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## WAL Checkpoints",
+        "",
+        "| target | status | reclaimed | diagnostics |",
+        "| --- | --- | ---: | --- |",
+    ]
+    actions = payload.get("actions") if isinstance(payload.get("actions"), dict) else {}
+    checkpoints = actions.get("sqlite_wal_checkpoint_truncate") if isinstance(actions.get("sqlite_wal_checkpoint_truncate"), dict) else {}
+    for name, item in checkpoints.items():
+        if not isinstance(item, dict):
+            continue
+        diagnostics = ", ".join(str(value) for value in item.get("diagnostics", []) if value) if isinstance(item.get("diagnostics"), list) else ""
+        lines.append(f"| `{name}` | `{item.get('status')}` | `{item.get('reclaimed_human')}` | {diagnostics or 'none'} |")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
     lines.append("")
     return "\n".join(lines)
 
@@ -31884,6 +32637,497 @@ def route_cache_freshness_gates(
     return payload
 
 
+def latest_diagnostic_summary(aoa_root: Path, glob_pattern: str) -> dict[str, Any]:
+    diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+    candidates = sorted(
+        (path for path in diagnostics_dir.glob(glob_pattern) if path.is_file() and path.suffix == ".json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    if not candidates:
+        return {"exists": False, "pattern": glob_pattern}
+    path = candidates[0]
+    payload = read_json(path, {})
+    payload = payload if isinstance(payload, dict) else {}
+    markdown = path.with_suffix(".md")
+    return {
+        "exists": True,
+        "pattern": glob_pattern,
+        "path": str(path),
+        "markdown": str(markdown) if markdown.exists() else "",
+        "mtime": path_mtime(path),
+        "artifact_type": payload.get("artifact_type"),
+        "generated_at": payload.get("generated_at"),
+        "ok": payload.get("ok"),
+        "status": payload.get("status"),
+        "diagnostics": payload.get("diagnostics", []) if isinstance(payload.get("diagnostics"), list) else [],
+    }
+
+
+def session_memory_timer_status() -> dict[str, Any]:
+    executable = shutil.which("systemctl")
+    if not executable:
+        return {"ok": True, "status": "systemctl_unavailable", "timers": [], "diagnostics": ["systemctl not found"]}
+    command = [executable, "--user", "list-timers", "--all", "*aoa-session-memory*", "--no-legend", "--no-pager"]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "status": "timer_probe_failed", "timers": [], "diagnostics": [f"{exc.__class__.__name__}:{exc}"]}
+    timers: list[dict[str, Any]] = []
+    for line in (completed.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        unit = next((part for part in parts if part.endswith(".timer")), "")
+        service = next((part for part in parts if part.endswith(".service")), "")
+        timers.append({"line": stripped, "unit": unit, "service": service})
+    return {
+        "ok": completed.returncode == 0,
+        "status": "available" if completed.returncode == 0 else "systemctl_error",
+        "command": shlex.join(command),
+        "timer_count": len(timers),
+        "timers": timers[:12],
+        "stderr": (completed.stderr or "").strip()[:500],
+        "diagnostics": [] if completed.returncode == 0 else [f"systemctl_returncode:{completed.returncode}"],
+    }
+
+
+def graph_maintenance_status_from_state(graph_state: dict[str, Any]) -> dict[str, Any]:
+    source_state = graph_state.get("source_state") if isinstance(graph_state.get("source_state"), dict) else {}
+    ledger = graph_state.get("ledger") if isinstance(graph_state.get("ledger"), dict) else {}
+    queue = graph_state.get("queue") if isinstance(graph_state.get("queue"), dict) else {}
+    status_counts = (
+        source_state.get("status_counts")
+        if isinstance(source_state.get("status_counts"), dict)
+        else ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
+    )
+    dirty_count = int_value(source_state.get("dirty_count"))
+    missing_count = int_value(source_state.get("missing_count"))
+    blocked_count = int_value(source_state.get("blocked_count"))
+    retired_count = int_value(source_state.get("retired_count") or ledger.get("retired_count"))
+    actionable_count = int_value(ledger.get("actionable_count")) + int_value(queue.get("actionable_count"))
+    deferred_live_count = int_value(ledger.get("deferred_live_source_count")) + int_value(queue.get("deferred_live_source_count"))
+    if actionable_count and dirty_count <= 0 and missing_count <= 0:
+        dirty_count = actionable_count
+    return {
+        "status": graph_state.get("status"),
+        "needs_maintenance": bool(graph_state.get("needs_maintenance")),
+        "needs_full_rebuild": bool(graph_state.get("needs_full_rebuild")),
+        "source_count": graph_state.get("source_count") or source_state.get("source_count"),
+        "status_counts": status_counts,
+        "dirty_count": dirty_count,
+        "missing_count": missing_count,
+        "blocked_count": blocked_count,
+        "retired_count": retired_count,
+        "actionable_count": actionable_count,
+        "deferred_live_source_count": deferred_live_count,
+        "truth_status": graph_state.get("truth_status"),
+        "diagnostics": graph_state.get("diagnostics", []) if isinstance(graph_state.get("diagnostics"), list) else [],
+    }
+
+
+def search_maintenance_status_from_provider(provider_status: dict[str, Any]) -> dict[str, Any]:
+    providers = provider_status.get("providers") if isinstance(provider_status.get("providers"), dict) else {}
+    portable = providers.get("portable_sqlite") if isinstance(providers.get("portable_sqlite"), dict) else {}
+    freshness = portable.get("freshness") if isinstance(portable.get("freshness"), dict) else {}
+    return {
+        "status": freshness.get("status") or portable.get("status"),
+        "provider_status": portable.get("status"),
+        "freshness_mode": provider_status.get("freshness_mode") or provider_status.get("status_mode"),
+        "count_mode": portable.get("count_mode"),
+        "has_documents": portable.get("has_documents"),
+        "has_route_index": portable.get("has_route_index"),
+        "has_route_terms": portable.get("has_route_terms"),
+        "actionable_dirty_session_count": int_value(freshness.get("actionable_dirty_session_count")),
+        "deferred_live_session_count": int_value(freshness.get("deferred_live_session_count")),
+        "dirty_session_count": int_value(freshness.get("dirty_session_count")),
+        "missing_freshness_state_count": int_value(freshness.get("missing_freshness_state_count")),
+        "actionable_dirty_sessions": freshness.get("actionable_dirty_sessions", [])[:8]
+        if isinstance(freshness.get("actionable_dirty_sessions"), list)
+        else [],
+        "deferred_live_sessions": freshness.get("deferred_live_sessions", [])[:8]
+        if isinstance(freshness.get("deferred_live_sessions"), list)
+        else [],
+        "reasons": freshness.get("reasons", []) if isinstance(freshness.get("reasons"), list) else [],
+        "diagnostics": portable.get("diagnostics", []) if isinstance(portable.get("diagnostics"), list) else [],
+    }
+
+
+def session_memory_maintenance_next_actions(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    route_status: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    actions: list[dict[str, Any]] = []
+    actionable_sessions = search.get("actionable_dirty_sessions") if isinstance(search.get("actionable_dirty_sessions"), list) else []
+    if int_value(search.get("actionable_dirty_session_count")) > 0:
+        first = actionable_sessions[0] if actionable_sessions else {}
+        target = str(first.get("session_label") or first.get("session_id") or "all") if isinstance(first, dict) else "all"
+        command = (
+            ["python3", "scripts/aoa_session_memory.py", "search-index", target, *root_args, "--no-rebuild", "--write-report"]
+            if target != "all"
+            else ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--write-report"]
+        )
+        actions.append({"id": "repair_search_actionable", "reason": "search_actionable_dirty_sessions", "command": command})
+    if route_status.get("needs_index_maintenance"):
+        actions.append(
+            {
+                "id": "repair_index_read_models",
+                "reason": "route_or_search_or_atlas_index_maintenance_needed",
+                "command": ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--write-report"],
+            }
+        )
+    if graph.get("needs_full_rebuild"):
+        actions.append(
+            {
+                "id": "repair_graph_store_rebuild",
+                "reason": "graph_store_schema_or_structural_rebuild_needed",
+                "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--write-report"],
+            }
+        )
+    elif graph.get("needs_maintenance") or int_value(graph.get("actionable_count")) > 0:
+        actions.append(
+            {
+                "id": "repair_graph_queue",
+                "reason": "graph_dirty_or_missing_sources",
+                "command": ["python3", "scripts/aoa_session_memory.py", "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report"],
+            }
+        )
+    if not actions and (int_value(search.get("deferred_live_session_count")) > 0 or int_value(graph.get("deferred_live_source_count")) > 0):
+        actions.append(
+            {
+                "id": "wait_live_catchup",
+                "reason": "recent_live_sources_deferred_until_quiet_window",
+                "command": ["python3", "scripts/aoa_session_memory.py", "auto-maintenance", "hot", "all", *root_args, "--apply", "--write-report"],
+                "note": "Run after the live quiet window, or let the timer catch up.",
+            }
+        )
+    if actions:
+        if actions[0]["id"] == "wait_live_catchup":
+            return "wait_live_catchup", actions
+        return "run_maintenance", actions
+    return "use_graph_search", [
+        {
+            "id": "use_graph_search",
+            "reason": "graph_and_search_hot_status_current",
+            "command": ["python3", "scripts/aoa_session_memory.py", "search", "", *root_args, "--limit", "20"],
+        }
+    ]
+
+
+def session_memory_agent_route_status(
+    *,
+    recommendation: str,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    route: dict[str, Any],
+) -> dict[str, Any]:
+    actionable_search = int_value(search.get("actionable_dirty_session_count"))
+    actionable_graph = int_value(graph.get("actionable_count"))
+    deferred_live = int_value(search.get("deferred_live_session_count")) + int_value(graph.get("deferred_live_source_count"))
+    needs_route_repair = any(
+        bool(route.get(key))
+        for key in (
+            "needs_index_maintenance",
+            "needs_graph_maintenance",
+            "needs_sidecar_export",
+            "needs_offline_graph_build",
+        )
+    )
+    can_use_graph_search = recommendation in {"use_graph_search", "wait_live_catchup"} and not needs_route_repair
+    if recommendation == "run_maintenance":
+        action = "run_maintenance_before_graph_search"
+        raw_or_deep_route = "Use raw refs for urgent proof only; repair the stale projection first."
+    elif recommendation == "install_or_bootstrap_runtime":
+        action = "install_or_bootstrap_runtime"
+        raw_or_deep_route = "Clean portable bundles have no live archive proof layer until installed or populated."
+    elif recommendation == "wait_live_catchup":
+        action = "use_graph_search_for_stable_archive_wait_for_recent_live"
+        raw_or_deep_route = "For claims about very recent live transcripts, wait for catch-up or run a deep check."
+    else:
+        action = "use_graph_search"
+        raw_or_deep_route = "Use graph/search for routing; keep raw/segment refs as the proof layer."
+    return {
+        "action": action,
+        "can_use_graph_search": can_use_graph_search and recommendation != "install_or_bootstrap_runtime",
+        "maintenance_required": recommendation == "run_maintenance",
+        "bootstrap_required": recommendation == "install_or_bootstrap_runtime",
+        "live_catchup_pending": deferred_live > 0,
+        "actionable_search_session_count": actionable_search,
+        "actionable_graph_source_count": actionable_graph,
+        "deferred_live_count": deferred_live,
+        "raw_or_deep_route": raw_or_deep_route,
+    }
+
+
+def session_memory_portable_clean_runtime_state(aoa_root: Path) -> dict[str, Any]:
+    sessions = registry_sessions(aoa_root)
+    sessions_index_path = aoa_root / SESSION_ROOT / SESSIONS_INDEX_JSON
+    sessions_index_markdown_path = aoa_root / SESSION_ROOT / SESSIONS_INDEX_MARKDOWN
+    sessions_index_payload = read_json(sessions_index_path, {})
+    sessions_index_ok = (
+        isinstance(sessions_index_payload, dict)
+        and sessions_index_payload.get("artifact_type") == "sessions_directory_index"
+        and int_value(sessions_index_payload.get("session_count"), -1) == len(sessions)
+        and sessions_index_markdown_path.exists()
+    )
+    runtime_absent = (
+        len(sessions) == 0
+        and sessions_index_ok
+        and not any((aoa_root / SESSION_ROOT).glob("*/session.manifest.json"))
+        and not search_db_path(aoa_root).exists()
+        and not graph_paths(aoa_root)["store"].exists()
+    )
+    return {
+        "ok": runtime_absent,
+        "session_count": len(sessions),
+        "sessions_index_ok": sessions_index_ok,
+        "search_store_exists": search_db_path(aoa_root).exists(),
+        "graph_store_exists": graph_paths(aoa_root)["store"].exists(),
+        "diagnostics": [] if runtime_absent else ["not_clean_portable_runtime"],
+    }
+
+
+def session_memory_maintenance_status(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    mode: str = "hot",
+    include_timers: bool = True,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    deep = mode == "deep"
+    provider_status = search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_mode="deep" if deep else "hot",
+    )
+    route_status = (
+        graph_freshness_gates(aoa_root=aoa_root, target="all", ref_sample_limit=50)
+        if deep
+        else route_cache_freshness_gates(aoa_root=aoa_root, target="all")
+    )
+    graph_state = route_status.get("graph_store") if isinstance(route_status.get("graph_store"), dict) else {}
+    search = search_maintenance_status_from_provider(provider_status)
+    graph = graph_maintenance_status_from_state(graph_state)
+    route = {
+        "status": "current" if route_status.get("ok") else "needs_attention",
+        "mode": mode,
+        "source_scan": bool(route_status.get("source_scan")),
+        "needs_index_maintenance": bool(route_status.get("needs_index_maintenance")),
+        "needs_graph_maintenance": bool(route_status.get("needs_graph_maintenance")),
+        "needs_sidecar_export": bool(route_status.get("needs_sidecar_export")),
+        "needs_offline_graph_build": bool(route_status.get("needs_offline_graph_build")),
+        "route_drift_count": int_value(route_status.get("route_drift_count")),
+        "diagnostics": route_status.get("diagnostics", []) if isinstance(route_status.get("diagnostics"), list) else [],
+    }
+    portable_clean_runtime = session_memory_portable_clean_runtime_state(aoa_root)
+    if portable_clean_runtime.get("ok"):
+        root_args = ["--workspace-root", str(workspace_root), "--source-aoa-root", str(aoa_root), "--force"]
+        recommendation = "install_or_bootstrap_runtime"
+        next_actions = [
+            {
+                "id": "install_or_bootstrap_runtime",
+                "reason": "clean_portable_bundle_without_live_runtime_indexes",
+                "command": ["python3", "scripts/aoa_session_memory.py", "install", *root_args],
+                "note": "Install into a workspace or populate sessions before using graph/search.",
+            }
+        ]
+    else:
+        recommendation, next_actions = session_memory_maintenance_next_actions(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            search=search,
+            graph=graph,
+            route_status=route_status,
+        )
+    agent_route = session_memory_agent_route_status(
+        recommendation=recommendation,
+        search=search,
+        graph=graph,
+        route=route,
+    )
+    latest_reports = {
+        "auto_maintenance": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-*.json"),
+        "graph_maintenance": latest_diagnostic_summary(aoa_root, "*__graph-maintenance.json"),
+        "search_provider_status": latest_diagnostic_summary(aoa_root, "*__search-provider-status.json"),
+        "route_cache_freshness": latest_diagnostic_summary(aoa_root, "*__route-cache-freshness-gates.json"),
+        "storage_audit": latest_diagnostic_summary(aoa_root, "*__storage-audit.json"),
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_status",
+        "generated_at": now,
+        "ok": recommendation in {"use_graph_search", "wait_live_catchup", "install_or_bootstrap_runtime"},
+        "mutates": False,
+        "mode": mode,
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "recommendation": recommendation,
+        "agent_route": agent_route,
+        "search": search,
+        "graph": graph,
+        "route": route,
+        "portable_clean_runtime": portable_clean_runtime,
+        "next_actions": next_actions,
+        "exact_next_command": shlex.join(next_actions[0]["command"]) if next_actions and isinstance(next_actions[0].get("command"), list) else "",
+        "latest_reports": latest_reports,
+        "timers": session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": []},
+        "mcp_boundary": "MCP may expose this packet read-only; repair/reindex/maintenance commands stay outside MCP.",
+        "diagnostics": []
+        if portable_clean_runtime.get("ok")
+        else sorted(set([*search.get("diagnostics", []), *graph.get("diagnostics", []), *route.get("diagnostics", [])])),
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__maintenance-status"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, maintenance_status_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def compact_session_sample(item: Any) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {"session_id": str(item)}
+        return {
+            key: item.get(key)
+            for key in (
+                "session_id",
+                "session_label",
+                "status",
+                "reason",
+                "deferred_live_reason",
+                "last_checked",
+                "last_indexed_at",
+                "document_count",
+            )
+            if key in item
+        }
+
+    search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
+    compact_search = {
+        key: search.get(key)
+        for key in (
+            "status",
+            "provider_status",
+            "freshness_mode",
+            "count_mode",
+            "has_documents",
+            "has_route_index",
+            "has_route_terms",
+            "actionable_dirty_session_count",
+            "deferred_live_session_count",
+            "dirty_session_count",
+            "missing_freshness_state_count",
+            "reasons",
+            "diagnostics",
+        )
+        if key in search
+    }
+    if isinstance(search.get("actionable_dirty_sessions"), list) and search.get("actionable_dirty_sessions"):
+        compact_search["actionable_dirty_session_samples"] = [
+            compact_session_sample(item) for item in search["actionable_dirty_sessions"][:4]
+        ]
+    if isinstance(search.get("deferred_live_sessions"), list) and search.get("deferred_live_sessions"):
+        compact_search["deferred_live_session_samples"] = [
+            compact_session_sample(item) for item in search["deferred_live_sessions"][:4]
+        ]
+
+    timers = payload.get("timers") if isinstance(payload.get("timers"), dict) else {}
+    compact_timers = {
+        "ok": timers.get("ok"),
+        "status": timers.get("status"),
+        "timer_count": timers.get("timer_count"),
+        "timers": [
+            {key: item.get(key) for key in ("unit", "service") if key in item}
+            for item in timers.get("timers", [])[:8]
+            if isinstance(item, dict)
+        ],
+        "diagnostics": timers.get("diagnostics", []),
+    }
+
+    latest_reports = payload.get("latest_reports") if isinstance(payload.get("latest_reports"), dict) else {}
+    compact_reports = {
+        name: {
+            key: report.get(key)
+            for key in ("exists", "path", "generated_at", "ok", "status", "diagnostics")
+            if key in report
+        }
+        for name, report in latest_reports.items()
+        if isinstance(report, dict)
+    }
+
+    return {
+        "schema_version": payload.get("schema_version"),
+        "artifact_type": payload.get("artifact_type"),
+        "generated_at": payload.get("generated_at"),
+        "ok": payload.get("ok"),
+        "mutates": payload.get("mutates"),
+        "mode": payload.get("mode"),
+        "recommendation": payload.get("recommendation"),
+        "agent_route": payload.get("agent_route"),
+        "search": compact_search,
+        "graph": payload.get("graph"),
+        "route": payload.get("route"),
+        "portable_clean_runtime": payload.get("portable_clean_runtime"),
+        "next_actions": [
+            {
+                key: action.get(key)
+                for key in ("id", "reason", "command", "note")
+                if key in action
+            }
+            for action in (payload.get("next_actions") or [])[:3]
+            if isinstance(action, dict)
+        ],
+        "exact_next_command": payload.get("exact_next_command"),
+        "latest_reports": compact_reports,
+        "timers": compact_timers,
+        "mcp_boundary": payload.get("mcp_boundary"),
+        "diagnostics": payload.get("diagnostics", []),
+        **({"report_json": payload.get("report_json")} if payload.get("report_json") else {}),
+        **({"report_markdown": payload.get("report_markdown")} if payload.get("report_markdown") else {}),
+    }
+
+
+def maintenance_status_markdown(payload: dict[str, Any]) -> str:
+    search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
+    lines = [
+        "# Session Memory Maintenance Status",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mode: `{payload.get('mode')}`",
+        f"- recommendation: `{payload.get('recommendation')}`",
+        f"- search: `{search.get('status')}` actionable=`{search.get('actionable_dirty_session_count')}` deferred=`{search.get('deferred_live_session_count')}`",
+        f"- graph: `{graph.get('status')}` dirty=`{graph.get('dirty_count')}` missing=`{graph.get('missing_count')}` blocked=`{graph.get('blocked_count')}` retired=`{graph.get('retired_count')}`",
+        f"- route: `{route.get('status')}` index_needed=`{route.get('needs_index_maintenance')}` graph_needed=`{route.get('needs_graph_maintenance')}`",
+        f"- exact_next_command: `{payload.get('exact_next_command')}`",
+        "",
+        "## Boundary",
+        "",
+        str(payload.get("mcp_boundary") or ""),
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
 def graph_state_item_source_mtime(item: dict[str, Any]) -> float:
     try:
         explicit_mtime = float(item.get("source_mtime") or 0.0)
@@ -32998,6 +34242,16 @@ def entity_usage_audit(
         "text_result_count": text_result_count,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
+        "search_has_route_index": bool(
+            provider_payload.get("has_route_index")
+            if isinstance(provider_payload, dict) and provider_payload.get("has_route_index") is not None
+            else int_value(provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else 0) > 0
+        ),
+        "search_has_route_terms": bool(
+            provider_payload.get("has_route_terms")
+            if isinstance(provider_payload, dict) and provider_payload.get("has_route_terms") is not None
+            else int_value(provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else 0) > 0
+        ),
         "freshness_counts": freshness_counts,
         "fresh_event_count": int_value(freshness_counts.get("fresh")),
         "stale_event_count": int_value(freshness_counts.get("stale")),
@@ -33485,6 +34739,16 @@ def entity_usage_scenario_audit(
         "search_schema_version": provider_payload.get("search_schema_version") if isinstance(provider_payload, dict) else None,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
+        "search_has_route_index": bool(
+            provider_payload.get("has_route_index")
+            if isinstance(provider_payload, dict) and provider_payload.get("has_route_index") is not None
+            else int_value(provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else 0) > 0
+        ),
+        "search_has_route_terms": bool(
+            provider_payload.get("has_route_terms")
+            if isinstance(provider_payload, dict) and provider_payload.get("has_route_terms") is not None
+            else int_value(provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else 0) > 0
+        ),
     }
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -33611,6 +34875,22 @@ def command_graph_freshness_gates(args: argparse.Namespace) -> int:
             write_report=args.write_report,
         )
     stdout_payload = payload if args.full else compact_freshness_stdout_payload(payload)
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_maintenance_status(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=root,
+        mode="deep" if args.deep else "hot",
+        include_timers=not args.no_timers,
+        write_report=args.write_report,
+    )
+    stdout_payload = payload if args.full else compact_maintenance_status_payload(payload)
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -34585,12 +35865,15 @@ def command_search_provider_status(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     freshness_records = [resolve_session_record(root, args.session)] if args.session else None
+    freshness_mode = "deep" if args.deep or freshness_records is not None else "hot"
     payload = search_provider_status(
         aoa_root=root,
         provider_name=args.provider,
         include_host=args.include_host,
         refresh_host=args.refresh_host,
         refresh_host_index=args.refresh_host_index,
+        freshness_mode=freshness_mode,
+        record_freshness_state=args.refresh_state,
         freshness_records=freshness_records,
         timeout=args.timeout,
         write_report=args.write_report,
@@ -34737,6 +36020,17 @@ def command_storage_audit(args: argparse.Namespace) -> int:
         aoa_root=root,
         deep_dbstat=args.deep_dbstat,
         row_counts=args.row_counts,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_storage_maintenance(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = storage_maintenance(
+        aoa_root=root,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -38993,6 +40287,8 @@ def build_parser() -> argparse.ArgumentParser:
     provider_status.add_argument("--refresh-host", action="store_true", help="Use the host deterministic refresh quality gate where configured.")
     provider_status.add_argument("--refresh-host-index", action="store_true", help="Use the host refresh-index quality gate where configured.")
     provider_status.add_argument("--session", help="Limit portable SQLite freshness to one session id, label, semantic name, or latest.")
+    provider_status.add_argument("--deep", action="store_true", help="Run archive projection freshness scan instead of the hot persisted state route.")
+    provider_status.add_argument("--refresh-state", action="store_true", help="With --deep or --session, persist the scanned freshness state into the hot provider queue.")
     provider_status.add_argument("--timeout", type=int, default=45)
     provider_status.add_argument("--write-report", action="store_true", help="Write JSON and Markdown provider reports under .aoa/diagnostics.")
     provider_status.set_defaults(func=command_search_provider_status)
@@ -39151,6 +40447,15 @@ def build_parser() -> argparse.ArgumentParser:
     storage_audit_parser.add_argument("--row-counts", action="store_true", help="Include SQLite row counts; can be slow on very large stores.")
     storage_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown storage audit reports under .aoa/diagnostics.")
     storage_audit_parser.set_defaults(func=command_storage_audit)
+
+    storage_maintenance_parser = sub.add_parser(
+        "storage-maintenance",
+        help="Run lossless storage maintenance currently limited to graph/search SQLite WAL checkpointing.",
+    )
+    storage_maintenance_parser.add_argument("--workspace-root")
+    storage_maintenance_parser.add_argument("--aoa-root")
+    storage_maintenance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown storage maintenance reports under .aoa/diagnostics.")
+    storage_maintenance_parser.set_defaults(func=command_storage_maintenance)
 
     graph_build = sub.add_parser(
         "graph-build",
@@ -39361,6 +40666,19 @@ def build_parser() -> argparse.ArgumentParser:
     graph_quality_corpus_check.add_argument("--write-report", action="store_true", help="Write JSON and Markdown check reports under .aoa/diagnostics.")
     graph_quality_corpus_check.add_argument("--full", action="store_true", help="Print per-case check results.")
     graph_quality_corpus_check.set_defaults(func=command_graph_quality_corpus)
+
+    maintenance_status_parser = sub.add_parser(
+        "maintenance-status",
+        aliases=["compact-status", "maintenance-plan"],
+        help="Return a compact read-only agent packet for search/graph maintenance posture and exact next command.",
+    )
+    maintenance_status_parser.add_argument("--workspace-root")
+    maintenance_status_parser.add_argument("--aoa-root")
+    maintenance_status_parser.add_argument("--deep", action="store_true", help="Run deep freshness gates instead of hot persisted status.")
+    maintenance_status_parser.add_argument("--no-timers", action="store_true", help="Skip systemd user timer snapshot.")
+    maintenance_status_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown maintenance-status reports under .aoa/diagnostics.")
+    maintenance_status_parser.add_argument("--full", action="store_true", help="Print full provider/route payload details.")
+    maintenance_status_parser.set_defaults(func=command_maintenance_status)
 
     graph_freshness_parser = sub.add_parser(
         "graph-freshness-check",

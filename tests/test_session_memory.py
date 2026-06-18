@@ -1552,7 +1552,7 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     )
     assert text_route_payload["ok"] is True
     assert text_route_payload["results"]
-    provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite", freshness_mode="deep")
     assert provider["providers"]["portable_sqlite"]["route_term_count"] > 0
 
 
@@ -1799,7 +1799,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
         for item in usage_audit["document_refs"]
     )
-    assert usage_audit["quality"]["search_route_index_count"] > 0
+    assert usage_audit["quality"]["search_has_route_index"] is True
+    assert usage_audit["quality"]["search_has_route_terms"] is True
     assert usage_audit["quality"]["fresh_event_count"] >= usage_audit["usage_event_count"]
     assert usage_audit["quality"]["stale_event_count"] == 0
     assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
@@ -1861,7 +1862,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert storage["ok"] is True
     assert storage["graph_store"]["ok"] is True
     assert storage["graph_store"]["table_sizes"]
+    assert storage["graph_store"]["wal"]["size_bytes"] >= 0
+    assert storage["graph_store"]["total_with_wal_bytes"] >= storage["graph_store"]["size_bytes"]
     assert storage["sessions"]["raw_block_duplication_candidate_bytes"] >= 0
+    assert any(item.get("id") == "sqlite_wal_checkpoint" for item in storage["recommendations"])
     assert any(item.get("id") == "graph_compact_aggregate_payload" for item in storage["recommendations"])
     assert Path(storage["report_json"]).exists()
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
@@ -1955,6 +1959,46 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert dossier["strong_refs"]
     assert dossier["read_first"]
     assert Path(dossier["report_json"]).exists()
+
+
+def test_storage_maintenance_checkpoints_sqlite_wal(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    search_path = module.search_db_path(aoa_root)
+    graph_path = module.graph_paths(aoa_root)["store"]
+
+    def open_wal_db(path: Path) -> sqlite3.Connection:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE payloads(value TEXT)")
+        conn.executemany("INSERT INTO payloads(value) VALUES (?)", [("x" * 1000,) for _ in range(1000)])
+        conn.commit()
+        assert Path(str(path) + "-wal").exists()
+        assert Path(str(path) + "-wal").stat().st_size > 0
+        return conn
+
+    search_conn = open_wal_db(search_path)
+    graph_conn = open_wal_db(graph_path)
+    try:
+        payload = module.storage_maintenance(aoa_root=aoa_root, write_report=True)
+        assert search_conn.execute("SELECT COUNT(*) FROM payloads").fetchone()[0] == 1000
+        assert graph_conn.execute("SELECT COUNT(*) FROM payloads").fetchone()[0] == 1000
+    finally:
+        search_conn.close()
+        graph_conn.close()
+
+    assert payload["artifact_type"] == "session_memory_storage_maintenance"
+    assert payload["ok"] is True
+    assert payload["mutates"] is True
+    assert payload["status"] == "checkpointed"
+    assert payload["reclaimed_bytes"] > 0
+    assert payload["actions"]["sqlite_wal_checkpoint_truncate"]["search_store"]["status"] == "checkpointed"
+    assert payload["actions"]["sqlite_wal_checkpoint_truncate"]["graph_store"]["status"] == "checkpointed"
+    assert module.path_total_size(Path(str(search_path) + "-wal")) == 0
+    assert module.path_total_size(Path(str(graph_path) + "-wal")) == 0
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
 
 
 def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Path) -> None:
@@ -5214,7 +5258,7 @@ def test_scoped_index_maintenance_readiness_uses_same_session_window(tmp_path: P
     assert actions["route_readiness"]["result"]["sample_limit"] == 0
     assert actions["route_readiness"]["result"]["selected_count"] == 1
 
-    full_provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    full_provider = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite", freshness_mode="deep")
     assert full_provider["providers"]["portable_sqlite"]["freshness"]["status"] == "stale"
 
     scoped_readiness = module.route_layer_readiness(aoa_root=aoa_root, target="all", since="2026-06-02")
@@ -5349,6 +5393,98 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert "aoa_session_memory MCP remains read-only" in payload["mcp_boundary"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_search_provider_status(**kwargs: Any) -> dict[str, Any]:
+        calls["search"] = kwargs
+        return {
+            "ok": True,
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready_with_deferred_live_updates",
+                    "count_mode": "not_counted_hot",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {
+                        "status": "current_with_deferred_live_updates",
+                        "actionable_dirty_session_count": 0,
+                        "deferred_live_session_count": 2,
+                        "dirty_session_count": 2,
+                        "missing_freshness_state_count": 0,
+                        "deferred_live_sessions": [
+                            {
+                                "session_id": "live-1",
+                                "session_label": "2026-06-18__001__live-session",
+                                "reason": "recent_live_projection_updates_deferred",
+                            }
+                        ],
+                        "reasons": ["recent_live_projection_updates_deferred"],
+                    },
+                }
+            },
+        }
+
+    def fake_route_cache_freshness_gates(**kwargs: Any) -> dict[str, Any]:
+        calls["route"] = kwargs
+        return {
+            "ok": True,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": [],
+            "graph_store": {
+                "status": "current",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "source_count": 3,
+                "truth_status": "hot_gate_ledger_queue_summary_no_source_scan",
+                "source_state": {
+                    "source_count": 3,
+                    "status_counts": {"clean": 3},
+                    "dirty_count": 0,
+                    "missing_count": 0,
+                    "blocked_count": 0,
+                },
+                "ledger": {"actionable_count": 0, "retired_count": 0, "deferred_live_source_count": 0},
+                "queue": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "diagnostics": [],
+            },
+        }
+
+    monkeypatch.setattr(module, "search_provider_status", fake_search_provider_status)
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_route_cache_freshness_gates)
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 1, "timers": [], "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+
+    payload = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root)
+    compact = module.compact_maintenance_status_payload(payload)
+
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["recommendation"] == "wait_live_catchup"
+    assert payload["agent_route"]["action"] == "use_graph_search_for_stable_archive_wait_for_recent_live"
+    assert payload["agent_route"]["can_use_graph_search"] is True
+    assert payload["search"]["actionable_dirty_session_count"] == 0
+    assert payload["search"]["deferred_live_session_count"] == 2
+    assert payload["graph"]["actionable_count"] == 0
+    assert calls["search"]["freshness_mode"] == "hot"
+    assert calls["route"]["target"] == "all"
+    assert "auto-maintenance hot all" in payload["exact_next_command"]
+    assert compact["agent_route"]["live_catchup_pending"] is True
+    assert compact["next_actions"][0]["id"] == "wait_live_catchup"
 
 
 def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5939,6 +6075,10 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
         "SELECT MAX(LENGTH(body)), COUNT(*) FROM documents JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid"
     ).fetchone()
     route_preview_len, payload_len = conn.execute("SELECT MAX(LENGTH(route_signals)), MAX(LENGTH(payload_json)) FROM documents").fetchone()
+    raw_unavailable_state = conn.execute(
+        "SELECT status, reason FROM search_freshness_state WHERE session_id = ?",
+        ("raw-missing-session",),
+    ).fetchone()
     conn.close()
     assert body_meta == module.SEARCH_BODY_STORAGE_MODE
     assert payload_meta == module.SEARCH_PAYLOAD_STORAGE_MODE
@@ -5946,6 +6086,7 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert route_preview_len <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
     assert payload_len < 1000
     assert compressed_count == indexed["document_count"]
+    assert raw_unavailable_state == ("current", "indexed")
 
     hook_results = module.search_sessions(aoa_root=aoa_root, query="hook timed out", explain=True)
     assert hook_results["ok"] is True
@@ -6256,11 +6397,15 @@ def test_scoped_search_index_refresh_preserves_other_session_state(tmp_path: Pat
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     try:
         state_count = conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0]
+        freshness_state_count = conn.execute("SELECT COUNT(*) FROM search_freshness_state").fetchone()[0]
+        freshness_statuses = {row[0] for row in conn.execute("SELECT DISTINCT status FROM search_freshness_state").fetchall()}
         labels = {row[0] for row in conn.execute("SELECT session_label FROM session_index_state").fetchall()}
         other_docs = conn.execute("SELECT COUNT(*) FROM documents WHERE session_id = ?", ("other-search-session",)).fetchone()[0]
     finally:
         conn.close()
     assert state_count == 2
+    assert freshness_state_count == 2
+    assert freshness_statuses == {"current"}
     assert str(target_label) in labels
     assert other_docs > 0
 
@@ -6308,10 +6453,12 @@ def test_budgeted_full_search_rebuild_does_not_replace_existing_db(tmp_path: Pat
     conn = sqlite3.connect(str(db_path))
     try:
         state_count = conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0]
+        freshness_state_count = conn.execute("SELECT COUNT(*) FROM search_freshness_state").fetchone()[0]
         document_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     finally:
         conn.close()
     assert state_count == 3
+    assert freshness_state_count == 3
     assert document_count == full["document_count"]
 
 
@@ -6576,8 +6723,148 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["ok"] is True
     assert status["default_provider"] == "portable_sqlite"
     assert status["providers"]["portable_sqlite"]["status"] == "ready"
+    assert status["freshness_mode"] == "hot"
+    assert status["providers"]["portable_sqlite"]["freshness"]["source_scan"] is False
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+def test_search_provider_status_hot_route_uses_persisted_state_without_archive_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-hot.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-hot", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find hot state evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-hot",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("archive scan should not run")),
+    )
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+    freshness = provider["freshness"]
+
+    assert status["ok"] is True
+    assert status["freshness_mode"] == "hot"
+    assert provider["status"] == "ready"
+    assert freshness["mode"] == "hot_persisted_state"
+    assert freshness["source_scan"] is False
+    assert freshness["freshness_state_status_counts"] == {"current": 1}
+
+
+def test_search_provider_status_hot_route_reports_missing_freshness_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-missing-state.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-missing-state", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find missing state evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-missing-state",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    try:
+        conn.execute("DELETE FROM search_freshness_state WHERE session_id = ?", ("provider-missing-state",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = status["providers"]["portable_sqlite"]
+    freshness = provider["freshness"]
+
+    assert status["ok"] is False
+    assert provider["status"] == "stale"
+    assert "search_freshness_state_missing" in provider["diagnostics"]
+    assert freshness["status"] == "stale"
+    assert freshness["missing_freshness_state_count"] == 1
+    assert freshness["actionable_dirty_session_count"] == 1
+
+
+def test_sync_marks_search_freshness_stale_until_scoped_search_index_refreshes(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-sync-stale.jsonl"
+    base_rows = [
+        {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-sync-stale", "cwd": str(workspace)}},
+        {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find sync stale evidence"}]}},
+    ]
+    write_jsonl(transcript, base_rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-sync-stale",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+
+    write_jsonl(
+        transcript,
+        [
+            *base_rows,
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Updated answer after initial search index."}]}},
+        ],
+    )
+    synced = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-sync-stale",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert synced["archive"]["search_freshness_state"]["status"] == "stale"
+
+    stale = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert stale["ok"] is False
+    assert stale["providers"]["portable_sqlite"]["freshness"]["actionable_dirty_session_ids"] == ["provider-sync-stale"]
+
+    label = module.resolve_session_record(aoa_root, "provider-sync-stale")["session_label"]
+    refreshed = module.search_index_sessions(aoa_root=aoa_root, target=str(label), rebuild=False)
+    assert refreshed["ok"] is True
+
+    current = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert current["ok"] is True
+    assert current["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
 
 
 def test_search_provider_status_detects_session_projection_drift(tmp_path: Path) -> None:
@@ -6610,7 +6897,15 @@ def test_search_provider_status_detects_session_projection_drift(tmp_path: Path)
     session_index_payload["test_search_drift"] = "Generated source drift."
     session_index_path.write_text(json.dumps(session_index_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    hot_before = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert hot_before["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
+
+    status = module.search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_mode="deep",
+        record_freshness_state=True,
+    )
     provider = status["providers"]["portable_sqlite"]
 
     assert status["ok"] is False
@@ -6618,7 +6913,15 @@ def test_search_provider_status_detects_session_projection_drift(tmp_path: Path)
     assert provider["status"] == "stale"
     assert "session_projection_dirty" in provider["diagnostics"]
     assert provider["freshness"]["status"] == "stale"
+    assert provider["freshness"]["scope"] == "all_sessions"
     assert provider["freshness"]["dirty_session_count"] == 1
+    assert provider["freshness"]["state_refresh"]["updated_count"] == 1
+
+    hot_after = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    hot_provider = hot_after["providers"]["portable_sqlite"]
+    assert hot_after["ok"] is False
+    assert hot_provider["freshness"]["status"] == "stale"
+    assert hot_provider["freshness"]["actionable_dirty_session_ids"] == ["provider-drift"]
 
 
 def test_search_provider_status_defers_recent_live_codex_projection_drift(tmp_path: Path) -> None:
@@ -6654,7 +6957,12 @@ def test_search_provider_status_defers_recent_live_codex_projection_drift(tmp_pa
     os.utime(transcript, None)
     os.utime(session_index_path, None)
 
-    status = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    status = module.search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_mode="deep",
+        record_freshness_state=True,
+    )
     provider = status["providers"]["portable_sqlite"]
     freshness = provider["freshness"]
 
@@ -6670,6 +6978,91 @@ def test_search_provider_status_defers_recent_live_codex_projection_drift(tmp_pa
     assert freshness["actionable_dirty_session_ids"] == []
     assert freshness["reasons"] == ["recent_live_projection_updates_deferred"]
     assert freshness["deferred_live_sessions"][0]["live_transcript_path"] == str(transcript)
+    assert freshness["state_refresh"]["status_counts"] == {"deferred_live": 1}
+
+    hot_after = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    hot_provider = hot_after["providers"]["portable_sqlite"]
+    hot_freshness = hot_provider["freshness"]
+    assert hot_after["ok"] is True
+    assert hot_provider["status"] == "ready_with_deferred_live_updates"
+    assert hot_freshness["status"] == "current_with_deferred_live_updates"
+    assert hot_freshness["deferred_live_session_count"] == 1
+    assert hot_freshness["deferred_live_sessions"][0]["deferred_live_reason"] == "recent_live_codex_transcript_update"
+
+
+def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "18" / "rollout-2026-06-18T00-00-00-live-handoff.jsonl"
+    transcript.parent.mkdir(parents=True)
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "live-handoff", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Index live handoff"}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Initial indexed answer."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-handoff",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+
+    record = module.resolve_session_record(aoa_root, "live-handoff")
+    segment_index_path = next((Path(record["path"]) / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(
+        {"layer": "entity", "key": "live_handoff_anchor", "route_signal": "entity:live_handoff_anchor"}
+    )
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(transcript, None)
+    os.utime(segment_index_path, None)
+
+    deferred = module.search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_mode="deep",
+        record_freshness_state=True,
+    )
+    assert deferred["ok"] is True
+    assert deferred["providers"]["portable_sqlite"]["freshness"]["status"] == "current_with_deferred_live_updates"
+    before = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
+    assert before["recommendation"] == "wait_live_catchup"
+    assert before["agent_route"]["live_catchup_pending"] is True
+
+    quiet_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
+    os.utime(transcript, (quiet_ts, quiet_ts))
+    os.utime(segment_index_path, (quiet_ts, quiet_ts))
+    catchup = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="all",
+        apply=True,
+        budget_seconds=120,
+    )
+    assert catchup["ok"] is True
+    assert catchup["maintenance"]["search_reindex_session_count"] >= 1
+
+    current = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert current["ok"] is True
+    assert current["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
+    after = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
+    assert after["recommendation"] == "use_graph_search"
+    assert after["agent_route"]["action"] == "use_graph_search"
+    assert after["agent_route"]["live_catchup_pending"] is False
 
 
 def test_search_provider_status_cli_can_scope_freshness_to_session(tmp_path: Path, capsys: Any) -> None:
@@ -8610,6 +9003,18 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+
+    maintenance = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        include_timers=False,
+    )
+    assert maintenance["ok"] is True
+    assert maintenance["recommendation"] == "install_or_bootstrap_runtime"
+    assert maintenance["agent_route"]["action"] == "install_or_bootstrap_runtime"
+    assert maintenance["agent_route"]["bootstrap_required"] is True
+    assert maintenance["portable_clean_runtime"]["ok"] is True
+    assert maintenance["diagnostics"] == []
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:

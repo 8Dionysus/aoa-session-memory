@@ -456,8 +456,23 @@ SQLite inspection. The command is read-only. It reports top-level `.aoa`
 weight, session raw/block/segment buckets, SQLite page and freelist state, and
 optional per-table sizes.
 
+Use `storage-maintenance` for the current lossless shrink action:
+
+```bash
+python3 scripts/aoa_session_memory.py storage-maintenance \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+This only checkpoints/truncates graph/search SQLite WAL files. It does not
+delete raw evidence, run `VACUUM`, rebuild graph/search stores, or remove raw
+blocks.
+
 The current safe storage route is:
 
+- SQLite WAL: checkpoint/truncate with `storage-maintenance`; if readers or
+  writers are active, let it defer and retry later.
 - Graph store: aggregate node/edge payloads keep compact refs; packet reads
   hydrate evidence from contribution rows.
 - Search store: new search rebuilds keep full text in FTS and compressed
