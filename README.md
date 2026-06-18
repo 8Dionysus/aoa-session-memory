@@ -402,7 +402,8 @@ this maintenance route so semantic name changes do not leave search or atlas
 surfaces behind the `session_id` bridge.
 
 For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
-maintenance controller with freshness gates, a lock, and bounded graph batches:
+maintenance controller with a clean preflight gate, a lock, and bounded graph
+batches:
 
 ```bash
 python3 scripts/aoa_session_memory.py auto-maintenance hot \
@@ -422,7 +423,10 @@ the archive needs to converge through repeated safe batches instead of one
 large rebuild. A successful bounded catch-up pass may report
 `applied_with_remaining_backlog` with `expected_catchup_remaining=true`; this
 means the selected repair batch landed and the remaining dirty sessions are the
-next automatic queue, not a failed service. For a live route-cache repair
+next automatic queue, not a failed service. A clean `hot` or `catchup` run must
+return `status=nothing_to_do`, `mutates=false`, and a `skipped_clean` action;
+it must not touch graph/search read-model stores just to prove they are already
+current. For a live route-cache repair
 without graph cost, run
 `index-maintenance --skip-graph-repair`; the report keeps graph follow-up
 visible through `defer_graph_repair`. The hot profile uses
@@ -480,7 +484,9 @@ The current safe storage route is:
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
 - Raw blocks: do not delete duplicated raw blocks yet. They need an
   offset/compressed-block reader route first so segment and raw refs remain
-  stable before any cleanup.
+  stable before any cleanup. The safe next slice is reader support,
+  ref-resolution tests over session/segment/raw-block refs, a dry-run reclaim
+  report, and only then a controlled cleanup route.
 
 ## Portable Route
 

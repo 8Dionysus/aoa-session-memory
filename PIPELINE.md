@@ -405,9 +405,14 @@ python3 scripts/aoa_session_memory.py auto-maintenance hot \
 ```
 
 `auto-maintenance` is the timer entrypoint. It takes a non-blocking
-`diagnostics/auto-maintenance.lock`, runs freshness gates before and after the
-maintenance pass, and delegates actual route/search/atlas/graph work to
-`index-maintenance`. Its profiles are:
+`diagnostics/auto-maintenance.lock`, runs a freshness gate first, and only
+delegates to `index-maintenance` when that gate shows actionable work. A clean
+hot/catchup gate (`needs_* = false`, search actionable/deferred counts `0`,
+graph actionable queue/ledger/deferred counts `0`) must return
+`status=nothing_to_do`, `mutates=false`, and a `skipped_clean` action without
+touching graph/search read-model stores. Dirty runs still run freshness gates
+before and after the maintenance pass and delegate actual
+route/search/atlas/graph work to `index-maintenance`. Its profiles are:
 
 - `hot`: two-day recent window, probe resource route, route/search/atlas repair
   for interactive agent routes, and a small bounded graph repair tick with
@@ -440,6 +445,8 @@ Use `auto-maintenance catchup --apply` or
 archive needs historical search/atlas catch-up but graph repair must stay
 deferred. The report must show candidate counts, selected repair counts,
 remaining counts, and `*_repair_limited=true` while backlog remains.
+If catchup has no backlog, the report must stay a clean no-op instead of
+reading or writing the full portable SQLite search store.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.

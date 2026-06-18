@@ -15489,14 +15489,98 @@ def atlas_index_hot_state(aoa_root: Path) -> dict[str, Any]:
     }
 
 
+def maintenance_action_kind(action_id: str) -> str:
+    if action_id == "skipped_clean":
+        return "skipped_clean"
+    if action_id in {"graph_maintenance", "defer_graph_repair"}:
+        return "graph_tick"
+    if action_id in {"refresh_search_projection_state", "route_readiness", "token_accounting_backfill", "reconcile_search_index", "reconcile_agent_atlas", "defer_index_repair", "route_sample_audit"}:
+        return "state_reconcile"
+    if action_id in {"reindex_route_indexes", "rebuild_search_index", "rebuild_agent_atlas"}:
+        return "incremental_update"
+    return "state_reconcile"
+
+
+def normalize_maintenance_action(
+    action: dict[str, Any],
+    *,
+    action_kind: str | None = None,
+    selection_count: int | None = None,
+    dirty_count: int | None = None,
+    deferred_count: int | None = None,
+    skip_reason: str | None = None,
+    apply_reason: str | None = None,
+) -> dict[str, Any]:
+    action_id = str(action.get("id") or "")
+    status = str(action.get("status") or "")
+    reason = str(action.get("reason") or "")
+    action["action_kind"] = action_kind or str(action.get("action_kind") or "") or maintenance_action_kind(action_id)
+    action["selection_count"] = int_value(action.get("selection_count") if selection_count is None else selection_count)
+    action["dirty_count"] = int_value(action.get("dirty_count") if dirty_count is None else dirty_count)
+    action["deferred_count"] = int_value(action.get("deferred_count") if deferred_count is None else deferred_count)
+    if status in {"not_needed", "skipped", "skipped_clean", "deferred", "deferred_budget_exhausted"}:
+        action["skip_reason"] = str(action.get("skip_reason") or skip_reason or reason or status)
+    else:
+        action["apply_reason"] = str(action.get("apply_reason") or apply_reason or reason or status or "maintenance_needed")
+    return action
+
+
 def maintenance_action(action_id: str, *, reason: str, needed: bool, command: list[str]) -> dict[str, Any]:
-    return {
+    return normalize_maintenance_action({
         "id": action_id,
         "needed": needed,
         "reason": reason,
         "status": "planned" if needed else "not_needed",
         "command": command,
-    }
+    })
+
+
+def skipped_clean_maintenance_action(
+    *,
+    reason: str,
+    selection_count: int = 0,
+    dirty_count: int = 0,
+    deferred_count: int = 0,
+) -> dict[str, Any]:
+    return normalize_maintenance_action(
+        {
+            "id": "skipped_clean",
+            "needed": False,
+            "reason": reason,
+            "status": "skipped_clean",
+            "command": [],
+        },
+        action_kind="skipped_clean",
+        selection_count=selection_count,
+        dirty_count=dirty_count,
+        deferred_count=deferred_count,
+        skip_reason=reason,
+    )
+
+
+def graph_actionable_count_from_state(graph_state: dict[str, Any]) -> int:
+    source_state = graph_state.get("source_state") if isinstance(graph_state.get("source_state"), dict) else {}
+    ledger = graph_state.get("ledger") if isinstance(graph_state.get("ledger"), dict) else {}
+    queue = graph_state.get("queue") if isinstance(graph_state.get("queue"), dict) else {}
+    return (
+        int_value(source_state.get("dirty_count"))
+        + int_value(source_state.get("missing_count"))
+        + int_value(source_state.get("orphaned_count"))
+        + int_value(ledger.get("actionable_count"))
+        + int_value(queue.get("actionable_count"))
+    )
+
+
+def graph_deferred_live_count_from_state(graph_state: dict[str, Any]) -> int:
+    ledger = graph_state.get("ledger") if isinstance(graph_state.get("ledger"), dict) else {}
+    queue = graph_state.get("queue") if isinstance(graph_state.get("queue"), dict) else {}
+    source_state = graph_state.get("source_state") if isinstance(graph_state.get("source_state"), dict) else {}
+    return (
+        int_value(graph_state.get("deferred_live_source_count"))
+        + int_value(source_state.get("deferred_live_source_count"))
+        + int_value(ledger.get("deferred_live_source_count"))
+        + int_value(queue.get("deferred_live_source_count"))
+    )
 
 
 def maintain_indexes(
@@ -15808,6 +15892,66 @@ def maintain_indexes(
         deferred["status"] = "deferred"
         actions.append(deferred)
 
+    graph_dirty_count = graph_actionable_count_from_state(graph_state) if isinstance(graph_state, dict) else 0
+    graph_deferred_count = graph_deferred_live_count_from_state(graph_state) if isinstance(graph_state, dict) else 0
+    action_metric_defaults = {
+        "token_accounting_backfill": {
+            "action_kind": "state_reconcile",
+            "selection_count": len(records),
+            "dirty_count": int_value(token_backfill_counts.get("planned")),
+        },
+        "reindex_route_indexes": {
+            "action_kind": "incremental_update",
+            "selection_count": len(route_drift),
+            "dirty_count": len(route_drift),
+        },
+        "refresh_search_projection_state": {
+            "action_kind": "state_reconcile",
+            "selection_count": len(search_state_refresh_records),
+            "dirty_count": len(search_state_refresh_candidate_records),
+        },
+        "rebuild_search_index": {
+            "action_kind": "full_rebuild" if search_rebuild_required else "incremental_update",
+            "selection_count": len(records) if search_rebuild_required else len(search_reindex_records),
+            "dirty_count": len(search_dirty_records) + (1 if search_non_projection_repair_needed else 0),
+        },
+        "rebuild_agent_atlas": {
+            "action_kind": "full_rebuild" if atlas_rebuild_required else "incremental_update",
+            "selection_count": len(records) if atlas_rebuild_required else len(atlas_repair_records),
+            "dirty_count": len(atlas_dirty_records) + (1 if atlas_rebuild_required else 0),
+        },
+        "route_readiness": {
+            "action_kind": "state_reconcile",
+            "selection_count": len(records),
+            "dirty_count": len(route_drift) + len(search_dirty_records) + len(atlas_dirty_records),
+        },
+        "graph_maintenance": {
+            "action_kind": "graph_tick",
+            "selection_count": effective_graph_batch_limit,
+            "dirty_count": graph_dirty_count,
+            "deferred_count": graph_deferred_count,
+        },
+        "route_sample_audit": {
+            "action_kind": "state_reconcile",
+            "selection_count": min(sample_limit, len(records)),
+            "dirty_count": len(route_drift),
+        },
+        "defer_graph_repair": {
+            "action_kind": "graph_tick",
+            "selection_count": 0,
+            "dirty_count": graph_dirty_count,
+            "deferred_count": graph_deferred_count,
+        },
+        "defer_index_repair": {
+            "action_kind": "state_reconcile",
+            "selection_count": 0,
+            "dirty_count": len(route_drift) + len(search_dirty_records) + len(atlas_dirty_records),
+        },
+    }
+    for action in actions:
+        metrics = action_metric_defaults.get(str(action.get("id") or ""), {})
+        normalize_maintenance_action(action, **metrics)
+
     action_results: list[dict[str, Any]] = []
     budget_exhausted = planning_budget_exhausted
     post_maintenance_states: dict[str, Any] = {}
@@ -15981,6 +16125,12 @@ def maintain_indexes(
                         + ([] if refreshed_search_rebuild_required else ["--no-rebuild"])
                         + ["--write-report"],
                     )
+                    normalize_maintenance_action(
+                        post_search_action,
+                        action_kind="full_rebuild" if refreshed_search_rebuild_required else "state_reconcile",
+                        selection_count=len(refreshed_records) if refreshed_search_rebuild_required else len(refreshed_search_dirty_records),
+                        dirty_count=len(refreshed_search_dirty_records) + (1 if refreshed_search_rebuild_required else 0),
+                    )
                     result = search_index_sessions(
                         aoa_root=aoa_root,
                         target="all" if refreshed_search_rebuild_required else target,
@@ -16032,6 +16182,12 @@ def maintain_indexes(
                         + ([] if refreshed_atlas_rebuild_required else selection_args)
                         + ([] if refreshed_atlas_rebuild_required else ["--no-clean"])
                         + ["--write-report"],
+                    )
+                    normalize_maintenance_action(
+                        post_atlas_action,
+                        action_kind="full_rebuild" if refreshed_atlas_rebuild_required else "state_reconcile",
+                        selection_count=len(refreshed_records) if refreshed_atlas_rebuild_required else len(refreshed_atlas_dirty_records),
+                        dirty_count=len(refreshed_atlas_dirty_records) + (1 if refreshed_atlas_rebuild_required else 0),
                     )
                     result = build_agent_atlas(
                         aoa_root=aoa_root,
@@ -16182,6 +16338,18 @@ def maintain_indexes(
     for action in actions:
         if action.get("needed") and not any(item.get("id") == action["id"] for item in action_results):
             action_results.append(action)
+    if not action_results and not index_repair_needed and not graph_repair_needed:
+        action_results.append(
+            skipped_clean_maintenance_action(
+                reason="indexes_and_graph_have_no_actionable_maintenance_work",
+                selection_count=len(records),
+                dirty_count=0,
+                deferred_count=len(deferred_sessions),
+            )
+        )
+    for action in action_results:
+        metrics = action_metric_defaults.get(str(action.get("id") or ""), {})
+        normalize_maintenance_action(action, **metrics)
     action_counts = dict(Counter(str(action.get("status") or "unknown") for action in action_results))
     final_records = records
     final_latest_source_mtime = latest_source_mtime
@@ -16352,13 +16520,17 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Actions",
         "",
-        "| action | needed | status | reason |",
-        "| --- | --- | --- | --- |",
+        "| action | kind | needed | status | selected | dirty | deferred | reason | route |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for action in payload.get("actions", []) if isinstance(payload.get("actions"), list) else []:
         if not isinstance(action, dict):
             continue
-        lines.append(f"| `{action.get('id')}` | `{action.get('needed')}` | `{action.get('status')}` | `{action.get('reason')}` |")
+        route_reason = action.get("skip_reason") or action.get("apply_reason") or ""
+        lines.append(
+            f"| `{action.get('id')}` | `{action.get('action_kind')}` | `{action.get('needed')}` | `{action.get('status')}` | "
+            f"`{action.get('selection_count')}` | `{action.get('dirty_count')}` | `{action.get('deferred_count')}` | `{action.get('reason')}` | `{route_reason}` |"
+        )
     drift = payload.get("route_drift") if isinstance(payload.get("route_drift"), list) else []
     if drift:
         lines.extend(["", "## Route Drift", ""])
@@ -16462,6 +16634,8 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- needs_graph_before: `{before.get('needs_graph_maintenance')}`",
         f"- needs_index_after: `{after.get('needs_index_maintenance')}`",
         f"- needs_graph_after: `{after.get('needs_graph_maintenance')}`",
+        f"- deferred_live_after: `{payload.get('deferred_live_after')}`",
+        f"- deferred_live_selection_count: `{payload.get('deferred_live_selection_count')}`",
         f"- deferred_graph_after: `{payload.get('deferred_graph_after')}`",
         f"- graph_deferred_by_budget: `{payload.get('graph_deferred_by_budget')}`",
         f"- expected_catchup_remaining: `{payload.get('expected_catchup_remaining')}`",
@@ -16483,6 +16657,26 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
         lines.extend(f"- `{item}`" for item in diagnostics)
+    actions = maintenance.get("actions") if isinstance(maintenance.get("actions"), list) else []
+    if actions:
+        lines.extend(
+            [
+                "",
+                "## Actions",
+                "",
+                "| action | kind | status | selected | dirty | deferred | reason | route |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            route_reason = action.get("skip_reason") or action.get("apply_reason") or ""
+            lines.append(
+                f"| `{action.get('id')}` | `{action.get('action_kind')}` | `{action.get('status')}` | "
+                f"`{action.get('selection_count')}` | `{action.get('dirty_count')}` | `{action.get('deferred_count')}` | "
+                f"`{action.get('reason')}` | `{route_reason}` |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -16541,12 +16735,15 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "budget_seconds",
                 "budget_exhausted",
                 "action_counts",
+                "actions",
                 "report_json",
                 "report_markdown",
                 "diagnostics",
             )
         }
     compact["graph_deferred_by_budget"] = compact.get("graph_deferred_by_budget")
+    compact["deferred_live_after"] = compact.get("deferred_live_after")
+    compact["deferred_live_selection_count"] = compact.get("deferred_live_selection_count")
     compact["expected_catchup_remaining"] = compact.get("expected_catchup_remaining")
     compact["hard_diagnostics"] = compact.get("hard_diagnostics")
     compact["deferred_graph_job"] = compact.get("deferred_graph_job")
@@ -16620,6 +16817,53 @@ def auto_maintenance_expected_catchup_remaining(
         return False, diagnostics
     hard_diagnostics = [item for item in diagnostics if not expected_catchup_remaining_diagnostic(str(item))]
     return not hard_diagnostics, hard_diagnostics
+
+
+def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[str, int]:
+    search_state = freshness.get("search_index") if isinstance(freshness.get("search_index"), dict) else {}
+    atlas_state = freshness.get("atlas_index") if isinstance(freshness.get("atlas_index"), dict) else {}
+    graph_state = freshness.get("graph_store") if isinstance(freshness.get("graph_store"), dict) else {}
+    search_dirty = int_value(search_state.get("dirty_session_count"))
+    search_actionable = int_value(search_state.get("actionable_dirty_session_count"))
+    search_deferred = int_value(search_state.get("deferred_live_session_count"))
+    atlas_dirty = int_value(atlas_state.get("dirty_session_count"))
+    route_drift = int_value(freshness.get("route_drift_count"))
+    graph_actionable = graph_actionable_count_from_state(graph_state)
+    graph_deferred = graph_deferred_live_count_from_state(graph_state)
+    dirty_count = route_drift + max(search_dirty, search_actionable) + atlas_dirty + graph_actionable
+    deferred_count = search_deferred + graph_deferred
+    return {
+        "selected_count": int_value(freshness.get("selected_count")),
+        "route_drift_count": route_drift,
+        "search_dirty_session_count": search_dirty,
+        "search_actionable_dirty_session_count": search_actionable,
+        "search_deferred_live_session_count": search_deferred,
+        "atlas_dirty_session_count": atlas_dirty,
+        "graph_actionable_count": graph_actionable,
+        "graph_deferred_live_source_count": graph_deferred,
+        "dirty_count": dirty_count,
+        "deferred_count": deferred_count,
+    }
+
+
+def auto_maintenance_clean_noop_reason(freshness: dict[str, Any]) -> str:
+    counts = auto_maintenance_freshness_work_counts(freshness)
+    diagnostics = [str(item) for item in freshness.get("diagnostics", []) if item] if isinstance(freshness.get("diagnostics"), list) else []
+    if diagnostics:
+        return ""
+    if any(
+        bool(freshness.get(key))
+        for key in (
+            "needs_index_maintenance",
+            "needs_graph_maintenance",
+            "needs_sidecar_export",
+            "needs_offline_graph_build",
+        )
+    ):
+        return ""
+    if counts["dirty_count"] > 0 or counts["deferred_count"] > 0:
+        return ""
+    return "freshness_gate_clean_no_actionable_search_atlas_or_graph_work"
 
 
 def auto_maintenance(
@@ -16748,6 +16992,18 @@ def auto_maintenance(
                 limit=effective_limit,
                 activity_hot_seconds=float(effective_since_days or 0) * 86400.0,
             )
+            stable_records, _stable_fingerprints, deferred_live_records, quiescence = projection_quiescence_split(
+                selected_records_override,
+                quiet_seconds=GRAPH_HOT_LIVE_DEFER_SECONDS,
+            )
+            if deferred_live_records:
+                selection_scope = dict(selection_scope)
+                selection_scope["quiescence"] = quiescence
+                selection_scope["deferred_live_session_count"] = len(deferred_live_records)
+                selection_scope["deferred_live_sessions"] = deferred_live_records[:20]
+                selection_scope["pre_quiescence_selected_count"] = len(selected_records_override)
+                selection_scope["selected_count"] = len(stable_records)
+                selected_records_override = stable_records
         def run_auto_freshness_probe() -> dict[str, Any]:
             if allow_deferred_graph:
                 return route_cache_freshness_gates(
@@ -16771,6 +17027,126 @@ def auto_maintenance(
             )
 
         freshness_before = run_auto_freshness_probe()
+        clean_skip_reason = auto_maintenance_clean_noop_reason(freshness_before)
+        if clean_skip_reason:
+            work_counts = auto_maintenance_freshness_work_counts(freshness_before)
+            selection_deferred_count = int_value(selection_scope.get("deferred_live_session_count"))
+            clean_status = "wait_live_catchup" if selection_deferred_count > 0 else "nothing_to_do"
+            clean_action_reason = (
+                "recent_live_sources_deferred_until_quiet_window"
+                if selection_deferred_count > 0
+                else clean_skip_reason
+            )
+            clean_action = skipped_clean_maintenance_action(
+                reason=clean_action_reason,
+                selection_count=work_counts["selected_count"],
+                dirty_count=work_counts["dirty_count"],
+                deferred_count=work_counts["deferred_count"] + selection_deferred_count,
+            )
+            maintenance = {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "index_maintenance",
+                "generated_at": now,
+                "ok": True,
+                "status": clean_status,
+                "mutates": False,
+                "apply": apply,
+                "target": target,
+                "since": effective_since,
+                "until": until,
+                "limit": effective_limit,
+                "selection_source": "auto_maintenance_clean_freshness_gate",
+                "selection_scope": selection_scope,
+                "reason": f"auto_maintenance:{profile}:{reason}",
+                "repair_indexes": effective_repair_indexes,
+                "repair_graph": effective_repair_graph,
+                "index_repair_needed": False,
+                "graph_repair_needed": False,
+                "repair_limit": effective_repair_limit,
+                "selected_count": work_counts["selected_count"],
+                "route_drift_count": work_counts["route_drift_count"],
+                "search_dirty_session_count": work_counts["search_dirty_session_count"],
+                "search_state_refresh_candidate_count": 0,
+                "search_state_refresh_count": 0,
+                "search_reindex_candidate_count": 0,
+                "search_reindex_session_count": 0,
+                "search_repair_remaining_count": 0,
+                "search_repair_limited": False,
+                "atlas_dirty_session_count": work_counts["atlas_dirty_session_count"],
+                "atlas_repair_session_count": 0,
+                "atlas_repair_remaining_count": 0,
+                "atlas_repair_limited": False,
+                "deferred_session_count": work_counts["deferred_count"] + selection_deferred_count,
+                "deferred_live_selection_count": selection_deferred_count,
+                "search_index": freshness_before.get("search_index") if isinstance(freshness_before.get("search_index"), dict) else {},
+                "atlas_index": freshness_before.get("atlas_index") if isinstance(freshness_before.get("atlas_index"), dict) else {},
+                "graph_store": freshness_before.get("graph_store") if isinstance(freshness_before.get("graph_store"), dict) else {},
+                "action_counts": {"skipped_clean": 1},
+                "actions": [clean_action],
+                "elapsed_ms": 0,
+                "diagnostics": [],
+            }
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "session_memory_auto_maintenance",
+                "generated_at": now,
+                "ok": True,
+                "status": clean_status,
+                "mutates": False,
+                "apply": apply,
+                "profile": profile,
+                "target": target,
+                "since": effective_since,
+                "until": until,
+                "limit": effective_limit,
+                "selection_scope": selection_scope,
+                "repair_limit": effective_repair_limit,
+                "resource_class": effective_resource_class,
+                "resource_kind": effective_resource_kind,
+                "timeout_sec": effective_timeout_sec,
+                "budget_seconds": effective_budget_seconds,
+                "repair_indexes": effective_repair_indexes,
+                "repair_graph": effective_repair_graph,
+                "allow_deferred_graph": allow_deferred_graph,
+                "max_raw_bytes": effective_max_raw_bytes,
+                "token_max_raw_bytes": effective_token_max_raw_bytes,
+                "graph_batch_limit": effective_graph_batch_limit,
+                "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
+                "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
+                "graph_max_refresh_edges": effective_graph_max_refresh_edges,
+                "deferred_graph_job_budget_seconds": deferred_graph_job_budget_seconds,
+                "ref_sample_limit": effective_ref_sample_limit,
+                "sample_audit": effective_sample_audit,
+                "progress_every": progress_every,
+                "lock_path": str(lock_path),
+                "resource_launcher": resource_launcher,
+                "freshness_before": freshness_before,
+                "preflight_diagnostics": [],
+                "maintenance": maintenance,
+                "freshness_after": freshness_before,
+                "deferred_live_after": selection_deferred_count > 0,
+                "deferred_live_selection_count": selection_deferred_count,
+                "deferred_graph_after": False,
+                "graph_deferred_by_budget": False,
+                "expected_catchup_remaining": False,
+                "hard_diagnostics": [],
+                "deferred_graph_job": "",
+                "deferred_graph_next": "",
+                "diagnostics": [],
+                "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
+                "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
+            }
+            if write_report:
+                diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                stem = f"{compact_stamp()}__auto-maintenance-{profile}"
+                report_json = diagnostics_dir / f"{stem}.json"
+                report_md = diagnostics_dir / f"{stem}.md"
+                write_json(report_json, payload)
+                write_markdown(report_md, auto_maintenance_markdown(payload))
+                payload["report_json"] = str(report_json)
+                payload["report_markdown"] = str(report_md)
+            return payload
         maintenance = maintain_indexes(
             aoa_root=aoa_root,
             target=target,
@@ -16838,6 +17214,7 @@ def auto_maintenance(
             diagnostics=diagnostics,
         )
         payload_ok = (not diagnostics and bool(maintenance.get("ok"))) or expected_catchup_remaining
+        selection_deferred_count = int_value(selection_scope.get("deferred_live_session_count"))
         payload = {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_auto_maintenance",
@@ -16846,7 +17223,11 @@ def auto_maintenance(
             "status": (
                 "applied_with_remaining_backlog"
                 if expected_catchup_remaining
-                else ("applied_with_deferred_graph" if apply and deferred_graph_after else ("applied" if apply else "planned"))
+                else (
+                    "applied_with_deferred_graph"
+                    if apply and deferred_graph_after
+                    else ("applied_with_deferred_live" if apply and selection_deferred_count > 0 else ("applied" if apply else "planned"))
+                )
             ),
             "mutates": bool(apply),
             "apply": apply,
@@ -16880,6 +17261,8 @@ def auto_maintenance(
             "preflight_diagnostics": preflight_diagnostics,
             "maintenance": maintenance,
             "freshness_after": freshness_after,
+            "deferred_live_after": selection_deferred_count > 0,
+            "deferred_live_selection_count": selection_deferred_count,
             "deferred_graph_after": deferred_graph_after,
             "graph_deferred_by_budget": graph_deferred_by_budget,
             "expected_catchup_remaining": expected_catchup_remaining,

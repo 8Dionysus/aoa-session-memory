@@ -4719,7 +4719,8 @@ def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_nam
     refreshed_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
     assert refreshed_plan["search_index"]["status"] == "current"
     assert refreshed_plan["atlas_index"]["status"] == "current"
-    assert refreshed_plan["action_counts"] == {}
+    assert refreshed_plan["action_counts"] == {"skipped_clean": 1}
+    assert refreshed_plan["actions"][0]["action_kind"] == "skipped_clean"
     search = module.search_sessions(aoa_root=aoa_root, query="route maintenance automation")
     assert search["ok"] is True
     assert search["result_count"] >= 1
@@ -5663,6 +5664,7 @@ def test_hot_auto_maintenance_includes_old_session_with_fresh_activity_mtime(tmp
     sessions_root = aoa_root / "sessions"
     sessions_root.mkdir(parents=True)
     now_ts = time.time()
+    quiet_recent_ts = now_ts - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
     cold_ts = now_ts - 10 * 86400
 
     def make_session(label: str, session_id: str, source_mtime: float) -> dict[str, Any]:
@@ -5712,7 +5714,7 @@ def test_hot_auto_maintenance_includes_old_session_with_fresh_activity_mtime(tmp
                 os.utime(path, (source_mtime, source_mtime))
         return record
 
-    active_old = make_session("2020-01-01__001__old-active", "old-active", now_ts)
+    active_old = make_session("2020-01-01__001__old-active", "old-active", quiet_recent_ts)
     cold_old = make_session("2020-01-02__001__old-cold", "old-cold", cold_ts)
     module.write_json(aoa_root / module.REGISTRY_NAME, {"sessions": [active_old, cold_old]})
 
@@ -5722,12 +5724,12 @@ def test_hot_auto_maintenance_includes_old_session_with_fresh_activity_mtime(tmp
         calls["freshness"].append(kwargs)
         selected = kwargs.get("selected_records") or []
         return {
-            "ok": True,
+            "ok": len(calls["freshness"]) > 1,
             "target": kwargs["target"],
             "selected_count": len(selected),
-            "needs_index_maintenance": False,
+            "needs_index_maintenance": len(calls["freshness"]) == 1,
             "needs_graph_maintenance": False,
-            "diagnostics": [],
+            "diagnostics": ["index_maintenance_needed"] if len(calls["freshness"]) == 1 else [],
         }
 
     def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
@@ -6994,6 +6996,165 @@ def test_search_provider_status_defers_recent_live_codex_projection_drift(tmp_pa
     assert hot_freshness["deferred_live_sessions"][0]["deferred_live_reason"] == "recent_live_codex_transcript_update"
 
 
+def test_auto_maintenance_clean_hot_and_catchup_noop_preserve_search_store(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "18" / "rollout-2026-06-18T00-00-00-clean-noop.jsonl"
+    transcript.parent.mkdir(parents=True)
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "clean-noop", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Build clean no-op maintenance evidence"}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Clean no-op answer."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "clean-noop",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, "clean-noop")
+    quiet_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
+    for path in [transcript, *[item for item in Path(record["path"]).rglob("*") if item.is_file()]]:
+        os.utime(path, (quiet_ts, quiet_ts))
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+    assert module.route_cache_freshness_gates(aoa_root=aoa_root, target="all")["ok"] is True
+
+    db_path = module.search_db_path(aoa_root)
+    wal_path = Path(str(db_path) + "-wal")
+
+    def search_store_stats() -> tuple[int, int]:
+        return (
+            db_path.stat().st_mtime_ns,
+            wal_path.stat().st_size if wal_path.exists() else 0,
+        )
+
+    before_hot = search_store_stats()
+    hot = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="all",
+        apply=True,
+        since_days=30,
+    )
+    after_hot = search_store_stats()
+
+    assert hot["ok"] is True
+    assert hot["status"] == "nothing_to_do"
+    assert hot["mutates"] is False
+    assert hot["freshness_after"] == hot["freshness_before"]
+    assert hot["maintenance"]["action_counts"] == {"skipped_clean": 1}
+    hot_action = hot["maintenance"]["actions"][0]
+    assert hot_action["action_kind"] == "skipped_clean"
+    assert hot_action["skip_reason"] == "freshness_gate_clean_no_actionable_search_atlas_or_graph_work"
+    assert hot_action["dirty_count"] == 0
+    assert hot_action["deferred_count"] == 0
+    assert after_hot == before_hot
+
+    before_catchup = search_store_stats()
+    catchup = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+    )
+    after_catchup = search_store_stats()
+
+    assert catchup["ok"] is True
+    assert catchup["status"] == "nothing_to_do"
+    assert catchup["mutates"] is False
+    assert catchup["repair_graph"] is False
+    assert catchup["maintenance"]["actions"][0]["action_kind"] == "skipped_clean"
+    assert after_catchup == before_catchup
+
+
+def test_hot_auto_maintenance_waits_for_recent_live_deferred_without_reindexing(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "18" / "rollout-2026-06-18T00-00-00-live-wait.jsonl"
+    transcript.parent.mkdir(parents=True)
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "live-wait", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Wait for recent live source"}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Recent live answer."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-wait",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+
+    record = module.resolve_session_record(aoa_root, "live-wait")
+    segment_index_path = next((Path(record["path"]) / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    segment_index["events"][0].setdefault("facets", {}).setdefault("route_signals", []).append(
+        {"layer": "entity", "key": "live_wait_anchor", "route_signal": "entity:live_wait_anchor"}
+    )
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.utime(transcript, None)
+    os.utime(segment_index_path, None)
+
+    deferred = module.search_provider_status(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+        freshness_mode="deep",
+        record_freshness_state=True,
+    )
+    assert deferred["providers"]["portable_sqlite"]["freshness"]["status"] == "current_with_deferred_live_updates"
+
+    db_path = module.search_db_path(aoa_root)
+    wal_path = Path(str(db_path) + "-wal")
+    before = (db_path.stat().st_mtime_ns, wal_path.stat().st_size if wal_path.exists() else 0)
+    hot = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="all",
+        apply=True,
+        since_days=30,
+    )
+    after = (db_path.stat().st_mtime_ns, wal_path.stat().st_size if wal_path.exists() else 0)
+
+    assert hot["ok"] is True
+    assert hot["status"] == "wait_live_catchup"
+    assert hot["mutates"] is False
+    assert hot["deferred_live_after"] is True
+    assert hot["deferred_live_selection_count"] == 1
+    assert hot["selection_scope"]["quiescence"]["deferred_live_session_count"] == 1
+    action = hot["maintenance"]["actions"][0]
+    assert action["action_kind"] == "skipped_clean"
+    assert action["deferred_count"] == 1
+    assert action["skip_reason"] == "recent_live_sources_deferred_until_quiet_window"
+    assert after == before
+
+
 def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -7047,8 +7208,8 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert before["agent_route"]["live_catchup_pending"] is True
 
     quiet_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
-    os.utime(transcript, (quiet_ts, quiet_ts))
-    os.utime(segment_index_path, (quiet_ts, quiet_ts))
+    for path in [transcript, *[item for item in Path(record["path"]).rglob("*") if item.is_file()]]:
+        os.utime(path, (quiet_ts, quiet_ts))
     catchup = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
