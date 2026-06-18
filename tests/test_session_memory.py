@@ -1861,6 +1861,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert storage["artifact_type"] == "session_memory_storage_audit"
     assert storage["ok"] is True
     assert storage["graph_store"]["ok"] is True
+    assert storage["graph_store"]["metadata"]["graph_store_aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
+    assert storage["graph_store"]["deep_dbstat_status"] == "completed"
+    assert storage["graph_store"]["row_count_status"] == "requested"
+    assert storage["search_store"]["metadata"]["search_body_storage_mode"] == module.SEARCH_BODY_STORAGE_MODE
     assert storage["graph_store"]["table_sizes"]
     assert storage["graph_store"]["wal"]["size_bytes"] >= 0
     assert storage["graph_store"]["total_with_wal_bytes"] >= storage["graph_store"]["size_bytes"]

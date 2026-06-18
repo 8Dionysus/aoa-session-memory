@@ -324,6 +324,10 @@ evidence and stable refs.
 Use `storage-audit` to measure current weight and reclaim candidates. It is a
 read-only gate; actual shrinkage of graph/search stores requires controlled
 rebuilds, not blind `VACUUM` or file deletion.
+The normal audit also exposes SQLite store metadata such as graph/search
+payload modes, so agents can distinguish compact layout state from old payload
+shape without running the heavy `dbstat` lane. Add `--deep-dbstat --row-counts`
+only for an offline per-table size pass.
 
 Use `storage-maintenance` for the current safe live shrink lane. It only runs
 SQLite WAL checkpoint/truncate for the graph and search stores, reports busy

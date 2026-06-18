@@ -29427,6 +29427,16 @@ def sqlite_storage_stats(
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
+        metadata: dict[str, str] = {}
+        for meta_table in ("metadata", "meta"):
+            try:
+                rows = conn.execute(f"SELECT key, value FROM {meta_table} ORDER BY key").fetchall()
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                metadata[str(row["key"])] = str(row["value"])
+        if metadata:
+            payload["metadata"] = metadata
         page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
         freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
@@ -29442,6 +29452,7 @@ def sqlite_storage_stats(
             }
         )
         if row_counts:
+            payload["row_count_status"] = "requested"
             row_count_payload: dict[str, int] = {}
             tables = [
                 str(row["name"])
@@ -29454,7 +29465,10 @@ def sqlite_storage_stats(
                 except sqlite3.Error:
                     continue
             payload["row_counts"] = row_count_payload
+        else:
+            payload["row_count_status"] = "not_requested"
         if deep:
+            payload["deep_dbstat_status"] = "requested"
             try:
                 rows = conn.execute(
                     """
@@ -29475,8 +29489,12 @@ def sqlite_storage_stats(
                     }
                     for row in rows
                 ]
+                payload["deep_dbstat_status"] = "completed"
             except sqlite3.Error as exc:
                 payload.setdefault("diagnostics", []).append(f"dbstat_unavailable:{exc}")
+                payload["deep_dbstat_status"] = "unavailable"
+        else:
+            payload["deep_dbstat_status"] = "not_requested"
         conn.close()
     except sqlite3.Error as exc:
         payload["diagnostics"] = [f"sqlite_error:{exc}"]
@@ -29773,8 +29791,15 @@ def storage_audit_markdown(payload: dict[str, Any]) -> str:
                 f"- freelist: `{store.get('freelist_human')}`",
                 f"- wal: `{wal.get('size_human')}`",
                 f"- total_with_wal: `{store.get('total_with_wal_human')}`",
+                f"- deep_dbstat_status: `{store.get('deep_dbstat_status')}`",
+                f"- row_count_status: `{store.get('row_count_status')}`",
             ]
         )
+        metadata = store.get("metadata") if isinstance(store.get("metadata"), dict) else {}
+        if metadata:
+            lines.extend(["", "| metadata | value |", "| --- | --- |"])
+            for meta_key, meta_value in sorted(metadata.items()):
+                lines.append(f"| `{meta_key}` | `{meta_value}` |")
         table_sizes = store.get("table_sizes") if isinstance(store.get("table_sizes"), list) else []
         if table_sizes:
             lines.extend(["", "| table | size |", "| --- | ---: |"])

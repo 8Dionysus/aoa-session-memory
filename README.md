@@ -453,8 +453,9 @@ python3 scripts/aoa_session_memory.py storage-audit \
 
 Add `--deep-dbstat --row-counts` only when the machine has time for heavier
 SQLite inspection. The command is read-only. It reports top-level `.aoa`
-weight, session raw/block/segment buckets, SQLite page and freelist state, and
-optional per-table sizes.
+weight, session raw/block/segment buckets, SQLite page and freelist state,
+SQLite store metadata such as graph/search payload modes, and optional
+per-table sizes.
 
 Use `storage-maintenance` for the current lossless shrink action:
 
