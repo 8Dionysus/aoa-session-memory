@@ -16953,6 +16953,17 @@ def maintain_indexes(
         + ([] if search_rebuild_required else ["--no-rebuild"])
         + ["--write-report"]
     )
+    entity_registry_refresh_target = target
+    entity_registry_refresh_selection_args = selection_args
+    if target == "all" and not entity_registry_refresh_selection_args:
+        entity_registry_refresh_selection_args = ["--limit", "1"]
+    entity_registry_search_command = (
+        base
+        + ["search-index", entity_registry_refresh_target, *root_args]
+        + entity_registry_refresh_selection_args
+        + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+        + ["--no-rebuild", "--write-report"]
+    )
     atlas_command = (
         base
         + ["atlas", "build", "all", *root_args]
@@ -17001,7 +17012,7 @@ def maintain_indexes(
             "refresh_entity_registry",
             reason="entity_registry_missing_or_stale",
             needed=repair_indexes and entity_registry_repair_needed and not search_rebuild_required,
-            command=base + ["entity-registry", *root_args, "--write"],
+            command=entity_registry_search_command,
         ),
         maintenance_action(
             "rebuild_agent_atlas",
@@ -17268,11 +17279,33 @@ def maintain_indexes(
                 entity_registry_action["status"] = "deferred_budget_exhausted"
                 action_results.append(entity_registry_action)
             else:
-                result = build_entity_registry(aoa_root=aoa_root, write=True)
+                result = search_index_sessions(
+                    aoa_root=aoa_root,
+                    target=target,
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    max_raw_bytes=max_raw_bytes,
+                    rebuild=False,
+                    write_report=write_report,
+                    selected_records=current_selected_records()[:1],
+                    budget_seconds=budget_remaining(),
+                    progress_every=progress_every,
+                )
                 entity_registry_action["status"] = "applied" if result.get("ok") else "failed"
                 entity_registry_action["result"] = {
                     key: result.get(key)
-                    for key in ("ok", "entity_count", "counts_by_kind", "counts_by_status", "registry_path", "diagnostics")
+                    for key in (
+                        "ok",
+                        "selected_count",
+                        "processed_count",
+                        "document_count",
+                        "entity_registry_document_count",
+                        "removed_entity_registry_document_count",
+                        "report_json",
+                        "report_markdown",
+                        "diagnostics",
+                    )
                 }
                 action_results.append(entity_registry_action)
                 entity_registry_ran = bool(result.get("ok"))
@@ -23799,6 +23832,51 @@ def delete_search_documents_for_session(
     return count
 
 
+def delete_search_documents_by_doc_type(conn: sqlite3.Connection, doc_type: str) -> int:
+    doc_type = str(doc_type or "").strip()
+    if not doc_type:
+        return 0
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS search_delete_rowids(rowid INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    conn.execute(
+        "INSERT OR IGNORE INTO search_delete_rowids(rowid) SELECT rowid FROM documents WHERE doc_type = ?",
+        (doc_type,),
+    )
+    count = int_value(conn.execute("SELECT COUNT(*) FROM search_delete_rowids").fetchone()[0])
+    if count <= 0:
+        return 0
+    conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    return count
+
+
+def refresh_search_entity_registry_documents(
+    conn: sqlite3.Connection,
+    *,
+    aoa_root: Path,
+    route_terms_db_path: Path,
+) -> dict[str, Any]:
+    registry_documents = search_documents_for_entity_registry(
+        aoa_root,
+        write_snapshot=True,
+        route_terms_db_path=route_terms_db_path,
+    )
+    conn.execute("BEGIN")
+    removed_count = delete_search_documents_by_doc_type(conn, "entity_registry")
+    inserted_count = 0
+    for doc in registry_documents:
+        insert_search_document(conn, doc)
+        inserted_count += 1
+    conn.commit()
+    return {
+        "inserted_count": inserted_count,
+        "removed_count": removed_count,
+    }
+
+
 def search_tokenize(query: str) -> list[str]:
     return [token for token in re.findall(r"[^\W_]+", str(query or ""), flags=re.UNICODE) if token]
 
@@ -24762,6 +24840,7 @@ def search_index_sessions(
     diagnostics: list[str] = []
     session_results: list[dict[str, Any]] = []
     committed_count = 0
+    removed_entity_registry_document_count = 0
     budget_exhausted = False
     try:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
@@ -24831,17 +24910,14 @@ def search_index_sessions(
                 )
             if record_index % 10 == 0:
                 conn.execute("PRAGMA optimize")
-        if rebuild and not budget_exhausted:
-            conn.execute("BEGIN")
-            registry_documents = search_documents_for_entity_registry(
-                aoa_root,
-                write_snapshot=True,
+        if not budget_exhausted and (deadline is None or time.monotonic() < deadline):
+            registry_refresh = refresh_search_entity_registry_documents(
+                conn,
+                aoa_root=aoa_root,
                 route_terms_db_path=write_db_path,
             )
-            for doc in registry_documents:
-                insert_search_document(conn, doc)
-                counts[str(doc.get("doc_type") or "unknown")] += 1
-            conn.commit()
+            counts["entity_registry"] += int_value(registry_refresh.get("inserted_count"))
+            removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
         if rebuild:
             create_search_db_indexes(conn)
             conn.commit()
@@ -24874,6 +24950,7 @@ def search_index_sessions(
                 "partial": True,
                 "document_count": sum(counts.values()),
                 "removed_document_count": removed_document_count,
+                "removed_entity_registry_document_count": removed_entity_registry_document_count,
                 "max_raw_bytes": max_raw_bytes,
                 "db_path": str(db_path),
                 "build_db_path": str(write_db_path),
@@ -24893,6 +24970,8 @@ def search_index_sessions(
             "target": target,
             "selected_count": len(records),
             "document_count": 0,
+            "removed_document_count": removed_document_count,
+            "removed_entity_registry_document_count": removed_entity_registry_document_count,
             "max_raw_bytes": max_raw_bytes,
             "db_path": str(db_path),
             "build_db_path": str(write_db_path),
@@ -24930,6 +25009,7 @@ def search_index_sessions(
         "partial": budget_exhausted,
         "document_count": document_count,
         "removed_document_count": removed_document_count,
+        "removed_entity_registry_document_count": removed_entity_registry_document_count,
         "session_document_count": counts.get("session", 0),
         "segment_document_count": counts.get("segment", 0),
         "event_document_count": counts.get("event", 0),
@@ -35351,14 +35431,18 @@ def session_memory_maintenance_status(
                 "command": [
                     "python3",
                     "scripts/aoa_session_memory.py",
-                    "entity-registry",
-                    "--write",
+                    "search-index",
+                    "all",
                     "--workspace-root",
                     str(workspace_root),
                     "--aoa-root",
                     str(aoa_root),
+                    "--limit",
+                    "1",
+                    "--no-rebuild",
+                    "--write-report",
                 ],
-                "note": "Refresh generated entity registry navigation snapshot; it does not repair or promote truth.",
+                "note": "Refresh generated entity registry snapshot and its search documents together; it does not repair or promote truth.",
             }
         )
     agent_route = session_memory_agent_route_status(

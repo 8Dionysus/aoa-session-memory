@@ -1491,6 +1491,38 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert newer_maintenance["needs_maintenance"] is True
     assert "source_newer_than_entity_registry" in newer_maintenance["diagnostics"]
 
+    maintenance_plan = module.maintain_indexes(aoa_root=aoa_root, target="all", repair_graph=False, max_raw_bytes=1)
+    planned_refresh = next(action for action in maintenance_plan["actions"] if action["id"] == "refresh_entity_registry")
+    assert planned_refresh["needed"] is True
+    assert "search-index" in planned_refresh["command"]
+    assert "--no-rebuild" in planned_refresh["command"]
+    assert "entity-registry" not in planned_refresh["command"]
+
+    applied_maintenance = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_graph=False,
+        max_raw_bytes=1,
+    )
+    assert applied_maintenance["ok"] is True
+    applied_refresh = next(action for action in applied_maintenance["actions"] if action["id"] == "refresh_entity_registry")
+    assert applied_refresh["status"] == "applied"
+    refreshed_search = applied_refresh["result"]
+    refreshed_registry = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
+    assert refreshed_search["ok"] is True
+    assert refreshed_search["entity_registry_document_count"] == refreshed_registry["entity_count"]
+    assert refreshed_search["removed_entity_registry_document_count"] >= filtered_snapshot["entity_count"]
+    refreshed_maintenance = module.entity_registry_maintenance_status(aoa_root)
+    assert refreshed_maintenance["needs_maintenance"] is False
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    registry_doc_count = conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0]
+    conn.close()
+    assert registry_doc_count == refreshed_registry["entity_count"]
+    newer_search = module.search_sessions(aoa_root=aoa_root, query="aoa-newer-skill", doc_type="entity_registry", limit=5)
+    assert newer_search["ok"] is True
+    assert newer_search["results"][0]["doc_type"] == "entity_registry"
+
 
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
