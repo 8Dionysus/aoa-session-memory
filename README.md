@@ -789,6 +789,10 @@ python3 scripts/aoa_session_memory.py entity-registry \
 observed, stale, removed, and unknown entity states so agents can route quickly
 without treating the registry as source truth. `index-maintenance` refreshes it
 when source skill/MCP surfaces are newer, and MCP exposes it read-only.
+When the registry must stay synchronized with SQLite search, use
+`search-index --no-rebuild` or `index-maintenance`; those routes refresh the
+snapshot and `doc_type=entity_registry` documents together. A bare
+`entity-registry --write` is only a generated snapshot refresh.
 
 Query it without losing evidence routing:
 
