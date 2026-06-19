@@ -1206,6 +1206,160 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
     assert search_payload["results"][0]["session_label"] == record["session_label"]
 
 
+def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# aoa-session-memory\n", encoding="utf-8")
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-18T00-00-00-goal-lifecycle.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "goal-lifecycle", "cwd": str(repo)}},
+            {
+                "timestamp": "2026-06-18T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Close goal lifecycle fully"}]},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "create_goal",
+                    "call_id": "call-create-goal",
+                    "arguments": json.dumps({"objective": "ship first class goal lifecycle", "token_budget": 500}),
+                },
+            },
+            {
+                "timestamp": "2026-06-18T00:00:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-create-goal", "output": json.dumps({"goal": {"status": "active", "tokensUsed": 3}})},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "get_goal", "call_id": "call-get-goal", "arguments": "{}"},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:05Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "update_goal", "call_id": "call-update-goal", "arguments": json.dumps({"status": "active"})},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:06Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "update_goal", "call_id": "call-complete-goal", "arguments": json.dumps({"status": "complete"})},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:07Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-complete-goal",
+                    "output": json.dumps({"goal": {"status": "complete", "tokensUsed": 42, "timeUsedSeconds": 12}}),
+                },
+            },
+            {
+                "timestamp": "2026-06-18T00:00:08Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Now record blocked external goal"}]},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:09Z",
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "update_goal", "call_id": "call-block-goal", "arguments": json.dumps({"status": "blocked"})},
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "goal-lifecycle",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "goal-lifecycle")
+    session_dir = Path(record["path"])
+    segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
+    events = {event["event_id"]: event for event in segment_index["events"]}
+    session_index = json.loads((session_dir / module.SESSION_INDEX_JSON).read_text(encoding="utf-8"))
+
+    complete_signals = {f"{signal['layer']}:{signal['key']}" for signal in events["000007"]["facets"]["route_signals"]}
+    blocked_signals = {f"{signal['layer']}:{signal['key']}" for signal in events["000010"]["facets"]["route_signals"]}
+    assert events["000007"]["facets"]["session_act"]["kind"] == "goal_completed"
+    assert events["000010"]["facets"]["session_act"]["kind"] == "goal_blocked"
+    assert {"goal:goal_updated", "goal:goal_completed"}.issubset(complete_signals)
+    assert {"goal:goal_updated", "goal:goal_blocked"}.issubset(blocked_signals)
+
+    assert session_index["goal_lifecycle_schema_version"] == module.GOAL_LIFECYCLE_SCHEMA_VERSION
+    assert session_index["goal_lifecycle_counts"]["total"] == 2
+    assert session_index["goal_event_counts"]["goal_created"] == 1
+    assert session_index["goal_event_counts"]["goal_inspected"] == 1
+    assert session_index["goal_event_counts"]["goal_updated"] == 1
+    assert session_index["goal_event_counts"]["goal_completed"] == 1
+    assert session_index["goal_event_counts"]["goal_blocked"] == 1
+    first, second = session_index["goal_lifecycles"]
+    assert first["goal_id"] == "goal-0001"
+    assert first["status"] == "complete"
+    assert first["objective"] == "ship first class goal lifecycle"
+    assert first["created_ref"]["raw_ref"] == "raw:line:3"
+    assert first["completed_ref"]["raw_ref"] == "raw:line:7"
+    assert first["task_episode_ids"] == ["task-0001"]
+    assert "missing_create" not in first["ambiguity_flags"]
+    assert second["goal_id"] == "goal-0002"
+    assert second["status"] == "blocked"
+    assert "missing_create" in second["ambiguity_flags"]
+    assert second["blocked_ref"]["raw_ref"] == "raw:line:10"
+    assert second["task_episode_ids"] == ["task-0002"]
+    assert session_index["route_signal_counts"]["goal"]["goal_completed"] == 1
+    assert session_index["route_signal_counts"]["goal"]["goal_blocked"] == 1
+
+    lifecycle_route = module.goal_lifecycle_route_search(aoa_root=aoa_root, target="latest", event_kind="goal_completed", limit=2)
+    assert lifecycle_route["ok"] is True
+    assert lifecycle_route["results"][0]["goal_id"] == "goal-0001"
+    assert lifecycle_route["results"][0]["refs"]["completed"]["raw_ref"] == "raw:line:7"
+
+    module.build_agent_atlas(aoa_root=aoa_root, target="all")
+    by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
+    assert {"goal_completed", "goal_blocked"}.issubset({entry["route_key"] for entry in by_goal["entries"]})
+
+    search_index = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert search_index["ok"] is True
+    lifecycle_search = module.search_sessions(aoa_root=aoa_root, doc_type="goal_lifecycle", route_signal="goal:goal_completed", limit=5)
+    assert lifecycle_search["ok"] is True
+    assert lifecycle_search["results"][0]["doc_type"] == "goal_lifecycle"
+    event_search = module.search_sessions(aoa_root=aoa_root, doc_type="event", route_signal="goal:goal_completed", limit=5)
+    assert event_search["ok"] is True
+    assert event_search["results"][0]["session_act"] == "goal_completed"
+    session_act_search = module.search_sessions(aoa_root=aoa_root, doc_type="event", session_act="goal_blocked", limit=5)
+    assert session_act_search["ok"] is True
+    assert session_act_search["results"][0]["session_act"] == "goal_blocked"
+
+    graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=True, export_sidecar=False)
+    assert graph["ok"] is True
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert module.graph_route_node_id("goal", "goal_completed") in node_ids
+    assert module.graph_goal_lifecycle_node_id("goal-lifecycle", "goal-0001") in node_ids
+    assert any(edge["type"] == "goal_lifecycle_has_event" for edge in graph["edges"])
+    timeline = module.graph_timeline(aoa_root=aoa_root, anchor="goal_completed", kind="goal", limit=10)
+    assert timeline["ok"] is True
+    assert any(event.get("session_act") == "goal_completed" for event in timeline["events"])
+
+    usage_audit = module.entity_usage_audit(aoa_root=aoa_root, anchor="goal_completed", kind="goal", limit=5, per_route_limit=5)
+    assert usage_audit["ok"] is True
+    assert usage_audit["usage_event_count"] >= 1
+    assert usage_audit["quality"]["direct_usage_present"] is True
+    assert usage_audit["usage_events"][0]["session_act"] == "goal_completed"
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -3463,6 +3617,100 @@ def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypa
     assert state["queue"]["deferred_live_source_count"] == 2
 
 
+def test_graph_hot_state_detects_stale_graph_source_versions_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-17__001__goal-hot-drift"
+    session_dir.mkdir(parents=True)
+    source_path = session_dir / module.SESSION_INDEX_JSON
+    source_path.write_text("{}", encoding="utf-8")
+    source_key = "session:goal-hot-drift"
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        store.replace_source(
+            {
+                "source": {
+                    "source_key": source_key,
+                    "source_type": "session",
+                    "session_id": "goal-hot-drift",
+                    "session_label": "2026-06-17__001__goal-hot-drift",
+                    "segment_id": "",
+                    "source_path": str(source_path),
+                    "source_paths": [str(source_path)],
+                    "source_sha": "fresh-session-index-sha",
+                    "source_mtime": source_path.stat().st_mtime,
+                    "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                    "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                    "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                },
+                "nodes": [],
+                "edges": [],
+            }
+        )
+        store.conn.execute(
+            "UPDATE graph_sources SET route_signal_classifier_version = ? WHERE source_key = ?",
+            (module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1, source_key),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                source_key: {
+                    "source_key": source_key,
+                    "status": "clean",
+                    "source_path": str(source_path),
+                    "session_id": "goal-hot-drift",
+                    "session_label": "2026-06-17__001__goal-hot-drift",
+                }
+            }
+        },
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("hot graph source version gate must not scan session sources")
+
+    monkeypatch.setattr(module, "chronological_session_records", fail_source_scan)
+    monkeypatch.setattr(module, "latest_index_source_mtime", fail_source_scan)
+    monkeypatch.setattr(module, "route_index_drift_records", fail_source_scan)
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "indexed_session_state_count": 1,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": 1,
+            "diagnostics": [],
+        },
+    )
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_hot_source_state_summary(aoa_root, state)
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
+
+    assert state["status"] == "dirty"
+    assert state["needs_maintenance"] is True
+    assert state["source_version_state"]["version_mismatch_source_count"] == 1
+    assert state["source_version_state"]["reason_group_counts"] == {"route_signal_classifier_mismatch": 1}
+    assert summary["dirty_count"] == 1
+    assert summary["maintenance_recommendation"]["route"] == "bounded_graph_maintenance"
+    assert payload["ok"] is False
+    assert payload["needs_graph_maintenance"] is True
+    assert payload["graph_store"]["source_version_state"]["samples"][0]["source_key"] == source_key
+
+
 def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
     task_started = {
         "timestamp": "2026-05-24T00:00:00Z",
@@ -4301,6 +4549,15 @@ def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     entry = json.loads(scope_entries[0].read_text(encoding="utf-8"))
     assert entry["truth_status"] == "route_signal_not_reviewed_truth"
     assert entry["evidence"]["raw_ref"] == "raw:line:2"
+    identity = entry["artifact_identity"]
+    assert identity["artifact_class"] == "session_memory_atlas_route_entry"
+    assert identity["owner_repo"] == "aoa-session-memory"
+    assert identity["trust_layer"] == [
+        "abi_contract_signature",
+        "local_session_provenance",
+        "w3c_prov_lineage",
+    ]
+    assert "raw refs before promoting any claim" in identity["consumer_expectation"]
 
 
 def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5160,6 +5417,7 @@ def test_build_agent_atlas_defers_remaining_records_when_budget_expires(tmp_path
         return [
             {
                 "schema_version": module.ATLAS_SCHEMA_VERSION,
+                "artifact_identity": module.atlas_route_entry_artifact_identity(),
                 "axis": "by-work-context",
                 "route_key": label,
                 "status": "generated",
@@ -9132,7 +9390,9 @@ def test_agent_atlas_policy_matches_source_skeleton() -> None:
         assert (axis_dir / "entries" / ".gitkeep").exists()
 
     schema = json.loads((source_aoa / "schemas" / "atlas-route-entry.schema.json").read_text(encoding="utf-8"))
+    assert "artifact_identity" in schema["required"]
     assert schema["properties"]["axis"]["pattern"] == "^by-[a-z0-9-]+$"
+    assert schema["$defs"]["artifactIdentity"]["properties"]["owner_repo"]["const"] == "aoa-session-memory"
 
 
 def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_sessions(
