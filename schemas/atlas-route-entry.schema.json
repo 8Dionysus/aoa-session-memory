@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "artifact_identity",
     "axis",
     "route_key",
     "status",
@@ -19,6 +20,9 @@
     "schema_version": {
       "type": "integer",
       "minimum": 1
+    },
+    "artifact_identity": {
+      "$ref": "#/$defs/artifactIdentity"
     },
     "axis": {
       "type": "string",
@@ -102,6 +106,89 @@
         "pattern": "^by-[a-z0-9-]+$"
       },
       "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "artifactIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_class",
+        "surface_state",
+        "owner_repo",
+        "authority_ref",
+        "producer",
+        "consumer_expectation",
+        "privacy_boundary",
+        "content_identity",
+        "abi_epoch",
+        "contract_version",
+        "trust_layer",
+        "verification",
+        "action"
+      ],
+      "properties": {
+        "artifact_class": {
+          "type": "string",
+          "const": "session_memory_atlas_route_entry"
+        },
+        "surface_state": {
+          "type": "string",
+          "const": "portable_generated_session_route_packet"
+        },
+        "owner_repo": {
+          "type": "string",
+          "const": "aoa-session-memory"
+        },
+        "authority_ref": {
+          "type": "string",
+          "const": "maps/README.md"
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 3
+        },
+        "consumer_expectation": {
+          "type": "string",
+          "minLength": 3
+        },
+        "privacy_boundary": {
+          "type": "string",
+          "minLength": 3
+        },
+        "content_identity": {
+          "type": "string",
+          "minLength": 3
+        },
+        "abi_epoch": {
+          "type": "string",
+          "const": "aoa_session_memory_atlas_route_entry_v1"
+        },
+        "contract_version": {
+          "type": "string",
+          "minLength": 3
+        },
+        "trust_layer": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "action": {
+          "type": "string",
+          "minLength": 3
+        }
+      }
     }
   }
 }
