@@ -47,6 +47,11 @@ Build the `.aoa` session-memory mechanism end to end:
 - Batch distillation policy: `config/batch-distillation-policy.json`
 - Portable search route: `search-index`, `search`, runtime `search/`, and
   `skills/aoa-session-search`
+- Generated entity registry: `entity-registry`,
+  `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
+  stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
+  hooks, scripts, validators, tests, evals, playbooks, techniques, mechanics,
+  graph, and memory surfaces; MCP access is read-only
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors
 - Incremental graph store, sidecar snapshots, and GraphRAG packets:

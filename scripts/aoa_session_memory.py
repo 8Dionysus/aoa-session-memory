@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 SCHEMA_VERSION = 1
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
+ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[float, dict[tuple[str, str], dict[str, Any]]]] = {}
 
 
 class SearchSqliteConnection(sqlite3.Connection):
@@ -85,14 +86,15 @@ TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 GOAL_LIFECYCLE_SCHEMA_VERSION = 1
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 27
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 28
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 8
+SEARCH_SCHEMA_VERSION = 9
+ENTITY_REGISTRY_SCHEMA_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
@@ -103,6 +105,8 @@ SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 1200
 SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 4000
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
+ENTITY_REGISTRY_PATH = ATLAS_ROOT / "entity-registry.json"
+ENTITY_REGISTRY_MARKDOWN = ATLAS_ROOT / "entity-registry.md"
 ATLAS_PROJECTION_STATE_JSON = "index-state.json"
 GRAPH_ROOT = Path("graph")
 GRAPH_NODES_JSONL = "nodes.jsonl"
@@ -444,6 +448,61 @@ ROUTE_SIGNAL_LAYER_TO_AXIS = {
     "route_next_action": "by-route-next-action",
     "agent_event": "by-agent-event",
 }
+
+ENTITY_REGISTRY_KINDS = (
+    "skill",
+    "mcp_service",
+    "mcp_tool",
+    "tool",
+    "api",
+    "plugin",
+    "hook",
+    "script",
+    "validator",
+    "test",
+    "eval",
+    "playbook",
+    "technique",
+    "mechanic",
+    "graph",
+    "memory",
+)
+ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND = {
+    "skill": "skill",
+    "mcp_service": "mcp",
+    "mcp_tool": "tool",
+    "tool": "tool",
+    "api": "api",
+    "plugin": "plugin",
+    "hook": "hook",
+    "script": "script",
+    "validator": "validator",
+    "test": "test",
+    "eval": "eval",
+    "playbook": "playbook",
+    "technique": "technique",
+    "mechanic": "mechanic",
+    "graph": "graph",
+    "memory": "memory",
+}
+ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER = {
+    "skill": "skill",
+    "mcp": "mcp_service",
+    "tool": "tool",
+    "api": "api",
+    "plugin": "plugin",
+    "hook": "hook",
+    "script": "script",
+    "validator": "validator",
+    "test": "test",
+    "eval": "eval",
+    "playbook": "playbook",
+    "technique": "technique",
+    "mechanic": "mechanic",
+    "graph": "graph",
+    "memory": "memory",
+}
+ENTITY_REGISTRY_RETIRED_SOURCE_KINDS = {"skill", "mcp_service"}
 
 GRAPH_ROUTE_NODE_TYPE_BY_LAYER = {
     "entity": "entity",
@@ -1300,7 +1359,7 @@ def copytree_ignore(_directory: str, names: list[str]) -> set[str]:
         if directory.name.startswith("by-") or directory.name == "maps":
             ignored.update(name for name in names if name in {"INDEX.md", "index.json"})
         if directory.name == "maps":
-            ignored.update(name for name in names if name == ATLAS_PROJECTION_STATE_JSON)
+            ignored.update(name for name in names if name in {ATLAS_PROJECTION_STATE_JSON, ENTITY_REGISTRY_PATH.name, ENTITY_REGISTRY_MARKDOWN.name})
     return ignored
 
 
@@ -2685,14 +2744,12 @@ def canonical_mcp_service_key(value: str, *, path_source: bool = False) -> str |
     key = mcp_service_shape_key(value, path_source=path_source)
     if not key:
         return None
-    if key in CANONICAL_MCP_SERVICE_KEYS:
-        return key
-    return key if path_source else None
+    return key
 
 
 def mcp_service_identity_suggestion(value: str, *, path_source: bool = False) -> str:
     key = mcp_service_shape_key(value, path_source=path_source)
-    if not key or canonical_mcp_service_key(value, path_source=path_source):
+    if not key or key in CANONICAL_MCP_SERVICE_KEYS:
         return ""
     matches = difflib.get_close_matches(key, sorted(CANONICAL_MCP_SERVICE_KEYS), n=1, cutoff=0.72)
     return matches[0] if matches else ""
@@ -2700,7 +2757,7 @@ def mcp_service_identity_suggestion(value: str, *, path_source: bool = False) ->
 
 def is_unknown_mcp_service_identity(value: str, *, path_source: bool = False) -> bool:
     key = mcp_service_shape_key(value, path_source=path_source)
-    return bool(key and not canonical_mcp_service_key(value, path_source=path_source))
+    return bool(key and key not in CANONICAL_MCP_SERVICE_KEYS)
 
 
 def mcp_config_service_key(value: str) -> str | None:
@@ -3147,6 +3204,683 @@ def operational_entity_layer_candidates(texts: list[str], *, memory_surface: str
         "graph": graph_entity_candidates_from_texts(texts),
         "memory": memory_entity_candidates_from_texts(texts, memory_surface=memory_surface),
     }
+
+
+def entity_registry_id(kind: str, key: str) -> str:
+    return f"{route_key_slug(kind, fallback='entity')}:{route_key_slug(key, fallback='unknown', max_chars=120)}"
+
+
+def entity_registry_route_layer(kind: str) -> str:
+    return ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND.get(route_key_slug(kind, fallback="entity"), "entity")
+
+
+def entity_registry_tool_key_is_mcp_tool(key: str) -> bool:
+    normalized = route_key_slug(key, fallback="")
+    return normalized.startswith("mcp__") or bool(re.match(r"^mcp_[a-z0-9_]+_mcp_[a-z0-9_]+$", normalized))
+
+
+def entity_registry_status_rank(status: str) -> int:
+    order = {"active": 0, "stale": 1, "removed": 2, "observed": 3, "unknown": 4}
+    return order.get(str(status or ""), 9)
+
+
+def entity_registry_source_ref(path: Path, *, source_type: str, status: str = "active") -> dict[str, Any]:
+    ref: dict[str, Any] = {"source_type": source_type, "path": str(path), "status": status}
+    try:
+        if path.exists():
+            ref["mtime"] = path.stat().st_mtime
+            ref["sha256"] = sha256_file(path) if path.is_file() else ""
+    except OSError:
+        ref["status"] = "stale"
+    return ref
+
+
+def entity_registry_make_entry(
+    *,
+    kind: str,
+    key: str,
+    aliases: Iterable[str] | None = None,
+    source_refs: Iterable[dict[str, Any]] | None = None,
+    source_surface: str = "",
+    owner: str = "",
+    status: str = "observed",
+    signal_count: int = 0,
+    session_count: int = 0,
+) -> dict[str, Any]:
+    normalized_kind = route_key_slug(kind, fallback="entity")
+    normalized_key = route_key_slug(key, fallback="unknown", max_chars=120)
+    refs = list(source_refs or [])
+    alias_values = sorted(
+        {
+            str(alias).strip()
+            for alias in aliases or []
+            if str(alias).strip() and str(alias).strip() != normalized_key
+        }
+    )
+    route_layer = entity_registry_route_layer(normalized_kind)
+    route_signal = route_signal_token(route_layer, normalized_key) if route_layer and normalized_key else ""
+    return {
+        "entity_id": entity_registry_id(normalized_kind, normalized_key),
+        "kind": normalized_kind,
+        "canonical_key": normalized_key,
+        "aliases": alias_values,
+        "route_layer": route_layer,
+        "route_signal": route_signal,
+        "source_refs": refs,
+        "source_surface": source_surface,
+        "owner": owner,
+        "freshness": {
+            "status": status,
+            "generated_at": utc_now(),
+            "source_ref_count": len(refs),
+            "signal_count": int_value(signal_count),
+            "session_count": int_value(session_count),
+        },
+        "status": status,
+        "truth_status": "generated_entity_registry_navigation_not_source_truth",
+    }
+
+
+def entity_registry_merge_entry(entries: dict[str, dict[str, Any]], entry: dict[str, Any]) -> None:
+    entity_id = str(entry.get("entity_id") or "")
+    if not entity_id:
+        return
+    existing = entries.get(entity_id)
+    if existing is None:
+        entries[entity_id] = entry
+        return
+    existing_aliases = set(existing.get("aliases", []) if isinstance(existing.get("aliases"), list) else [])
+    existing_aliases.update(entry.get("aliases", []) if isinstance(entry.get("aliases"), list) else [])
+    existing["aliases"] = sorted(str(alias) for alias in existing_aliases if str(alias))
+    existing_refs = existing.get("source_refs", []) if isinstance(existing.get("source_refs"), list) else []
+    ref_tokens = {
+        (str(ref.get("source_type") or ""), str(ref.get("path") or ""))
+        for ref in existing_refs
+        if isinstance(ref, dict)
+    }
+    for ref in entry.get("source_refs", []) if isinstance(entry.get("source_refs"), list) else []:
+        if not isinstance(ref, dict):
+            continue
+        token = (str(ref.get("source_type") or ""), str(ref.get("path") or ""))
+        if token in ref_tokens:
+            continue
+        existing_refs.append(ref)
+        ref_tokens.add(token)
+    existing["source_refs"] = existing_refs
+    incoming_has_stronger_status = entity_registry_status_rank(str(entry.get("status") or "")) < entity_registry_status_rank(str(existing.get("status") or ""))
+    if incoming_has_stronger_status:
+        existing["status"] = entry.get("status")
+    freshness = existing.get("freshness") if isinstance(existing.get("freshness"), dict) else {}
+    incoming_freshness = entry.get("freshness") if isinstance(entry.get("freshness"), dict) else {}
+    freshness["source_ref_count"] = len(existing_refs)
+    freshness["signal_count"] = int_value(freshness.get("signal_count")) + int_value(incoming_freshness.get("signal_count"))
+    freshness["session_count"] = max(int_value(freshness.get("session_count")), int_value(incoming_freshness.get("session_count")))
+    freshness["status"] = existing.get("status")
+    existing["freshness"] = freshness
+    if (incoming_has_stronger_status or not existing.get("source_surface")) and entry.get("source_surface"):
+        existing["source_surface"] = entry.get("source_surface")
+    if (incoming_has_stronger_status or not existing.get("owner")) and entry.get("owner"):
+        existing["owner"] = entry.get("owner")
+
+
+def entity_registry_skill_roots(aoa_root: Path) -> list[tuple[Path, str, str]]:
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    candidates: list[tuple[Path, str, str]] = [
+        (aoa_root / "skills", "aoa_session_memory_source_skills", "aoa-session-memory"),
+        (codex_home / "skills", "codex_user_skills", "codex-user-root"),
+        (Path("/srv/AbyssOS/aoa-skills/.agents/skills"), "aoa_skills_repo", "aoa-skills"),
+    ]
+    plugins_root = codex_home / "plugins" / "cache"
+    if plugins_root.exists():
+        for skills_dir in sorted(plugins_root.glob("**/skills"))[:80]:
+            candidates.append((skills_dir, "codex_plugin_skills", "codex-plugin-cache"))
+    roots: list[tuple[Path, str, str]] = []
+    seen: set[str] = set()
+    for root, source_surface, owner in candidates:
+        token = str(root)
+        if token in seen:
+            continue
+        seen.add(token)
+        if root.exists():
+            roots.append((root, source_surface, owner))
+    return roots
+
+
+def entity_registry_skill_key_from_file(path: Path) -> tuple[str, list[str]]:
+    name = path.parent.name
+    aliases = [name]
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[:40]:
+            match = re.match(r"\s*name:\s*['\"]?([^'\"]+)['\"]?\s*$", line)
+            if match:
+                name = match.group(1).strip()
+                aliases.append(name)
+                break
+    except OSError:
+        pass
+    key = skill_entity_key(name, explicit=True, path_source=True) or route_key_slug(name, fallback=path.parent.name)
+    return key, aliases
+
+
+def entity_registry_discover_skills(aoa_root: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for root, source_surface, owner in entity_registry_skill_roots(aoa_root):
+        for skill_path in sorted(root.glob("*/SKILL.md")):
+            key, aliases = entity_registry_skill_key_from_file(skill_path)
+            if not key:
+                continue
+            entries.append(
+                entity_registry_make_entry(
+                    kind="skill",
+                    key=key,
+                    aliases=aliases,
+                    source_refs=[entity_registry_source_ref(skill_path, source_type=source_surface, status="active")],
+                    source_surface=source_surface,
+                    owner=owner,
+                    status="active",
+                )
+            )
+    return entries
+
+
+def entity_registry_codex_config_paths(aoa_root: Path) -> list[Path]:
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    paths = [codex_home / "config.toml", aoa_root.parent / ".codex" / "config.toml"]
+    return [path for path in paths if path.exists()]
+
+
+def entity_registry_mcp_service_entries_from_config(path: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    data: dict[str, Any] = {}
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):  # type: ignore[attr-defined]
+            data = {}
+    if isinstance(data.get("mcp_servers"), dict):
+        names = list(data["mcp_servers"])
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        names = [match.group(1).strip().strip("'\"") for match in re.finditer(r"^\s*\[mcp_servers\.([^\]]+)\]\s*$", text, flags=re.MULTILINE)]
+    for service_name in names:
+        service_key = mcp_config_service_key(f"mcp_servers_{service_name}") or canonical_mcp_service_key(
+            service_name if service_name.endswith(("_mcp", "-mcp")) else f"{service_name}_mcp",
+            path_source=False,
+        )
+        if not service_key:
+            continue
+        entries.append(
+            entity_registry_make_entry(
+                kind="mcp_service",
+                key=service_key,
+                aliases=[service_name, service_key.replace("_", "-")],
+                source_refs=[entity_registry_source_ref(path, source_type="codex_mcp_config", status="active")],
+                source_surface="codex_mcp_config",
+                owner="codex-user-root",
+                status="active",
+            )
+        )
+    return entries
+
+
+def entity_registry_discover_mcp_services(aoa_root: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for config_path in entity_registry_codex_config_paths(aoa_root):
+        entries.extend(entity_registry_mcp_service_entries_from_config(config_path))
+    for services_root in (Path("/home/dionysus/src/abyss-stack/mcp/services"), Path("/srv/AbyssOS/abyss-stack/mcp/services")):
+        if not services_root.exists():
+            continue
+        for service_dir in sorted(path for path in services_root.iterdir() if path.is_dir()):
+            key = canonical_mcp_service_key(service_dir.name, path_source=True)
+            if not key:
+                continue
+            entries.append(
+                entity_registry_make_entry(
+                    kind="mcp_service",
+                    key=key,
+                    aliases=[service_dir.name, key.replace("_", "-")],
+                    source_refs=[entity_registry_source_ref(service_dir, source_type="abyss_stack_mcp_service_dir", status="active")],
+                    source_surface="abyss_stack_mcp_service_dir",
+                    owner="abyss-stack",
+                    status="active",
+                )
+            )
+    return entries
+
+
+def entity_registry_entries_from_route_terms(
+    aoa_root: Path,
+    *,
+    db_path: Path | None = None,
+    limit_per_layer: int = 400,
+) -> list[dict[str, Any]]:
+    db_path = db_path or search_db_path(aoa_root)
+    if not db_path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        for layer in sorted(ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER):
+            rows = conn.execute(
+                """
+                SELECT route_terms.key AS key, route_terms.route_signal AS route_signal,
+                       COUNT(*) AS signal_count, COUNT(DISTINCT documents.session_id) AS session_count,
+                       MAX(documents.session_date) AS latest_session_date
+                FROM route_terms
+                JOIN document_routes ON document_routes.route_id = route_terms.id
+                JOIN documents ON documents.rowid = document_routes.doc_rowid
+                WHERE route_terms.layer = ?
+                GROUP BY route_terms.key, route_terms.route_signal
+                ORDER BY signal_count DESC, session_count DESC, key ASC
+                LIMIT ?
+                """,
+                (layer, limit_per_layer),
+            ).fetchall()
+            for row in rows:
+                key = str(row["key"] or "")
+                if not key:
+                    continue
+                kind = "mcp_tool" if layer == "tool" and entity_registry_tool_key_is_mcp_tool(key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
+                entries.append(
+                    entity_registry_make_entry(
+                        kind=kind,
+                        key=key,
+                        aliases=[str(row["route_signal"] or "")],
+                        source_refs=[
+                            {
+                                "source_type": "search_route_terms",
+                                "path": str(db_path),
+                                "status": "observed",
+                                "latest_session_date": row["latest_session_date"],
+                            }
+                        ],
+                        source_surface="archived_route_terms",
+                        owner="aoa-session-memory",
+                        status="observed",
+                        signal_count=int_value(row["signal_count"]),
+                        session_count=int_value(row["session_count"]),
+                    )
+                )
+    except sqlite3.Error:
+        return entries
+    finally:
+        if conn is not None:
+            conn.close()
+    return entries
+
+
+def entity_registry_current_mcp_config_paths(aoa_root: Path) -> set[str]:
+    return {str(path) for path in entity_registry_codex_config_paths(aoa_root)}
+
+
+def entity_registry_source_surface_state(aoa_root: Path) -> dict[str, Any]:
+    paths: list[Path] = []
+    for root, _source_surface, _owner in entity_registry_skill_roots(aoa_root):
+        try:
+            paths.extend(sorted(root.glob("*/SKILL.md")))
+        except OSError:
+            continue
+    paths.extend(entity_registry_codex_config_paths(aoa_root))
+    for services_root in (Path("/home/dionysus/src/abyss-stack/mcp/services"), Path("/srv/AbyssOS/abyss-stack/mcp/services")):
+        if not services_root.exists():
+            continue
+        try:
+            paths.extend(sorted(path for path in services_root.iterdir() if path.is_dir()))
+        except OSError:
+            continue
+    latest_mtime = 0.0
+    latest_path = ""
+    readable_count = 0
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        readable_count += 1
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_path = str(path)
+    return {
+        "source_path_count": readable_count,
+        "latest_source_mtime": latest_mtime,
+        "latest_source_mtime_iso": datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat().replace("+00:00", "Z") if latest_mtime else "",
+        "latest_source_path": latest_path,
+    }
+
+
+def entity_registry_retired_entries_from_previous_snapshot(
+    aoa_root: Path,
+    *,
+    current_active_entity_ids: set[str],
+) -> list[dict[str, Any]]:
+    path = aoa_root / ENTITY_REGISTRY_PATH
+    if not path.exists():
+        return []
+    previous = read_json(path, {})
+    if not isinstance(previous, dict) or previous.get("artifact_type") != "entity_registry_snapshot":
+        return []
+    config_paths = entity_registry_current_mcp_config_paths(aoa_root)
+    entries: list[dict[str, Any]] = []
+    for previous_entry in previous.get("entries", []) if isinstance(previous.get("entries"), list) else []:
+        if not isinstance(previous_entry, dict):
+            continue
+        kind = route_key_slug(previous_entry.get("kind"), fallback="")
+        if kind not in ENTITY_REGISTRY_RETIRED_SOURCE_KINDS:
+            continue
+        entity_id = str(previous_entry.get("entity_id") or "")
+        if not entity_id or entity_id in current_active_entity_ids:
+            continue
+        previous_status = str(previous_entry.get("status") or "")
+        if previous_status == "unknown":
+            continue
+        previous_refs = previous_entry.get("source_refs") if isinstance(previous_entry.get("source_refs"), list) else []
+        retired_refs: list[dict[str, Any]] = []
+        statuses: list[str] = []
+        for ref in previous_refs:
+            if not isinstance(ref, dict):
+                continue
+            source_type = str(ref.get("source_type") or "")
+            if source_type in {"search_route_terms", "lookup_request"}:
+                continue
+            retired_ref = dict(ref)
+            retired_ref["previous_status"] = str(retired_ref.get("status") or previous_status or "active")
+            retired_ref["registry_refresh_status"] = "not_present_in_current_runtime_discovery"
+            ref_path = Path(str(retired_ref.get("path") or "")) if retired_ref.get("path") else None
+            if source_type == "codex_mcp_config" and ref_path is not None and str(ref_path) in config_paths:
+                status = "removed"
+            elif ref_path is not None and ref_path.exists():
+                status = "stale"
+            else:
+                status = "removed"
+            retired_ref["status"] = status
+            statuses.append(status)
+            retired_refs.append(retired_ref)
+        if not retired_refs:
+            continue
+        retired_status = "removed" if "removed" in statuses else "stale"
+        previous_freshness = previous_entry.get("freshness") if isinstance(previous_entry.get("freshness"), dict) else {}
+        entry = entity_registry_make_entry(
+            kind=kind,
+            key=str(previous_entry.get("canonical_key") or ""),
+            aliases=previous_entry.get("aliases") if isinstance(previous_entry.get("aliases"), list) else [],
+            source_refs=retired_refs,
+            source_surface=str(previous_entry.get("source_surface") or "previous_entity_registry_snapshot"),
+            owner=str(previous_entry.get("owner") or "unresolved"),
+            status=retired_status,
+            signal_count=int_value(previous_freshness.get("signal_count")),
+            session_count=int_value(previous_freshness.get("session_count")),
+        )
+        entry["retired_from_snapshot"] = {
+            "path": str(path),
+            "generated_at": previous.get("generated_at"),
+            "previous_status": previous_status,
+        }
+        freshness = entry.get("freshness") if isinstance(entry.get("freshness"), dict) else {}
+        freshness["diagnostics"] = ["not_present_in_current_runtime_discovery"]
+        freshness["previous_status"] = previous_status
+        entry["freshness"] = freshness
+        entries.append(entry)
+    return entries
+
+
+def build_entity_registry(
+    *,
+    aoa_root: Path,
+    write: bool = False,
+    include_runtime: bool = True,
+    route_terms_db_path: Path | None = None,
+    query: str = "",
+    kind: str = "all",
+    limit: int = 5000,
+) -> dict[str, Any]:
+    entries_by_id: dict[str, dict[str, Any]] = {}
+    source_surfaces: list[str] = []
+    current_active_entity_ids: set[str] = set()
+    if include_runtime:
+        runtime_entries = [
+            *entity_registry_discover_skills(aoa_root),
+            *entity_registry_discover_mcp_services(aoa_root),
+        ]
+        current_active_entity_ids = {
+            str(entry.get("entity_id") or "")
+            for entry in runtime_entries
+            if str(entry.get("status") or "") == "active" and str(entry.get("entity_id") or "")
+        }
+        for entry in runtime_entries:
+            entity_registry_merge_entry(entries_by_id, entry)
+        for entry in entity_registry_retired_entries_from_previous_snapshot(
+            aoa_root,
+            current_active_entity_ids=current_active_entity_ids,
+        ):
+            entity_registry_merge_entry(entries_by_id, entry)
+        source_surfaces.extend(["runtime_skills", "runtime_mcp_config", "runtime_mcp_service_dirs", "previous_entity_registry_snapshot"])
+    for entry in entity_registry_entries_from_route_terms(aoa_root, db_path=route_terms_db_path):
+        entity_registry_merge_entry(entries_by_id, entry)
+    source_surfaces.append("archived_route_terms")
+    all_entries = sorted(
+        entries_by_id.values(),
+        key=lambda item: (str(item.get("kind") or ""), entity_registry_status_rank(str(item.get("status") or "")), str(item.get("canonical_key") or "")),
+    )
+    entries = list(all_entries)
+    selected_kind = route_key_slug(kind, fallback="all")
+    if selected_kind and selected_kind not in {"all", "auto"}:
+        entries = [entry for entry in entries if str(entry.get("kind") or "") == selected_kind]
+    query_key = route_key_slug(query, fallback="") if query else ""
+    if query_key:
+        entries = [
+            entry
+            for entry in entries
+            if query_key in str(entry.get("canonical_key") or "")
+            or any(query_key in route_key_slug(alias, fallback="") for alias in entry.get("aliases", []) if alias)
+        ]
+    entries = entries[: max(1, int_value(limit, 5000))]
+    generated_at_epoch = time.time()
+    snapshot_payload = {
+        "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "generated_at": datetime.fromtimestamp(generated_at_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at_epoch": generated_at_epoch,
+        "ok": True,
+        "mutates": bool(write),
+        "aoa_root": str(aoa_root),
+        "truth_status": "generated_entity_registry_navigation_not_source_truth",
+        "registry_path": str(aoa_root / ENTITY_REGISTRY_PATH),
+        "source_surfaces": sorted(set(source_surfaces)),
+        "source_truth_surfaces": [
+            "Codex runtime skill list",
+            "CODEX_HOME/skills/*/SKILL.md",
+            "CODEX_HOME/plugins/cache/**/skills/*/SKILL.md",
+            "repo-local SKILL.md surfaces",
+            "CODEX_HOME/config.toml mcp_servers",
+            "abyss-stack/mcp/services/*",
+            "portable search route_terms archived evidence",
+            "previous entity registry snapshot for stale/removed navigation state",
+        ],
+        "entity_count": len(all_entries),
+        "counts_by_kind": dict(Counter(str(entry.get("kind") or "unknown") for entry in all_entries)),
+        "counts_by_status": dict(Counter(str(entry.get("status") or "unknown") for entry in all_entries)),
+        "query": "",
+        "kind": "all",
+        "entries": all_entries,
+        "diagnostics": [],
+        "next_route": "Use trace-route/search/graph/entity-usage-audit for observed use; open source_refs for source truth.",
+    }
+    payload = {
+        "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "generated_at": snapshot_payload["generated_at"],
+        "generated_at_epoch": snapshot_payload["generated_at_epoch"],
+        "ok": True,
+        "mutates": bool(write),
+        "aoa_root": str(aoa_root),
+        "truth_status": "generated_entity_registry_navigation_not_source_truth",
+        "registry_path": str(aoa_root / ENTITY_REGISTRY_PATH),
+        "source_surfaces": snapshot_payload["source_surfaces"],
+        "source_truth_surfaces": snapshot_payload["source_truth_surfaces"],
+        "total_entity_count": len(all_entries),
+        "entity_count": len(entries),
+        "counts_by_kind": dict(Counter(str(entry.get("kind") or "unknown") for entry in entries)),
+        "counts_by_status": dict(Counter(str(entry.get("status") or "unknown") for entry in entries)),
+        "snapshot_counts_by_kind": snapshot_payload["counts_by_kind"],
+        "snapshot_counts_by_status": snapshot_payload["counts_by_status"],
+        "query": query,
+        "kind": selected_kind,
+        "entries": entries,
+        "diagnostics": [],
+        "next_route": "Use trace-route/search/graph/entity-usage-audit for observed use; open source_refs for source truth.",
+    }
+    if write:
+        write_json(aoa_root / ENTITY_REGISTRY_PATH, snapshot_payload)
+        write_markdown(aoa_root / ENTITY_REGISTRY_MARKDOWN, entity_registry_markdown(snapshot_payload))
+    return payload
+
+
+def load_entity_registry(aoa_root: Path, *, include_runtime: bool = True) -> dict[str, Any]:
+    path = aoa_root / ENTITY_REGISTRY_PATH
+    payload = read_json(path, {}) if path.exists() else {}
+    if isinstance(payload, dict) and payload.get("artifact_type") == "entity_registry_snapshot":
+        return payload
+    return build_entity_registry(aoa_root=aoa_root, write=False, include_runtime=include_runtime)
+
+
+def entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    payload = load_entity_registry(aoa_root)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "")
+        key = str(entry.get("canonical_key") or "")
+        if kind and key:
+            index[(kind, key)] = entry
+        for alias in entry.get("aliases", []) if isinstance(entry.get("aliases"), list) else []:
+            alias_key = route_key_slug(alias, fallback="")
+            if alias_key:
+                index.setdefault((kind, alias_key), entry)
+    return index
+
+
+def cached_entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    root_key = str(aoa_root.resolve())
+    registry_path = aoa_root / ENTITY_REGISTRY_PATH
+    try:
+        mtime = registry_path.stat().st_mtime if registry_path.exists() else 0.0
+    except OSError:
+        mtime = 0.0
+    cached = ENTITY_REGISTRY_INDEX_CACHE.get(root_key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    index = entity_registry_entry_index(aoa_root)
+    ENTITY_REGISTRY_INDEX_CACHE[root_key] = (mtime, index)
+    return index
+
+
+def entity_registry_lookup(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    include_unknown: bool = True,
+) -> dict[str, Any]:
+    normalized_kind = route_key_slug(kind, fallback="auto")
+    aliases = trace_anchor_aliases(anchor)
+    index = entity_registry_entry_index(aoa_root)
+    if normalized_kind == "mcp":
+        search_kinds = ["mcp_service"]
+    elif normalized_kind in {"auto", "all"}:
+        search_kinds = list(ENTITY_REGISTRY_KINDS)
+    else:
+        search_kinds = [normalized_kind]
+    matches: dict[str, dict[str, Any]] = {}
+    for alias in aliases:
+        alias_key = route_key_slug(alias, fallback="")
+        for item_kind in search_kinds:
+            lookup_kind = "mcp_service" if item_kind == "mcp" else item_kind
+            entry = index.get((lookup_kind, alias_key))
+            if entry:
+                matches[str(entry.get("entity_id") or "")] = entry
+        if normalized_kind in {"auto", "all", "mcp", "mcp_service"}:
+            mcp_key = canonical_mcp_service_key(alias, path_source="/" in alias)
+            entry = index.get(("mcp_service", mcp_key or ""))
+            if entry:
+                matches[str(entry.get("entity_id") or "")] = entry
+        if normalized_kind in {"auto", "all", "skill"}:
+            skill_key = skill_entity_key(alias, explicit=True, path_source="/" in alias)
+            entry = index.get(("skill", skill_key or ""))
+            if entry:
+                matches[str(entry.get("entity_id") or "")] = entry
+    entries = [entry for key, entry in matches.items() if key]
+    if not entries and include_unknown:
+        guessed_kind = normalized_kind
+        if guessed_kind in {"auto", "all"}:
+            inferred = infer_trace_route_kinds(anchor, "auto")
+            guessed_kind = "mcp_service" if "mcp" in inferred else (inferred[0] if inferred else "entity")
+        if guessed_kind == "mcp":
+            guessed_kind = "mcp_service"
+        entries = [
+            entity_registry_make_entry(
+                kind=guessed_kind,
+                key=route_key_slug(anchor, fallback="unknown", max_chars=120),
+                aliases=aliases,
+                source_refs=[],
+                source_surface="lookup_request",
+                owner="unresolved",
+                status="unknown",
+            )
+        ]
+    return {
+        "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_lookup",
+        "generated_at": utc_now(),
+        "ok": True,
+        "mutates": False,
+        "anchor": anchor,
+        "kind": normalized_kind,
+        "aliases": aliases,
+        "match_count": len(entries),
+        "entries": entries,
+        "agent_route_packet": {
+            "status": entries[0].get("status") if entries else "unknown",
+            "registered": bool(entries and entries[0].get("status") != "unknown"),
+            "refs": entries[0].get("source_refs", []) if entries else [],
+            "next_route": "Use trace-route and graph-neighborhood for session usage; open source_refs for source truth.",
+        },
+        "truth_status": "generated_entity_registry_lookup_not_source_truth",
+    }
+
+
+def entity_registry_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Entity Registry",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- entity_count: `{payload.get('entity_count')}`",
+        f"- truth_status: `{payload.get('truth_status')}`",
+        "",
+        "## Counts",
+        "",
+    ]
+    for kind, count in sorted((payload.get("counts_by_kind") or {}).items()):
+        lines.append(f"- `{kind}`: `{count}`")
+    lines.extend(["", "## Entries", "", "| kind | key | status | route | refs |", "| --- | --- | --- | --- | --- |"])
+    for entry in payload.get("entries", []) if isinstance(payload.get("entries"), list) else []:
+        refs = entry.get("source_refs") if isinstance(entry.get("source_refs"), list) else []
+        lines.append(
+            "| `{kind}` | `{key}` | `{status}` | `{route}` | `{refs}` |".format(
+                kind=entry.get("kind", ""),
+                key=entry.get("canonical_key", ""),
+                status=entry.get("status", ""),
+                route=entry.get("route_signal", ""),
+                refs=len(refs),
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 def trace_identity_diagnostics(anchor: str, *, kind: str = "auto") -> list[str]:
@@ -3617,8 +4351,6 @@ def route_signals_for_event(
                 add("entity", key, confidence="medium", source=f"{layer}_entity", detail=key)
     entities = named_entity_candidates_from_text(entity_text)
     for entity in sorted(entities)[:16]:
-        if is_unknown_mcp_service_identity(entity):
-            continue
         add("entity", entity, confidence="medium", source="entity_mention", detail=entity)
     for mcp_route in sorted(mcp_route_candidates_from_texts([entity_text, " ".join(path_candidates)]))[:8]:
         add("mcp", mcp_route, confidence="medium", source="mcp_service_mention", detail=mcp_route)
@@ -16116,11 +16848,19 @@ def maintain_indexes(
             "reasons": ["graph_state_check_skipped_by_profile"],
             "diagnostics": [],
         }
+    entity_registry_state = entity_registry_maintenance_status(aoa_root)
+    entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
     effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(1, min(int_value(graph_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     effective_graph_max_refresh_nodes = None if graph_max_refresh_nodes is None or int_value(graph_max_refresh_nodes) <= 0 else int_value(graph_max_refresh_nodes)
     effective_graph_max_refresh_edges = None if graph_max_refresh_edges is None or int_value(graph_max_refresh_edges) <= 0 else int_value(graph_max_refresh_edges)
-    index_repair_needed = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh")) or token_backfill_needed
+    index_repair_needed = (
+        bool(route_drift)
+        or bool(search_state.get("needs_refresh"))
+        or bool(atlas_state.get("needs_refresh"))
+        or token_backfill_needed
+        or entity_registry_repair_needed
+    )
     graph_repair_needed = (
         bool(graph_state.get("needs_maintenance"))
         or graph_state.get("status") == "missing"
@@ -16258,6 +16998,12 @@ def maintain_indexes(
             command=search_command,
         ),
         maintenance_action(
+            "refresh_entity_registry",
+            reason="entity_registry_missing_or_stale",
+            needed=repair_indexes and entity_registry_repair_needed and not search_rebuild_required,
+            command=base + ["entity-registry", *root_args, "--write"],
+        ),
+        maintenance_action(
             "rebuild_agent_atlas",
             reason="atlas_missing_or_stale",
             needed=repair_indexes and (bool(atlas_repair_records) or atlas_rebuild_required or bool(route_drift) or token_backfill_needed),
@@ -16303,10 +17049,11 @@ def maintain_indexes(
     reindex_action = actions[1]
     search_state_refresh_action = actions[2]
     search_action = actions[3]
-    atlas_action = actions[4]
-    readiness_action = actions[5]
-    graph_action = actions[6]
-    sample_action = actions[7]
+    entity_registry_action = actions[4]
+    atlas_action = actions[5]
+    readiness_action = actions[6]
+    graph_action = actions[7]
+    sample_action = actions[8]
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -16349,6 +17096,11 @@ def maintain_indexes(
             "action_kind": "full_rebuild" if search_rebuild_required else "incremental_update",
             "selection_count": len(records) if search_rebuild_required else len(search_reindex_records),
             "dirty_count": len(search_dirty_records) + (1 if search_non_projection_repair_needed else 0),
+        },
+        "refresh_entity_registry": {
+            "action_kind": "state_reconcile",
+            "selection_count": 1,
+            "dirty_count": 1 if entity_registry_repair_needed else 0,
         },
         "rebuild_agent_atlas": {
             "action_kind": "full_rebuild" if atlas_rebuild_required else "incremental_update",
@@ -16403,6 +17155,7 @@ def maintain_indexes(
     if apply:
         reindex_ran = False
         token_backfill_ran = False
+        entity_registry_ran = False
         post_index_ran = False
         graph_ran = False
         if token_action["needed"]:
@@ -16500,6 +17253,29 @@ def maintain_indexes(
                 search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(search_action)
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
+                if not result.get("ok") and result.get("diagnostics"):
+                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if entity_registry_action["needed"]:
+            if search_action["needed"] or reindex_ran or token_backfill_ran:
+                entity_registry_action["status"] = "covered_by_search_index"
+                entity_registry_action["result"] = {
+                    "ok": True,
+                    "note": "search-index rebuild/repair refreshes maps/entity-registry.json before indexing registry docs",
+                }
+                action_results.append(entity_registry_action)
+            elif not has_budget():
+                budget_exhausted = True
+                entity_registry_action["status"] = "deferred_budget_exhausted"
+                action_results.append(entity_registry_action)
+            else:
+                result = build_entity_registry(aoa_root=aoa_root, write=True)
+                entity_registry_action["status"] = "applied" if result.get("ok") else "failed"
+                entity_registry_action["result"] = {
+                    key: result.get(key)
+                    for key in ("ok", "entity_count", "counts_by_kind", "counts_by_status", "registry_path", "diagnostics")
+                }
+                action_results.append(entity_registry_action)
+                entity_registry_ran = bool(result.get("ok"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if atlas_action["needed"] or reindex_ran or token_backfill_ran:
@@ -16710,7 +17486,7 @@ def maintain_indexes(
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if readiness_action["needed"] or reindex_ran or token_backfill_ran or post_index_ran or graph_ran:
+        if readiness_action["needed"] or reindex_ran or token_backfill_ran or entity_registry_ran or post_index_ran or graph_ran:
             if not has_budget():
                 budget_exhausted = True
                 readiness_action["status"] = "deferred_budget_exhausted"
@@ -16792,11 +17568,13 @@ def maintain_indexes(
     final_search_state = search_state
     final_atlas_state = atlas_state
     final_graph_state = graph_state
+    final_entity_registry_state = entity_registry_state
     try:
         final_records = current_selected_records()
         final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
         final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
         final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
+        final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
         final_graph_state = (
             graph_store_state(
                 aoa_root=aoa_root,
@@ -16829,6 +17607,7 @@ def maintain_indexes(
         "repair_graph": repair_graph,
         "index_repair_needed": index_repair_needed,
         "graph_repair_needed": graph_repair_needed,
+        "entity_registry_repair_needed": entity_registry_repair_needed,
         "repair_limit": effective_repair_limit,
         "selected_count": len(records),
         "max_raw_bytes": max_raw_bytes,
@@ -16882,10 +17661,12 @@ def maintain_indexes(
         "deferred_sessions": deferred_sessions[:20],
         "search_index": search_state,
         "atlas_index": atlas_state,
+        "entity_registry": entity_registry_state,
         "graph_store": graph_state,
         "post_maintenance_states": post_maintenance_states,
         "final_search_index": final_search_state,
         "final_atlas_index": final_atlas_state,
+        "final_entity_registry": final_entity_registry_state,
         "final_graph_store": final_graph_state,
         "action_counts": action_counts,
         "actions": action_results,
@@ -16920,6 +17701,7 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- repair_graph: `{payload.get('repair_graph')}`",
         f"- index_repair_needed: `{payload.get('index_repair_needed')}`",
         f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
+        f"- entity_registry_repair_needed: `{payload.get('entity_registry_repair_needed')}`",
         f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
@@ -16948,9 +17730,11 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- token_backfill_counts: `{json.dumps((payload.get('token_backfill') or {}).get('counts', {}) if isinstance(payload.get('token_backfill'), dict) else {}, ensure_ascii=False)}`",
         f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
         f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
+        f"- entity_registry: `{(payload.get('entity_registry') or {}).get('status') if isinstance(payload.get('entity_registry'), dict) else ''}`",
         f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
         f"- final_search_index: `{(payload.get('final_search_index') or {}).get('status') if isinstance(payload.get('final_search_index'), dict) else ''}`",
         f"- final_atlas_index: `{(payload.get('final_atlas_index') or {}).get('status') if isinstance(payload.get('final_atlas_index'), dict) else ''}`",
+        f"- final_entity_registry: `{(payload.get('final_entity_registry') or {}).get('status') if isinstance(payload.get('final_entity_registry'), dict) else ''}`",
         f"- final_graph_store: `{(payload.get('final_graph_store') or {}).get('status') if isinstance(payload.get('final_graph_store'), dict) else ''}`",
         "",
         "## Actions",
@@ -23379,6 +24163,108 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
         )
 
 
+def search_documents_for_entity_registry(
+    aoa_root: Path,
+    *,
+    write_snapshot: bool = False,
+    route_terms_db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    registry = build_entity_registry(
+        aoa_root=aoa_root,
+        write=write_snapshot,
+        include_runtime=True,
+        route_terms_db_path=route_terms_db_path,
+    )
+    registry_path = aoa_root / ENTITY_REGISTRY_PATH
+    registry_sha = sha256_file(registry_path) if registry_path.exists() else ""
+    documents: list[dict[str, Any]] = []
+    base = {
+        "session_id": "entity-registry",
+        "session_label": "entity-registry",
+        "session_title": "Generated entity registry",
+        "session_date": registry.get("generated_at", "")[:10],
+        "cwd": str(aoa_root),
+        "archive_status": "generated_navigation",
+        "distillation_status": "not_reviewed_truth",
+        "review_status": "generated",
+        "manifest_path": str(registry_path),
+        "raw_path": "",
+        "raw_sha256": registry_sha,
+        "freshness_status": "fresh" if registry_path.exists() else "generated_in_memory",
+        "stale_reason": "",
+    }
+
+    def compact_registry_payload(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
+        freshness = entry.get("freshness") if isinstance(entry.get("freshness"), dict) else {}
+        compact_refs = [
+            {
+                "source_type": ref.get("source_type"),
+                "path": ref.get("path"),
+                "status": ref.get("status"),
+            }
+            for ref in refs[:3]
+            if isinstance(ref, dict)
+        ]
+        return {
+            "entity_id": entry.get("entity_id"),
+            "kind": entry.get("kind"),
+            "canonical_key": entry.get("canonical_key"),
+            "aliases": entry.get("aliases", [])[:8] if isinstance(entry.get("aliases"), list) else [],
+            "status": entry.get("status"),
+            "route_layer": entry.get("route_layer"),
+            "route_signal": entry.get("route_signal"),
+            "source_surface": entry.get("source_surface"),
+            "owner": entry.get("owner"),
+            "source_ref_count": len(refs),
+            "source_refs_sample": compact_refs,
+            "freshness": {
+                "status": freshness.get("status"),
+                "signal_count": freshness.get("signal_count"),
+                "session_count": freshness.get("session_count"),
+            },
+        }
+
+    for entry in registry.get("entries", []) if isinstance(registry.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        route_layer = str(entry.get("route_layer") or "")
+        route_key = str(entry.get("canonical_key") or "")
+        route_layers, route_signals = route_fields_from_signals(
+            [{"layer": route_layer, "key": route_key}] if route_layer and route_key else []
+        )
+        refs = entry.get("source_refs") if isinstance(entry.get("source_refs"), list) else []
+        body = search_doc_text(
+            [
+                entry.get("entity_id"),
+                entry.get("kind"),
+                entry.get("canonical_key"),
+                entry.get("aliases"),
+                entry.get("status"),
+                entry.get("source_surface"),
+                entry.get("owner"),
+                entry.get("freshness"),
+                refs,
+            ],
+            max_chars=3600,
+        )
+        documents.append(
+            {
+                **base,
+                "id": f"entity_registry:{entry.get('entity_id')}",
+                "doc_type": "entity_registry",
+                "title": f"{entry.get('kind')} {entry.get('canonical_key')} {entry.get('status')}".strip(),
+                "body": body,
+                "segment_ref": str(registry_path),
+                "route_layers": route_layers,
+                "route_signals": route_signals,
+                "tags": f"entity_registry {entry.get('kind')} {entry.get('status')}",
+                "entity_registry": compact_registry_payload(entry, refs),
+                "truth_status": registry.get("truth_status"),
+            }
+        )
+    return documents
+
+
 def session_semantic_names_text(manifest: dict[str, Any]) -> str:
     semantic = semantic_names_payload(manifest)
     parts = [
@@ -23945,6 +24831,17 @@ def search_index_sessions(
                 )
             if record_index % 10 == 0:
                 conn.execute("PRAGMA optimize")
+        if rebuild and not budget_exhausted:
+            conn.execute("BEGIN")
+            registry_documents = search_documents_for_entity_registry(
+                aoa_root,
+                write_snapshot=True,
+                route_terms_db_path=write_db_path,
+            )
+            for doc in registry_documents:
+                insert_search_document(conn, doc)
+                counts[str(doc.get("doc_type") or "unknown")] += 1
+            conn.commit()
         if rebuild:
             create_search_db_indexes(conn)
             conn.commit()
@@ -24037,6 +24934,7 @@ def search_index_sessions(
         "segment_document_count": counts.get("segment", 0),
         "event_document_count": counts.get("event", 0),
         "incident_document_count": counts.get("incident", 0),
+        "entity_registry_document_count": counts.get("entity_registry", 0),
         "db_path": str(db_path),
         "build_db_path": str(write_db_path),
         "diagnostics": diagnostics,
@@ -25654,13 +26552,22 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
 
     if any(item in kinds for item in {"skill", "entity", "mcp"}):
         for alias in aliases:
-            if "mcp" in kinds and is_unknown_mcp_service_identity(alias, path_source="/" in alias):
-                continue
             for entity in named_entity_candidates_from_text(alias):
                 add_candidate("entity", entity, source="named_entity_alias", detail=alias)
             slug = route_key_slug(alias, fallback="")
             if slug and (slug.startswith("aoa_") or slug.startswith("abyss_") or "skill" in kinds):
                 add_candidate("entity", slug, source="canonical_alias", detail=alias)
+
+    if "skill" in kinds:
+        add_candidate("skill", "", source="skill_layer_hint", confidence="low", detail="generic skill route layer")
+        for alias in aliases:
+            key = skill_entity_key(alias, explicit=True, path_source="/" in alias)
+            if key:
+                add_candidate("skill", key, source="skill_alias", confidence="high", detail=alias)
+                add_candidate("entity", key, source="skill_entity_alias", confidence="high", detail=alias)
+        for key in sorted(skill_entity_candidates_from_texts(aliases + [anchor]))[:8]:
+            add_candidate("skill", key, source="skill_text_alias", confidence="high", detail=anchor)
+            add_candidate("entity", key, source="skill_text_entity_alias", confidence="medium", detail=anchor)
 
     if "mcp" in kinds:
         add_candidate("mcp", "", source="mcp_layer_hint", confidence="low", detail="generic MCP route layer")
@@ -26887,6 +27794,72 @@ def graph_contributions_for_record(
     def add_session_edge(edge: dict[str, Any]) -> None:
         graph_add_edge(session_edges, edge)
 
+    aoa_root_for_registry = session_dir.parent.parent if session_dir.parent.name == "sessions" else session_dir.parent
+    registry_index = cached_entity_registry_entry_index(aoa_root_for_registry)
+
+    def registry_entry_for_route(layer: str, key: str) -> dict[str, Any] | None:
+        route_layer = route_key_slug(layer, fallback="")
+        route_key = route_key_slug(key, fallback="", max_chars=120)
+        kind = "mcp_tool" if route_layer == "tool" and entity_registry_tool_key_is_mcp_tool(route_key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(route_layer, route_layer)
+        return registry_index.get((kind, route_key))
+
+    def add_registry_route_links(
+        *,
+        add_node: Callable[[dict[str, Any]], None],
+        add_edge: Callable[[dict[str, Any]], None],
+        owner_node_id: str,
+        route_node_id: str,
+        layer: str,
+        key: str,
+        evidence_refs: list[dict[str, Any]],
+        edge_type: str,
+        count: int = 1,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        entry = registry_entry_for_route(layer, key)
+        if not entry:
+            return
+        registry_node_id = f"entity_registry:{entry.get('entity_id')}"
+        add_node(
+            {
+                "id": registry_node_id,
+                "type": "entity_registry",
+                "label": f"{entry.get('kind')}:{entry.get('canonical_key')}",
+                "entity_id": entry.get("entity_id"),
+                "entity_kind": entry.get("kind"),
+                "canonical_key": entry.get("canonical_key"),
+                "status": entry.get("status"),
+                "route_layer": entry.get("route_layer"),
+                "route_signal": entry.get("route_signal"),
+                "source_surface": entry.get("source_surface"),
+                "owner": entry.get("owner"),
+                "refs": {"registry": str(aoa_root_for_registry / ENTITY_REGISTRY_PATH)},
+                "evidence_refs": evidence_refs,
+            }
+        )
+        edge_payload = {
+            "source": owner_node_id,
+            "target": registry_node_id,
+            "type": edge_type,
+            "session_id": session_id,
+            "route_signal": route_signal_token(route_key_slug(layer, fallback="route_signal"), route_key_slug(key, fallback="generic")),
+            "count": int_value(count, 1),
+            "evidence_refs": evidence_refs,
+        }
+        if extra:
+            edge_payload.update(extra)
+        add_edge(edge_payload)
+        add_edge(
+            {
+                "source": registry_node_id,
+                "target": route_node_id,
+                "type": "registry_entity_has_route_signal",
+                "session_id": session_id,
+                "route_signal": route_signal_token(route_key_slug(layer, fallback="route_signal"), route_key_slug(key, fallback="generic")),
+                "evidence_refs": evidence_refs,
+            }
+        )
+
     work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else session_index.get("work_context")
     route_signal_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
     session_source_key = graph_source_key("session", session_id)
@@ -26955,6 +27928,17 @@ def graph_contributions_for_record(
                         "count": int_value(count, 1),
                         "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                     }
+                )
+                add_registry_route_links(
+                    add_node=add_session_node,
+                    add_edge=add_session_edge,
+                    owner_node_id=session_node_id,
+                    route_node_id=route_node_id,
+                    layer=str(layer),
+                    key=str(key),
+                    evidence_refs=[{"session_id": session_id, "refs": session_refs}],
+                    edge_type="session_has_registered_entity",
+                    count=int_value(count, 1),
                 )
 
         task_episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
@@ -27254,6 +28238,17 @@ def graph_contributions_for_record(
                         "route_signal": signal["route_signal"],
                         "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                     }
+                )
+                add_registry_route_links(
+                    add_node=add_segment_node,
+                    add_edge=add_segment_edge,
+                    owner_node_id=event_node_id,
+                    route_node_id=route_node_id,
+                    layer=layer,
+                    key=key,
+                    evidence_refs=[{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
+                    edge_type="event_mentions_registered_entity",
+                    extra={"segment_id": segment_id, "event_id": event_id},
                 )
             for relation in event.get("relationships", []) if isinstance(event.get("relationships"), list) else []:
                 if not isinstance(relation, dict) or not relation.get("event_id"):
@@ -31276,9 +32271,21 @@ def graph_store_resolve_anchor(
     candidates = trace_route_candidates(anchor, kind=route_kind)
     diagnostics = trace_identity_diagnostics(anchor, kind=route_kind)
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
+    ordered_lookup_candidates = sorted(
+        lookup_candidates,
+        key=lambda candidate: (
+            0
+            if str(candidate.get("layer") or "") == route_kind
+            else 1
+            if str(candidate.get("layer") or "") != "entity"
+            else 2,
+            str(candidate.get("layer") or ""),
+            str(candidate.get("key") or ""),
+        ),
+    )
     start_node_ids: list[str] = []
     exact_route_node_ids: list[str] = []
-    for candidate in lookup_candidates:
+    for candidate in ordered_lookup_candidates:
         layer = str(candidate.get("layer") or "")
         key = str(candidate.get("key") or "")
         if key:
@@ -31392,7 +32399,21 @@ def graph_from_store_neighborhood(
             if distance >= depth:
                 continue
             edge_rows = conn.execute(
-                "SELECT id, source_node, target_node FROM edges WHERE source_node = ? OR target_node = ? LIMIT 200",
+                """
+                SELECT id, source_node, target_node, edge_type, count
+                FROM edges
+                WHERE source_node = ? OR target_node = ?
+                ORDER BY
+                  CASE edge_type
+                    WHEN 'registry_entity_has_route_signal' THEN 0
+                    WHEN 'session_has_registered_entity' THEN 1
+                    WHEN 'event_mentions_registered_entity' THEN 2
+                    ELSE 3
+                  END,
+                  count DESC,
+                  id ASC
+                LIMIT 200
+                """,
                 (node_id, node_id),
             ).fetchall()
             for row in edge_rows:
@@ -31439,11 +32460,23 @@ def resolve_graph_anchor(
     candidates = trace_route_candidates(anchor, kind=route_kind)
     diagnostics = trace_identity_diagnostics(anchor, kind=route_kind)
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
+    ordered_lookup_candidates = sorted(
+        lookup_candidates,
+        key=lambda candidate: (
+            0
+            if str(candidate.get("layer") or "") == route_kind
+            else 1
+            if str(candidate.get("layer") or "") != "entity"
+            else 2,
+            str(candidate.get("layer") or ""),
+            str(candidate.get("key") or ""),
+        ),
+    )
     start_node_ids: list[str] = []
     exact_route_node_ids: list[str] = []
     scored: list[tuple[int, str]] = []
 
-    for candidate in lookup_candidates:
+    for candidate in ordered_lookup_candidates:
         layer = str(candidate.get("layer") or "")
         key = str(candidate.get("key") or "")
         if key:
@@ -34201,6 +35234,60 @@ def session_memory_portable_clean_runtime_state(aoa_root: Path) -> dict[str, Any
     }
 
 
+def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
+    path = aoa_root / ENTITY_REGISTRY_PATH
+    source_state = entity_registry_source_surface_state(aoa_root)
+    if not path.exists():
+        return {
+            "status": "missing",
+            "needs_maintenance": True,
+            "path": str(path),
+            "entity_count": 0,
+            "source_surface": source_state,
+            "diagnostics": ["entity_registry_missing"],
+            "truth_status": "generated_entity_registry_navigation_not_source_truth",
+        }
+    payload = read_json(path, {})
+    diagnostics: list[str] = []
+    if not isinstance(payload, dict):
+        diagnostics.append("entity_registry_unreadable")
+        payload = {}
+    if int_value(payload.get("schema_version")) != ENTITY_REGISTRY_SCHEMA_VERSION:
+        diagnostics.append("entity_registry_schema_mismatch")
+    if payload.get("artifact_type") != "entity_registry_snapshot":
+        diagnostics.append("entity_registry_artifact_type_mismatch")
+    entity_count = int_value(payload.get("entity_count"))
+    if entity_count <= 0:
+        diagnostics.append("entity_registry_empty")
+    generated_at = parse_utc_timestamp(str(payload.get("generated_at") or ""))
+    try:
+        generated_at_epoch = float(payload.get("generated_at_epoch") or 0.0)
+    except (TypeError, ValueError):
+        generated_at_epoch = 0.0
+    if generated_at_epoch <= 0 and generated_at is not None:
+        generated_at_epoch = generated_at.timestamp() + 1.0
+    latest_source_mtime = float(source_state.get("latest_source_mtime") or 0.0)
+    if generated_at is None and generated_at_epoch <= 0 and latest_source_mtime:
+        diagnostics.append("entity_registry_generated_at_unreadable")
+    elif generated_at_epoch > 0 and latest_source_mtime > generated_at_epoch + 0.001:
+        diagnostics.append("source_newer_than_entity_registry")
+    return {
+        "status": "needs_maintenance" if diagnostics else "current",
+        "needs_maintenance": bool(diagnostics),
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "generated_at_epoch": payload.get("generated_at_epoch"),
+        "schema_version": payload.get("schema_version"),
+        "expected_schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "entity_count": entity_count,
+        "counts_by_kind": payload.get("counts_by_kind", {}),
+        "counts_by_status": payload.get("counts_by_status", {}),
+        "source_surface": source_state,
+        "diagnostics": diagnostics,
+        "truth_status": "generated_entity_registry_navigation_not_source_truth",
+    }
+
+
 def session_memory_maintenance_status(
     *,
     workspace_root: Path,
@@ -34224,6 +35311,7 @@ def session_memory_maintenance_status(
     graph_state = route_status.get("graph_store") if isinstance(route_status.get("graph_store"), dict) else {}
     search = search_maintenance_status_from_provider(provider_status)
     graph = graph_maintenance_status_from_state(graph_state)
+    entity_registry = entity_registry_maintenance_status(aoa_root)
     route = {
         "status": "current" if route_status.get("ok") else "needs_attention",
         "mode": mode,
@@ -34255,12 +35343,33 @@ def session_memory_maintenance_status(
             graph=graph,
             route_status=route_status,
         )
+    if entity_registry.get("needs_maintenance"):
+        next_actions.append(
+            {
+                "id": "entity_registry_refresh",
+                "reason": ",".join(str(item) for item in entity_registry.get("diagnostics", []) if item) or "entity_registry_needs_refresh",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "entity-registry",
+                    "--write",
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--aoa-root",
+                    str(aoa_root),
+                ],
+                "note": "Refresh generated entity registry navigation snapshot; it does not repair or promote truth.",
+            }
+        )
     agent_route = session_memory_agent_route_status(
         recommendation=recommendation,
         search=search,
         graph=graph,
         route=route,
     )
+    agent_route["entity_registry_status"] = entity_registry.get("status")
+    agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
+    agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, script, validator, test, eval, graph, or memory entity."
     latest_reports = {
         "auto_maintenance": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-*.json"),
         "graph_maintenance": latest_diagnostic_summary(aoa_root, "*__graph-maintenance.json"),
@@ -34281,6 +35390,7 @@ def session_memory_maintenance_status(
         "agent_route": agent_route,
         "search": search,
         "graph": graph,
+        "entity_registry": entity_registry,
         "route": route,
         "portable_clean_runtime": portable_clean_runtime,
         "next_actions": next_actions,
@@ -34290,7 +35400,16 @@ def session_memory_maintenance_status(
         "mcp_boundary": "MCP may expose this packet read-only; repair/reindex/maintenance commands stay outside MCP.",
         "diagnostics": []
         if portable_clean_runtime.get("ok")
-        else sorted(set([*search.get("diagnostics", []), *graph.get("diagnostics", []), *route.get("diagnostics", [])])),
+        else sorted(
+            set(
+                [
+                    *search.get("diagnostics", []),
+                    *graph.get("diagnostics", []),
+                    *route.get("diagnostics", []),
+                    *entity_registry.get("diagnostics", []),
+                ]
+            )
+        ),
     }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
@@ -34388,6 +35507,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "agent_route": payload.get("agent_route"),
         "search": compact_search,
         "graph": payload.get("graph"),
+        "entity_registry": payload.get("entity_registry"),
         "route": payload.get("route"),
         "portable_clean_runtime": payload.get("portable_clean_runtime"),
         "next_actions": [
@@ -34412,6 +35532,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
 def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
     graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    entity_registry = payload.get("entity_registry") if isinstance(payload.get("entity_registry"), dict) else {}
     route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
     lines = [
         "# Session Memory Maintenance Status",
@@ -34422,6 +35543,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- recommendation: `{payload.get('recommendation')}`",
         f"- search: `{search.get('status')}` actionable=`{search.get('actionable_dirty_session_count')}` deferred=`{search.get('deferred_live_session_count')}`",
         f"- graph: `{graph.get('status')}` dirty=`{graph.get('dirty_count')}` missing=`{graph.get('missing_count')}` blocked=`{graph.get('blocked_count')}` retired=`{graph.get('retired_count')}`",
+        f"- entity_registry: `{entity_registry.get('status')}` entities=`{entity_registry.get('entity_count')}`",
         f"- route: `{route.get('status')}` index_needed=`{route.get('needs_index_maintenance')}` graph_needed=`{route.get('needs_graph_maintenance')}`",
         f"- exact_next_command: `{payload.get('exact_next_command')}`",
         "",
@@ -37340,6 +38462,29 @@ def command_goal_lifecycles(args: argparse.Namespace) -> int:
         limit=args.limit,
         order=args.order,
     )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_entity_registry(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    if args.lookup:
+        payload = entity_registry_lookup(
+            aoa_root=root,
+            anchor=args.lookup,
+            kind=args.kind,
+            include_unknown=not args.no_unknown,
+        )
+    else:
+        payload = build_entity_registry(
+            aoa_root=root,
+            write=args.write,
+            include_runtime=not args.no_runtime,
+            query=args.query or "",
+            kind=args.kind,
+            limit=args.limit,
+        )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -41674,7 +42819,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--allow-host-warnings", action="store_true", help="Allow host context overlay even when host quality gates report warnings.")
     search.add_argument("--host-timeout", type=int, default=45)
     search.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
-    search.add_argument("--doc-type", choices=["session", "segment", "event", "incident", "task_episode", "goal_lifecycle"])
+    search.add_argument("--doc-type", choices=["session", "segment", "event", "incident", "task_episode", "goal_lifecycle", "entity_registry"])
     search.add_argument("--event-type")
     search.add_argument("--family")
     search.add_argument("--outcome")
@@ -41800,6 +42945,21 @@ def build_parser() -> argparse.ArgumentParser:
     goal_lifecycles_parser.add_argument("--order", choices=["recent", "chronological"], default="recent")
     goal_lifecycles_parser.set_defaults(func=command_goal_lifecycles)
 
+    entity_registry_parser = sub.add_parser(
+        "entity-registry",
+        help="Build or read the generated registry of skills, MCP services/tools, tools, APIs, hooks, scripts, validators, tests, evals, graph, and memory entities.",
+    )
+    entity_registry_parser.add_argument("--workspace-root")
+    entity_registry_parser.add_argument("--aoa-root")
+    entity_registry_parser.add_argument("--kind", default="all", help="Registry kind such as skill, mcp_service, mcp_tool, tool, hook, graph, or all.")
+    entity_registry_parser.add_argument("--query", default="", help="Filter registry entries by key or alias.")
+    entity_registry_parser.add_argument("--lookup", help="Return an agent route packet for one anchor.")
+    entity_registry_parser.add_argument("--limit", type=int, default=5000)
+    entity_registry_parser.add_argument("--write", action="store_true", help="Write maps/entity-registry.json and .md. Generated navigation only.")
+    entity_registry_parser.add_argument("--no-runtime", action="store_true", help="Do not inspect live Codex skill/MCP runtime surfaces; use archived route terms only.")
+    entity_registry_parser.add_argument("--no-unknown", action="store_true", help="For --lookup, return zero matches instead of an unknown/unregistered packet.")
+    entity_registry_parser.set_defaults(func=command_entity_registry)
+
     trace_route_parser = sub.add_parser(
         "trace-route",
         aliases=["resolve-anchor", "trace-anchor"],
@@ -41813,7 +42973,7 @@ def build_parser() -> argparse.ArgumentParser:
     trace_route_parser.add_argument("--per-route-limit", type=int, default=12, help="Maximum hits fetched for each inferred route candidate.")
     trace_route_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     trace_route_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
-    trace_route_parser.add_argument("--doc-type", choices=["all", "session", "segment", "event", "incident", "task_episode", "goal_lifecycle"], default="event")
+    trace_route_parser.add_argument("--doc-type", choices=["all", "session", "segment", "event", "incident", "task_episode", "goal_lifecycle", "entity_registry"], default="event")
     trace_route_parser.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     trace_route_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown route-trace reports under .aoa/diagnostics.")
     trace_route_parser.add_argument("--full", action="store_true", help="Print complete results to stdout.")

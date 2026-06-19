@@ -774,6 +774,22 @@ python3 scripts/aoa_session_memory.py search-index all \
   --write-report
 ```
 
+Build or inspect the generated entity registry for skills, MCPs, hooks, tools,
+APIs, scripts, validators, tests, evals, graph, and memory surfaces:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-registry \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --lookup aoa-session-memory-mcp \
+  --kind mcp
+```
+
+`maps/entity-registry.json` is generated navigation. It records active,
+observed, stale, removed, and unknown entity states so agents can route quickly
+without treating the registry as source truth. `index-maintenance` refreshes it
+when source skill/MCP surfaces are newer, and MCP exposes it read-only.
+
 Query it without losing evidence routing:
 
 ```bash

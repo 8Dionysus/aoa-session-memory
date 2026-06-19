@@ -1360,6 +1360,138 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert usage_audit["usage_events"][0]["session_act"] == "goal_completed"
 
 
+def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    codex_home = tmp_path / ".codex"
+    skill_dir = codex_home / "skills" / "aoa-live-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: aoa-live-skill\ndescription: Live fixture skill.\n---\n# aoa-live-skill\n",
+        encoding="utf-8",
+    )
+    codex_home.mkdir(exist_ok=True)
+    (codex_home / "config.toml").write_text(
+        "[mcp_servers.aoa-kag]\ncommand = \"python3\"\nargs = [\"-m\", \"aoa_kag\"]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    transcript = tmp_path / "rollout-2026-06-18T00-00-00-entity-registry.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "entity-registry-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use skill: aoa-live-skill and mcp/services/aoa-kag-mcp for lookup."}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "mcp__aoa_kag_mcp__lookup", "call_id": "call-1"}},
+            {"timestamp": "2026-06-18T00:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "lookup ok"}},
+            {"timestamp": "2026-06-18T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "aoa-live-skill and aoa-kag-mcp checked."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "entity-registry-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    registry = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
+    entries = {(entry["kind"], entry["canonical_key"]): entry for entry in registry["entries"]}
+
+    assert indexed["ok"] is True
+    assert indexed["entity_registry_document_count"] > 0
+    assert entries[("skill", "aoa_live_skill")]["status"] == "active"
+    assert entries[("mcp_service", "aoa_kag_mcp")]["status"] == "active"
+    assert entries[("mcp_tool", "mcp_aoa_kag_mcp_lookup")]["status"] == "observed"
+
+    skill_candidates = module.trace_route_candidates("aoa-live-skill", kind="skill")
+    mcp_candidates = module.trace_route_candidates("aoa-kag-mcp", kind="mcp")
+    assert any(candidate["route_signal"] == "skill:aoa_live_skill" for candidate in skill_candidates)
+    assert any(candidate["route_signal"] == "mcp:aoa_kag_mcp" for candidate in mcp_candidates)
+
+    registry_search = module.search_sessions(aoa_root=aoa_root, query="aoa-live-skill", doc_type="entity_registry", limit=5)
+    assert registry_search["ok"] is True
+    assert registry_search["results"][0]["doc_type"] == "entity_registry"
+
+    graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=True, export_sidecar=False)
+    node_types = {node["type"] for node in graph["nodes"]}
+    edge_types = {edge["type"] for edge in graph["edges"]}
+    assert "entity_registry" in node_types
+    assert "session_has_registered_entity" in edge_types
+    assert "event_mentions_registered_entity" in edge_types
+    neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-live-skill", kind="skill", depth=1, limit=20)
+    assert neighborhood["ok"] is True
+    assert any(node.get("type") == "entity_registry" for node in neighborhood["nodes"])
+
+    lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-kag-mcp", kind="mcp")
+    assert lookup["agent_route_packet"]["registered"] is True
+    assert lookup["entries"][0]["status"] == "active"
+
+    unknown_lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-never-seen-mcp", kind="mcp")
+    assert unknown_lookup["agent_route_packet"]["registered"] is False
+    assert unknown_lookup["agent_route_packet"]["status"] == "unknown"
+    assert unknown_lookup["entries"][0]["kind"] == "mcp_service"
+
+    filtered = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        kind="skill",
+        query="aoa-live-skill",
+        limit=1,
+        route_terms_db_path=module.search_db_path(aoa_root),
+    )
+    filtered_snapshot = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
+    assert filtered["entity_count"] == 1
+    assert filtered_snapshot["kind"] == "all"
+    assert filtered_snapshot["entity_count"] >= 3
+    assert filtered_snapshot["counts_by_kind"]["mcp_service"] >= 1
+    assert filtered_snapshot["counts_by_kind"]["mcp_tool"] >= 1
+
+    moved_codex_home = tmp_path / ".codex-moved"
+    moved_codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(moved_codex_home))
+    stale_registry = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        route_terms_db_path=module.search_db_path(aoa_root),
+    )
+    stale_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in stale_registry["entries"]}
+    assert stale_entries[("skill", "aoa_live_skill")]["status"] == "stale"
+    assert stale_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "stale"
+
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (skill_dir / "SKILL.md").unlink()
+    skill_dir.rmdir()
+    (codex_home / "config.toml").write_text("# aoa-kag MCP removed\n", encoding="utf-8")
+    removed_registry = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        route_terms_db_path=module.search_db_path(aoa_root),
+    )
+    removed_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in removed_registry["entries"]}
+    assert removed_entries[("skill", "aoa_live_skill")]["status"] == "removed"
+    assert removed_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "removed"
+    assert removed_registry["counts_by_status"]["removed"] >= 2
+
+    maintenance = module.entity_registry_maintenance_status(aoa_root)
+    assert maintenance["needs_maintenance"] is False
+
+    time.sleep(0.01)
+    newer_skill_dir = codex_home / "skills" / "aoa-newer-skill"
+    newer_skill_dir.mkdir(parents=True)
+    (newer_skill_dir / "SKILL.md").write_text("---\nname: aoa-newer-skill\n---\n", encoding="utf-8")
+    newer_maintenance = module.entity_registry_maintenance_status(aoa_root)
+    assert newer_maintenance["needs_maintenance"] is True
+    assert "source_newer_than_entity_registry" in newer_maintenance["diagnostics"]
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -1997,18 +2129,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])
         if isinstance(item, dict)
     )
-    assert "mcp:aoa_decsions_mcp" not in {
+    typo_routes = {
         f"{item.get('layer')}:{item.get('key')}"
         for item in typo_mcp_trace.get("route_candidates", [])
         if isinstance(item, dict) and item.get("key")
     }
-    assert "entity:aoa_decsions_mcp" not in {
-        f"{item.get('layer')}:{item.get('key')}"
-        for item in typo_mcp_trace.get("route_candidates", [])
-        if isinstance(item, dict) and item.get("key")
-    }
-    assert any("unknown_mcp_service_identity:aoa_decsions_mcp" in item for item in typo_mcp_trace["diagnostics"])
-    assert any("did_you_mean:aoa_decisions_mcp" in item for item in typo_mcp_trace["diagnostics"])
+    assert "mcp:aoa_decsions_mcp" in typo_routes
+    assert "entity:aoa_decsions_mcp" in typo_routes
+    assert not any("unknown_mcp_service_identity:aoa_decsions_mcp" in item for item in typo_mcp_trace["diagnostics"])
     assert query_state["query_scope"] == "lightweight_store_availability_not_full_dirty_audit"
     assert query_state["metadata"]["graph_store_aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
     assert query_state["metadata"]["graph_store_contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
@@ -9346,6 +9474,8 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "maps" / "by-work-context" / "README.md").exists()
     assert (aoa_root / "maps" / "by-work-context" / "entries" / ".gitkeep").exists()
     assert not (aoa_root / "maps" / "INDEX.md").exists()
+    assert not (aoa_root / module.ENTITY_REGISTRY_PATH).exists()
+    assert not (aoa_root / module.ENTITY_REGISTRY_MARKDOWN).exists()
     assert not list((aoa_root / "maps" / "by-work-context" / "entries").glob("*.json"))
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()

@@ -537,6 +537,28 @@ route through `by-entity`; names and paths shaped like `*-mcp` or
 `mcp/services/<name>` route through both `by-entity` and `by-mcp`. These are
 still evidence-derived route signals, not a hand-authored project registry.
 
+The generated entity registry is the inventory layer above those route
+signals. It merges active local source surfaces (`SKILL.md`, Codex user/plugin
+skills, Codex MCP config, and local MCP service directories) with archived
+route-term evidence for skills, MCP services/tools, hooks, tools, APIs,
+scripts, validators, tests, evals, playbooks, techniques, mechanics, graph, and
+memory surfaces. The registry is written under `maps/entity-registry.json` and
+`.md`; it is a navigation snapshot, not source truth. If a previously active
+skill or MCP source disappears, the entry remains visible as `stale` or
+`removed` while archived use stays available through search and graph routes.
+
+```bash
+python3 scripts/aoa_session_memory.py entity-registry \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --lookup aoa-session-memory-mcp \
+  --kind mcp
+```
+
+`index-maintenance` refreshes the registry when the snapshot is missing, stale,
+or older than its source surfaces. MCP may expose entity inventory and lookup
+read-only; `--write` registry refresh stays outside MCP.
+
 When an agent needs to debug or study one operational thing, use the resolver
 instead of guessing one axis by hand:
 
@@ -1131,6 +1153,7 @@ aoa-session-history-import      -> historical Codex JSONL batch import
 aoa-session-batch-distill       -> first-wave historical-session conveyor
 aoa-session-manual-review       -> manual-review packets and promotion queue
 aoa-session-reindex             -> regenerate generated indexes from raw
+aoa-session-search              -> portable search, entity registry, route trace
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness
 aoa-session-memory-doctor       -> filesystem and live health
