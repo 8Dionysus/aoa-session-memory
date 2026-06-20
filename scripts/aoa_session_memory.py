@@ -80,7 +80,7 @@ RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
-AGENT_EVENT_SCHEMA_VERSION = 1
+AGENT_EVENT_SCHEMA_VERSION = 2
 TASK_EPISODE_SCHEMA_VERSION = 2
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 GOAL_LIFECYCLE_SCHEMA_VERSION = 1
@@ -4629,6 +4629,16 @@ def classify_agent_event(
         agent_class = "assistant_reasoning_boundary"
     elif event_type == "FINAL_STATE" or conversation_kind == "assistant_final_closeout":
         agent_class = "assistant_final_closeout"
+    elif event_type == "DECISION" or conversation_kind == "assistant_decision":
+        agent_class = "assistant_decision"
+    elif event_type == "ASSUMPTION" or conversation_kind == "assistant_assumption":
+        agent_class = "assistant_assumption"
+    elif event_type == "OPEN_THREAD" or conversation_kind == "assistant_open_thread":
+        agent_class = "assistant_open_thread"
+    elif event_type == "PROCESS_LESSON" or conversation_kind == "assistant_process_lesson":
+        agent_class = "assistant_process_lesson"
+    elif event_type == "CHECKPOINT" or conversation_kind == "assistant_checkpoint":
+        agent_class = "assistant_checkpoint"
     elif (
         text_has_any(semantic_lower, ["blocked", "blocker", "блокер", "заблок", "не могу продолж", "cannot proceed", "impasse"])
         or event_type == "DEAD_BRANCH"

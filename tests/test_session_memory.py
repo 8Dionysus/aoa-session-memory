@@ -232,8 +232,9 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
             {"timestamp": "2026-06-13T00:00:06Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "1 passed"}},
             {"timestamp": "2026-06-13T00:00:07Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Почти готово, сейчас прогоню еще одну проверку."}]}},
             {"timestamp": "2026-06-13T00:00:08Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Готово. Итог: проверка прошла."}]}},
-            {"timestamp": "2026-06-13T00:00:09Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Продолжай"}]}},
-            {"timestamp": "2026-06-13T00:00:10Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Дальше беру второй сценарий."}]}},
+            {"timestamp": "2026-06-13T00:00:09Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Осталось проверить open thread отдельно."}]}},
+            {"timestamp": "2026-06-13T00:00:10Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Продолжай"}]}},
+            {"timestamp": "2026-06-13T00:00:11Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Дальше беру второй сценарий."}]}},
         ],
     )
 
@@ -254,6 +255,7 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert "assistant_reasoning_boundary" in segment_index["by_agent_event"]
     assert "assistant_progress_update" in segment_index["by_agent_event"]
     assert "assistant_final_closeout" in segment_index["by_agent_event"]
+    assert "assistant_open_thread" in segment_index["by_agent_event"]
 
     reasoning_event = next(event for event in segment_index["events"] if event["type"] == "ASSISTANT_REASONING_BOUNDARY")
     assert reasoning_event["facets"]["conversation_act"]["kind"] == "assistant_reasoning_boundary"
@@ -267,6 +269,10 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
 
     final_closeout = next(event for event in segment_index["events"] if event["type"] == "FINAL_STATE")
     assert final_closeout["facets"]["agent_event"]["class"] == "assistant_final_closeout"
+
+    open_thread = next(event for event in segment_index["events"] if event["type"] == "OPEN_THREAD")
+    assert open_thread["facets"]["conversation_act"]["kind"] == "assistant_open_thread"
+    assert open_thread["facets"]["agent_event"]["class"] == "assistant_open_thread"
 
     stream_event = next(event for event in segment_index["events"] if event.get("source_type") == "event_msg" and event["type"] == "ASSISTANT_MESSAGE")
     assert stream_event["facets"]["agent_event"]["canonical"] is False
@@ -333,6 +339,22 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
     assert closeouts["results"][0]["task_episode_id"] == "task-0001"
     assert closeouts["results"][0]["freshness"]["basis"] == "indexed_snapshot"
+    default_response_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        limit=20,
+    )
+    assert default_response_route["result_count"] >= 1
+    assert all(item["agent_event"] != "assistant_open_thread" for item in default_response_route["results"])
+    open_thread_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_open_thread"],
+        limit=5,
+    )
+    assert open_thread_route["result_count"] == 1
+    assert open_thread_route["results"][0]["agent_event"] == "assistant_open_thread"
+    assert open_thread_route["results"][0]["event_id"] == open_thread["event_id"]
     progress_route = module.agent_event_route_search(
         aoa_root=aoa_root,
         session=session_dir.name,
