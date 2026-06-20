@@ -17279,31 +17279,23 @@ def maintain_indexes(
                 entity_registry_action["status"] = "deferred_budget_exhausted"
                 action_results.append(entity_registry_action)
             else:
-                result = search_index_sessions(
+                result = refresh_entity_registry_search_documents_only(
                     aoa_root=aoa_root,
-                    target=target,
-                    since=since,
-                    until=until,
-                    limit=limit,
-                    max_raw_bytes=max_raw_bytes,
-                    rebuild=False,
                     write_report=write_report,
-                    selected_records=current_selected_records()[:1],
                     budget_seconds=budget_remaining(),
-                    progress_every=progress_every,
                 )
                 entity_registry_action["status"] = "applied" if result.get("ok") else "failed"
                 entity_registry_action["result"] = {
                     key: result.get(key)
                     for key in (
                         "ok",
-                        "selected_count",
-                        "processed_count",
+                        "artifact_type",
                         "document_count",
                         "entity_registry_document_count",
                         "removed_entity_registry_document_count",
+                        "entity_count",
+                        "elapsed_ms",
                         "report_json",
-                        "report_markdown",
                         "diagnostics",
                     )
                 }
@@ -17950,6 +17942,8 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                     "needs_sidecar_export",
                     "needs_offline_graph_build",
                     "search_vs_graph",
+                    "entity_registry",
+                    "entity_registry_repair_needed",
                     "report_json",
                     "report_markdown",
                     "diagnostics",
@@ -17968,6 +17962,7 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "repair_graph",
                 "index_repair_needed",
                 "graph_repair_needed",
+                "entity_registry_repair_needed",
                 "repair_limit",
                 "route_drift_count",
                 "search_dirty_session_count",
@@ -18074,15 +18069,17 @@ def auto_maintenance_expected_catchup_remaining(
 def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[str, int]:
     search_state = freshness.get("search_index") if isinstance(freshness.get("search_index"), dict) else {}
     atlas_state = freshness.get("atlas_index") if isinstance(freshness.get("atlas_index"), dict) else {}
+    entity_registry_state = freshness.get("entity_registry") if isinstance(freshness.get("entity_registry"), dict) else {}
     graph_state = freshness.get("graph_store") if isinstance(freshness.get("graph_store"), dict) else {}
     search_dirty = int_value(search_state.get("dirty_session_count"))
     search_actionable = int_value(search_state.get("actionable_dirty_session_count"))
     search_deferred = int_value(search_state.get("deferred_live_session_count"))
     atlas_dirty = int_value(atlas_state.get("dirty_session_count"))
+    entity_registry_dirty = 1 if entity_registry_state.get("needs_maintenance") else 0
     route_drift = int_value(freshness.get("route_drift_count"))
     graph_actionable = graph_actionable_count_from_state(graph_state)
     graph_deferred = graph_deferred_live_count_from_state(graph_state)
-    dirty_count = route_drift + max(search_dirty, search_actionable) + atlas_dirty + graph_actionable
+    dirty_count = route_drift + max(search_dirty, search_actionable) + atlas_dirty + entity_registry_dirty + graph_actionable
     deferred_count = search_deferred + graph_deferred
     return {
         "selected_count": int_value(freshness.get("selected_count")),
@@ -18091,6 +18088,7 @@ def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[st
         "search_actionable_dirty_session_count": search_actionable,
         "search_deferred_live_session_count": search_deferred,
         "atlas_dirty_session_count": atlas_dirty,
+        "entity_registry_dirty_count": entity_registry_dirty,
         "graph_actionable_count": graph_actionable,
         "graph_deferred_live_source_count": graph_deferred,
         "dirty_count": dirty_count,
@@ -23875,6 +23873,81 @@ def refresh_search_entity_registry_documents(
         "inserted_count": inserted_count,
         "removed_count": removed_count,
     }
+
+
+def refresh_entity_registry_search_documents_only(
+    *,
+    aoa_root: Path,
+    write_report: bool = False,
+    budget_seconds: float | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    started = time.monotonic()
+    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
+    db_path = search_db_path(aoa_root)
+    conn: sqlite3.Connection | None = None
+    diagnostics: list[str] = []
+    try:
+        conn = init_search_db(db_path, rebuild=False, create_indexes=True, budget_deadline=deadline)
+        if deadline is not None:
+            conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 10000)
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
+        conn.commit()
+        registry_refresh = refresh_search_entity_registry_documents(
+            conn,
+            aoa_root=aoa_root,
+            route_terms_db_path=db_path,
+        )
+        entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
+        removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
+        document_count = int_value(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+    except sqlite3.Error as exc:
+        diagnostics.append(f"sqlite_error:{exc}")
+        document_count = 0
+        entity_registry_document_count = 0
+        removed_entity_registry_document_count = 0
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
+            conn.close()
+    registry_state = entity_registry_maintenance_status(aoa_root)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "entity_registry_search_sync",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": not diagnostics and entity_registry_document_count == int_value(registry_state.get("entity_count")),
+        "target": "entity-registry",
+        "selected_count": 0,
+        "processed_count": 0,
+        "document_count": document_count,
+        "entity_registry_document_count": entity_registry_document_count,
+        "removed_entity_registry_document_count": removed_entity_registry_document_count,
+        "entity_count": registry_state.get("entity_count"),
+        "entity_registry": registry_state,
+        "db_path": str(db_path),
+        "budget_seconds": budget_seconds,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__entity-registry-search-sync"
+        report_json = diagnostics_dir / f"{stem}.json"
+        write_json(report_json, payload)
+        payload["report_json"] = str(report_json)
+    return payload
 
 
 def search_tokenize(query: str) -> list[str]:
@@ -34798,12 +34871,22 @@ def graph_freshness_gates(
         expected_session_count=len(gate_records) if graph_selection_global else None,
     )
     refs_state = evidence_ref_integrity_state(aoa_root, sample_limit=ref_sample_limit)
+    entity_registry_state = entity_registry_maintenance_status(aoa_root)
+    entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
     graph_store_current_statuses = {"current", "current_with_blocked_sources", "current_with_retired_sources"}
-    needs_index_maintenance = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh"))
+    needs_index_maintenance = (
+        bool(route_drift)
+        or bool(search_state.get("needs_refresh"))
+        or bool(atlas_state.get("needs_refresh"))
+        or entity_registry_repair_needed
+    )
     needs_graph_maintenance = bool(store_state.get("needs_maintenance")) or store_state.get("status") == "missing"
     needs_sidecar_export = bool(graph_state.get("needs_snapshot_refresh")) and store_state.get("status") in graph_store_current_statuses
     needs_graph_build = bool(store_state.get("needs_full_rebuild"))
     sidecar_gate_ok = graph_state.get("status") in {"current", "not_exported"}
+    if entity_registry_repair_needed:
+        diagnostics.append("entity_registry_missing_or_stale")
+        diagnostics.extend(str(item) for item in entity_registry_state.get("diagnostics", []) if item)
     gates = []
     if stable_mode:
         gates.append(
@@ -34831,6 +34914,7 @@ def graph_freshness_gates(
     gates.extend([
         {"name": "map_fresh", "ok": not route_drift and atlas_state.get("status") == "current", "state": {"route_drift_count": len(route_drift), "atlas_status": atlas_state.get("status")}},
         {"name": "search_fresh", "ok": search_state.get("status") == "current", "state": search_state},
+        {"name": "entity_registry_fresh", "ok": not entity_registry_repair_needed, "state": entity_registry_state},
         {"name": "graph_store_current", "ok": store_state.get("status") in graph_store_current_statuses, "state": store_state},
         {"name": "graph_sidecar_snapshot", "ok": sidecar_gate_ok, "state": graph_state},
         {"name": "refs_alive", "ok": refs_state.get("ok"), "state": refs_state},
@@ -34864,6 +34948,7 @@ def graph_freshness_gates(
         "route_drift": route_drift[:20],
         "search_index": search_state,
         "atlas_index": atlas_state,
+        "entity_registry": entity_registry_state,
         "graph_store": store_state,
         "graph_sidecar": graph_state,
         "refs": refs_state,
@@ -34901,6 +34986,7 @@ def route_cache_freshness_markdown(payload: dict[str, Any]) -> str:
         f"- needs_graph_maintenance: `{payload.get('needs_graph_maintenance')}`",
         f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
         f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
+        f"- entity_registry: `{(payload.get('entity_registry') or {}).get('status') if isinstance(payload.get('entity_registry'), dict) else ''}`",
         f"- route_drift_count: `{payload.get('route_drift_count')}`",
         f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
     ]
@@ -34975,9 +35061,19 @@ def route_cache_freshness_gates(
             int_value(atlas_state.get("projection_session_count")),
         )
     graph_hot_state = graph_store_hot_state(aoa_root)
-    needs_index_maintenance = bool(route_drift) or bool(search_state.get("needs_refresh")) or bool(atlas_state.get("needs_refresh"))
+    entity_registry_state = entity_registry_maintenance_status(aoa_root)
+    entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
+    needs_index_maintenance = (
+        bool(route_drift)
+        or bool(search_state.get("needs_refresh"))
+        or bool(atlas_state.get("needs_refresh"))
+        or entity_registry_repair_needed
+    )
     needs_graph_maintenance = bool(graph_hot_state.get("needs_maintenance")) or graph_hot_state.get("status") in {"missing", "stale"}
     diagnostics = ["index_maintenance_needed"] if needs_index_maintenance else []
+    if entity_registry_repair_needed:
+        diagnostics.append("entity_registry_missing_or_stale")
+        diagnostics.extend(str(item) for item in entity_registry_state.get("diagnostics", []) if item)
     if needs_graph_maintenance:
         diagnostics.append("graph_maintenance_needed")
     diagnostics.extend(str(item) for item in search_state.get("diagnostics", []) if item)
@@ -35013,6 +35109,8 @@ def route_cache_freshness_gates(
         "route_drift": route_drift[:40],
         "search_index": search_state,
         "atlas_index": atlas_state,
+        "entity_registry": entity_registry_state,
+        "entity_registry_repair_needed": entity_registry_repair_needed,
         "graph_store": graph_hot_state,
         "diagnostics": diagnostics,
     }
@@ -35171,10 +35269,24 @@ def session_memory_maintenance_next_actions(
     search: dict[str, Any],
     graph: dict[str, Any],
     route_status: dict[str, Any],
+    entity_registry: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
     actions: list[dict[str, Any]] = []
     actionable_sessions = search.get("actionable_dirty_sessions") if isinstance(search.get("actionable_dirty_sessions"), list) else []
+    route_search = route_status.get("search_index") if isinstance(route_status.get("search_index"), dict) else {}
+    route_atlas = route_status.get("atlas_index") if isinstance(route_status.get("atlas_index"), dict) else {}
+    route_entity_registry = (
+        entity_registry
+        if isinstance(entity_registry, dict)
+        else route_status.get("entity_registry") if isinstance(route_status.get("entity_registry"), dict) else {}
+    )
+    entity_registry_needs = bool(route_entity_registry.get("needs_maintenance"))
+    route_or_cache_index_needs = (
+        int_value(route_status.get("route_drift_count")) > 0
+        or bool(route_search.get("needs_refresh"))
+        or bool(route_atlas.get("needs_refresh"))
+    )
     if int_value(search.get("actionable_dirty_session_count")) > 0:
         first = actionable_sessions[0] if actionable_sessions else {}
         target = str(first.get("session_label") or first.get("session_id") or "all") if isinstance(first, dict) else "all"
@@ -35184,7 +35296,26 @@ def session_memory_maintenance_next_actions(
             else ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--write-report"]
         )
         actions.append({"id": "repair_search_actionable", "reason": "search_actionable_dirty_sessions", "command": command})
-    if route_status.get("needs_index_maintenance"):
+    if entity_registry_needs and not route_or_cache_index_needs and int_value(search.get("actionable_dirty_session_count")) <= 0:
+        actions.append(
+            {
+                "id": "entity_registry_refresh",
+                "reason": ",".join(str(item) for item in route_entity_registry.get("diagnostics", []) if item) or "entity_registry_needs_refresh",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-index",
+                    "all",
+                    *root_args,
+                    "--limit",
+                    "1",
+                    "--no-rebuild",
+                    "--write-report",
+                ],
+                "note": "Refresh generated entity registry snapshot and its search documents together; it does not repair or promote truth.",
+            }
+        )
+    if route_status.get("needs_index_maintenance") and (route_or_cache_index_needs or not entity_registry_needs):
         actions.append(
             {
                 "id": "repair_index_read_models",
@@ -35400,6 +35531,7 @@ def session_memory_maintenance_status(
         "needs_graph_maintenance": bool(route_status.get("needs_graph_maintenance")),
         "needs_sidecar_export": bool(route_status.get("needs_sidecar_export")),
         "needs_offline_graph_build": bool(route_status.get("needs_offline_graph_build")),
+        "entity_registry_repair_needed": bool(entity_registry.get("needs_maintenance")),
         "route_drift_count": int_value(route_status.get("route_drift_count")),
         "diagnostics": route_status.get("diagnostics", []) if isinstance(route_status.get("diagnostics"), list) else [],
     }
@@ -35422,28 +35554,7 @@ def session_memory_maintenance_status(
             search=search,
             graph=graph,
             route_status=route_status,
-        )
-    if entity_registry.get("needs_maintenance"):
-        next_actions.append(
-            {
-                "id": "entity_registry_refresh",
-                "reason": ",".join(str(item) for item in entity_registry.get("diagnostics", []) if item) or "entity_registry_needs_refresh",
-                "command": [
-                    "python3",
-                    "scripts/aoa_session_memory.py",
-                    "search-index",
-                    "all",
-                    "--workspace-root",
-                    str(workspace_root),
-                    "--aoa-root",
-                    str(aoa_root),
-                    "--limit",
-                    "1",
-                    "--no-rebuild",
-                    "--write-report",
-                ],
-                "note": "Refresh generated entity registry snapshot and its search documents together; it does not repair or promote truth.",
-            }
+            entity_registry=entity_registry,
         )
     agent_route = session_memory_agent_route_status(
         recommendation=recommendation,

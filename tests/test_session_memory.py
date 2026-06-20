@@ -1524,6 +1524,86 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert newer_search["results"][0]["doc_type"] == "entity_registry"
 
 
+def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    codex_home = tmp_path / ".codex"
+    skill_dir = codex_home / "skills" / "aoa-auto-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: aoa-auto-skill\ndescription: Auto fixture skill.\n---\n# aoa-auto-skill\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    transcript = tmp_path / "rollout-2026-06-18T00-00-00-auto-entity-registry.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "auto-entity-registry-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use skill: aoa-auto-skill."}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "aoa-auto-skill checked."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "auto-entity-registry-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert indexed["ok"] is True
+    atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
+    assert atlas["ok"] is True
+
+    time.sleep(0.01)
+    newer_skill_dir = codex_home / "skills" / "aoa-auto-newer-skill"
+    newer_skill_dir.mkdir(parents=True)
+    (newer_skill_dir / "SKILL.md").write_text("---\nname: aoa-auto-newer-skill\n---\n", encoding="utf-8")
+
+    freshness = module.route_cache_freshness_gates(aoa_root=aoa_root, target="all")
+    assert freshness["ok"] is False
+    assert freshness["needs_index_maintenance"] is True
+    assert freshness["entity_registry"]["needs_maintenance"] is True
+    assert "entity_registry_missing_or_stale" in freshness["diagnostics"]
+
+    status = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
+    assert status["recommendation"] == "run_maintenance"
+    assert status["next_actions"][0]["id"] == "entity_registry_refresh"
+    assert "search-index" in status["next_actions"][0]["command"]
+    assert "--no-rebuild" in status["next_actions"][0]["command"]
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        max_raw_bytes=1,
+        budget_seconds=30,
+    )
+    assert payload["ok"] is True
+    refresh_action = next(action for action in payload["maintenance"]["actions"] if action["id"] == "refresh_entity_registry")
+    assert refresh_action["status"] == "applied"
+
+    refreshed_registry = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    registry_doc_count = conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0]
+    conn.close()
+    assert registry_doc_count == refreshed_registry["entity_count"]
+
+    lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-auto-newer-skill", kind="skill")
+    assert lookup["agent_route_packet"]["registered"] is True
+    assert lookup["entries"][0]["status"] == "active"
+    search = module.search_sessions(aoa_root=aoa_root, query="aoa-auto-newer-skill", doc_type="entity_registry", limit=5)
+    assert search["ok"] is True
+    assert search["results"][0]["doc_type"] == "entity_registry"
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -3574,6 +3654,11 @@ def test_route_cache_hot_gate_uses_cached_states_without_source_scan(tmp_path: P
             "diagnostics": [],
         },
     )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 7, "diagnostics": []},
+    )
 
     payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
 
@@ -3638,6 +3723,11 @@ def test_route_cache_hot_gate_scoped_filters_scan_selected_records(tmp_path: Pat
             "needs_full_rebuild": False,
             "diagnostics": [],
         },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 1, "diagnostics": []},
     )
 
     payload = module.route_cache_freshness_gates(aoa_root=aoa_root, since="2026-06-15", limit=1)
@@ -5888,6 +5978,16 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
 
     monkeypatch.setattr(module, "search_provider_status", fake_search_provider_status)
     monkeypatch.setattr(module, "route_cache_freshness_gates", fake_route_cache_freshness_gates)
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 3,
+            "diagnostics": [],
+        },
+    )
     monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
     monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 1, "timers": [], "diagnostics": []})
     monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
