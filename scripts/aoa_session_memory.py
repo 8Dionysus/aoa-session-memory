@@ -32538,6 +32538,7 @@ def graph_from_store_neighborhood(
             return None
         depth = max(0, min(int_value(depth, 1), 3))
         limit = max(1, min(int_value(limit, 40), 200))
+        max_edges = max(80, min(limit * 12, 1200))
         selected_nodes: list[str] = []
         selected_edges: list[str] = []
         seen_nodes: set[str] = set()
@@ -32559,9 +32560,13 @@ def graph_from_store_neighborhood(
                 ORDER BY
                   CASE edge_type
                     WHEN 'registry_entity_has_route_signal' THEN 0
-                    WHEN 'session_has_registered_entity' THEN 1
+                    WHEN 'mentions_route_signal' THEN 1
                     WHEN 'event_mentions_registered_entity' THEN 2
-                    ELSE 3
+                    WHEN 'session_has_registered_entity' THEN 3
+                    WHEN 'has_event' THEN 4
+                    WHEN 'answered_by' THEN 5
+                    WHEN 'responds_to' THEN 5
+                    ELSE 6
                   END,
                   count DESC,
                   id ASC
@@ -32571,7 +32576,7 @@ def graph_from_store_neighborhood(
             ).fetchall()
             for row in edge_rows:
                 edge_id = str(row["id"])
-                if edge_id not in seen_edges:
+                if edge_id not in seen_edges and len(selected_edges) < max_edges:
                     seen_edges.add(edge_id)
                     selected_edges.append(edge_id)
                 neighbor = str(row["target_node"] if row["source_node"] == node_id else row["source_node"])
@@ -33230,23 +33235,26 @@ def graph_shortest_path(
     }
 
 
-def graph_cooccurrence(
+def graph_cooccurrence_from_packet(
     *,
     aoa_root: Path,
+    packet: dict[str, Any],
     anchor: str,
     kind: str = "auto",
     limit: int = 30,
+    source: str = "bounded_cooccurrence_neighborhood",
 ) -> dict[str, Any]:
-    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=kind, depth=1, limit=max(limit * 6, 60))
     graph = {
-        "source": "bounded_cooccurrence_neighborhood",
+        "source": source,
         "generated_at": utc_now(),
         "nodes": packet.get("nodes", []) if isinstance(packet.get("nodes"), list) else [],
         "edges": packet.get("edges", []) if isinstance(packet.get("edges"), list) else [],
         "diagnostics": packet.get("diagnostics", []) if isinstance(packet.get("diagnostics"), list) else [],
     }
     node_map = graph_node_by_id(graph)
-    resolved = resolve_graph_anchor(graph, anchor, kind=kind, limit=60)
+    resolved = packet.get("resolved") if isinstance(packet.get("resolved"), dict) else {}
+    if not resolved.get("start_node_ids"):
+        resolved = resolve_graph_anchor(graph, anchor, kind=kind, limit=60)
     if not resolved.get("start_node_ids"):
         resolved = packet.get("resolved", resolved) if isinstance(packet.get("resolved"), dict) else resolved
     start_ids = set(resolved.get("start_node_ids", []))
@@ -33298,15 +33306,34 @@ def graph_cooccurrence(
         "ok": bool(selected),
         "mutates": False,
         "truth_status": "cooccurrence_packet_not_reviewed_truth",
+        "source": source,
         "anchor": anchor,
         "kind": kind,
         "resolved": resolved,
         "anchor_event_count": len(anchor_events),
         "cooccurrences": selected,
         "evidence_refs": graph_collect_evidence(evidence_nodes, [], limit=80),
-        "freshness": graph_freshness(aoa_root, graph),
+        "freshness": packet.get("freshness") if isinstance(packet.get("freshness"), dict) else graph_freshness(aoa_root, graph),
         "diagnostics": graph.get("diagnostics", []),
     }
+
+
+def graph_cooccurrence(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 30,
+) -> dict[str, Any]:
+    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=kind, depth=1, limit=max(limit * 6, 60))
+    return graph_cooccurrence_from_packet(
+        aoa_root=aoa_root,
+        packet=packet,
+        anchor=anchor,
+        kind=kind,
+        limit=limit,
+        source="bounded_cooccurrence_neighborhood",
+    )
 
 
 def refs_from_search_hits(hits: list[dict[str, Any]], *, limit: int = 60) -> list[dict[str, Any]]:
@@ -33360,7 +33387,13 @@ def graph_rag_packet(
         explain=True,
     )
     neighborhood = graph_neighborhood(aoa_root=aoa_root, anchor=anchor_text, depth=2, limit=max(limit * 8, 40))
-    cooccurrence = graph_cooccurrence(aoa_root=aoa_root, anchor=anchor_text, limit=min(limit * 4, 40))
+    cooccurrence = graph_cooccurrence_from_packet(
+        aoa_root=aoa_root,
+        packet=neighborhood,
+        anchor=anchor_text,
+        limit=min(limit * 4, 40),
+        source="shared_graphrag_neighborhood",
+    )
     search_hits = lexical.get("results", []) if isinstance(lexical.get("results"), list) else []
     lexical_refs = refs_from_search_hits(search_hits, limit=limit * 4)
     graph_refs = neighborhood.get("evidence_refs", []) if isinstance(neighborhood.get("evidence_refs"), list) else []
@@ -33405,6 +33438,7 @@ def graph_rag_packet(
         },
         "communities": {
             "method": "route_signal_cooccurrence",
+            "source": cooccurrence.get("source"),
             "items": cooccurring_routes,
         },
         "evidence_refs": evidence_refs,
@@ -37488,6 +37522,443 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "ok",
+        "artifact_type",
+        "match_count",
+        "result_count",
+        "event_count",
+        "usage_event_count",
+        "consequence_event_count",
+        "document_count",
+        "entity_count",
+        "entity_registry_document_count",
+        "removed_entity_registry_document_count",
+        "selected_count",
+        "processed_count",
+        "remaining_count",
+        "budget_seconds",
+        "budget_exhausted",
+        "partial",
+        "node_count",
+        "edge_count",
+        "diagnostics",
+    )
+    summary = {key: payload.get(key) for key in keys if key in payload}
+    if payload.get("artifact_type") == "session_memory_graphrag_packet":
+        lexical = payload.get("lexical") if isinstance(payload.get("lexical"), dict) else {}
+        graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        summary["lexical_result_count"] = lexical.get("result_count")
+        summary["graph_node_count"] = graph.get("node_count")
+        summary["graph_edge_count"] = graph.get("edge_count")
+        summary["evidence_ref_count"] = len(payload.get("evidence_refs", []) if isinstance(payload.get("evidence_refs"), list) else [])
+    if payload.get("artifact_type") == "session_memory_entity_usage_neighborhood":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        summary["usage_neighborhood_present"] = quality.get("usage_neighborhood_present")
+        summary["raw_preview_available"] = quality.get("raw_preview_available")
+    if payload.get("artifact_type") == "entity_registry_lookup":
+        route = payload.get("agent_route_packet") if isinstance(payload.get("agent_route_packet"), dict) else {}
+        summary["registered"] = route.get("registered")
+        summary["status"] = route.get("status")
+    return summary
+
+
+def performance_baseline_step(
+    step_id: str,
+    *,
+    description: str,
+    mutates: bool,
+    run: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        payload = run()
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary.
+        return {
+            "id": step_id,
+            "description": description,
+            "ok": False,
+            "mutates": mutates,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "summary": {},
+            "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+        }
+    diagnostics = payload.get("diagnostics", []) if isinstance(payload.get("diagnostics"), list) else []
+    return {
+        "id": step_id,
+        "description": description,
+        "ok": bool(payload.get("ok")),
+        "mutates": mutates,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "artifact_type": payload.get("artifact_type"),
+        "summary": performance_step_summary(payload),
+        "diagnostics": diagnostics,
+    }
+
+
+def skipped_performance_step(step_id: str, *, description: str, reason: str, mutates: bool) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "description": description,
+        "ok": True,
+        "status": "skipped",
+        "mutates": False,
+        "would_mutate": mutates,
+        "elapsed_ms": 0,
+        "summary": {},
+        "diagnostics": [reason],
+    }
+
+
+def performance_storage_summary(aoa_root: Path) -> dict[str, Any]:
+    search_path = search_db_path(aoa_root)
+    graph_path = graph_paths(aoa_root)["store"]
+    summary: dict[str, Any] = {
+        "search": {
+            "db_path": str(search_path),
+            "exists": search_path.exists(),
+            "size_bytes": search_path.stat().st_size if search_path.exists() else 0,
+            "diagnostics": [],
+        },
+        "graph": {
+            "db_path": str(graph_path),
+            "exists": graph_path.exists(),
+            "size_bytes": graph_path.stat().st_size if graph_path.exists() else 0,
+            "diagnostics": [],
+        },
+    }
+    if search_path.exists():
+        try:
+            conn = sqlite3.connect(str(search_path))
+            total = int_value(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+            doc_type_counts = [
+                {"doc_type": str(row[0] or ""), "count": int_value(row[1])}
+                for row in conn.execute(
+                    "SELECT doc_type, COUNT(*) FROM documents GROUP BY doc_type ORDER BY COUNT(*) DESC LIMIT 20"
+                ).fetchall()
+            ]
+            route_term_count = int_value(conn.execute("SELECT COUNT(*) FROM route_terms").fetchone()[0])
+            conn.close()
+            summary["search"].update(
+                {
+                    "document_count": total,
+                    "doc_type_counts": doc_type_counts,
+                    "route_term_count": route_term_count,
+                    "event_document_count": next((item["count"] for item in doc_type_counts if item.get("doc_type") == "event"), 0),
+                    "entity_registry_document_count": next((item["count"] for item in doc_type_counts if item.get("doc_type") == "entity_registry"), 0),
+                }
+            )
+        except sqlite3.Error as exc:
+            summary["search"]["diagnostics"] = [f"sqlite_error:{exc}"]
+    graph_state = graph_store_query_state(aoa_root)
+    summary["graph"].update(
+        {
+            "status": graph_state.get("status"),
+            "metadata": graph_state.get("metadata") if isinstance(graph_state.get("metadata"), dict) else {},
+            "diagnostics": graph_state.get("diagnostics", []) if isinstance(graph_state.get("diagnostics"), list) else [],
+        }
+    )
+    return summary
+
+
+def performance_baseline_diagnosis(steps: list[dict[str, Any]], storage: dict[str, Any] | None = None) -> dict[str, Any]:
+    completed = [step for step in steps if step.get("status") != "skipped"]
+    slowest = max(completed, key=lambda step: int_value(step.get("elapsed_ms")), default={})
+    by_id = {str(step.get("id") or ""): step for step in completed}
+    likely_components: list[dict[str, Any]] = []
+
+    def elapsed(step_id: str) -> int:
+        return int_value((by_id.get(step_id) or {}).get("elapsed_ms"))
+
+    registry_ms = elapsed("narrow_entity_registry_refresh")
+    search_ms = elapsed("narrow_search_index_refresh")
+    if search_ms and registry_ms and search_ms > max(1000, registry_ms * 2):
+        search_summary = by_id.get("narrow_search_index_refresh", {}).get("summary")
+        likely_components.append(
+            {
+                "component": "session_search_index_refresh",
+                "reason": "narrow search-index refresh is materially slower than registry-only refresh",
+                "elapsed_ms": search_ms,
+                "comparison_elapsed_ms": registry_ms,
+                "selected_count": (search_summary or {}).get("selected_count") if isinstance(search_summary, dict) else None,
+                "processed_count": (search_summary or {}).get("processed_count") if isinstance(search_summary, dict) else None,
+            }
+        )
+    for step_id, component in (
+        ("registry_lookup", "entity_registry_lookup"),
+        ("usage_audit", "entity_usage_audit"),
+        ("usage_neighborhood", "entity_usage_neighborhood"),
+        ("graphrag_packet", "graph_rag_packet"),
+    ):
+        step_ms = elapsed(step_id)
+        if step_ms > 2000:
+            likely_components.append(
+                {
+                    "component": component,
+                    "reason": "read route exceeds interactive 2s target",
+                    "elapsed_ms": step_ms,
+                }
+            )
+    storage = storage if isinstance(storage, dict) else {}
+    search_storage = storage.get("search") if isinstance(storage.get("search"), dict) else {}
+    graph_storage = storage.get("graph") if isinstance(storage.get("graph"), dict) else {}
+    event_document_count = int_value(search_storage.get("event_document_count"))
+    search_size_bytes = int_value(search_storage.get("size_bytes"))
+    graph_size_bytes = int_value(graph_storage.get("size_bytes"))
+    if event_document_count > 250_000:
+        likely_components.append(
+            {
+                "component": "search_event_document_volume",
+                "reason": "portable search has a large event-document hot set; prefer compact/hot event projections before broad rebuilds",
+                "event_document_count": event_document_count,
+                "size_bytes": search_size_bytes,
+            }
+        )
+    if graph_size_bytes > 10 * 1024 * 1024 * 1024:
+        likely_components.append(
+            {
+                "component": "graph_store_weight",
+                "reason": "graph store is heavy enough that read packets should stay bounded or use hot materialized neighborhoods",
+                "size_bytes": graph_size_bytes,
+            }
+        )
+    refresh_step = by_id.get("narrow_entity_registry_refresh", {})
+    refresh_summary = refresh_step.get("summary") if isinstance(refresh_step.get("summary"), dict) else {}
+    search_step = by_id.get("narrow_search_index_refresh", {})
+    search_summary = search_step.get("summary") if isinstance(search_step.get("summary"), dict) else {}
+    return {
+        "slowest_step": slowest.get("id"),
+        "slowest_elapsed_ms": slowest.get("elapsed_ms"),
+        "likely_heavy_components": likely_components,
+        "refresh_path": {
+            "entity_registry_refresh_reindexes_session_docs": False if refresh_step else None,
+            "entity_registry_selected_count": refresh_summary.get("selected_count"),
+            "entity_registry_processed_count": refresh_summary.get("processed_count"),
+            "search_index_refresh_reindexes_session_docs": bool(int_value(search_summary.get("processed_count"))),
+            "search_index_selected_count": search_summary.get("selected_count"),
+            "search_index_processed_count": search_summary.get("processed_count"),
+        },
+        "interpretation": "Use registry-only refresh for entity source drift; reserve search-index refresh for session/search document drift.",
+    }
+
+
+def performance_baseline_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Performance Baseline",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- anchor: `{payload.get('anchor')}`",
+        f"- kind: `{payload.get('kind')}`",
+        f"- apply_refresh: `{payload.get('apply_refresh')}`",
+        f"- search_target: `{payload.get('search_target')}`",
+        f"- total_elapsed_ms: `{payload.get('elapsed_ms')}`",
+        "",
+        "| step | ok | mutates | elapsed_ms | summary |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for step in payload.get("steps", []) if isinstance(payload.get("steps"), list) else []:
+        if not isinstance(step, dict):
+            continue
+        summary = json.dumps(step.get("summary", {}), ensure_ascii=False, sort_keys=True)
+        lines.append(
+            f"| `{step.get('id')}` | `{step.get('ok')}` | `{step.get('mutates')}` | "
+            f"`{step.get('elapsed_ms')}` | `{short_text(summary, max_chars=220)}` |"
+        )
+    diagnosis = payload.get("diagnosis") if isinstance(payload.get("diagnosis"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Diagnosis",
+            "",
+            f"- slowest_step: `{diagnosis.get('slowest_step')}`",
+            f"- slowest_elapsed_ms: `{diagnosis.get('slowest_elapsed_ms')}`",
+        ]
+    )
+    for item in diagnosis.get("likely_heavy_components", []) if isinstance(diagnosis.get("likely_heavy_components"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"- `{item.get('component')}`: `{item.get('reason')}` elapsed_ms=`{item.get('elapsed_ms')}`")
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    search_storage = storage.get("search") if isinstance(storage.get("search"), dict) else {}
+    graph_storage = storage.get("graph") if isinstance(storage.get("graph"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Storage",
+            "",
+            f"- search_size_bytes: `{search_storage.get('size_bytes')}`",
+            f"- search_document_count: `{search_storage.get('document_count')}`",
+            f"- search_event_document_count: `{search_storage.get('event_document_count')}`",
+            f"- search_route_term_count: `{search_storage.get('route_term_count')}`",
+            f"- graph_size_bytes: `{graph_storage.get('size_bytes')}`",
+            f"- graph_status: `{graph_storage.get('status')}`",
+        ]
+    )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def performance_baseline(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 6,
+    per_route_limit: int = 10,
+    search_target: str = "latest",
+    max_raw_bytes: int | None = None,
+    apply_refresh: bool = False,
+    refresh_budget_seconds: float | None = 120.0,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    started = time.monotonic()
+    limit = max(1, min(int_value(limit, 6), 30))
+    per_route_limit = max(1, min(int_value(per_route_limit, 10), 50))
+    anchor_text = str(anchor or "").strip() or "aoa-session-memory-mcp"
+    kind_text = str(kind or "auto")
+    steps: list[dict[str, Any]] = [
+        performance_baseline_step(
+            "registry_lookup",
+            description="Resolve the anchor through generated entity registry.",
+            mutates=False,
+            run=lambda: entity_registry_lookup(aoa_root=aoa_root, anchor=anchor_text, kind=kind_text),
+        ),
+        performance_baseline_step(
+            "usage_audit",
+            description="Trace usage events, consequences, and document refs.",
+            mutates=False,
+            run=lambda: entity_usage_audit(
+                aoa_root=aoa_root,
+                anchor=anchor_text,
+                kind=kind_text,
+                limit=limit,
+                per_route_limit=per_route_limit,
+                consequence_window=4,
+                document_limit=max(20, limit * 6),
+            ),
+        ),
+        performance_baseline_step(
+            "usage_neighborhood",
+            description="Open local before/after windows around usage events.",
+            mutates=False,
+            run=lambda: entity_usage_neighborhood(
+                aoa_root=aoa_root,
+                anchor=anchor_text,
+                kind=kind_text,
+                limit=min(limit, 6),
+                per_route_limit=per_route_limit,
+                before=2,
+                after=4,
+                raw_preview_chars=400,
+                document_limit=max(24, limit * 8),
+            ),
+        ),
+        performance_baseline_step(
+            "graphrag_packet",
+            description="Build lexical plus graph expansion evidence packet.",
+            mutates=False,
+            run=lambda: graph_rag_packet(
+                aoa_root=aoa_root,
+                query=anchor_text,
+                anchor=anchor_text,
+                limit=min(limit, 8),
+            ),
+        ),
+    ]
+    if apply_refresh:
+        steps.append(
+            performance_baseline_step(
+                "narrow_entity_registry_refresh",
+                description="Refresh entity registry snapshot and entity_registry search docs only.",
+                mutates=True,
+                run=lambda: refresh_entity_registry_search_documents_only(
+                    aoa_root=aoa_root,
+                    write_report=False,
+                    budget_seconds=refresh_budget_seconds,
+                ),
+            )
+        )
+        steps.append(
+            performance_baseline_step(
+                "narrow_search_index_refresh",
+                description="Refresh one selected session through incremental search-index path.",
+                mutates=True,
+                run=lambda: search_index_sessions(
+                    aoa_root=aoa_root,
+                    target=search_target,
+                    max_raw_bytes=max_raw_bytes,
+                    rebuild=False,
+                    write_report=False,
+                    budget_seconds=refresh_budget_seconds,
+                ),
+            )
+        )
+    else:
+        steps.append(
+            skipped_performance_step(
+                "narrow_entity_registry_refresh",
+                description="Refresh entity registry snapshot and entity_registry search docs only.",
+                reason="skipped_requires_apply_refresh",
+                mutates=True,
+            )
+        )
+        steps.append(
+            skipped_performance_step(
+                "narrow_search_index_refresh",
+                description="Refresh one selected session through incremental search-index path.",
+                reason="skipped_requires_apply_refresh",
+                mutates=True,
+            )
+        )
+    diagnostics = sorted(
+        {
+            str(item)
+            for step in steps
+            for item in (step.get("diagnostics", []) if isinstance(step.get("diagnostics"), list) else [])
+            if item and item != "skipped_requires_apply_refresh"
+        }
+    )
+    storage = performance_storage_summary(aoa_root)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_performance_baseline",
+        "generated_at": now,
+        "ok": all(bool(step.get("ok")) for step in steps) and not diagnostics,
+        "mutates": bool(apply_refresh),
+        "truth_status": "performance_measurement_not_correctness_proof",
+        "anchor": anchor_text,
+        "kind": kind_text,
+        "limit": limit,
+        "per_route_limit": per_route_limit,
+        "search_target": search_target,
+        "max_raw_bytes": max_raw_bytes,
+        "apply_refresh": apply_refresh,
+        "refresh_budget_seconds": refresh_budget_seconds,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "steps": steps,
+        "storage": storage,
+        "diagnosis": performance_baseline_diagnosis(steps, storage=storage),
+        "diagnostics": diagnostics,
+        "next_route": "Use this baseline to choose the next optimization; repeat after changes and compare step elapsed_ms.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__performance-baseline__{route_key_slug(anchor_text, fallback='anchor', max_chars=80)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, performance_baseline_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def command_graph_quality_corpus(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -37702,6 +38173,27 @@ def command_entity_usage_scenario_audit(args: argparse.Namespace) -> int:
         full=args.full,
     )
     stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"provider"}}
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_performance_baseline(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    max_raw_bytes = int(float(args.max_raw_mb) * 1024 * 1024) if args.max_raw_mb is not None else None
+    payload = performance_baseline(
+        aoa_root=root,
+        anchor=args.anchor,
+        kind=args.kind,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        search_target=args.search_target,
+        max_raw_bytes=max_raw_bytes,
+        apply_refresh=args.apply_refresh,
+        refresh_budget_seconds=args.refresh_budget_seconds,
+        write_report=args.write_report,
+    )
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"steps"}}
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -43511,6 +44003,25 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_scenario.add_argument("--write-report", action="store_true", help="Write JSON and Markdown scenario audit reports under .aoa/diagnostics.")
     entity_usage_scenario.add_argument("--full", action="store_true", help="Print nested entity usage packets for every sample.")
     entity_usage_scenario.set_defaults(func=command_entity_usage_scenario_audit)
+
+    performance_parser = sub.add_parser(
+        "performance-baseline",
+        aliases=["route-performance-baseline"],
+        help="Measure registry lookup, usage audit, neighborhood, GraphRAG, and optional narrow refresh timings.",
+    )
+    performance_parser.add_argument("anchor", nargs="?", default="aoa-session-memory-mcp", help="Entity anchor to benchmark.")
+    performance_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    performance_parser.add_argument("--workspace-root")
+    performance_parser.add_argument("--aoa-root")
+    performance_parser.add_argument("--limit", type=int, default=6)
+    performance_parser.add_argument("--per-route-limit", type=int, default=10)
+    performance_parser.add_argument("--search-target", default="latest", help="Session target for the optional incremental search-index refresh.")
+    performance_parser.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for search refresh above this many MiB.")
+    performance_parser.add_argument("--apply-refresh", action="store_true", help="Also measure mutating narrow entity-registry and search-index refreshes.")
+    performance_parser.add_argument("--refresh-budget-seconds", type=float, default=120.0)
+    performance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown performance baseline reports under .aoa/diagnostics.")
+    performance_parser.add_argument("--full", action="store_true", help="Print per-step timing details.")
+    performance_parser.set_defaults(func=command_performance_baseline)
 
     atlas = sub.add_parser("atlas", help="Generate the agent atlas route entries from session indexes.")
     atlas_sub = atlas.add_subparsers(dest="atlas_command", required=True)

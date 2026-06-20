@@ -1604,6 +1604,92 @@ def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: 
     assert search["results"][0]["doc_type"] == "entity_registry"
 
 
+def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "config.toml").write_text(
+        "[mcp_servers.aoa-kag]\ncommand = \"python3\"\nargs = [\"-m\", \"aoa_kag\"]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    transcript = tmp_path / "rollout-2026-06-18T00-00-00-performance-baseline.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "performance-baseline-session", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use mcp/services/aoa-kag-mcp for lookup."}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "mcp__aoa_kag_mcp__lookup", "call_id": "call-1"}},
+            {"timestamp": "2026-06-18T00:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "lookup ok"}},
+            {"timestamp": "2026-06-18T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "aoa-kag-mcp lookup completed."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "performance-baseline-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)["ok"] is True
+    assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
+    assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
+
+    planned = module.performance_baseline(
+        aoa_root=aoa_root,
+        anchor="aoa-kag-mcp",
+        kind="mcp",
+        limit=2,
+        per_route_limit=3,
+        apply_refresh=False,
+    )
+    planned_steps = {step["id"]: step for step in planned["steps"]}
+    assert planned["ok"] is True
+    assert planned["mutates"] is False
+    assert planned_steps["narrow_entity_registry_refresh"]["status"] == "skipped"
+    assert planned_steps["narrow_search_index_refresh"]["status"] == "skipped"
+
+    applied = module.performance_baseline(
+        aoa_root=aoa_root,
+        anchor="aoa-kag-mcp",
+        kind="mcp",
+        limit=2,
+        per_route_limit=3,
+        search_target="latest",
+        max_raw_bytes=1,
+        apply_refresh=True,
+        refresh_budget_seconds=30,
+        write_report=True,
+    )
+    steps = {step["id"]: step for step in applied["steps"]}
+    assert applied["artifact_type"] == "session_memory_performance_baseline"
+    assert applied["ok"] is True
+    assert applied["mutates"] is True
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+    assert set(steps) == {
+        "registry_lookup",
+        "usage_audit",
+        "usage_neighborhood",
+        "graphrag_packet",
+        "narrow_entity_registry_refresh",
+        "narrow_search_index_refresh",
+    }
+    assert steps["registry_lookup"]["summary"]["registered"] is True
+    assert steps["narrow_entity_registry_refresh"]["summary"]["selected_count"] == 0
+    assert steps["narrow_entity_registry_refresh"]["summary"]["processed_count"] == 0
+    assert steps["narrow_search_index_refresh"]["summary"]["selected_count"] == 1
+    assert steps["narrow_search_index_refresh"]["summary"]["processed_count"] == 1
+    assert applied["diagnosis"]["refresh_path"]["entity_registry_refresh_reindexes_session_docs"] is False
+    assert applied["diagnosis"]["refresh_path"]["search_index_refresh_reindexes_session_docs"] is True
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
