@@ -36839,6 +36839,7 @@ def entity_usage_audit(
         }
     limit = max(1, min(int_value(limit, 20), 200))
     per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
+    route_fetch_limit = max(per_route_limit, min(100, max(limit * 4, limit + 8, 12)))
     diagnostics = trace_identity_diagnostics(anchor, kind=normalized_kind)
     candidates = trace_route_candidates(anchor, kind=normalized_kind)
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
@@ -36852,7 +36853,7 @@ def entity_usage_audit(
         payload = search_sessions(
             aoa_root=aoa_root,
             query="",
-            limit=per_route_limit,
+            limit=route_fetch_limit,
             provider=provider,
             session=session,
             doc_type="event",
@@ -36865,6 +36866,8 @@ def entity_usage_audit(
                 "candidate": candidate,
                 "ok": payload.get("ok"),
                 "result_count": payload.get("result_count"),
+                "requested_per_route_limit": per_route_limit,
+                "fetch_limit": route_fetch_limit,
                 "diagnostics": payload.get("diagnostics", []),
             }
         )
@@ -36881,7 +36884,7 @@ def entity_usage_audit(
         text_payload = search_sessions(
             aoa_root=aoa_root,
             query=anchor,
-            limit=per_route_limit,
+            limit=route_fetch_limit,
             provider=provider,
             session=session,
             doc_type="event",
@@ -36933,6 +36936,8 @@ def entity_usage_audit(
         "document_refs_present": bool(document_refs),
         "route_candidate_count": len(lookup_candidates),
         "route_result_count": len(hits),
+        "requested_per_route_limit": per_route_limit,
+        "route_fetch_limit": route_fetch_limit,
         "candidate_event_count": len(ranked_pairs),
         "candidate_usage_event_count": sum(1 for _hit, event, _original_index in ranked_pairs if event.get("role") == "usage"),
         "text_result_count": text_result_count,

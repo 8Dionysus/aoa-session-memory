@@ -1690,6 +1690,68 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     assert applied["diagnosis"]["refresh_path"]["search_index_refresh_reindexes_session_docs"] is True
 
 
+def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(tmp_path: Path, monkeypatch: Any) -> None:
+    result_hits = [
+        {
+            "doc_id": f"event:session:001:{index:06d}",
+            "event_type": "COMMAND_OUTPUT",
+            "conversation_act": "tool_output_success",
+            "session_act": "memory_observation",
+            "title": f"Hook result {index}",
+            "route_signals": "hook_health:userpromptsubmit",
+            "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
+        }
+        for index in range(1, 7)
+    ]
+    usage_hit = {
+        "doc_id": "event:session:001:000007",
+        "event_type": "FILE_READ",
+        "conversation_act": "command_inspection_request",
+        "session_act": "memory_read",
+        "title": "Hook receipt search",
+        "route_signals": "hook:userpromptsubmit|hook_health:userpromptsubmit",
+        "refs": {"raw": "raw:line:7", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    candidate_hits = [*result_hits, usage_hit]
+    called_limits: list[int] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_limits.append(int(kwargs.get("limit") or 0))
+        limit = int(kwargs.get("limit") or 0)
+        return {"ok": True, "result_count": min(limit, len(candidate_hits)), "results": candidate_hits[:limit], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "route_index_count": 1,
+                    "route_term_count": 1,
+                }
+            }
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="userpromptsubmit",
+        kind="hook",
+        limit=3,
+        per_route_limit=3,
+    )
+
+    assert audit["ok"] is True
+    assert max(called_limits) >= 12
+    assert audit["quality"]["requested_per_route_limit"] == 3
+    assert audit["quality"]["route_fetch_limit"] >= 12
+    assert audit["event_count"] == 3
+    assert audit["usage_event_count"] == 1
+    assert audit["usage_events"][0]["doc_id"] == "event:session:001:000007"
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
