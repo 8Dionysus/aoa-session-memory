@@ -405,6 +405,11 @@ the materialized `graph_type_counts` projection and should stay interactive;
 `graph-cardinality --refresh` is the heavy repair/materialization route and
 must be run through the machine resource lane on large live stores. Do not use
 ad hoc `GROUP BY node_type/edge_type` scans as the normal agent path.
+`maintenance-status` surfaces the same cached signal as
+`operations.graph_pressure`, together with the conservative SQLite compaction
+headroom plan. Treat this as the agent-facing hot route for graph weight:
+large top edge counts mean graph cardinality or query-projection work comes
+before physical SQLite compaction.
 When old live graph stores still contain generated standalone `raw_ref` nodes
 and `has_raw_ref` edges, use `graph-raw-ref-prune` as the bounded projection
 repair. It deletes only generated graph materialization rows, keeps raw/session

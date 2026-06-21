@@ -518,6 +518,15 @@ Host timers should run maintenance through `abyss-machine resource launch
 machine resource layer instead of hooks or MCP reads.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
+`maintenance-status` also reports `operations.graph_pressure` when graph
+storage is large. This is a hot-path, read-only packet built from cached graph
+type counts and SQLite headroom metadata. Use it to distinguish cardinality
+pressure from physical SQLite reclaim before running deep audits: if top edge
+types dominate, plan sharding, high-fanout edge policy, or query projections
+before physical compaction. `graph-sqlite-compact` remains the explicit
+preflight for staged physical shrink and must not replace live
+`graph.sqlite3` by default.
+
 ## Storage Audit
 
 Use `storage-audit` before large rebuilds, cleanup, or host storage work:

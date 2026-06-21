@@ -177,6 +177,7 @@ OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
 OPS_SEARCH_DB_CRITICAL_BYTES = 20 * 1024 * 1024 * 1024
 OPS_GRAPH_DB_WARNING_BYTES = 40 * 1024 * 1024 * 1024
 OPS_GRAPH_DB_CRITICAL_BYTES = 80 * 1024 * 1024 * 1024
+OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT = 10_000_000
 OPS_SQLITE_WAL_WARNING_BYTES = 512 * 1024 * 1024
 OPS_WRITER_WARNING_MS = 10 * 60 * 1000
 OPS_LOCK_WAIT_WARNING_MS = 1000
@@ -40390,6 +40391,84 @@ def session_memory_ops_long_maintenance_reasons(
     return reasons[:12]
 
 
+def session_memory_graph_pressure_summary(
+    *,
+    aoa_root: Path,
+    storage: dict[str, Any],
+) -> dict[str, Any]:
+    graph_db_entry = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
+    graph_total_bytes = int_value(graph_db_entry.get("total_with_wal_bytes"), int_value(graph_db_entry.get("size_bytes")))
+    graph_db_path = graph_paths(aoa_root)["store"]
+    projection = graph_cardinality_projection_read(aoa_root, limit=8)
+    counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+    node_counts = counts.get("node") if isinstance(counts.get("node"), dict) else {}
+    edge_counts = counts.get("edge") if isinstance(counts.get("edge"), dict) else {}
+    node_count = sum(int_value(value) for value in node_counts.values())
+    edge_count = sum(int_value(value) for value in edge_counts.values())
+    top = projection.get("top") if isinstance(projection.get("top"), dict) else {}
+    top_node_types = top.get("node", []) if isinstance(top.get("node"), list) else []
+    top_edge_types = top.get("edge", []) if isinstance(top.get("edge"), list) else []
+    compaction_plan = sqlite_vacuum_headroom_plan(
+        db_path=graph_db_path,
+        method="vacuum-into",
+        target_path=aoa_root / DIAGNOSTICS_ROOT / "graph.sqlite3.vacuum-copy",
+        min_free_after_gb=GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    )
+    reclaimable_bytes = int_value(compaction_plan.get("conservative_reclaimable_bytes"))
+    reclaim_ratio = round(reclaimable_bytes / graph_total_bytes, 6) if graph_total_bytes > 0 else 0.0
+    projection_status = str(projection.get("status") or "unknown")
+    if graph_total_bytes < OPS_GRAPH_DB_WARNING_BYTES:
+        status = "normal"
+        next_route = "continue using graph/search; no graph storage action is needed"
+    elif projection_status != "current":
+        status = "large_cardinality_unknown"
+        next_route = "refresh graph-cardinality through the heavy resource lane before planning graph shrink or sharding"
+    elif edge_count >= OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT:
+        status = "large_cardinality_dominates"
+        next_route = "prioritize graph cardinality reduction, sharding, or high-fanout query projections; physical SQLite compaction is not the primary fix"
+    elif reclaim_ratio >= 0.10 and compaction_plan.get("apply_ready"):
+        status = "physical_compaction_candidate"
+        next_route = "run graph-sqlite-compact --write-report, then stage vacuum-into only after reviewing the plan"
+    elif reclaim_ratio >= 0.10:
+        status = "physical_compaction_blocked"
+        next_route = "reserve disk headroom before physical graph SQLite compaction; keep graph routes usable meanwhile"
+    else:
+        status = "large_projection_low_reclaim"
+        next_route = "use storage-audit --deep-dbstat only for offline table evidence; do not vacuum solely for the large file"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_pressure_summary",
+        "mutates": False,
+        "status": status,
+        "graph_db_total_bytes": graph_total_bytes,
+        "graph_db_total_human": human_size(graph_total_bytes),
+        "warning_bytes": OPS_GRAPH_DB_WARNING_BYTES,
+        "critical_bytes": OPS_GRAPH_DB_CRITICAL_BYTES,
+        "projection_status": projection_status,
+        "node_count": node_count,
+        "edge_count": edge_count,
+        "top_node_types": top_node_types[:8],
+        "top_edge_types": top_edge_types[:8],
+        "physical_compaction": {
+            "status": compaction_plan.get("status"),
+            "apply_ready": compaction_plan.get("apply_ready"),
+            "freelist_bytes": compaction_plan.get("freelist_bytes"),
+            "freelist_human": compaction_plan.get("freelist_human"),
+            "reclaim_ratio": reclaim_ratio,
+            "conservative_reclaimable_bytes": reclaimable_bytes,
+            "conservative_reclaimable_human": compaction_plan.get("conservative_reclaimable_human"),
+            "required_free_human": compaction_plan.get("required_free_human"),
+            "free_human": compaction_plan.get("free_human"),
+            "min_free_after_human": compaction_plan.get("min_free_after_human"),
+            "diagnostics": compaction_plan.get("diagnostics", []) if isinstance(compaction_plan.get("diagnostics"), list) else [],
+        },
+        "exact_read_command": f"python3 scripts/aoa_session_memory.py graph-cardinality --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit 12",
+        "optional_deep_audit_command": f"python3 scripts/aoa_session_memory.py storage-audit --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --deep-dbstat --write-report",
+        "next_route": next_route,
+        "truth_status": "diagnostic_projection_for_operator_routing_not_archive_truth",
+    }
+
+
 def session_memory_operations_summary(
     *,
     aoa_root: Path,
@@ -40404,6 +40483,7 @@ def session_memory_operations_summary(
     writer = session_memory_ops_writer_summary(coordinator)
     last_successful_auto_maintenance = latest_successful_auto_maintenance_reports(aoa_root)
     recent_problem_jobs = recent_problem_maintenance_reports(aoa_root)
+    graph_pressure = session_memory_graph_pressure_summary(aoa_root=aoa_root, storage=storage)
     warnings = session_memory_ops_warnings(
         storage=storage,
         search=search,
@@ -40437,6 +40517,7 @@ def session_memory_operations_summary(
         },
         "writer": writer,
         "latest_search_index": latest_search_index,
+        "graph_pressure": graph_pressure,
         "last_successful_auto_maintenance": last_successful_auto_maintenance,
         "recent_problem_jobs": recent_problem_jobs,
         "warning_count": len(warnings),
@@ -41244,6 +41325,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
 
     operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
     latest_search_index = operations.get("latest_search_index") if isinstance(operations.get("latest_search_index"), dict) else {}
+    graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     compact_operations = {
         "warning_count": operations.get("warning_count"),
         "warnings": [
@@ -41282,6 +41364,42 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             )
             if key in latest_search_index
         },
+        "graph_pressure": {
+            key: graph_pressure.get(key)
+            for key in (
+                "status",
+                "graph_db_total_human",
+                "projection_status",
+                "node_count",
+                "edge_count",
+                "top_edge_types",
+                "next_route",
+                "exact_read_command",
+                "optional_deep_audit_command",
+                "truth_status",
+            )
+            if key in graph_pressure
+        }
+        | (
+            {
+                "physical_compaction": {
+                    key: (graph_pressure.get("physical_compaction") or {}).get(key)
+                    for key in (
+                        "status",
+                        "apply_ready",
+                        "freelist_human",
+                        "reclaim_ratio",
+                        "conservative_reclaimable_human",
+                        "required_free_human",
+                        "free_human",
+                    )
+                    if isinstance(graph_pressure.get("physical_compaction"), dict)
+                    and key in (graph_pressure.get("physical_compaction") or {})
+                }
+            }
+            if isinstance(graph_pressure.get("physical_compaction"), dict)
+            else {}
+        ),
         "slow_phases": latest_search_index.get("slow_phases", [])[:4] if isinstance(latest_search_index.get("slow_phases"), list) else [],
         "slow_indexes": latest_search_index.get("slow_indexes", [])[:4] if isinstance(latest_search_index.get("slow_indexes"), list) else [],
         "last_successful_auto_maintenance": {
@@ -41366,6 +41484,8 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     graph_db = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
     operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
     latest_search_index = operations.get("latest_search_index") if isinstance(operations.get("latest_search_index"), dict) else {}
+    graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
+    graph_pressure_compaction = graph_pressure.get("physical_compaction") if isinstance(graph_pressure.get("physical_compaction"), dict) else {}
     lines = [
         "# Session Memory Maintenance Status",
         "",
@@ -41383,6 +41503,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- last_maintenance: `{last_job.get('owner_job', '')}` status=`{last_job.get('status', '')}` finished_at=`{last_job.get('finished_at', '')}` elapsed_ms=`{last_job.get('elapsed_ms', '')}`",
         f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
         f"- graph_db: `{graph_db.get('size_human')}` wal=`{(graph_db.get('wal') or {}).get('size_human') if isinstance(graph_db.get('wal'), dict) else ''}` total=`{graph_db.get('total_with_wal_human')}`",
+        f"- graph_pressure: `{graph_pressure.get('status')}` nodes=`{graph_pressure.get('node_count')}` edges=`{graph_pressure.get('edge_count')}` physical=`{graph_pressure_compaction.get('status')}` reclaim=`{graph_pressure_compaction.get('conservative_reclaimable_human')}` next=`{graph_pressure.get('next_route')}`",
         f"- ops_warnings: `{operations.get('warning_count')}`",
         f"- latest_search_index: processed=`{latest_search_index.get('processed_count')}` docs=`{latest_search_index.get('document_count')}` elapsed_ms=`{latest_search_index.get('elapsed_ms')}` docs_per_sec=`{latest_search_index.get('documents_per_second')}`",
         f"- exact_next_command: `{payload.get('exact_next_command')}`",

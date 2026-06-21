@@ -7488,6 +7488,66 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert {"search_db_large", "graph_db_large", "search_wal_large", "search_actionable_dirty_sessions", "recent_problem_jobs"} <= warning_codes
     reason_kinds = {item["reason"] for item in ops["why_maintenance_long"]}
     assert {"search_index_phase", "sqlite_index_build", "large_sqlite_projection"} <= reason_kinds
+    assert ops["graph_pressure"]["status"] == "large_cardinality_unknown"
+    assert ops["graph_pressure"]["projection_status"] == "missing"
+    assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
+
+
+def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=8: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 1_500_000, "entity": 50_000},
+                "edge": {"mentions_route_signal": 13_000_000, "has_event": 1_500_000},
+            },
+            "top": {
+                "node": [{"type": "event", "count": 1_500_000}],
+                "edge": [{"type": "mentions_route_signal", "count": 13_000_000}],
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_vacuum_headroom_plan",
+        lambda **_kwargs: {
+            "status": "blocked_low_disk_headroom",
+            "apply_ready": False,
+            "freelist_bytes": 3 * 1024 * 1024 * 1024,
+            "freelist_human": "3.0 GiB",
+            "conservative_reclaimable_bytes": 3 * 1024 * 1024 * 1024,
+            "conservative_reclaimable_human": "3.0 GiB",
+            "required_free_human": "80.0 GiB",
+            "free_human": "60.0 GiB",
+            "min_free_after_human": "25.0 GiB",
+            "diagnostics": ["sqlite_compaction_low_disk_headroom"],
+        },
+    )
+
+    summary = module.session_memory_graph_pressure_summary(
+        aoa_root=aoa_root,
+        storage={
+            "graph_db": {
+                "total_with_wal_bytes": 57 * 1024 * 1024 * 1024,
+                "total_with_wal_human": "57.0 GiB",
+            }
+        },
+    )
+
+    assert summary["status"] == "large_cardinality_dominates"
+    assert summary["node_count"] == 1_550_000
+    assert summary["edge_count"] == 14_500_000
+    assert summary["top_edge_types"][0]["type"] == "mentions_route_signal"
+    assert summary["physical_compaction"]["status"] == "blocked_low_disk_headroom"
+    assert summary["physical_compaction"]["reclaim_ratio"] < 0.1
+    assert "cardinality reduction" in summary["next_route"]
+    assert "storage-audit" in summary["optional_deep_audit_command"]
 
 
 def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: Path, monkeypatch: Any) -> None:

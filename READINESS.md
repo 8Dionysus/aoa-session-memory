@@ -115,6 +115,9 @@ Build the `.aoa` session-memory mechanism end to end:
   last result, DB/WAL size status, operations warnings, last successful
   auto-maintenance profiles, recent problem jobs, and `why_maintenance_long`
   search-index/storage evidence through `maintenance-status --full`;
+  graph storage pressure is visible through `operations.graph_pressure` with
+  cached graph cardinality, top edge types, physical compaction headroom, and
+  the next safe route before any deep audit or SQLite compaction;
   `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active;
   `maintenance-status` exposes a `live_tail` packet over deferred live
   freshness rows with `waiting_for_quiet_window` vs `ready_for_catchup`,
