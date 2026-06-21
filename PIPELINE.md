@@ -165,6 +165,14 @@ Use `entity-usage-audit` when the agent needs a compact cross-session packet
 for how a skill, MCP, hook, tool, API, script, validator, test, graph, memory
 surface, or other recurring entity appears in archived work.
 
+`entity-usage-audit` is a structured-fast route first. It queries typed route
+signals and direct usage classes with lightweight search hits, skips raw
+semantic previews on the search harvest, and only opens the broad text fallback
+when the typed route hits do not contain direct usage evidence. The payload
+exposes `text_search_skipped`, `route_hit_count_before_text_fallback`, and
+`route_usage_hit_count_before_text_fallback` so an agent can tell whether it got
+the fast indexed path or had to widen.
+
 Use `entity-usage-neighborhood` when the agent needs the local before/after
 event window around direct usage. Its `--limit` means "how many usage windows
 to open", not "how few search hits to inspect". The command may use a wider

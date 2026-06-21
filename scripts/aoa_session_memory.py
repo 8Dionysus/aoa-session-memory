@@ -25958,13 +25958,20 @@ def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tupl
     return None, None
 
 
-def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str = "", full_body: str | None = None) -> dict[str, Any]:
+def compact_search_result(
+    row: sqlite3.Row,
+    *,
+    explain: bool = False,
+    query: str = "",
+    full_body: str | None = None,
+    semantic_preview: bool = True,
+) -> dict[str, Any]:
     refs, ref_resolution = resolve_search_result_refs(row)
     freshness = search_result_freshness(row, resolved_refs=refs, ref_resolution=ref_resolution)
     snippet = short_text(full_body if full_body is not None else row["body"], max_chars=420)
-    semantic_preview = route_raw_semantic_preview(row, refs, max_chars=420)
-    preview = semantic_preview.get("text") or snippet
-    preview_source = semantic_preview.get("status") if semantic_preview.get("text") else "search_body"
+    raw_semantic_preview = route_raw_semantic_preview(row, refs, max_chars=420) if semantic_preview else {"status": "skipped", "text": ""}
+    preview = raw_semantic_preview.get("text") or snippet
+    preview_source = raw_semantic_preview.get("status") if raw_semantic_preview.get("text") else "search_body"
     result = {
         "rank": row["rank"] if "rank" in row.keys() else 0,
         "doc_id": row["id"],
@@ -26022,6 +26029,8 @@ def compact_search_result(row: sqlite3.Row, *, explain: bool = False, query: str
             },
             "why_this_is_not_authority": "Search result routes to raw/segment refs; raw transcript and segment indexes remain stronger evidence.",
         }
+        if not semantic_preview:
+            result["explain"]["semantic_preview"] = "skipped_for_lightweight_route"
     return result
 
 
@@ -26137,6 +26146,7 @@ def search_sessions(
     date_from: str | None = None,
     date_to: str | None = None,
     explain: bool = False,
+    semantic_preview: bool = True,
 ) -> dict[str, Any]:
     now = utc_now()
     provider_config = search_provider_config(aoa_root)
@@ -26285,7 +26295,13 @@ def search_sessions(
                         continue
                     seen_rowids.add(rowid)
                     scanned_candidate_count += 1
-                    result = compact_search_result(row, explain=explain, query=query, full_body=candidate_body_overrides.get(rowid))
+                    result = compact_search_result(
+                        row,
+                        explain=explain,
+                        query=query,
+                        full_body=candidate_body_overrides.get(rowid),
+                        semantic_preview=semantic_preview,
+                    )
                     freshness = result.get("freshness") if isinstance(result.get("freshness"), dict) else {}
                     if str(freshness.get("status") or "") == requested_freshness_status:
                         results.append(result)
@@ -26309,7 +26325,13 @@ def search_sessions(
         else:
             body_overrides = search_document_bodies_for_rows(conn, rows)
             results = [
-                compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
+                compact_search_result(
+                    row,
+                    explain=explain,
+                    query=query,
+                    full_body=body_overrides.get(int_value(row["rowid"])),
+                    semantic_preview=semantic_preview,
+                )
                 for row in rows
             ]
             freshness_filter_diagnostics = []
@@ -37568,6 +37590,7 @@ def entity_usage_audit(
             route_layer=route_layer_value,
             route_signal=route_signal_value or None,
             explain=True,
+            semantic_preview=False,
         )
         route_result_summaries.append(
             {
@@ -37586,7 +37609,17 @@ def entity_usage_audit(
             if isinstance(hit, dict):
                 merge_usage_hit(merged, hit, matched_route)
 
+    route_hit_count = len(merged)
+    route_usage_hit_count = sum(
+        1
+        for hit in merged.values()
+        if compact_usage_event_from_search_hit(hit).get("role") == "usage"
+    )
+    text_search_skipped = False
     skip_text_search = bool(diagnostics) and not lookup_candidates
+    if not skip_text_search and lookup_candidates and route_hit_count >= limit and route_usage_hit_count > 0:
+        skip_text_search = True
+        text_search_skipped = True
     text_result_count = 0
     if not skip_text_search:
         text_payload = search_sessions(
@@ -37597,6 +37630,7 @@ def entity_usage_audit(
             session=session,
             doc_type="event",
             explain=True,
+            semantic_preview=False,
         )
         text_result_count = int_value(text_payload.get("result_count"))
         if text_payload.get("ok"):
@@ -37649,6 +37683,9 @@ def entity_usage_audit(
         "candidate_event_count": len(ranked_pairs),
         "candidate_usage_event_count": sum(1 for _hit, event, _original_index in ranked_pairs if event.get("role") == "usage"),
         "text_result_count": text_result_count,
+        "text_search_skipped": text_search_skipped,
+        "route_hit_count_before_text_fallback": route_hit_count,
+        "route_usage_hit_count_before_text_fallback": route_usage_hit_count,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
         "search_has_route_index": bool(

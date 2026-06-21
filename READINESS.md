@@ -52,6 +52,10 @@ Build the `.aoa` session-memory mechanism end to end:
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
   hooks, scripts, validators, tests, evals, playbooks, techniques, mechanics,
   graph, and memory surfaces; MCP access is read-only
+- Entity usage fast path: `entity-usage-audit` starts from typed route signals
+  and direct usage classes, skips raw semantic previews during the indexed
+  harvest, and only falls back to broad text search when structured route hits
+  do not include direct usage evidence
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors
 - Incremental graph store, sidecar snapshots, and GraphRAG packets:
@@ -518,6 +522,14 @@ Last observed result:
   as stable corruption. Source-local MCP smokes: default status `0.06s`,
   include-live status `19.89s`, entity inventory `1.43s`, graph neighborhood
   `1.53s`, GraphRAG packet `4.92s`, usage audit `27.95s`.
+- 2026-06-21 entity usage MCP fast-path proof: a live
+  `entity_usage_audit` for `aoa_session_memory_mcp` dropped from
+  `elapsed_ms=16527.43` to `elapsed_ms=742.78` after disabling per-hit semantic
+  previews in this route and skipping broad text fallback when typed route hits
+  already include direct usage. A randomized live scenario audit across skill,
+  MCP, hook health, tool, goal, and API samples returned `6/6` passed with raw
+  previews available for proof windows in
+  `diagnostics/20260621T015349Z__entity-usage-scenario-audit__codex_goal_fastpath_20260621.json`.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

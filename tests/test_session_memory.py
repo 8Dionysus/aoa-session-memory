@@ -1736,9 +1736,13 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     }
     candidate_hits = [*result_hits, usage_hit]
     called_limits: list[int] = []
+    called_queries: list[str] = []
+    called_semantic_preview: list[bool] = []
 
     def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
         called_limits.append(int(kwargs.get("limit") or 0))
+        called_queries.append(str(kwargs.get("query") or ""))
+        called_semantic_preview.append(bool(kwargs.get("semantic_preview", True)))
         limit = int(kwargs.get("limit") or 0)
         return {"ok": True, "result_count": min(limit, len(candidate_hits)), "results": candidate_hits[:limit], "diagnostics": []}
 
@@ -1767,6 +1771,11 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
 
     assert audit["ok"] is True
     assert max(called_limits) >= 12
+    assert set(called_queries) == {""}
+    assert audit["quality"]["text_search_skipped"] is True
+    assert audit["quality"]["route_usage_hit_count_before_text_fallback"] == 1
+    assert called_semantic_preview
+    assert all(value is False for value in called_semantic_preview)
     assert audit["quality"]["requested_per_route_limit"] == 3
     assert audit["quality"]["route_fetch_limit"] >= 12
     assert audit["event_count"] == 3

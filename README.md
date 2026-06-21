@@ -808,6 +808,24 @@ When the registry must stay synchronized with SQLite search, use
 snapshot and `doc_type=entity_registry` documents together. A bare
 `entity-registry --write` is only a generated snapshot refresh.
 
+Ask how an entity was actually used, with consequences and evidence refs:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --kind mcp \
+  --limit 5 \
+  --per-route-limit 5 \
+  --consequence-window 4
+```
+
+The usage audit starts from typed route signals and direct usage classes. It
+keeps the MCP-sized harvest lightweight by skipping per-hit raw semantic
+previews, and it skips broad text fallback when route hits already contain
+direct usage evidence. Use the returned raw/session refs or
+`entity-usage-neighborhood` when exact before/after evidence is needed.
+
 Query it without losing evidence routing:
 
 ```bash
