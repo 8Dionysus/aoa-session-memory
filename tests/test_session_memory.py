@@ -3111,6 +3111,137 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     assert updated["projection"]["counts"]["edge"]["has_event"] == 1
 
 
+def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_id = "session-raw-ref-prune"
+    refs = {"raw": "raw:line:7", "segment": f"sessions/{session_id}/segments/000.md#event-7", "session": f"sessions/{session_id}/session.manifest.json"}
+    event_node_id = f"event:{session_id}:000:7"
+    raw_node_id = module.graph_raw_ref_node_id(session_id, refs["raw"])
+    route_node_id = module.graph_route_node_id("skill", "aoa-decision")
+    has_raw_ref_edge_id = module.graph_edge_id(event_node_id, raw_node_id, "has_raw_ref")
+    route_edge_id = module.graph_edge_id(event_node_id, route_node_id, "mentions_route_signal")
+    contribution = {
+        "source": {
+            "source_key": "segment:session-raw-ref-prune:000",
+            "source_type": "segment",
+            "session_id": session_id,
+            "session_label": "2026-06-21__001__raw-ref-prune",
+            "segment_id": "000",
+            "source_path": f"sessions/{session_id}/segments/000.index.json",
+            "source_paths": [f"sessions/{session_id}/segments/000.index.json"],
+            "source_sha": "sha-raw-ref-prune",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {
+                "id": event_node_id,
+                "type": "event",
+                "title": "Tool call: aoa-decision",
+                "evidence_refs": [{"session_id": session_id, "refs": refs}],
+            },
+            {
+                "id": raw_node_id,
+                "type": "raw_ref",
+                "label": refs["raw"],
+                "raw_ref": refs["raw"],
+                "evidence_refs": [{"session_id": session_id, "refs": refs}],
+            },
+            {
+                "id": route_node_id,
+                "type": "skill",
+                "route_layer": "skill",
+                "route_key": "aoa-decision",
+                "route_signal": "skill:aoa-decision",
+                "evidence_refs": [{"session_id": session_id, "refs": refs}],
+            },
+        ],
+        "edges": [
+            {
+                "id": has_raw_ref_edge_id,
+                "source": event_node_id,
+                "target": raw_node_id,
+                "type": "has_raw_ref",
+                "evidence_refs": [{"session_id": session_id, "refs": refs}],
+            },
+            {
+                "id": route_edge_id,
+                "source": event_node_id,
+                "target": route_node_id,
+                "type": "mentions_route_signal",
+                "evidence_refs": [{"session_id": session_id, "refs": refs}],
+            },
+        ],
+    }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+
+    dry_run = module.graph_raw_ref_prune(aoa_root=aoa_root, write_report=True)
+    assert dry_run["ok"] is True
+    assert dry_run["mutates"] is False
+    assert dry_run["affected_row_count"] == 0
+    assert dry_run["candidate_aggregate_row_count"] == 2
+    assert dry_run["action_count_basis"] == "aggregate_projection_counts_contributions_measured_on_apply"
+    assert dry_run["execution_profile"] == module.GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE
+    assert dry_run["before_counts"]["raw_ref_node_count"] == 1
+    assert dry_run["after_counts"]["raw_ref_node_count"] == 1
+    assert Path(dry_run["report_json"]).exists()
+    assert Path(dry_run["report_markdown"]).exists()
+
+    blocked_payload = module.graph_raw_ref_prune(aoa_root=aoa_root, apply=True, min_free_gb=10**9)
+    assert blocked_payload["ok"] is False
+    assert blocked_payload["mutates"] is False
+    assert blocked_payload["status"] == "preflight_failed"
+    assert "graph_raw_ref_prune_low_disk_headroom" in blocked_payload["diagnostics"]
+    conn = sqlite3.connect(str(module.graph_paths(aoa_root)["store"]))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM nodes WHERE node_type = 'raw_ref'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM edges WHERE edge_type = 'has_raw_ref'").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    apply_payload = module.graph_raw_ref_prune(aoa_root=aoa_root, apply=True, write_report=True, allow_low_free=True)
+    assert apply_payload["ok"] is True
+    assert apply_payload["mutates"] is True
+    assert apply_payload["status"] == "applied"
+    assert apply_payload["action_counts"]["nodes_raw_ref"] == 1
+    assert apply_payload["action_counts"]["edges_has_raw_ref"] == 1
+    assert apply_payload["action_counts"]["node_contribs_raw_ref"] == 1
+    assert apply_payload["action_counts"]["edge_contribs_has_raw_ref"] == 1
+    assert apply_payload["after_counts"]["raw_ref_node_count"] == 0
+    assert apply_payload["after_counts"]["has_raw_ref_edge_count"] == 0
+    assert Path(apply_payload["report_json"]).exists()
+    assert Path(apply_payload["report_markdown"]).exists()
+
+    conn = sqlite3.connect(str(module.graph_paths(aoa_root)["store"]))
+    conn.row_factory = sqlite3.Row
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM nodes WHERE node_type = 'raw_ref'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM edges WHERE edge_type = 'has_raw_ref'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM node_contribs WHERE node_type = 'raw_ref'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM edge_contribs WHERE edge_type = 'has_raw_ref'").fetchone()[0] == 0
+        event_contrib = json.loads(conn.execute("SELECT payload_json FROM node_contribs WHERE node_id = ?", (event_node_id,)).fetchone()["payload_json"])
+        route_edge = conn.execute("SELECT payload_json FROM edge_contribs WHERE edge_id = ?", (route_edge_id,)).fetchone()
+        metadata = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM metadata").fetchall()}
+    finally:
+        conn.close()
+    assert event_contrib["evidence_refs"][0]["refs"]["raw"] == refs["raw"]
+    assert route_edge is not None
+    assert metadata["graph_raw_ref_prune_policy"] == "generated_projection_rows_only_v1"
+    assert metadata["graph_raw_ref_source_count_summary_status"] == "graph_sources_counts_not_rewritten"
+
+    cardinality = module.graph_cardinality(aoa_root=aoa_root)
+    assert cardinality["projection"]["counts"]["node"]["event"] == 1
+    assert "raw_ref" not in cardinality["projection"]["counts"]["node"]
+    assert "has_raw_ref" not in cardinality["projection"]["counts"]["edge"]
+
+
 def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"

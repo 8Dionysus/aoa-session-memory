@@ -391,6 +391,15 @@ the materialized `graph_type_counts` projection and should stay interactive;
 `graph-cardinality --refresh` is the heavy repair/materialization route and
 must be run through the machine resource lane on large live stores. Do not use
 ad hoc `GROUP BY node_type/edge_type` scans as the normal agent path.
+When old live graph stores still contain generated standalone `raw_ref` nodes
+and `has_raw_ref` edges, use `graph-raw-ref-prune` as the bounded projection
+repair. It deletes only generated graph materialization rows, keeps raw/session
+evidence refs in event and contribution packets, updates graph type counts, and
+does not run `VACUUM`. The apply path is a `manual-bulk` single-transaction
+delete with a default disk-headroom preflight (`--min-free-gb 20`) because WAL
+growth can be large before checkpoint. Dry-run reports aggregate candidates
+from materialized graph type counts; contribution-row delete counts are measured
+only during apply.
 
 Use `storage-maintenance` for the current safe live shrink lane. It only runs
 SQLite WAL checkpoint/truncate for the graph and search stores, reports busy
@@ -935,6 +944,7 @@ prune the snapshots after proof/export:
 
 ```bash
 python3 scripts/aoa_session_memory.py graph-prune-sidecar --apply --write-report
+python3 scripts/aoa_session_memory.py graph-raw-ref-prune --apply --min-free-gb 20 --write-report
 ```
 
 A fully absent sidecar is `not_exported`, not a freshness failure, as long as

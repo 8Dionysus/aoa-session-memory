@@ -321,6 +321,27 @@ current truth. If the gate reports `needs_offline_graph_build`, verify host
 disk/time budget before running a full `graph-build all --write
 --force-large-export`.
 
+Older live graph stores may still contain standalone `raw_ref` nodes and
+`has_raw_ref` edges from the previous materialization policy. New graph builds
+keep raw refs in event/contribution evidence packets instead. Prune those
+generated rows without touching raw/session evidence with:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-raw-ref-prune \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --min-free-gb 20 \
+  --write-report
+```
+
+This is a `manual-bulk` single-transaction delete route. Before `--apply` it
+checks disk headroom because SQLite may create a large WAL before checkpoint;
+use `--allow-low-free` only when the operator has explicitly reserved capacity
+another way. The command updates graph type counts and creates SQLite freelist
+pages; it does not run `VACUUM`, so the physical `graph.sqlite3` file may stay
+large until a controlled rebuild or VACUUM route has enough disk headroom.
+
 For live-churn checks, keep the strict default as full truth and use
 `graph-freshness-check --stable --quiet-seconds 120` only when the operator
 wants a quiescent-subset gate. Stable mode reports recent writes under
@@ -515,7 +536,11 @@ The current safe storage route is:
   zero sample delta means topology/cardinality is the pressure center. Use
   `graph-cardinality` for fast materialized node/edge type counts; run
   `graph-cardinality --refresh` through the heavy resource lane only when the
-  projection is missing or intentionally being rebuilt.
+  projection is missing or intentionally being rebuilt. If
+  `storage-audit` reports old `raw_ref` graph materialization rows, run
+  `graph-raw-ref-prune --apply --write-report` first. This route is
+  `manual-bulk`, requires disk headroom for WAL growth, and physical file shrink
+  still needs reserved disk for VACUUM or a controlled rebuild.
 - Search store: new search rebuilds keep full text in FTS and compressed
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
 - Raw blocks: do not delete duplicated raw blocks yet. They need an

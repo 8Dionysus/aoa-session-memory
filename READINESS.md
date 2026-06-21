@@ -708,6 +708,18 @@ Last observed result:
   `status=disabled_for_new_builds_existing_store_mixed`. Do not schema-bump the
   live graph solely for this; reclaim needs a reserved rebuild/prune plus
   SQLite compaction route.
+- 2026-06-21 raw-ref prune route: `graph-raw-ref-prune` is the controlled lane
+  for that mixed-store tail. Dry-run is read-only and uses materialized
+  `graph_type_counts`; apply runs under the maintenance coordinator, deletes only
+  generated `raw_ref`/`has_raw_ref` aggregate and contribution rows, updates graph
+  type counts/metadata, checkpoints WAL, and leaves raw transcripts plus
+  session/segment/event evidence refs untouched. The command intentionally does
+  not run `VACUUM`; any physical `graph.sqlite3` shrink needs a separate
+  reserved-disk route. The live 2026-06-21 repair removed 1,602,750 `raw_ref`
+  nodes, 1,602,750 `has_raw_ref` edges, and matching contribution rows
+  (6,411,000 rows total) in about 56 minutes; the apply path is therefore
+  documented as `manual-bulk`, has a disk-headroom preflight, and should not be
+  used as an interactive query path.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

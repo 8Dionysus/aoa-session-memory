@@ -159,6 +159,8 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
+GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE = "manual_bulk_single_transaction_delete_v1"
+GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
 GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
@@ -32300,6 +32302,58 @@ class GraphSqliteStore:
         source_count = int(row[0] or 0) if row else 0
         return {"node_count": node_count, "edge_count": edge_count, "source_count": source_count}
 
+    def page_stats(self) -> dict[str, Any]:
+        return sqlite_page_stats_from_connection(self.conn, self.db_path)
+
+    def prune_raw_ref_materialization(self, *, reason: str = "operator_requested") -> dict[str, Any]:
+        before_page_stats = self.page_stats()
+        projection_ready = self.type_counts_projection_ready()
+        before_projection = self.type_counts_projection_state(limit=80)
+        now = utc_now()
+        action_counts: dict[str, int] = {}
+        try:
+            self.conn.execute("PRAGMA busy_timeout=120000")
+            for key, table, column, item_type in (
+                ("nodes_raw_ref", "nodes", "node_type", "raw_ref"),
+                ("edges_has_raw_ref", "edges", "edge_type", "has_raw_ref"),
+                ("node_contribs_raw_ref", "node_contribs", "node_type", "raw_ref"),
+                ("edge_contribs_has_raw_ref", "edge_contribs", "edge_type", "has_raw_ref"),
+            ):
+                cursor = self.conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (item_type,))
+                action_counts[key] = max(0, int_value(cursor.rowcount))
+            if projection_ready:
+                self._apply_type_count_delta("node", Counter({"raw_ref": action_counts["nodes_raw_ref"]}), Counter())
+                self._apply_type_count_delta("edge", Counter({"has_raw_ref": action_counts["edges_has_raw_ref"]}), Counter())
+                self._upsert_metadata("graph_type_counts_graph_updated_at", now)
+            elif action_counts["nodes_raw_ref"] or action_counts["edges_has_raw_ref"]:
+                self._upsert_metadata("graph_type_counts_status", "stale_after_raw_ref_prune")
+            self._upsert_metadata("updated_at", now)
+            self._upsert_metadata("graph_raw_ref_pruned_at", now)
+            self._upsert_metadata("graph_raw_ref_prune_policy", "generated_projection_rows_only_v1")
+            self._upsert_metadata("graph_raw_ref_pruned_row_count", sum(action_counts.values()))
+            self._upsert_metadata("graph_raw_ref_source_count_summary_status", "graph_sources_counts_not_rewritten")
+            self._upsert_metadata("graph_raw_ref_materialization_policy", GRAPH_RAW_REF_MATERIALIZATION_POLICY)
+            self._upsert_metadata("graph_materialize_raw_ref_nodes", "1" if GRAPH_MATERIALIZE_RAW_REF_NODES else "0")
+            self.conn.commit()
+        except sqlite3.Error:
+            self.conn.rollback()
+            raise
+        after_page_stats = self.page_stats()
+        after_projection = self.type_counts_projection_state(limit=80)
+        return {
+            "status": "applied",
+            "reason": reason,
+            "projection_was_ready": projection_ready,
+            "before_page_stats": before_page_stats,
+            "after_page_stats": after_page_stats,
+            "before_projection": before_projection,
+            "after_projection": after_projection,
+            "action_counts": action_counts,
+            "affected_row_count": sum(action_counts.values()),
+            "sqlite_freelist_delta_bytes": int_value(after_page_stats.get("freelist_bytes")) - int_value(before_page_stats.get("freelist_bytes")),
+            "source_count_summary_status": "graph_sources_counts_not_rewritten",
+        }
+
     def source_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) FROM graph_sources").fetchone()
         return int(row[0] or 0) if row else 0
@@ -35211,6 +35265,288 @@ def human_size(size_bytes: int) -> str:
     return f"{size:.1f} TiB"
 
 
+def sqlite_page_stats_from_connection(conn: sqlite3.Connection, db_path: Path) -> dict[str, Any]:
+    page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+    page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+    freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    wal_path = Path(str(db_path) + "-wal")
+    shm_path = Path(str(db_path) + "-shm")
+    return {
+        "path": str(db_path),
+        "size_bytes": path_total_size(db_path),
+        "size_human": human_size(path_total_size(db_path)),
+        "wal_bytes": path_total_size(wal_path),
+        "wal_human": human_size(path_total_size(wal_path)),
+        "shm_bytes": path_total_size(shm_path),
+        "shm_human": human_size(path_total_size(shm_path)),
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_count": freelist_count,
+        "allocated_bytes": page_size * page_count,
+        "allocated_human": human_size(page_size * page_count),
+        "freelist_bytes": page_size * freelist_count,
+        "freelist_human": human_size(page_size * freelist_count),
+    }
+
+
+def graph_raw_ref_prune_disk_preflight(
+    graph_store_path: Path,
+    *,
+    min_free_gb: float = GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB,
+    allow_low_free: bool = False,
+) -> dict[str, Any]:
+    min_free_bytes = max(0, int(float(min_free_gb) * 1024 * 1024 * 1024))
+    usage_path = graph_store_path.parent
+    if not usage_path.exists():
+        for candidate in (usage_path, *usage_path.parents):
+            if candidate.exists():
+                usage_path = candidate
+                break
+    try:
+        usage = shutil.disk_usage(usage_path)
+        free_bytes = int(usage.free)
+        total_bytes = int(usage.total)
+        used_bytes = int(usage.used)
+        ok = bool(allow_low_free or min_free_bytes <= 0 or free_bytes >= min_free_bytes)
+        status = "ok" if ok else "blocked_low_disk_headroom"
+        diagnostics = [] if ok else ["graph_raw_ref_prune_low_disk_headroom"]
+        return {
+            "ok": ok,
+            "status": status,
+            "path": str(usage_path),
+            "free_bytes": free_bytes,
+            "free_human": human_size(free_bytes),
+            "used_bytes": used_bytes,
+            "used_human": human_size(used_bytes),
+            "total_bytes": total_bytes,
+            "total_human": human_size(total_bytes),
+            "min_free_gb": float(min_free_gb),
+            "min_free_bytes": min_free_bytes,
+            "min_free_human": human_size(min_free_bytes),
+            "allow_low_free": bool(allow_low_free),
+            "diagnostics": diagnostics,
+            "note": "Apply is a manual-bulk single-transaction delete and can create a large SQLite WAL before checkpoint.",
+        }
+    except OSError as exc:
+        return {
+            "ok": bool(allow_low_free),
+            "status": "disk_usage_error_allowed" if allow_low_free else "disk_usage_error",
+            "path": str(usage_path),
+            "min_free_gb": float(min_free_gb),
+            "min_free_bytes": min_free_bytes,
+            "min_free_human": human_size(min_free_bytes),
+            "allow_low_free": bool(allow_low_free),
+            "diagnostics": [f"disk_usage_error:{exc}"],
+            "note": "Could not inspect disk headroom before graph raw-ref prune apply.",
+        }
+
+
+def graph_raw_ref_prune_markdown(payload: dict[str, Any]) -> str:
+    before_store = payload.get("before_store") if isinstance(payload.get("before_store"), dict) else {}
+    after_store = payload.get("after_store") if isinstance(payload.get("after_store"), dict) else {}
+    action_counts = payload.get("action_counts") if isinstance(payload.get("action_counts"), dict) else {}
+    before_counts = payload.get("before_counts") if isinstance(payload.get("before_counts"), dict) else {}
+    after_counts = payload.get("after_counts") if isinstance(payload.get("after_counts"), dict) else {}
+    checkpoint = payload.get("wal_checkpoint") if isinstance(payload.get("wal_checkpoint"), dict) else {}
+    disk_preflight = payload.get("disk_preflight") if isinstance(payload.get("disk_preflight"), dict) else {}
+    lines = [
+        "# Graph Raw Ref Prune",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- execution_profile: `{payload.get('execution_profile')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- affected_row_count: `{payload.get('affected_row_count')}`",
+        f"- candidate_aggregate_row_count: `{payload.get('candidate_aggregate_row_count')}`",
+        f"- sqlite_freelist_delta: `{payload.get('sqlite_freelist_delta_human')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Counts",
+        "",
+        "| type | before | after |",
+        "| --- | ---: | ---: |",
+        f"| `raw_ref nodes` | `{before_counts.get('raw_ref_node_count')}` | `{after_counts.get('raw_ref_node_count')}` |",
+        f"| `has_raw_ref edges` | `{before_counts.get('has_raw_ref_edge_count')}` | `{after_counts.get('has_raw_ref_edge_count')}` |",
+        "",
+        "## Actions",
+        "",
+        "| action | rows |",
+        "| --- | ---: |",
+    ]
+    for key, value in sorted(action_counts.items()):
+        lines.append(f"| `{key}` | `{value}` |")
+    lines.extend(
+        [
+            "",
+            "## SQLite",
+            "",
+            "| phase | db size | wal | freelist |",
+            "| --- | ---: | ---: | ---: |",
+            f"| before | `{before_store.get('size_human')}` | `{(before_store.get('wal') or {}).get('size_human') if isinstance(before_store.get('wal'), dict) else before_store.get('wal_human')}` | `{before_store.get('freelist_human')}` |",
+            f"| after | `{after_store.get('size_human')}` | `{(after_store.get('wal') or {}).get('size_human') if isinstance(after_store.get('wal'), dict) else after_store.get('wal_human')}` | `{after_store.get('freelist_human')}` |",
+        ]
+    )
+    if disk_preflight:
+        lines.extend(
+            [
+                "",
+                "## Disk Preflight",
+                "",
+                f"- status: `{disk_preflight.get('status')}`",
+                f"- free: `{disk_preflight.get('free_human')}`",
+                f"- min_free: `{disk_preflight.get('min_free_human')}`",
+                f"- allow_low_free: `{disk_preflight.get('allow_low_free')}`",
+                f"- note: `{disk_preflight.get('note')}`",
+            ]
+        )
+    if checkpoint:
+        lines.extend(
+            [
+                "",
+                "## WAL Checkpoint",
+                "",
+                f"- status: `{checkpoint.get('status')}`",
+                f"- reclaimed: `{checkpoint.get('reclaimed_human')}`",
+            ]
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def graph_raw_ref_prune(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    write_report: bool = False,
+    reason: str = "operator_requested",
+    min_free_gb: float = GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB,
+    allow_low_free: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    graph_store_path = graph_paths(aoa_root)["store"]
+    diagnostics: list[str] = []
+    before_projection = graph_cardinality_projection_read(aoa_root, limit=80)
+    before_counts_payload = graph_raw_ref_materialization_recommendation(aoa_root)
+    before_store = sqlite_storage_stats(graph_store_path)
+    action_counts = {
+        "nodes_raw_ref": before_counts_payload["raw_ref_node_count"],
+        "edges_has_raw_ref": before_counts_payload["has_raw_ref_edge_count"],
+        "node_contribs_raw_ref": 0,
+        "edge_contribs_has_raw_ref": 0,
+    }
+    disk_preflight = graph_raw_ref_prune_disk_preflight(
+        graph_store_path,
+        min_free_gb=min_free_gb,
+        allow_low_free=allow_low_free,
+    )
+    prune_result: dict[str, Any] = {}
+    wal_checkpoint: dict[str, Any] = {}
+    status = "dry_run"
+    if not before_store.get("ok"):
+        diagnostics.extend(str(item) for item in before_store.get("diagnostics", []) if item)
+    if apply and not graph_store_path.exists():
+        diagnostics.append("graph_store_missing")
+    if apply and not disk_preflight.get("ok"):
+        status = "preflight_failed"
+        diagnostics.extend(str(item) for item in disk_preflight.get("diagnostics", []) if item)
+    if apply and not diagnostics:
+        store = GraphSqliteStore(aoa_root)
+        try:
+            prune_result = store.prune_raw_ref_materialization(reason=reason)
+            action_counts = prune_result.get("action_counts") if isinstance(prune_result.get("action_counts"), dict) else action_counts
+            status = "applied"
+        except sqlite3.Error as exc:
+            diagnostics.append(sqlite_error_diagnostic(exc))
+            status = "sqlite_error"
+        finally:
+            store.close()
+        if status == "applied":
+            wal_checkpoint = sqlite_wal_checkpoint(graph_store_path)
+            diagnostics.extend(
+                f"wal_checkpoint:{item}"
+                for item in (wal_checkpoint.get("diagnostics", []) if isinstance(wal_checkpoint.get("diagnostics"), list) else [])
+                if item
+            )
+    after_projection = graph_cardinality_projection_read(aoa_root, limit=80)
+    after_counts_payload = graph_raw_ref_materialization_recommendation(aoa_root)
+    after_store = sqlite_storage_stats(graph_store_path)
+    affected_rows = sum(int_value(value) for value in action_counts.values()) if status == "applied" else 0
+    candidate_aggregate_rows = int_value(before_counts_payload.get("affected_row_count"))
+    before_freelist = int_value(before_store.get("freelist_bytes"))
+    after_freelist = int_value(after_store.get("freelist_bytes"))
+    freelist_delta = max(0, after_freelist - before_freelist)
+    file_delta = int_value(before_store.get("total_with_wal_bytes")) - int_value(after_store.get("total_with_wal_bytes"))
+    remaining_rows = int_value(after_counts_payload.get("affected_row_count"))
+    ok = not diagnostics and (not apply or status == "applied")
+    if status == "preflight_failed":
+        next_route = "reserve disk headroom or rerun graph-raw-ref-prune --apply --allow-low-free only with an explicit operator decision"
+    elif apply and remaining_rows:
+        next_route = "raw_ref graph materialization remains; rerun graph-raw-ref-prune --apply --write-report or use a controlled graph rebuild if rows are inconsistent"
+    elif apply:
+        next_route = "run storage-audit --write-report; physical graph.sqlite3 shrink still requires a controlled VACUUM or rebuild with reserved disk headroom"
+    elif candidate_aggregate_rows:
+        next_route = "run graph-raw-ref-prune --apply --write-report through the maintenance lane when ready; this manual-bulk route prunes generated rows but does not VACUUM the live graph store"
+    else:
+        next_route = "no generated raw_ref graph materialization rows are visible; use storage-audit --write-report if graph.sqlite3 size is still a concern"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_raw_ref_prune",
+        "generated_at": utc_now(),
+        "ok": ok,
+        "mutates": status == "applied",
+        "apply": bool(apply),
+        "status": status,
+        "reason": reason,
+        "aoa_root": str(aoa_root),
+        "store_path": str(graph_store_path),
+        "policy": GRAPH_RAW_REF_MATERIALIZATION_POLICY,
+        "materialize_raw_ref_nodes": GRAPH_MATERIALIZE_RAW_REF_NODES,
+        "execution_profile": GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE,
+        "disk_preflight": disk_preflight,
+        "truth_status": "generated_graph_projection_prune_not_memory_truth",
+        "before_counts": before_counts_payload,
+        "after_counts": after_counts_payload,
+        "before_projection": before_projection,
+        "after_projection": after_projection,
+        "before_store": before_store,
+        "after_store": after_store,
+        "prune_result": prune_result,
+        "wal_checkpoint": wal_checkpoint,
+        "action_counts": action_counts,
+        "action_count_basis": "sqlite_delete_counts" if status == "applied" else "aggregate_projection_counts_contributions_measured_on_apply",
+        "affected_row_count": affected_rows,
+        "candidate_aggregate_row_count": candidate_aggregate_rows,
+        "sqlite_freelist_delta_bytes": freelist_delta,
+        "sqlite_freelist_delta_human": human_size(freelist_delta),
+        "physical_file_delta_bytes": file_delta,
+        "physical_file_delta_human": human_size(file_delta) if file_delta >= 0 else f"-{human_size(abs(file_delta))}",
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+        "stop_line": "Only generated graph raw_ref materialization rows are pruned. Raw transcripts, session indexes, segment indexes, and event evidence_refs stay authoritative.",
+        "operator_note": "This is a manual-bulk route. On large live stores it can run for a long time and create a large WAL before checkpoint.",
+        "sqlite_file_size_note": "DELETE usually creates SQLite freelist pages; graph.sqlite3 file size does not shrink until controlled VACUUM or rebuild.",
+        "next_route": next_route,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__graph-raw-ref-prune"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, graph_raw_ref_prune_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def path_total_size(path: Path) -> int:
     if not path.exists() and not path.is_symlink():
         return 0
@@ -35699,7 +36035,7 @@ def graph_raw_ref_materialization_recommendation(aoa_root: Path) -> dict[str, An
         next_route = "evaluate whether raw_ref graph nodes are still required before disabling materialization"
     elif affected_rows:
         status = "disabled_for_new_builds_existing_store_mixed"
-        next_route = "run a controlled graph rebuild or future raw-ref-prune compaction lane when enough disk/time is reserved"
+        next_route = "run graph-raw-ref-prune --apply --write-report to prune generated rows; physical graph.sqlite3 shrink still requires controlled VACUUM or rebuild with reserved disk"
     else:
         status = "disabled_for_new_builds_no_materialized_raw_ref_nodes"
         next_route = "no raw_ref graph-node compaction is needed; keep raw refs in event evidence packets"
@@ -44433,6 +44769,37 @@ def command_graph_prune_sidecar(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_graph_raw_ref_prune(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+
+    def run_prune() -> dict[str, Any]:
+        return graph_raw_ref_prune(
+            aoa_root=root,
+            apply=args.apply,
+            write_report=args.write_report,
+            reason="operator_requested",
+            min_free_gb=args.min_free_gb,
+            allow_low_free=args.allow_low_free,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_prune,
+            owner_job="graph-raw-ref-prune",
+            mode="manual-bulk",
+            target="graph/raw_ref_materialization",
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+        )
+        if args.apply
+        else run_prune()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_cardinality(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -48839,6 +49206,19 @@ def build_parser() -> argparse.ArgumentParser:
     graph_prune_sidecar_parser.add_argument("--apply", action="store_true", help="Remove graph/nodes.jsonl, graph/edges.jsonl, and graph/index.json. Default is dry-run.")
     graph_prune_sidecar_parser.add_argument("--write-report", action="store_true", help="Write a sidecar prune report under .aoa/diagnostics.")
     graph_prune_sidecar_parser.set_defaults(func=command_graph_prune_sidecar)
+
+    graph_raw_ref_prune_parser = sub.add_parser(
+        "graph-raw-ref-prune",
+        aliases=["graph-prune-raw-ref"],
+        help="Prune generated raw_ref graph materialization rows while preserving raw/session evidence refs.",
+    )
+    graph_raw_ref_prune_parser.add_argument("--workspace-root")
+    graph_raw_ref_prune_parser.add_argument("--aoa-root")
+    graph_raw_ref_prune_parser.add_argument("--apply", action="store_true", help="Delete generated raw_ref nodes/edges and contribution rows. Default is dry-run.")
+    graph_raw_ref_prune_parser.add_argument("--write-report", action="store_true", help="Write a raw-ref prune report under .aoa/diagnostics.")
+    graph_raw_ref_prune_parser.add_argument("--min-free-gb", type=float, default=GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB, help="Minimum free disk headroom required before --apply. Default: 20 GiB.")
+    graph_raw_ref_prune_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom apply guard when the operator has reserved capacity another way.")
+    graph_raw_ref_prune_parser.set_defaults(func=command_graph_raw_ref_prune)
 
     graph_cardinality_parser = sub.add_parser(
         "graph-cardinality",
