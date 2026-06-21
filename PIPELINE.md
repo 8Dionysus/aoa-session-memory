@@ -167,9 +167,10 @@ surface, or other recurring entity appears in archived work.
 
 `entity-usage-audit` is a structured-fast route first. It queries typed route
 signals and direct usage classes with lightweight search hits, skips raw
-semantic previews on the search harvest, and only opens the broad text fallback
-when the typed route hits do not contain direct usage evidence. The payload
-exposes `text_search_skipped`, `route_hit_count_before_text_fallback`, and
+semantic previews and compressed full-body hydration on the search harvest, and
+only opens the broad text fallback when the typed route hits do not contain
+direct usage evidence. The payload exposes `text_search_skipped`,
+`route_hit_count_before_text_fallback`, and
 `route_usage_hit_count_before_text_fallback` so an agent can tell whether it got
 the fast indexed path or had to widen.
 

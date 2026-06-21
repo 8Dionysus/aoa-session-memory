@@ -1738,11 +1738,13 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     called_limits: list[int] = []
     called_queries: list[str] = []
     called_semantic_preview: list[bool] = []
+    called_hydrate_body: list[bool] = []
 
     def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
         called_limits.append(int(kwargs.get("limit") or 0))
         called_queries.append(str(kwargs.get("query") or ""))
         called_semantic_preview.append(bool(kwargs.get("semantic_preview", True)))
+        called_hydrate_body.append(bool(kwargs.get("hydrate_body", True)))
         limit = int(kwargs.get("limit") or 0)
         return {"ok": True, "result_count": min(limit, len(candidate_hits)), "results": candidate_hits[:limit], "diagnostics": []}
 
@@ -1776,6 +1778,8 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     assert audit["quality"]["route_usage_hit_count_before_text_fallback"] == 1
     assert called_semantic_preview
     assert all(value is False for value in called_semantic_preview)
+    assert called_hydrate_body
+    assert all(value is False for value in called_hydrate_body)
     assert audit["quality"]["requested_per_route_limit"] == 3
     assert audit["quality"]["route_fetch_limit"] >= 12
     assert audit["event_count"] == 3
@@ -7255,6 +7259,58 @@ def test_search_index_raw_text_uses_segment_line_limits_without_reclassifying(tm
     assert results["result_count"] == 1
     assert results["results"][0]["agent_event"] == "assistant_open_thread"
     assert results["results"][0]["refs"]["raw"] == "raw:line:2"
+
+
+def test_search_sessions_lightweight_route_skips_compressed_body_hydration(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-lightweight-route.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "search-lightweight-route", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Lightweight structured route should not hydrate compressed body."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-lightweight-route",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert indexed["ok"] is True
+
+    def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
+        raise AssertionError("lightweight structured route must not read document_bodies")
+
+    monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
+    results = module.search_sessions(
+        aoa_root=aoa_root,
+        doc_type="event",
+        limit=1,
+        explain=True,
+        semantic_preview=False,
+        hydrate_body=False,
+    )
+
+    assert results["ok"] is True
+    assert results["result_count"] == 1
+    assert results["results"][0]["preview_source"] == "search_body"
+    assert results["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
 
 
 def test_freshness_filter_preserves_search_order_before_stored_hits(tmp_path: Path) -> None:

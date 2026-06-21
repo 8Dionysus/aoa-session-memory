@@ -54,8 +54,9 @@ Build the `.aoa` session-memory mechanism end to end:
   graph, and memory surfaces; MCP access is read-only
 - Entity usage fast path: `entity-usage-audit` starts from typed route signals
   and direct usage classes, skips raw semantic previews during the indexed
-  harvest, and only falls back to broad text search when structured route hits
-  do not include direct usage evidence
+  harvest, avoids compressed full-body hydration when bounded search rows are
+  enough, and only falls back to broad text search when structured route hits do
+  not include direct usage evidence
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors
 - Incremental graph store, sidecar snapshots, and GraphRAG packets:

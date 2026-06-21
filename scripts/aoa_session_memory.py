@@ -26147,6 +26147,7 @@ def search_sessions(
     date_to: str | None = None,
     explain: bool = False,
     semantic_preview: bool = True,
+    hydrate_body: bool = True,
 ) -> dict[str, Any]:
     now = utc_now()
     provider_config = search_provider_config(aoa_root)
@@ -26288,7 +26289,7 @@ def search_sessions(
 
             def append_live_freshness_matches(candidate_rows: list[sqlite3.Row]) -> bool:
                 nonlocal scanned_candidate_count
-                candidate_body_overrides = search_document_bodies_for_rows(conn, candidate_rows)
+                candidate_body_overrides = search_document_bodies_for_rows(conn, candidate_rows) if hydrate_body else {}
                 for row in candidate_rows:
                     rowid = int_value(row["rowid"])
                     if rowid in seen_rowids:
@@ -26323,7 +26324,7 @@ def search_sessions(
             freshness_filter_diagnostics.append(f"freshness_status_filter_applied_after_live_check:{requested_freshness_status}")
             freshness_filter_diagnostics.append(f"freshness_status_candidate_count:{scanned_candidate_count}")
         else:
-            body_overrides = search_document_bodies_for_rows(conn, rows)
+            body_overrides = search_document_bodies_for_rows(conn, rows) if hydrate_body else {}
             results = [
                 compact_search_result(
                     row,
@@ -37591,6 +37592,7 @@ def entity_usage_audit(
             route_signal=route_signal_value or None,
             explain=True,
             semantic_preview=False,
+            hydrate_body=False,
         )
         route_result_summaries.append(
             {
@@ -37631,6 +37633,7 @@ def entity_usage_audit(
             doc_type="event",
             explain=True,
             semantic_preview=False,
+            hydrate_body=False,
         )
         text_result_count = int_value(text_payload.get("result_count"))
         if text_payload.get("ok"):
