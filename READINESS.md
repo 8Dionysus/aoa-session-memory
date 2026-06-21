@@ -121,11 +121,18 @@ Build the `.aoa` session-memory mechanism end to end:
   `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active;
   manual-bulk writers return a bounded
   `session_memory_maintenance_lock_conflict` packet instead of waiting
-  silently behind an active maintenance lease;
+  silently behind an active maintenance lease, and the coordinator persists the
+  refusal as `last_conflict` with requested owner/mode, blocking owner,
+  surfaces, lock wait, timeout, and skipped/deferred reason;
   `maintenance-status` exposes a `live_tail` packet over deferred live
   freshness rows with `waiting_for_quiet_window` vs `ready_for_catchup`,
   quiet-window remaining seconds, `next_ready_at`, and the typed catch-up
   command so agents do not confuse non-actionable live tail with broken search;
+  2026-06-21 live proof: manual `graph-maintenance all --apply` behind an
+  active `auto-maintenance:hot` lease returned `mutates=false` and persisted
+  `last_conflict` with `blocking_owner=auto-maintenance:hot`,
+  `requested_mode=manual-bulk`, `touched_surfaces=["graph"]`, and
+  `lock_wait_ms=5004`;
   search-deferred live sessions route through targeted
   `index-maintenance <session> --skip-graph-repair`, with graph repair kept as
   an explicit follow-up

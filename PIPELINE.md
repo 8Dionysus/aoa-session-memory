@@ -551,9 +551,12 @@ a manual catch-up.
 Manual-bulk commands use the same shared lock but must not block indefinitely
 behind an unattended timer. When the lock is still held after the bounded wait,
 they return a `session_memory_maintenance_lock_conflict` packet with
-`mutates=false`, the blocking owner, and lock-wait diagnostics. Treat that as a
-clear retry/defer signal, not as permission to start a second writer or kill the
-owner.
+`mutates=false`, the blocking owner, and lock-wait diagnostics. The coordinator
+also persists that refusal under `maintenance-coordinator.json:last_conflict`,
+including the requested owner/mode, blocking owner, touched surfaces, wait time,
+timeout, and skipped/deferred reason, so a later `maintenance-status` call can
+explain why the manual job did not mutate. Treat that as a clear retry/defer
+signal, not as permission to start a second writer or kill the owner.
 
 `maintenance-status` also exposes a `live_tail` packet for deferred live
 sources. It separates actionable dirty work from quiet-window deferral, reports

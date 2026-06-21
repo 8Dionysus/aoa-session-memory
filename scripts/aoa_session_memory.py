@@ -18276,6 +18276,7 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 "reason",
                 "touched_surfaces",
                 "deferred_reason",
+                "conflict_kind",
                 "skipped_reason",
                 "requested_mode",
                 "requested_owner_job",
@@ -18539,6 +18540,57 @@ def finish_maintenance_coordinator_job(
     return completed
 
 
+def record_maintenance_coordinator_conflict(aoa_root: Path, conflict: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now()
+    requested_owner = str(conflict.get("owner_job") or conflict.get("requested_owner_job") or "")
+    requested_mode = str(conflict.get("mode") or conflict.get("requested_mode") or "")
+    blocking_owner = conflict.get("blocking_owner") if isinstance(conflict.get("blocking_owner"), dict) else {}
+    conflict_event = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_coordinator_conflict",
+        "generated_at": now,
+        "status": str(conflict.get("status") or "skipped_lock_held"),
+        "owner_job": requested_owner,
+        "requested_owner_job": requested_owner,
+        "mode": requested_mode,
+        "requested_mode": requested_mode,
+        "target": str(conflict.get("target") or "all"),
+        "reason": str(conflict.get("reason") or "operator_requested"),
+        "touched_surfaces": sorted(str(item) for item in conflict.get("touched_surfaces", []) if item),
+        "lock_wait_ms": max(0, int_value(conflict.get("lock_wait_ms"))),
+        "lock_timeout_sec": float(conflict.get("lock_timeout_sec") or 0.0),
+        "conflict_kind": str(conflict.get("conflict_kind") or conflict.get("deferred_reason") or "lock_held"),
+        "deferred_reason": str(conflict.get("deferred_reason") or conflict.get("conflict_kind") or "lock_held"),
+        "skipped_reason": str(conflict.get("skipped_reason") or "maintenance lock is already held"),
+        "blocking_owner": blocking_owner,
+        "lock_path": str(maintenance_lock_path(aoa_root)),
+        "state_path": str(maintenance_coordinator_state_path(aoa_root)),
+    }
+    state_path = maintenance_coordinator_state_path(aoa_root)
+    state = read_maintenance_coordinator_state(aoa_root)
+    state.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_coordinator_state",
+            "generated_at": now,
+            "lock_path": str(maintenance_lock_path(aoa_root)),
+            "last_conflict": conflict_event,
+            "last_event": {
+                "status": conflict_event["status"],
+                "event_type": "conflict",
+                "owner_job": requested_owner,
+                "mode": requested_mode,
+                "blocking_owner_job": blocking_owner.get("owner_job"),
+                "blocking_mode": blocking_owner.get("mode"),
+                "touched_surfaces": conflict_event["touched_surfaces"],
+                "at": now,
+            },
+        }
+    )
+    write_json(state_path, state)
+    return conflict_event
+
+
 def maintenance_lock_snapshot(aoa_root: Path) -> dict[str, Any]:
     lock_path = maintenance_lock_path(aoa_root)
     state_path = maintenance_coordinator_state_path(aoa_root)
@@ -18571,6 +18623,7 @@ def maintenance_lock_snapshot(aoa_root: Path) -> dict[str, Any]:
         "owner": owner if active else {},
         "active_job": active_job if active or stale_active_job else {},
         "stale_active_job": stale_active_job,
+        "last_conflict": state.get("last_conflict") if isinstance(state.get("last_conflict"), dict) else {},
         "last_job": state.get("last_job") if isinstance(state.get("last_job"), dict) else {},
         "last_event": state.get("last_event") if isinstance(state.get("last_event"), dict) else {},
         "diagnostics": ["stale_active_job_without_lock"] if stale_active_job else [],
@@ -18612,7 +18665,7 @@ def run_with_maintenance_lock(
                 if lock_timeout <= 0 or time.monotonic() >= deadline:
                     lock_wait_ms = int((time.monotonic() - wait_started) * 1000)
                     conflict_kind = maintenance_lock_conflict_kind(requested_mode=mode, blocking_owner=blocking_owner)
-                    return {
+                    payload = {
                         "schema_version": SCHEMA_VERSION,
                         "artifact_type": "session_memory_maintenance_lock_conflict",
                         "generated_at": utc_now(),
@@ -18632,6 +18685,8 @@ def run_with_maintenance_lock(
                         "conflict_kind": conflict_kind,
                         "diagnostics": [conflict_kind],
                     }
+                    payload["maintenance_coordinator"] = record_maintenance_coordinator_conflict(aoa_root, payload)
+                    return payload
                 time.sleep(0.25)
         lock_wait_ms = int((time.monotonic() - wait_started) * 1000)
         owner = maintenance_owner_packet(
@@ -18890,6 +18945,25 @@ def auto_maintenance(
                         if skipped_status == "deferred_conflicting_lease"
                         else "maintenance lock is already held"
                     )
+                    coordinator_conflict = record_maintenance_coordinator_conflict(
+                        aoa_root,
+                        {
+                            "status": skipped_status,
+                            "owner_job": f"auto-maintenance:{profile}",
+                            "requested_owner_job": f"auto-maintenance:{profile}",
+                            "mode": profile,
+                            "requested_mode": profile,
+                            "target": target,
+                            "reason": reason,
+                            "touched_surfaces": auto_touched_surfaces,
+                            "lock_wait_ms": lock_wait_ms,
+                            "lock_timeout_sec": lock_timeout_sec,
+                            "conflict_kind": conflict_kind,
+                            "deferred_reason": conflict_kind,
+                            "skipped_reason": skipped_reason,
+                            "blocking_owner": blocking_owner,
+                        },
+                    )
                     return {
                         "schema_version": SCHEMA_VERSION,
                         "artifact_type": "session_memory_auto_maintenance",
@@ -18921,6 +18995,7 @@ def auto_maintenance(
                         "lock_wait_ms": lock_wait_ms,
                         "resource_launcher": resource_launcher,
                         "maintenance_coordinator": {
+                            **coordinator_conflict,
                             "status": skipped_status,
                             "deferred_reason": conflict_kind,
                             "skipped_reason": skipped_reason,
@@ -41614,6 +41689,10 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
     coordinator = payload.get("coordinator") if isinstance(payload.get("coordinator"), dict) else {}
     owner = coordinator.get("owner") if isinstance(coordinator.get("owner"), dict) else {}
     last_job = coordinator.get("last_job") if isinstance(coordinator.get("last_job"), dict) else {}
+    last_conflict = coordinator.get("last_conflict") if isinstance(coordinator.get("last_conflict"), dict) else {}
+    last_conflict_blocking_owner = (
+        last_conflict.get("blocking_owner") if isinstance(last_conflict.get("blocking_owner"), dict) else {}
+    )
     compact_coordinator = {
         "active": coordinator.get("active"),
         "lock_path": coordinator.get("lock_path"),
@@ -41653,8 +41732,45 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             )
             if key in last_job
         },
+        "last_conflict": {
+            key: last_conflict.get(key)
+            for key in (
+                "status",
+                "owner_job",
+                "requested_owner_job",
+                "mode",
+                "requested_mode",
+                "target",
+                "reason",
+                "touched_surfaces",
+                "lock_wait_ms",
+                "lock_timeout_sec",
+                "conflict_kind",
+                "deferred_reason",
+                "skipped_reason",
+                "generated_at",
+            )
+            if key in last_conflict
+        },
         "diagnostics": coordinator.get("diagnostics", []),
     }
+    if last_conflict_blocking_owner:
+        compact_coordinator["last_conflict"]["blocking_owner"] = {
+            key: last_conflict_blocking_owner.get(key)
+            for key in (
+                "job_id",
+                "owner_job",
+                "mode",
+                "profile",
+                "pid",
+                "started_at",
+                "deadline_at",
+                "target",
+                "reason",
+                "touched_surfaces",
+            )
+            if key in last_conflict_blocking_owner
+        }
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     compact_storage: dict[str, Any] = {}
     for key in ("search_db", "graph_db", "search_root", "graph_root"):

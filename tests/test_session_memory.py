@@ -8748,6 +8748,8 @@ def test_hot_auto_maintenance_defers_when_bulk_lease_is_active(tmp_path: Path, m
 
         payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
 
+    state = module.read_maintenance_coordinator_state(aoa_root)
+    last_conflict = state["last_conflict"]
     coordinator = payload["maintenance_coordinator"]
     assert payload["ok"] is True
     assert payload["status"] == "deferred_conflicting_lease"
@@ -8757,6 +8759,11 @@ def test_hot_auto_maintenance_defers_when_bulk_lease_is_active(tmp_path: Path, m
     assert coordinator["blocking_owner"]["owner_job"] == "index-maintenance"
     assert coordinator["blocking_owner"]["mode"] == "manual-bulk"
     assert coordinator["blocking_owner"]["touched_surfaces"] == ["atlas", "graph", "search"]
+    assert last_conflict["status"] == "deferred_conflicting_lease"
+    assert last_conflict["owner_job"] == "auto-maintenance:hot"
+    assert last_conflict["requested_mode"] == "hot"
+    assert last_conflict["conflict_kind"] == "hot_deferred_for_bulk_lease"
+    assert last_conflict["blocking_owner"]["owner_job"] == "index-maintenance"
 
 
 def test_manual_maintenance_lock_returns_conflict_instead_of_blocking(tmp_path: Path) -> None:
@@ -8780,6 +8787,7 @@ def test_manual_maintenance_lock_returns_conflict_instead_of_blocking(tmp_path: 
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         module.write_maintenance_lock_owner(lock_handle, owner)
+        module.write_maintenance_coordinator_active(aoa_root, owner)
         payload = module.run_with_maintenance_lock(
             aoa_root,
             fail_callback,
@@ -8790,12 +8798,24 @@ def test_manual_maintenance_lock_returns_conflict_instead_of_blocking(tmp_path: 
             lock_timeout_sec=0.0,
         )
 
+    state = module.read_maintenance_coordinator_state(aoa_root)
+    last_conflict = state["last_conflict"]
+    coordinator = payload["maintenance_coordinator"]
     assert payload["ok"] is True
     assert payload["status"] == "skipped_lock_held"
     assert payload["mutates"] is False
     assert payload["owner_job"] == "graph-maintenance"
     assert payload["blocking_owner"]["owner_job"] == "auto-maintenance:catchup"
     assert payload["conflict_kind"] == "lock_held"
+    assert coordinator["status"] == "skipped_lock_held"
+    assert coordinator["owner_job"] == "graph-maintenance"
+    assert coordinator["blocking_owner"]["owner_job"] == "auto-maintenance:catchup"
+    assert last_conflict["status"] == "skipped_lock_held"
+    assert last_conflict["owner_job"] == "graph-maintenance"
+    assert last_conflict["requested_mode"] == "manual-bulk"
+    assert last_conflict["conflict_kind"] == "lock_held"
+    assert last_conflict["blocking_owner"]["mode"] == "catchup"
+    assert state["active_job"]["owner_job"] == "auto-maintenance:catchup"
 
 
 def test_maintenance_status_reports_active_coordinator_lock(tmp_path: Path, monkeypatch: Any) -> None:
@@ -8875,6 +8895,21 @@ def test_maintenance_status_reports_active_coordinator_lock(tmp_path: Path, monk
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         module.write_maintenance_lock_owner(lock_handle, owner)
         module.write_maintenance_coordinator_active(aoa_root, owner)
+        module.record_maintenance_coordinator_conflict(
+            aoa_root,
+            {
+                "status": "skipped_lock_held",
+                "owner_job": "graph-maintenance",
+                "mode": "manual-bulk",
+                "target": "all",
+                "reason": "operator_requested",
+                "touched_surfaces": ["graph"],
+                "lock_wait_ms": 5,
+                "lock_timeout_sec": 0.0,
+                "conflict_kind": "lock_held",
+                "blocking_owner": owner,
+            },
+        )
 
         payload = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root)
 
@@ -8883,10 +8918,14 @@ def test_maintenance_status_reports_active_coordinator_lock(tmp_path: Path, monk
     assert payload["coordinator"]["owner"]["owner_job"] == "auto-maintenance:catchup"
     assert payload["coordinator"]["owner"]["mode"] == "catchup"
     assert payload["coordinator"]["owner"]["deadline_at"]
+    assert payload["coordinator"]["last_conflict"]["owner_job"] == "graph-maintenance"
+    assert payload["coordinator"]["last_conflict"]["blocking_owner"]["owner_job"] == "auto-maintenance:catchup"
     assert "search_db" in payload["storage"]
     assert "wal" in payload["storage"]["search_db"]
     assert compact["coordinator"]["active"] is True
     assert compact["coordinator"]["owner"]["touched_surfaces"]
+    assert compact["coordinator"]["last_conflict"]["conflict_kind"] == "lock_held"
+    assert compact["coordinator"]["last_conflict"]["blocking_owner"]["owner_job"] == "auto-maintenance:catchup"
 
 
 def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
