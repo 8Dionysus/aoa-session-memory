@@ -698,6 +698,16 @@ Last observed result:
   `event_mentions_registered_entity=2,297,969`, and `event/raw_ref=1,601,970`
   each. Use this projection for agent graph size/cardinality questions instead
   of ad hoc full `GROUP BY` scans.
+- 2026-06-21 raw-ref materialization policy: new/rebuilt graph sources no
+  longer emit standalone `raw_ref` nodes or `has_raw_ref` edges; raw refs remain
+  in event `evidence_refs`, which keeps raw/segment/session authority intact
+  while reducing future graph cardinality. The live graph store is intentionally
+  mixed until a controlled rebuild/prune lane runs: `storage-audit` reports
+  `graph_raw_ref_materialization_policy=event_evidence_refs_only_v1`,
+  `raw_ref_node_count=1,602,750`, `has_raw_ref_edge_count=1,602,750`, and
+  `status=disabled_for_new_builds_existing_store_mixed`. Do not schema-bump the
+  live graph solely for this; reclaim needs a reserved rebuild/prune plus
+  SQLite compaction route.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

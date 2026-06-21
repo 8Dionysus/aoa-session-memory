@@ -157,6 +157,8 @@ GRAPH_HOT_LIVE_DEFER_SECONDS = 600.0
 GRAPH_STORE_SCHEMA_VERSION = 2
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
+GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
+GRAPH_MATERIALIZE_RAW_REF_NODES = False
 GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
@@ -31644,7 +31646,7 @@ def graph_contributions_for_record(
                 }
             )
             raw_ref = str(event.get("raw_ref") or "")
-            if raw_ref:
+            if raw_ref and GRAPH_MATERIALIZE_RAW_REF_NODES:
                 raw_node_id = graph_raw_ref_node_id(session_id, raw_ref)
                 add_segment_node(
                     {
@@ -31874,6 +31876,14 @@ class GraphSqliteStore:
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             ("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("graph_raw_ref_materialization_policy", GRAPH_RAW_REF_MATERIALIZATION_POLICY),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("graph_materialize_raw_ref_nodes", "1" if GRAPH_MATERIALIZE_RAW_REF_NODES else "0"),
         )
         self.conn.commit()
 
@@ -32902,7 +32912,7 @@ def build_session_graph_legacy(
                         }
                     )
                     raw_ref = str(event.get("raw_ref") or "")
-                    if raw_ref:
+                    if raw_ref and GRAPH_MATERIALIZE_RAW_REF_NODES:
                         raw_node_id = graph_raw_ref_node_id(session_id, raw_ref)
                         add_node(
                             {
@@ -35676,6 +35686,40 @@ def graph_aggregate_payload_compaction_recommendation(
     }
 
 
+def graph_raw_ref_materialization_recommendation(aoa_root: Path) -> dict[str, Any]:
+    projection = graph_cardinality_projection_read(aoa_root, limit=80)
+    counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+    node_counts = counts.get("node") if isinstance(counts.get("node"), dict) else {}
+    edge_counts = counts.get("edge") if isinstance(counts.get("edge"), dict) else {}
+    raw_ref_node_count = int_value(node_counts.get("raw_ref"))
+    has_raw_ref_edge_count = int_value(edge_counts.get("has_raw_ref"))
+    affected_rows = raw_ref_node_count + has_raw_ref_edge_count
+    if GRAPH_MATERIALIZE_RAW_REF_NODES:
+        status = "enabled"
+        next_route = "evaluate whether raw_ref graph nodes are still required before disabling materialization"
+    elif affected_rows:
+        status = "disabled_for_new_builds_existing_store_mixed"
+        next_route = "run a controlled graph rebuild or future raw-ref-prune compaction lane when enough disk/time is reserved"
+    else:
+        status = "disabled_for_new_builds_no_materialized_raw_ref_nodes"
+        next_route = "no raw_ref graph-node compaction is needed; keep raw refs in event evidence packets"
+    return {
+        "status": status,
+        "policy": GRAPH_RAW_REF_MATERIALIZATION_POLICY,
+        "materialize_raw_ref_nodes": GRAPH_MATERIALIZE_RAW_REF_NODES,
+        "raw_ref_node_count": raw_ref_node_count,
+        "has_raw_ref_edge_count": has_raw_ref_edge_count,
+        "affected_row_count": affected_rows,
+        "estimate_status": "cardinality_only_rebuild_or_vacuum_required",
+        "estimated_reclaimable_bytes": 0,
+        "estimated_reclaimable_human": "requires controlled rebuild/prune",
+        "quality_tradeoff": "none_expected; raw refs remain in event evidence refs and raw/segment/session authority stays unchanged",
+        "speed_tradeoff": "smaller future graph stores; graph packets hydrate raw refs from event evidence instead of traversing raw_ref nodes",
+        "projection_status": projection.get("status"),
+        "next_route": next_route,
+    }
+
+
 def storage_audit(
     *,
     aoa_root: Path,
@@ -35710,6 +35754,7 @@ def storage_audit(
         table_sizes=table_sizes,
         sample=graph_store.get("aggregate_payload_compaction_sample") if isinstance(graph_store.get("aggregate_payload_compaction_sample"), dict) else {},
     )
+    raw_ref_materialization = graph_raw_ref_materialization_recommendation(aoa_root)
     sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
         search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
     )
@@ -35749,6 +35794,21 @@ def storage_audit(
                 "aggregate_table_size_human": graph_compaction["aggregate_table_size_human"],
                 "sample_delta_ratio": graph_compaction.get("sample_delta_ratio"),
                 "next_route": graph_compaction["next_route"],
+            },
+            {
+                "id": "graph_raw_ref_materialization_policy",
+                "status": raw_ref_materialization["status"],
+                "quality_tradeoff": raw_ref_materialization["quality_tradeoff"],
+                "speed_tradeoff": raw_ref_materialization["speed_tradeoff"],
+                "policy": raw_ref_materialization["policy"],
+                "materialize_raw_ref_nodes": raw_ref_materialization["materialize_raw_ref_nodes"],
+                "raw_ref_node_count": raw_ref_materialization["raw_ref_node_count"],
+                "has_raw_ref_edge_count": raw_ref_materialization["has_raw_ref_edge_count"],
+                "affected_row_count": raw_ref_materialization["affected_row_count"],
+                "estimated_reclaimable_bytes": raw_ref_materialization["estimated_reclaimable_bytes"],
+                "estimated_reclaimable_human": raw_ref_materialization["estimated_reclaimable_human"],
+                "estimate_status": raw_ref_materialization["estimate_status"],
+                "next_route": raw_ref_materialization["next_route"],
             },
             {
                 "id": "raw_block_offset_or_compressed_store",
@@ -36689,7 +36749,7 @@ def graph_from_search_results(
                 "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
             },
         )
-        if refs.get("raw"):
+        if refs.get("raw") and GRAPH_MATERIALIZE_RAW_REF_NODES:
             raw_node_id = graph_raw_ref_node_id(session_id, str(refs.get("raw")))
             graph_add_node(
                 nodes,
@@ -37288,7 +37348,10 @@ def graph_explain_packet(
         "query": query or intent_text,
         "explanation": {
             "entrypoints": "portable lexical search plus route-candidate graph expansion",
-            "graph_expansion": "bounded trace/search hits are converted into event, route-signal, raw_ref, session, and segment nodes",
+            "graph_expansion": (
+                "bounded trace/search hits are converted into event, route-signal, session, and segment nodes; "
+                "raw refs stay in event evidence refs"
+            ),
             "community_signal": "cooccurrence is route-signal co-presence around evidence events",
             "freshness": "search provider and graph packet freshness are routing checks, not authority",
             "authority": "raw/segment/session refs remain stronger than packet summaries",

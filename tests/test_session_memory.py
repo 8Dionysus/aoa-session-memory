@@ -2611,7 +2611,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert (aoa_root / "graph" / "graph.sqlite3").exists()
     assert json.loads((aoa_root / "graph" / "index.json").read_text(encoding="utf-8"))["builder"] == "sqlite_graph_store"
     assert graph["node_type_counts"]["event"] >= 1
-    assert graph["node_type_counts"]["raw_ref"] >= 1
+    assert graph["node_type_counts"].get("raw_ref", 0) == 0
+    assert graph["edge_type_counts"].get("has_raw_ref", 0) == 0
+    assert any(
+        (ref.get("refs") or {}).get("raw")
+        for node in graph["nodes"]
+        if isinstance(node, dict) and node.get("type") == "event"
+        for ref in (node.get("evidence_refs") or [])
+        if isinstance(ref, dict)
+    )
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     aggregate_edge = json.loads(conn.execute("SELECT payload_json FROM edges LIMIT 1").fetchone()[0])
     aggregate_node = json.loads(conn.execute("SELECT payload_json FROM nodes LIMIT 1").fetchone()[0])
@@ -2790,6 +2798,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert query_state["query_scope"] == "lightweight_store_availability_not_full_dirty_audit"
     assert query_state["metadata"]["graph_store_aggregate_payload_mode"] == module.GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
     assert query_state["metadata"]["graph_store_contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+    assert query_state["metadata"]["graph_raw_ref_materialization_policy"] == module.GRAPH_RAW_REF_MATERIALIZATION_POLICY
+    assert query_state["metadata"]["graph_materialize_raw_ref_nodes"] == "0"
     assert storage["artifact_type"] == "session_memory_storage_audit"
     assert storage["ok"] is True
     assert storage["graph_store"]["ok"] is True
@@ -2811,6 +2821,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert graph_recommendation["estimate_status"] == "sampled_no_payload_delta"
     assert graph_recommendation["estimated_reclaimable_bytes"] == 0
     assert graph_recommendation["aggregate_table_size_bytes"] > 0
+    raw_ref_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "graph_raw_ref_materialization_policy")
+    assert raw_ref_recommendation["policy"] == module.GRAPH_RAW_REF_MATERIALIZATION_POLICY
+    assert raw_ref_recommendation["materialize_raw_ref_nodes"] is False
+    assert raw_ref_recommendation["status"] == "disabled_for_new_builds_no_materialized_raw_ref_nodes"
+    assert raw_ref_recommendation["affected_row_count"] == 0
     search_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "search_hot_store_v3")
     assert search_recommendation["status"] == "bounded_policy_recorded"
     assert Path(storage["report_json"]).exists()
