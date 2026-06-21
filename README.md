@@ -445,6 +445,12 @@ belong to explicit deep/global provider status, not the hot scoped gate. The
 hot live-quiescence prefilter is mtime-only; it defers recently written live
 sessions without hashing full projection sources, leaving fingerprint proof to
 the bounded search/atlas freshness gates that follow.
+Schema-level, missing, empty, or corrupt search stores require a full SQLite
+rewrite. Non-`deep` auto profiles must report
+`status=deferred_full_search_rebuild_to_deep` with a deep resource-launch
+command instead of starting that rewrite from a `hot`, `backlog`, or `catchup`
+timer. Manual full rebuilds may still run `search-index all --rebuild` through
+the heavy resource lane.
 Maintenance writers also publish a coordinator packet to
 `diagnostics/maintenance-coordinator.json` while holding
 `diagnostics/auto-maintenance.lock`. `maintenance-status --full` reports the

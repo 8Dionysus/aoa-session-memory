@@ -93,7 +93,9 @@ Build the `.aoa` session-memory mechanism end to end:
   plus a small bounded graph tick with explicit graph remainder deferral),
   `backlog` (`medium`, recent index+graph repair), `catchup` (`medium`,
   full-scope bounded search/atlas catch-up without graph repair), and `deep`
-  (`heavy`, full repair); MCP remains read-only and plan-only
+  (`heavy`, full repair). Schema-level, missing, empty, or corrupt search
+  stores are deferred from non-`deep` profiles to the heavy lane instead of
+  being rebuilt by a bounded timer; MCP remains read-only and plan-only
 - Maintenance coordinator state:
   `diagnostics/maintenance-coordinator.json` plus the shared
   `diagnostics/auto-maintenance.lock` expose active owner job, mode,
@@ -589,6 +591,9 @@ Last observed result:
   orphan `.rebuild-*` file and a stale coordinator event; cleanup plus the
   successful manual-bulk run prove that schema-level full rebuilds need a
   long/heavy maintenance lane rather than the ordinary bounded catch-up timer.
+  `auto-maintenance` now enforces that route by returning
+  `deferred_full_search_rebuild_to_deep` from non-`deep` profiles when search
+  freshness requires a full rewrite.
 - 2026-06-21 MCP live route proof after schema 10 rebuild:
   `aoa_session_maintenance_status(full=true)` returned through MCP in about
   `1.45s` with search ready, graph usable, no writer, and the completed
@@ -599,10 +604,10 @@ Last observed result:
   document refs, and provider schema `10` in about `1.09s`;
   `aoa_session_entity_usage_neighborhood` returned bounded before/after
   windows in about `1.74s` with raw previews intentionally disabled for the
-  fast route. MCP inventory accepts `layer=mcp`, but direct
-  `layer=mcp_service` currently returns an unsupported-layer error even
-  though the entity registry counts MCP services separately; normalize this
-  layer alias before treating inventory layers as fully symmetric.
+  fast route. A fresh MCP stdio smoke after the inventory normalization accepts
+  `layer=mcp_service`, returns canonical `layer=mcp`, uses `source=atlas`, and
+  resolves `aoa_session_memory_mcp`; already-running Codex MCP processes need
+  a restart to load the source change.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

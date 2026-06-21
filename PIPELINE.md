@@ -458,6 +458,13 @@ route/search/atlas/graph work to `index-maintenance`. Its profiles are:
 - `deep`: full archive, heavy resource route, full repair and
   calibration-capable batch with larger aggregate refresh chunks.
 
+Full search rewrites are outside the bounded timer profiles. If the freshness
+gate reports a schema mismatch, missing/empty store, corrupt SQLite store, or
+empty route-posting/term tables, `hot`, `backlog`, and `catchup` must return
+`deferred_full_search_rebuild_to_deep` with a deep/heavy resource-launch
+command. Only `deep` or an explicit operator-run `search-index all --rebuild`
+may perform the atomic full SQLite replacement.
+
 The lock is the writer guard; `diagnostics/maintenance-coordinator.json` is the
 operator/agent explanation layer. Every writer that uses the shared maintenance
 lock should publish owner job, mode, touched projection surfaces, lock wait,

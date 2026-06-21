@@ -6631,6 +6631,66 @@ def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: P
     assert len(calls["freshness"]) == 2
 
 
+def test_catchup_auto_maintenance_defers_full_search_rebuild_to_deep(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {"freshness": []}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness"].append(kwargs)
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 282,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": False,
+            "diagnostics": ["index_maintenance_needed"],
+            "search_index": {
+                "status": "stale",
+                "needs_refresh": True,
+                "reasons": ["search_schema_mismatch"],
+                "dirty_session_count": 0,
+            },
+            "atlas_index": {"status": "current", "needs_refresh": False, "dirty_session_count": 0},
+            "graph_store": {"status": "current", "needs_maintenance": False},
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_: (_ for _ in ()).throw(AssertionError("catchup should use route-cache freshness")))
+    monkeypatch.setattr(module, "maintain_indexes", lambda **_: (_ for _ in ()).throw(AssertionError("catchup must not start a full search rebuild")))
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "deferred_full_search_rebuild_to_deep"
+    assert payload["mutates"] is False
+    assert payload["search_rebuild_deferred_to_deep"] is True
+    assert payload["search_full_rebuild_reasons"] == ["search_schema_mismatch"]
+    assert payload["maintenance"]["status"] == "deferred_full_search_rebuild_to_deep"
+    assert payload["maintenance"]["action_counts"] == {"deferred": 1}
+    assert payload["maintenance"]["actions"][0]["id"] == "defer_search_full_rebuild"
+    assert payload["maintenance"]["actions"][0]["status"] == "deferred"
+    assert payload["maintenance"]["actions"][0]["command"][:4] == [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "auto-maintenance",
+        "deep",
+    ]
+    assert "deep" in payload["deep_resource_launcher"]
+    assert "--class" in payload["deep_resource_launcher"]
+    assert "heavy" in payload["deep_resource_launcher"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+    assert len(calls["freshness"]) == 1
+
+
 def test_catchup_auto_maintenance_does_not_hide_hard_failures(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

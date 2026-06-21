@@ -17979,6 +17979,7 @@ def auto_maintenance_profile(profile: str) -> dict[str, Any]:
 def auto_maintenance_resource_launcher(
     *,
     profile: str,
+    target: str = "all",
     workspace_root: Path,
     aoa_root: Path,
     apply: bool,
@@ -18003,6 +18004,7 @@ def auto_maintenance_resource_launcher(
         str(Path(__file__).resolve()),
         "auto-maintenance",
         profile,
+        target,
         "--workspace-root",
         str(workspace_root),
         "--aoa-root",
@@ -18587,6 +18589,21 @@ def expected_catchup_remaining_diagnostic(diagnostic: str) -> bool:
     return diagnostic.endswith(":route_signal_classifier_mismatch")
 
 
+SEARCH_FULL_REBUILD_STATUSES = {"missing", "empty", "sqlite_error"}
+SEARCH_FULL_REBUILD_REASONS = {"search_schema_mismatch", "search_route_index_empty", "search_route_terms_empty"}
+
+
+def auto_maintenance_search_full_rebuild_reasons(freshness: dict[str, Any]) -> list[str]:
+    search_state = freshness.get("search_index") if isinstance(freshness.get("search_index"), dict) else {}
+    status = str(search_state.get("status") or "")
+    rebuild_reasons: list[str] = []
+    if status in SEARCH_FULL_REBUILD_STATUSES:
+        rebuild_reasons.append(f"search_status:{status}")
+    reasons = search_state.get("reasons") if isinstance(search_state.get("reasons"), list) else []
+    rebuild_reasons.extend(str(reason) for reason in reasons if str(reason) in SEARCH_FULL_REBUILD_REASONS)
+    return sorted(set(rebuild_reasons))
+
+
 def auto_maintenance_expected_catchup_remaining(
     *,
     profile: str,
@@ -18732,6 +18749,7 @@ def auto_maintenance(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     resource_launcher = auto_maintenance_resource_launcher(
         profile=profile,
+        target=target,
         workspace_root=workspace_root,
         aoa_root=aoa_root,
         apply=apply,
@@ -18978,6 +18996,158 @@ def auto_maintenance(
                 "graph_deferred_by_budget": False,
                 "expected_catchup_remaining": False,
                 "hard_diagnostics": [],
+                "deferred_graph_job": "",
+                "deferred_graph_next": "",
+                "diagnostics": [],
+                "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
+                "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
+            }
+            payload = finalize_auto_payload(payload)
+            if write_report:
+                diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                stem = f"{compact_stamp()}__auto-maintenance-{profile}"
+                report_json = diagnostics_dir / f"{stem}.json"
+                report_md = diagnostics_dir / f"{stem}.md"
+                write_json(report_json, payload)
+                write_markdown(report_md, auto_maintenance_markdown(payload))
+                payload["report_json"] = str(report_json)
+                payload["report_markdown"] = str(report_md)
+            return payload
+        search_full_rebuild_reasons = auto_maintenance_search_full_rebuild_reasons(freshness_before)
+        if effective_repair_indexes and profile != "deep" and search_full_rebuild_reasons:
+            work_counts = auto_maintenance_freshness_work_counts(freshness_before)
+            search_state = freshness_before.get("search_index") if isinstance(freshness_before.get("search_index"), dict) else {}
+            atlas_state = freshness_before.get("atlas_index") if isinstance(freshness_before.get("atlas_index"), dict) else {}
+            graph_state = freshness_before.get("graph_store") if isinstance(freshness_before.get("graph_store"), dict) else {}
+            deep_command = [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "auto-maintenance",
+                "deep",
+                target,
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--apply",
+                "--write-report",
+            ]
+            deep_resource_launcher = auto_maintenance_resource_launcher(
+                profile="deep",
+                target=target,
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                apply=True,
+                write_report=True,
+            )
+            deferred_action = normalize_maintenance_action(
+                {
+                    "id": "defer_search_full_rebuild",
+                    "needed": True,
+                    "reason": "search_full_rebuild_requires_deep_profile",
+                    "status": "deferred",
+                    "command": deep_command,
+                },
+                action_kind="full_rebuild",
+                selection_count=work_counts["selected_count"],
+                dirty_count=1,
+                deferred_count=1,
+                skip_reason="search_full_rebuild_requires_deep_profile",
+            )
+            maintenance = {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "index_maintenance",
+                "generated_at": now,
+                "ok": True,
+                "status": "deferred_full_search_rebuild_to_deep",
+                "mutates": False,
+                "apply": apply,
+                "target": target,
+                "since": effective_since,
+                "until": until,
+                "limit": effective_limit,
+                "selection_source": "auto_maintenance_search_full_rebuild_guard",
+                "selection_scope": selection_scope,
+                "reason": f"auto_maintenance:{profile}:{reason}",
+                "repair_indexes": effective_repair_indexes,
+                "repair_graph": effective_repair_graph,
+                "index_repair_needed": True,
+                "graph_repair_needed": bool(freshness_before.get("needs_graph_maintenance")),
+                "repair_limit": effective_repair_limit,
+                "selected_count": work_counts["selected_count"],
+                "route_drift_count": work_counts["route_drift_count"],
+                "search_dirty_session_count": work_counts["search_dirty_session_count"],
+                "search_state_refresh_candidate_count": 0,
+                "search_state_refresh_count": 0,
+                "search_reindex_candidate_count": 0,
+                "search_reindex_session_count": 0,
+                "search_repair_remaining_count": work_counts["selected_count"],
+                "search_repair_limited": True,
+                "search_rebuild_deferred_to_deep": True,
+                "search_full_rebuild_reasons": search_full_rebuild_reasons,
+                "atlas_dirty_session_count": work_counts["atlas_dirty_session_count"],
+                "atlas_repair_session_count": 0,
+                "atlas_repair_remaining_count": 0,
+                "atlas_repair_limited": False,
+                "deferred_session_count": 1,
+                "deferred_live_selection_count": int_value(selection_scope.get("deferred_live_session_count")),
+                "search_index": search_state,
+                "atlas_index": atlas_state,
+                "graph_store": graph_state,
+                "action_counts": {"deferred": 1},
+                "actions": [deferred_action],
+                "elapsed_ms": 0,
+                "diagnostics": [],
+            }
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "session_memory_auto_maintenance",
+                "generated_at": now,
+                "ok": True,
+                "status": "deferred_full_search_rebuild_to_deep",
+                "mutates": False,
+                "apply": apply,
+                "profile": profile,
+                "target": target,
+                "since": effective_since,
+                "until": until,
+                "limit": effective_limit,
+                "selection_scope": selection_scope,
+                "repair_limit": effective_repair_limit,
+                "resource_class": effective_resource_class,
+                "resource_kind": effective_resource_kind,
+                "timeout_sec": effective_timeout_sec,
+                "budget_seconds": effective_budget_seconds,
+                "repair_indexes": effective_repair_indexes,
+                "repair_graph": effective_repair_graph,
+                "allow_deferred_graph": allow_deferred_graph,
+                "max_raw_bytes": effective_max_raw_bytes,
+                "token_max_raw_bytes": effective_token_max_raw_bytes,
+                "graph_batch_limit": effective_graph_batch_limit,
+                "graph_refresh_chunk_size": effective_graph_refresh_chunk_size,
+                "graph_max_refresh_nodes": effective_graph_max_refresh_nodes,
+                "graph_max_refresh_edges": effective_graph_max_refresh_edges,
+                "deferred_graph_job_budget_seconds": deferred_graph_job_budget_seconds,
+                "ref_sample_limit": effective_ref_sample_limit,
+                "sample_audit": effective_sample_audit,
+                "progress_every": progress_every,
+                "lock_path": str(lock_path),
+                "resource_launcher": resource_launcher,
+                "deep_resource_launcher": deep_resource_launcher,
+                "deep_next_command": deep_command,
+                "freshness_before": freshness_before,
+                "preflight_diagnostics": [f"search_full_rebuild_required:{reason}" for reason in search_full_rebuild_reasons],
+                "maintenance": maintenance,
+                "freshness_after": freshness_before,
+                "deferred_live_after": False,
+                "deferred_live_selection_count": int_value(selection_scope.get("deferred_live_session_count")),
+                "deferred_graph_after": False,
+                "graph_deferred_by_budget": False,
+                "expected_catchup_remaining": False,
+                "hard_diagnostics": [],
+                "search_rebuild_deferred_to_deep": True,
+                "search_full_rebuild_reasons": search_full_rebuild_reasons,
                 "deferred_graph_job": "",
                 "deferred_graph_next": "",
                 "diagnostics": [],
