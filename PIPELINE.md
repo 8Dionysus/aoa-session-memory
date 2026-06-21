@@ -253,6 +253,12 @@ Search schema 10 additionally caps route postings for aggregate documents
 route postings uncapped. Aggregate route fields are ordered by route-signal
 frequency before capping, so the retained aggregate postings are the strongest
 signals rather than alphabetic noise.
+Every successful `search-index` run refreshes `search/catalog.json`. The
+catalog records `session_id`, label, date, freshness, schema versions,
+document count, active projection, and monthly shard key. While shard DBs are
+not materialized, `active_projection=monolith_fallback` must remain explicit.
+Future shard fan-out should start from this catalog instead of rediscovering
+session buckets through broad monolith scans.
 
 ### PostCompact
 

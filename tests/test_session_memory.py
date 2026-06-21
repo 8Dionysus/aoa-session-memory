@@ -7464,13 +7464,27 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert indexed["inline_optimize_policy"]["rebuild_every"] == 0
     assert indexed["inline_optimize_policy"]["incremental_every"] == module.SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY
     assert indexed["inline_optimize_count"] == 0
+    assert indexed["search_catalog"]["status"] == "current"
+    assert indexed["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert indexed["search_catalog"]["shard_strategy"] == module.SEARCH_SHARD_STRATEGY
     phase_names = {item.get("phase") for item in indexed["phase_timings"]}
     assert {"session_bulk_index", "sqlite_index_build", "entity_registry_refresh"}.issubset(phase_names)
     assert indexed["session_document_count"] == 2
     assert indexed["event_document_count"] == 6
     assert indexed["incident_document_count"] >= 1
     assert Path(indexed["db_path"]).exists()
+    assert module.search_catalog_path(aoa_root).exists()
     assert Path(indexed["report_json"]).exists()
+    catalog = module.read_search_catalog(aoa_root)
+    assert catalog["ok"] is True
+    assert catalog["status"] == "current"
+    assert catalog["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert catalog["shard_strategy"] == module.SEARCH_SHARD_STRATEGY
+    assert catalog["session_count"] == 2
+    assert any(item.get("shard") == "month/2026-05" for item in catalog["sessions"])
+    search_session_catalog = next(item for item in catalog["sessions"] if item.get("session_id") == "search-index-session")
+    assert search_session_catalog["schema_versions"]["search_schema_version"] == str(module.SEARCH_SCHEMA_VERSION)
+    assert search_session_catalog["freshness"]["status"] == "current"
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     body_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
     payload_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_payload_storage_mode",)).fetchone()[0]
@@ -7503,6 +7517,8 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert hook_hit["refs"]["raw"] == "raw:line:5"
     assert hook_hit["refs"]["segment"]
     assert hook_hit["refs"]["raw_block"] == "raw/blocks/000__initial-to-latest.raw.jsonl"
+    assert hook_hit["search_catalog"]["shard"] == "month/2026-05"
+    assert hook_hit["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
     assert hook_hit["freshness"]["status"] == "fresh"
     assert hook_hit["explain"]["why_this_is_not_authority"]
 

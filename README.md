@@ -820,6 +820,19 @@ row, and raw/segment refs remain authoritative; the cap prevents aggregate
 documents from multiplying path/entity/mechanic postings into tens of millions
 of SQLite rows.
 
+Successful `search-index` runs also refresh `search/catalog.json`. The catalog
+maps each indexed session to its current freshness, schema versions, active
+projection, and future monthly shard key. Until monthly shard DBs are
+materialized, the active projection is `monolith_fallback`; the catalog is the
+route map for sharding, not a replacement for raw/session indexes or the search
+DB.
+
+```bash
+python3 scripts/aoa_session_memory.py search-catalog \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index
 build phase. Reports include phase timings for bulk session indexing, SQLite

@@ -46,8 +46,12 @@ Build the `.aoa` session-memory mechanism end to end:
   `schemas/atlas-route-entry.schema.json`
 - Distillation routes: `config/event-distillation-routes.json`
 - Batch distillation policy: `config/batch-distillation-policy.json`
-- Portable search route: `search-index`, `search`, runtime `search/`, and
-  `skills/aoa-session-search`
+- Portable search route: `search-index`, `search`, `search-catalog`, runtime
+  `search/`, generated `search/catalog.json`, and `skills/aoa-session-search`
+  (`2026-06-21T09:40:03Z` live catalog: `ok=true`, `status=current`,
+  `session_count=282`, `shard_count=3`, `active_projection=monolith_fallback`,
+  diagnostics report
+  `diagnostics/20260621T094003Z__search-catalog.json`)
 - Generated entity registry: `entity-registry`,
   `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
