@@ -3911,6 +3911,117 @@ def test_route_cache_hot_gate_scoped_filters_scan_selected_records(tmp_path: Pat
     assert payload["selected_count"] == 1
 
 
+def test_sqlite_search_index_state_scoped_uses_session_state_without_global_counts(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    conn = module.init_search_db(db_path, rebuild=True)
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(module.SEARCH_SCHEMA_VERSION)))
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", "2026-06-20T00:00:00Z"))
+    doc = conn.execute(
+        """
+        INSERT INTO documents (id, doc_type, session_id, session_label, payload_json)
+        VALUES ('doc-1', 'event', 'scoped-session', '2026-06-15__001__scoped-hot-gate', '{}')
+        """
+    )
+    route = conn.execute(
+        "INSERT INTO route_terms (layer, key, route_signal) VALUES ('entity', 'skill:aoa-decision', 'entity:skill:aoa-decision')"
+    )
+    conn.execute("INSERT INTO document_routes (doc_rowid, route_id) VALUES (?, ?)", (doc.lastrowid, route.lastrowid))
+    conn.execute(
+        """
+        INSERT INTO session_index_state (
+            session_id, session_label, source_fingerprint, source_latest_mtime,
+            search_schema_version, route_signal_classifier_version, indexed_at,
+            document_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "scoped-session",
+            "2026-06-15__001__scoped-hot-gate",
+            "fingerprint-1",
+            12.0,
+            str(module.SEARCH_SCHEMA_VERSION),
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            "2026-06-20T00:00:00Z",
+            7,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    real_connect = module.connect_existing_search_db
+
+    class GuardedConnection:
+        def __init__(self, wrapped: sqlite3.Connection) -> None:
+            self.wrapped = wrapped
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            normalized = " ".join(str(sql).split()).upper()
+            if "GROUP BY DOC_TYPE" in normalized or "COUNT(*) FROM DOCUMENTS" in normalized:
+                raise AssertionError("scoped search state must not run global document counts")
+            return self.wrapped.execute(sql, *args, **kwargs)
+
+        def close(self) -> None:
+            self.wrapped.close()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.wrapped, name)
+
+    monkeypatch.setattr(
+        module,
+        "connect_existing_search_db",
+        lambda path, *, timeout=1.0: GuardedConnection(real_connect(path, timeout=timeout)),
+    )
+    monkeypatch.setattr(
+        module,
+        "search_route_storage_counts",
+        lambda _conn: (_ for _ in ()).throw(AssertionError("scoped search state must not count global route storage")),
+    )
+
+    record = {
+        "session_id": "scoped-session",
+        "session_label": "2026-06-15__001__scoped-hot-gate",
+        "path": str(aoa_root / "sessions" / "2026-06-15__001__scoped-hot-gate"),
+    }
+    clean = module.sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime=12.0,
+        records=[record],
+        projection_fingerprints=[
+            {
+                "session_id": "scoped-session",
+                "session_label": "2026-06-15__001__scoped-hot-gate",
+                "fingerprint": "fingerprint-1",
+            }
+        ],
+    )
+
+    assert clean["status"] == "current"
+    assert clean["count_mode"] == "scoped_session_state"
+    assert clean["document_count"] == 7
+    assert clean["route_index_count"] is None
+    assert clean["truth_status"] == "scoped_search_session_state_no_document_count_scan"
+
+    dirty = module.sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime=13.0,
+        records=[record],
+        projection_fingerprints=[
+            {
+                "session_id": "scoped-session",
+                "session_label": "2026-06-15__001__scoped-hot-gate",
+                "fingerprint": "fingerprint-2",
+            }
+        ],
+    )
+
+    assert dirty["status"] == "stale"
+    assert dirty["needs_refresh"] is True
+    assert dirty["dirty_session_ids"] == ["scoped-session"]
+    assert "session_projection_dirty" in dirty["reasons"]
+
+
 def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)

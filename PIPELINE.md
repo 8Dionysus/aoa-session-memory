@@ -483,7 +483,10 @@ indexes, segment indexes, incidents, and raw refs. If only the stored projection
 state is stale while
 documents are already current, `index-maintenance` refreshes
 `session_index_state` instead of rebuilding all SQLite documents and route
-rows for the session.
+rows for the session. Scoped search freshness must stay on this projection
+state path: it may check schema and table presence, but it must not count the
+full `documents`, `document_routes`, or `route_terms` tables just to decide
+whether selected sessions are dirty.
 
 Pre-GraphRAG trust has its own loop above the generated graph:
 

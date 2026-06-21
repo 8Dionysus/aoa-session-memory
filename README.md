@@ -438,7 +438,10 @@ budget before the graph tick can start, `auto-maintenance` queues a bounded
 budget instead of requiring a manual follow-up. Search fingerprints ignore
 rendered Markdown companions and can refresh stale `session_index_state`
 without rebuilding session documents when the SQLite documents are already
-current.
+current. Scoped route-cache freshness uses the lightweight
+`session_index_state` projection state and table-existence probes instead of
+counting the full `documents` and route-posting tables; full document counts
+belong to explicit deep/global provider status, not the hot scoped gate.
 Maintenance writers also publish a coordinator packet to
 `diagnostics/maintenance-coordinator.json` while holding
 `diagnostics/auto-maintenance.lock`. `maintenance-status --full` reports the

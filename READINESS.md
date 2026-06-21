@@ -98,10 +98,12 @@ Build the `.aoa` session-memory mechanism end to end:
   `route-cache-freshness-gates` checks route/search/atlas state while the
   maintenance pass advances graph state in small batches; search projection
   fingerprints exclude rendered Markdown companions and can refresh stale
-  `session_index_state` without rebuilding SQLite documents; if route-cache
-  work spends the hot budget before graph work starts, a bounded graph job is
-  queued as the automatic continuation route with a separate profile graph
-  budget
+  `session_index_state` without rebuilding SQLite documents; scoped search
+  freshness uses `session_index_state` and lightweight table-presence probes
+  instead of counting the full SQLite document and route-posting tables; if
+  route-cache work spends the hot budget before graph work starts, a bounded
+  graph job is queued as the automatic continuation route with a separate
+  profile graph budget
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata

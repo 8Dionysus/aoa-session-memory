@@ -15677,6 +15677,89 @@ def search_dirty_projection_states(
     return dirty
 
 
+def sqlite_search_index_scoped_state(
+    aoa_root: Path,
+    latest_source_mtime: float,
+    records: list[dict[str, Any]],
+    projection_fingerprints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "db_path": str(db_path),
+            "diagnostics": ["search_index_missing"],
+        }
+    selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else search_projection_fingerprints_for_records(records)
+    selected_ids = {str(item.get("session_id") or "") for item in selected_fingerprints if item.get("session_id")}
+    try:
+        conn = connect_existing_search_db(db_path)
+        metadata = search_index_metadata(conn)
+        schema_diagnostics = search_schema_diagnostics(conn)
+        has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone()) if sqlite_table_exists(conn, "documents") else False
+        has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
+        has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
+        indexed_session_states = sqlite_search_session_states(conn)
+        conn.close()
+    except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        return {
+            "status": status,
+            "needs_refresh": status != "sqlite_locked",
+            "db_path": str(db_path),
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    schema_version = str(metadata.get("schema_version") or "")
+    selected_indexed_states = [
+        state
+        for session_id, state in indexed_session_states.items()
+        if not selected_ids or session_id in selected_ids
+    ]
+    selected_document_count = sum(int_value(state.get("document_count")) for state in selected_indexed_states)
+    db_mtime = path_mtime(db_path)
+    dirty_sessions = search_dirty_projection_states(selected_fingerprints, indexed_session_states)
+    reasons: list[str] = list(schema_diagnostics)
+    if schema_version != str(SEARCH_SCHEMA_VERSION):
+        reasons.append("search_schema_mismatch")
+    if selected_fingerprints and (not has_documents or selected_document_count <= 0):
+        reasons.append("search_index_empty")
+    if has_documents and not has_routes:
+        reasons.append("search_route_index_empty")
+    if has_routes and not has_route_terms:
+        reasons.append("search_route_terms_empty")
+    if dirty_sessions:
+        reasons.append("session_projection_dirty")
+    status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
+    return {
+        "status": status,
+        "needs_refresh": bool(reasons),
+        "db_path": str(db_path),
+        "db_mtime": db_mtime,
+        "latest_source_mtime": latest_source_mtime,
+        "search_schema_version": schema_version,
+        "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
+        "document_count": selected_document_count,
+        "document_counts": {"selected_session_state": selected_document_count},
+        "count_mode": "scoped_session_state",
+        "has_documents": has_documents,
+        "has_route_index": has_routes,
+        "has_route_terms": has_route_terms,
+        "route_index_count": None,
+        "route_index_document_count": None,
+        "route_term_count": None,
+        "selected_session_state_count": len(selected_fingerprints),
+        "indexed_session_state_count": len(indexed_session_states),
+        "dirty_session_count": len(dirty_sessions),
+        "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
+        "dirty_sessions": dirty_sessions[:40],
+        "reasons": reasons,
+        "truth_status": "scoped_search_session_state_no_document_count_scan",
+        "source_scan": True,
+        "diagnostics": [],
+    }
+
+
 def upsert_search_session_state(
     conn: sqlite3.Connection,
     *,
@@ -16334,6 +16417,13 @@ def sqlite_search_index_state(
     records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if records is not None:
+        return sqlite_search_index_scoped_state(
+            aoa_root,
+            latest_source_mtime,
+            records,
+            projection_fingerprints=projection_fingerprints,
+        )
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return {
@@ -16390,6 +16480,7 @@ def sqlite_search_index_state(
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": document_count,
         "document_counts": counts,
+        "count_mode": "counted_deep",
         **route_counts,
         "selected_session_state_count": len(selected_fingerprints),
         "indexed_session_state_count": len(indexed_session_states),
