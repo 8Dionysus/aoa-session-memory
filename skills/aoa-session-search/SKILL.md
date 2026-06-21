@@ -64,6 +64,12 @@ The embedding overlay and reranker are host read-model accelerators. They may
 make the first route cheaper, but the returned `.aoa` raw/segment refs remain
 the only archive evidence to promote or cite.
 
+Literal raw-text query is bounded by default. Keep the default
+`--query-timeout-ms` for live agent work; pass `--query-timeout-ms 0` only for
+an explicit offline scan. Bounded FTS uses exact token matching with date order
+instead of `bm25` ranking, and a budget overrun returns `sqlite_query_timeout`
+with `bounded_timeout.next_expansion_command` rather than blocking the session.
+
 Use filters when the route is known:
 
 ```bash

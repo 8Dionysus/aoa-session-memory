@@ -1045,6 +1045,15 @@ python3 scripts/aoa_session_memory.py search \
 reranker, but the result provider remains `portable_sqlite` and every usable
 claim must still route through raw/segment refs.
 
+Literal raw-text FTS reads are bounded by default. The `search`,
+`agent-responses`, `agent-closeouts`, `agent-progress-updates`,
+`agent-reasoning-windows`, and `answer-neighborhood` commands accept
+`--query-timeout-ms`; `0` disables the guard only for an explicit offline scan.
+Bounded FTS reads use exact token matching with date order instead of expensive
+`bm25` rank sorting. If a query still exceeds the budget, the command returns a
+`sqlite_query_timeout` packet with a `next_expansion_command` instead of
+blocking the agent route.
+
 Build a compact evidence packet for a continuation or investigation recipe:
 
 ```bash

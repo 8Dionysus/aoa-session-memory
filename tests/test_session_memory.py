@@ -9414,6 +9414,105 @@ def test_search_read_routes_report_locked_search_db_without_traceback(tmp_path: 
     assert search_connects
 
 
+def test_raw_fts_search_timeout_returns_bounded_route_packet(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+
+    class TimeoutConnection:
+        def __init__(self) -> None:
+            self.progress_handlers: list[tuple[Any, int]] = []
+            self.executed_sql: list[str] = []
+            self.closed = False
+
+        def set_progress_handler(self, handler: Any, n: int) -> None:
+            self.progress_handlers.append((handler, n))
+
+        def execute(self, sql: str, *_args: Any, **_kwargs: Any) -> Any:
+            self.executed_sql.append(sql)
+            time.sleep(0.01)
+            raise sqlite3.OperationalError("interrupted")
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_conn = TimeoutConnection()
+    monkeypatch.setattr(module, "connect_existing_search_db", lambda *_args, **_kwargs: fake_conn)
+
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="very broad raw text",
+        doc_type="event",
+        query_timeout_ms=1,
+        explain=True,
+    )
+
+    assert payload["ok"] is False
+    assert payload["provider"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert payload["bounded_timeout"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert payload["bounded_timeout"]["query_timeout_ms"] == 1
+    assert "--query-timeout-ms 30000" in payload["bounded_timeout"]["next_expansion_command"]
+    assert "--doc-type event" in payload["bounded_timeout"]["next_expansion_command"]
+    assert payload["cost_profile"]["uses_fts"] is True
+    assert payload["cost_profile"]["bounded_query_timeout"] is True
+    assert payload["cost_profile"]["rank_mode"] == "bounded_date_order_no_bm25"
+    assert payload["diagnostics"][0] == "search_fts_query_timeout:1ms"
+    assert payload["diagnostics"][1] == "sqlite_query_timeout:interrupted"
+    assert fake_conn.progress_handlers[0][1] == module.SEARCH_FTS_QUERY_PROGRESS_OPCODES
+    assert fake_conn.progress_handlers[-1] == (None, 0)
+    assert "bm25(" not in fake_conn.executed_sql[0]
+    assert "ORDER BY documents.session_date DESC" in fake_conn.executed_sql[0]
+    assert fake_conn.closed is True
+
+
+def test_agent_event_raw_fts_timeout_preserves_route_diagnostic(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+
+    class TimeoutConnection:
+        def __init__(self) -> None:
+            self.progress_handlers: list[tuple[Any, int]] = []
+            self.executed_sql: list[str] = []
+
+        def set_progress_handler(self, handler: Any, n: int) -> None:
+            self.progress_handlers.append((handler, n))
+
+        def execute(self, sql: str, *_args: Any, **_kwargs: Any) -> Any:
+            self.executed_sql.append(sql)
+            time.sleep(0.01)
+            raise sqlite3.OperationalError("interrupted")
+
+        def close(self) -> None:
+            pass
+
+    fake_conn = TimeoutConnection()
+    monkeypatch.setattr(module, "connect_existing_search_db", lambda *_args, **_kwargs: fake_conn)
+
+    route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        query="assistant answer broad query",
+        agent_events=["assistant_answer"],
+        query_timeout_ms=1,
+    )
+
+    assert route["ok"] is False
+    assert route["provider"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert route["bounded_timeout"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert "agent-responses" in route["bounded_timeout"]["next_expansion_command"]
+    assert "--agent-event assistant_answer" in route["bounded_timeout"]["next_expansion_command"]
+    assert route["cost_profile"]["uses_fts"] is True
+    assert route["cost_profile"]["bounded_query_timeout"] is True
+    assert route["cost_profile"]["rank_mode"] == "bounded_date_order_no_bm25"
+    assert route["diagnostics"][0] == "search_fts_query_timeout:1ms"
+    assert fake_conn.progress_handlers[0][1] == module.SEARCH_FTS_QUERY_PROGRESS_OPCODES
+    assert fake_conn.progress_handlers[-1] == (None, 0)
+    assert "bm25(" not in fake_conn.executed_sql[0]
+    assert "ORDER BY documents.session_date DESC" in fake_conn.executed_sql[0]
+
+
 def test_search_provider_status_detects_structural_schema_drift(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)

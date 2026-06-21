@@ -796,6 +796,13 @@ changes candidate order and writes `host_rerank` metadata onto `.aoa` hits.
 Neither layer is portable authority, and neither may promote a claim without
 the raw/segment refs already carried by the hit.
 
+Literal raw-text FTS is a bounded read route. Default agent-facing queries keep
+exact token matching but avoid `bm25` rank sorting so common terms do not block
+the session. Use `--query-timeout-ms 0` only for an explicit offline scan where
+rank sorting is worth the cost. A timed-out raw-text route must return a
+`sqlite_query_timeout` diagnostic and `next_expansion_command`, not a hanging
+agent workflow.
+
 Build a recipe-based retrieval packet:
 
 ```bash

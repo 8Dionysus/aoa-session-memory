@@ -106,6 +106,9 @@ SEARCH_FTS_STORAGE_MODE = "full_text_fts_with_compressed_body_v1"
 SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE = "omitted_for_structured_route_shard_v1"
 SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL = "local_fts"
 SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK = "monolith_fallback_required"
+SEARCH_FTS_QUERY_TIMEOUT_MS = 8000
+SEARCH_FTS_QUERY_PROGRESS_OPCODES = 10000
+SEARCH_FTS_QUERY_TIMEOUT_STATUS = "sqlite_query_timeout"
 SEARCH_BODY_PREVIEW_CHARS = 700
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
@@ -15716,6 +15719,8 @@ def sqlite_error_status(exc: sqlite3.Error) -> str:
     text = str(exc).lower()
     if "database is locked" in text or "database table is locked" in text or "database is busy" in text:
         return "sqlite_locked"
+    if "interrupted" in text:
+        return SEARCH_FTS_QUERY_TIMEOUT_STATUS
     return "sqlite_error"
 
 
@@ -25496,6 +25501,136 @@ def fts_query_from_user(query: str) -> str:
     return " AND ".join(f'"{token.replace("\"", "\"\"")}"' for token in tokens[:16])
 
 
+def normalized_search_fts_query_timeout_ms(query_timeout_ms: int | None) -> int:
+    if query_timeout_ms is None:
+        return SEARCH_FTS_QUERY_TIMEOUT_MS
+    return max(0, int_value(query_timeout_ms, SEARCH_FTS_QUERY_TIMEOUT_MS))
+
+
+def install_search_fts_query_deadline(
+    conn: sqlite3.Connection,
+    *,
+    query_timeout_ms: int | None,
+) -> tuple[int, float | None]:
+    effective_timeout_ms = normalized_search_fts_query_timeout_ms(query_timeout_ms)
+    if effective_timeout_ms <= 0:
+        return 0, None
+    deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
+    conn.set_progress_handler(
+        lambda: 1 if time.monotonic() >= deadline else 0,
+        SEARCH_FTS_QUERY_PROGRESS_OPCODES,
+    )
+    return effective_timeout_ms, deadline
+
+
+def clear_search_fts_query_deadline(conn: sqlite3.Connection) -> None:
+    try:
+        conn.set_progress_handler(None, 0)
+    except sqlite3.Error:
+        pass
+
+
+def search_fts_timeout_next_command(
+    command: str,
+    *,
+    query: str,
+    limit: int,
+    query_timeout_ms: int,
+    options: list[tuple[str, Any]] | None = None,
+) -> str:
+    expanded_timeout_ms = max(query_timeout_ms * 4 if query_timeout_ms > 0 else SEARCH_FTS_QUERY_TIMEOUT_MS * 4, 30000)
+    args = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        command,
+        "--query",
+        str(query or ""),
+        "--limit",
+        str(max(1, int_value(limit, 20))),
+        "--query-timeout-ms",
+        str(expanded_timeout_ms),
+    ]
+    for flag, value in options or []:
+        if value is None or value == "" or value is False:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if item is not None and item != "":
+                    args.extend([flag, str(item)])
+        elif value is True:
+            args.append(flag)
+        else:
+            args.extend([flag, str(value)])
+    return shlex.join(args)
+
+
+def search_fts_timeout_payload(
+    *,
+    aoa_root: Path,
+    query: str,
+    normalized_query: str,
+    db_path: Path,
+    provider: str,
+    projection_mode: str,
+    query_timeout_ms: int,
+    elapsed_ms: int,
+    command: str,
+    limit: int,
+    options: list[tuple[str, Any]],
+    cost_profile: dict[str, Any],
+    provider_config: dict[str, Any],
+    exc: sqlite3.Error,
+) -> dict[str, Any]:
+    diagnostic = f"search_fts_query_timeout:{query_timeout_ms}ms"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": False,
+        "query": query,
+        "normalized_query": normalized_query,
+        "db_path": str(db_path),
+        "aoa_root": str(aoa_root),
+        "result_count": 0,
+        "results": [],
+        "search_projection": {
+            "mode": projection_mode,
+            "db_path": str(db_path),
+            "fallback_db_path": str(search_db_path(aoa_root)),
+        },
+        "cost_profile": {
+            **cost_profile,
+            "query_timeout_ms": query_timeout_ms,
+            "bounded_query_timeout": True,
+            "elapsed_ms": elapsed_ms,
+        },
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "portable_sqlite",
+            "status": SEARCH_FTS_QUERY_TIMEOUT_STATUS,
+            "authority_law": provider_config.get("authority_law"),
+        },
+        "bounded_timeout": {
+            "status": SEARCH_FTS_QUERY_TIMEOUT_STATUS,
+            "query_timeout_ms": query_timeout_ms,
+            "elapsed_ms": elapsed_ms,
+            "next_route": (
+                "Prefer structured filters, shard-backed routes, or entity/agent-event/goal routes. "
+                "Raise --query-timeout-ms only for an explicit offline raw-text scan."
+            ),
+            "next_expansion_command": search_fts_timeout_next_command(
+                command,
+                query=query,
+                limit=limit,
+                query_timeout_ms=query_timeout_ms,
+                options=options,
+            ),
+        },
+        "diagnostics": [diagnostic, sqlite_error_diagnostic(exc)],
+    }
+
+
 def search_json_text(value: Any) -> str:
     if value is None:
         return ""
@@ -27489,6 +27624,7 @@ def search_shard_fanout_unavailable_payload(
     semantic_preview: bool,
     hydrate_body: bool,
     exclude_agent_event_stream_copies: bool = False,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     payload = search_sessions(
         aoa_root=aoa_root,
@@ -27521,6 +27657,7 @@ def search_shard_fanout_unavailable_payload(
         hydrate_body=hydrate_body,
         exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
         use_shards=False,
+        query_timeout_ms=query_timeout_ms,
     )
     payload["search_projection"] = {
         "mode": SEARCH_ACTIVE_PROJECTION_MONOLITH,
@@ -27564,6 +27701,7 @@ def search_sessions_shard_fanout(
     hydrate_body: bool = True,
     exclude_agent_event_stream_copies: bool = False,
     max_shards: int = 24,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     if provider != "portable_sqlite" or include_host_context or include_semantic_context or rerank_local:
         return search_shard_fanout_unavailable_payload(
@@ -27597,6 +27735,7 @@ def search_sessions_shard_fanout(
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
+            query_timeout_ms=query_timeout_ms,
         )
     catalog = read_search_catalog(aoa_root)
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
@@ -27647,6 +27786,7 @@ def search_sessions_shard_fanout(
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
+            query_timeout_ms=query_timeout_ms,
         )
     effective_limit = max(1, int_value(limit, 20))
     uses_fts = bool(fts_query_from_user(query))
@@ -27692,6 +27832,7 @@ def search_sessions_shard_fanout(
                 semantic_preview=semantic_preview,
                 hydrate_body=hydrate_body,
                 exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
+                query_timeout_ms=query_timeout_ms,
             )
             payload.setdefault("search_projection", {})["unsupported_raw_text_shards"] = unsupported_raw_text_shards
             payload.setdefault("search_projection", {})["raw_text_query_support"] = SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
@@ -27741,6 +27882,7 @@ def search_sessions_shard_fanout(
             use_shards=False,
             db_path_override=shard_path,
             projection_mode=SEARCH_ACTIVE_PROJECTION_SHARD,
+            query_timeout_ms=query_timeout_ms,
         )
         shard_payloads.append(
             {
@@ -27860,6 +28002,7 @@ def search_sessions(
     max_shards: int = 24,
     db_path_override: Path | None = None,
     projection_mode: str | None = None,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
     provider_config = search_provider_config(aoa_root)
@@ -27909,6 +28052,7 @@ def search_sessions(
             hydrate_body=hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             max_shards=max_shards,
+            query_timeout_ms=query_timeout_ms,
         )
     db_path = db_path_override or search_db_path(aoa_root)
     effective_projection_mode = projection_mode or (
@@ -27996,9 +28140,16 @@ def search_sessions(
     lightweight_route = bool(structured_route_filter and not fts_query and not include_host_context and not include_semantic_context and not rerank_local)
     effective_semantic_preview = bool(semantic_preview and not lightweight_route)
     effective_hydrate_body = bool(hydrate_body and not lightweight_route)
+    effective_query_timeout_ms = normalized_search_fts_query_timeout_ms(query_timeout_ms) if fts_query else 0
     conn: sqlite3.Connection | None = None
+    started_monotonic = time.monotonic()
     try:
         conn = connect_existing_search_db(db_path)
+        if fts_query:
+            effective_query_timeout_ms, _deadline = install_search_fts_query_deadline(
+                conn,
+                query_timeout_ms=query_timeout_ms,
+            )
         body_overrides: dict[int, str] = {}
         if route_where:
             conn.execute("CREATE TEMP TABLE search_route_filter(doc_rowid INTEGER PRIMARY KEY)")
@@ -28026,8 +28177,16 @@ def search_sessions(
             query_params_base = [*params, *(extra_params or [])]
             query_where = " AND ".join(query_filters)
             if fts_query:
+                rank_select = "0.0 AS rank" if effective_query_timeout_ms else "bm25(documents_fts) AS rank"
+                order_clause = (
+                    " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ? OFFSET ?"
+                    if effective_query_timeout_ms
+                    else " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ? OFFSET ?"
+                )
                 sql = (
-                    "SELECT documents.*, bm25(documents_fts) AS rank "
+                    "SELECT documents.*, "
+                    + rank_select
+                    + " "
                     "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid"
                     f"{route_join} "
                     "WHERE documents_fts MATCH ?"
@@ -28036,7 +28195,7 @@ def search_sessions(
                 if query_where:
                     sql += " AND " + query_where
                     query_params.extend(query_params_base)
-                sql += " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ? OFFSET ?"
+                sql += order_clause
                 query_params.extend([limit_value, offset])
                 return conn.execute(sql, query_params).fetchall()
             sql = f"SELECT documents.*, 0.0 AS rank FROM documents{route_join}"
@@ -28106,9 +28265,49 @@ def search_sessions(
             ]
             freshness_filter_diagnostics = []
     except sqlite3.Error as exc:
-        if conn is not None:
-            conn.close()
         status = sqlite_error_status(exc)
+        if status == SEARCH_FTS_QUERY_TIMEOUT_STATUS and fts_query:
+            return search_fts_timeout_payload(
+                aoa_root=aoa_root,
+                query=query,
+                normalized_query=fts_query,
+                db_path=db_path,
+                provider=provider,
+                projection_mode=effective_projection_mode,
+                query_timeout_ms=effective_query_timeout_ms,
+                elapsed_ms=int((time.monotonic() - started_monotonic) * 1000),
+                command="search",
+                limit=limit,
+                options=[
+                    ("--session", session),
+                    ("--doc-type", doc_type),
+                    ("--event-type", event_type),
+                    ("--family", family),
+                    ("--outcome", outcome),
+                    ("--conversation-act", conversation_act),
+                    ("--session-act", session_act),
+                    ("--agent-event", agent_event),
+                    ("--task-episode-id", task_episode_id),
+                    ("--route-layer", route_layer),
+                    ("--route-signal", route_signal),
+                    ("--archive-status", archive_status),
+                    ("--freshness-status", freshness_status),
+                    ("--date-from", date_from),
+                    ("--date-to", date_to),
+                    ("--explain", explain),
+                ],
+                cost_profile={
+                    "lightweight_route": lightweight_route,
+                    "structured_route_filter": structured_route_filter,
+                    "uses_fts": True,
+                    "hydrates_body": effective_hydrate_body,
+                    "semantic_preview": effective_semantic_preview,
+                    "uses_shards": db_path_override is not None,
+                    "rank_mode": "bounded_date_order_no_bm25" if effective_query_timeout_ms else "bm25",
+                },
+                provider_config=provider_config,
+                exc=exc,
+            )
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_results",
@@ -28124,6 +28323,7 @@ def search_sessions(
         }
     finally:
         if conn is not None:
+            clear_search_fts_query_deadline(conn)
             conn.close()
     accelerator_provider = provider if provider != "portable_sqlite" else "abyss_machine_nervous"
     if provider == "portable_sqlite" and not include_host_context:
@@ -28220,6 +28420,9 @@ def search_sessions(
             "uses_fts": bool(fts_query),
             "hydrates_body": effective_hydrate_body,
             "semantic_preview": effective_semantic_preview,
+            "query_timeout_ms": effective_query_timeout_ms,
+            "bounded_query_timeout": bool(fts_query and effective_query_timeout_ms),
+            "rank_mode": "bounded_date_order_no_bm25" if fts_query and effective_query_timeout_ms else ("bm25" if fts_query else "none"),
         },
         "provider": {
             "selected": provider,
@@ -28357,6 +28560,9 @@ def agent_event_cost_profile_summary(payloads: list[dict[str, Any]]) -> dict[str
             "hydrates_body": False,
             "semantic_preview": False,
             "uses_shards": False,
+            "query_timeout_ms": 0,
+            "bounded_query_timeout": False,
+            "rank_mode": "none",
         }
     return {
         "lightweight_route": all(bool(profile.get("lightweight_route")) for profile in profiles),
@@ -28365,6 +28571,9 @@ def agent_event_cost_profile_summary(payloads: list[dict[str, Any]]) -> dict[str
         "hydrates_body": any(bool(profile.get("hydrates_body")) for profile in profiles),
         "semantic_preview": any(bool(profile.get("semantic_preview")) for profile in profiles),
         "uses_shards": any(bool(profile.get("uses_shards")) for profile in profiles),
+        "query_timeout_ms": max((int_value(profile.get("query_timeout_ms"), 0) for profile in profiles), default=0),
+        "bounded_query_timeout": any(bool(profile.get("bounded_query_timeout")) for profile in profiles),
+        "rank_mode": "mixed" if len({str(profile.get("rank_mode") or "") for profile in profiles}) > 1 else str(profiles[0].get("rank_mode") or ""),
         "class_query_count": len(profiles),
     }
 
@@ -28381,6 +28590,7 @@ def search_agent_event_documents_with_shards(
     explain: bool,
     include_stream_copies: bool,
     max_shards: int,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
     effective_limit = max(1, limit)
@@ -28402,10 +28612,16 @@ def search_agent_event_documents_with_shards(
                 exclude_agent_event_stream_copies=not include_stream_copies,
                 use_shards=True,
                 max_shards=max_shards,
+                query_timeout_ms=query_timeout_ms,
             )
         )
     ok = all(bool(payload.get("ok")) for payload in payloads) if payloads else False
     diagnostics: list[str] = []
+    bounded_timeouts = [
+        payload.get("bounded_timeout")
+        for payload in payloads
+        if isinstance(payload.get("bounded_timeout"), dict)
+    ]
     merged: dict[str, dict[str, Any]] = {}
     for payload in payloads:
         diagnostics.extend(str(item) for item in payload.get("diagnostics", []) if item)
@@ -28444,6 +28660,11 @@ def search_agent_event_documents_with_shards(
         "search_projection": projection,
         "cost_profile": cost_profile,
         "provider": provider_payload,
+        "bounded_timeout": {
+            "status": SEARCH_FTS_QUERY_TIMEOUT_STATUS,
+            "items": bounded_timeouts,
+            "next_route": "Use structured agent-event filters without a text query, or run an explicit offline raw-text scan.",
+        } if bounded_timeouts else {},
         "result_count": len(results),
         "results": results,
         "diagnostics": diagnostics,
@@ -28463,6 +28684,7 @@ def search_agent_event_documents(
     include_stream_copies: bool = False,
     use_shards: bool = False,
     max_shards: int = 24,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
     classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
@@ -28481,6 +28703,7 @@ def search_agent_event_documents(
             explain=explain,
             include_stream_copies=include_stream_copies,
             max_shards=max_shards,
+            query_timeout_ms=query_timeout_ms,
         )
     provider_config = search_provider_config(aoa_root)
     configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
@@ -28538,22 +28761,39 @@ def search_agent_event_documents(
     where = " AND ".join(filters)
     fts_query = fts_query_from_user(query)
     lightweight_route = not bool(fts_query)
+    effective_query_timeout_ms = normalized_search_fts_query_timeout_ms(query_timeout_ms) if fts_query else 0
     conn: sqlite3.Connection | None = None
+    started_monotonic = time.monotonic()
     try:
         conn = connect_existing_search_db(db_path)
+        if fts_query:
+            effective_query_timeout_ms, _deadline = install_search_fts_query_deadline(
+                conn,
+                query_timeout_ms=query_timeout_ms,
+            )
         if fts_query:
             source_rank_select = (
                 "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank"
                 if include_stream_copies
                 else "0 AS source_rank"
             )
-            order_clause = (
-                " ORDER BY rank, source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
-                if include_stream_copies
-                else " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
-            )
+            rank_select = "0.0 AS rank" if effective_query_timeout_ms else "bm25(documents_fts) AS rank"
+            if include_stream_copies:
+                order_clause = (
+                    " ORDER BY source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                    if effective_query_timeout_ms
+                    else " ORDER BY rank, source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                )
+            else:
+                order_clause = (
+                    " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                    if effective_query_timeout_ms
+                    else " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                )
             sql = (
-                "SELECT documents.*, bm25(documents_fts) AS rank, "
+                "SELECT documents.*, "
+                + rank_select
+                + ", "
                 + source_rank_select
                 + " "
                 "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid "
@@ -28585,9 +28825,37 @@ def search_agent_event_documents(
         metadata = search_index_metadata(conn)
         body_overrides = search_document_bodies_for_rows(conn, rows) if not lightweight_route else {}
     except sqlite3.Error as exc:
-        if conn is not None:
-            conn.close()
         status = sqlite_error_status(exc)
+        if status == SEARCH_FTS_QUERY_TIMEOUT_STATUS and fts_query:
+            return search_fts_timeout_payload(
+                aoa_root=aoa_root,
+                query=query,
+                normalized_query=fts_query,
+                db_path=db_path,
+                provider=provider,
+                projection_mode=SEARCH_ACTIVE_PROJECTION_MONOLITH,
+                query_timeout_ms=effective_query_timeout_ms,
+                elapsed_ms=int((time.monotonic() - started_monotonic) * 1000),
+                command="agent-responses",
+                limit=limit,
+                options=[
+                    ("--session", session),
+                    ("--task-episode-id", task_episode_id),
+                    ("--agent-event", classes),
+                    ("--include-stream-copies", include_stream_copies),
+                ],
+                cost_profile={
+                    "lightweight_route": lightweight_route,
+                    "structured_route_filter": True,
+                    "uses_fts": True,
+                    "hydrates_body": not lightweight_route,
+                    "semantic_preview": not lightweight_route,
+                    "uses_shards": False,
+                    "rank_mode": "bounded_date_order_no_bm25" if effective_query_timeout_ms else "bm25",
+                },
+                provider_config=provider_config,
+                exc=exc,
+            )
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_results",
@@ -28604,6 +28872,7 @@ def search_agent_event_documents(
         }
     finally:
         if conn is not None:
+            clear_search_fts_query_deadline(conn)
             conn.close()
 
     provider_payload = (
@@ -28638,6 +28907,9 @@ def search_agent_event_documents(
             "uses_fts": bool(fts_query),
             "hydrates_body": not lightweight_route,
             "semantic_preview": not lightweight_route,
+            "query_timeout_ms": effective_query_timeout_ms,
+            "bounded_query_timeout": bool(fts_query and effective_query_timeout_ms),
+            "rank_mode": "bounded_date_order_no_bm25" if fts_query and effective_query_timeout_ms else ("bm25" if fts_query else "none"),
         },
         "provider": {
             "selected": provider,
@@ -28669,6 +28941,7 @@ def agent_event_route_search(
     include_stream_copies: bool = False,
     use_shards: bool = False,
     max_shards: int = 24,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
     classes = [item for item in (agent_events or []) if item]
@@ -28686,6 +28959,7 @@ def agent_event_route_search(
         include_stream_copies=include_stream_copies,
         use_shards=use_shards,
         max_shards=max_shards,
+        query_timeout_ms=query_timeout_ms,
     )
     results = route_payload.get("results") if isinstance(route_payload.get("results"), list) else []
     return {
@@ -28703,6 +28977,7 @@ def agent_event_route_search(
         "search_projection": route_payload.get("search_projection") if isinstance(route_payload.get("search_projection"), dict) else {},
         "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
         "cost_profile": route_payload.get("cost_profile") if isinstance(route_payload.get("cost_profile"), dict) else {},
+        "bounded_timeout": route_payload.get("bounded_timeout") if isinstance(route_payload.get("bounded_timeout"), dict) else {},
         "result_count": len(results),
         "results": results,
         "diagnostics": route_payload.get("diagnostics", []),
@@ -28799,6 +29074,7 @@ def agent_event_windows(
     include_stream_copies: bool = False,
     use_shards: bool = False,
     max_shards: int = 24,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     classes = [item for item in (agent_events or []) if item]
     payload = agent_event_route_search(
@@ -28813,6 +29089,7 @@ def agent_event_windows(
         include_stream_copies=include_stream_copies,
         use_shards=use_shards,
         max_shards=max_shards,
+        query_timeout_ms=query_timeout_ms,
     )
     windows = [
         event_window_for_search_result(hit, before=before, after=after)
@@ -28841,6 +29118,7 @@ def agent_event_windows(
             include_stream_copies=include_stream_copies,
             use_shards=use_shards,
             max_shards=max_shards,
+            query_timeout_ms=query_timeout_ms,
         )
         bridge_results = [
             hit for hit in bridge_payload.get("results", [])
@@ -43040,6 +43318,7 @@ def command_search(args: argparse.Namespace) -> int:
         explain=args.explain,
         use_shards=args.use_shards,
         max_shards=args.max_shards,
+        query_timeout_ms=getattr(args, "query_timeout_ms", SEARCH_FTS_QUERY_TIMEOUT_MS),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -43068,6 +43347,7 @@ def command_agent_responses(args: argparse.Namespace) -> int:
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
         use_shards=bool(getattr(args, "use_shards", False)),
         max_shards=int_value(getattr(args, "max_shards", 24), 24),
+        query_timeout_ms=getattr(args, "query_timeout_ms", SEARCH_FTS_QUERY_TIMEOUT_MS),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -43090,6 +43370,7 @@ def command_agent_event_windows(args: argparse.Namespace) -> int:
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
         use_shards=bool(getattr(args, "use_shards", False)),
         max_shards=int_value(getattr(args, "max_shards", 24), 24),
+        query_timeout_ms=getattr(args, "query_timeout_ms", SEARCH_FTS_QUERY_TIMEOUT_MS),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -47576,6 +47857,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
     search.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     search.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    search.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     search.set_defaults(func=command_search)
 
     agent_responses = sub.add_parser(
@@ -47598,6 +47880,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_responses.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_responses.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     agent_responses.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    agent_responses.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_responses.add_argument("--explain", action="store_true")
     agent_responses.set_defaults(func=command_agent_responses)
 
@@ -47613,6 +47896,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_closeouts.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_closeouts.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     agent_closeouts.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    agent_closeouts.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_closeouts.add_argument("--explain", action="store_true")
     agent_closeouts.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_final_closeout"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -47628,6 +47912,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_progress.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     agent_progress.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     agent_progress.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    agent_progress.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_progress.add_argument("--explain", action="store_true")
     agent_progress.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_progress_update"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -47645,6 +47930,7 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning_windows.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     reasoning_windows.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     reasoning_windows.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    reasoning_windows.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
 
     answer_neighborhood = sub.add_parser("answer-neighborhood", help="Find assistant answer-like events and return bounded neighboring events.")
@@ -47662,6 +47948,7 @@ def build_parser() -> argparse.ArgumentParser:
     answer_neighborhood.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     answer_neighborhood.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
     answer_neighborhood.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    answer_neighborhood.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     answer_neighborhood.set_defaults(func=command_agent_event_windows)
 
     task_episodes_parser = sub.add_parser("task-episodes", help="List generated task episodes with status, verification/failure filters, and refs.")
