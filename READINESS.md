@@ -143,7 +143,7 @@ python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /pa
 python3 scripts/aoa_session_memory.py sweep-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 7 --min-age-sec 60 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
 python3 scripts/aoa_session_memory.py index-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --token-max-raw-mb 512 --write-report
-python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
+python3 scripts/aoa_session_memory.py search-index all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py search-provider-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --include-host --write-report
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timed out" --explain
 python3 scripts/aoa_session_memory.py agent-responses --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --session latest --limit 20
@@ -539,6 +539,25 @@ Last observed result:
   order, uses the lightweight profile (`uses_fts=false`,
   `hydrates_body=false`, `semantic_preview=false`), and the same live route
   returned `10` results in `0.41s`.
+- 2026-06-21 search raw-lexical policy proof: live `search-provider-status`,
+  `maintenance-status --full`, and `storage-audit` showed the current search
+  store has no recorded bounded raw-lexical metadata and is classified as
+  `unbounded_or_legacy_policy`. `search-index` now applies the `16 MiB` bounded
+  raw lexical budget by default, records the policy and raw-text skip counts in
+  SQLite metadata/reports, and `maintenance-status` routes legacy stores to
+  `repair_search_storage_policy` instead of silently treating weight policy as
+  complete. Use `--unbounded-raw-text` only for an explicit full lexical
+  rebuild/benchmark.
+- 2026-06-21 bounded rebuild proof: `search-index all --write-report` rebuilt
+  `281` sessions and `1,630,447` documents with `raw_text_status_counts` of
+  `available=166`, `not_available=69`, `skipped_raw_too_large=46`; the search
+  store dropped from `18.2 GiB`/`19G` displayed to `15.0 GiB`, and
+  `maintenance-status --full` returned `ok=true`,
+  `storage_policy_status=bounded_policy_recorded`, and `agent_route=use_graph_search`.
+  During the rebuild, a pathological inline `PRAGMA optimize` phase was found
+  and removed from full rebuilds; reports now expose phase timings so future
+  long rebuilds show whether they are in bulk indexing, SQLite index build, or
+  entity-registry refresh.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

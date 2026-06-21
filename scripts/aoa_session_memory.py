@@ -103,6 +103,11 @@ SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
 SEARCH_BODY_PREVIEW_CHARS = 700
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
+SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
+SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
+SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
+SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY = 0
+SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY = 50
 SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 1200
 SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 4000
 GRAPH_SCHEMA_VERSION = 1
@@ -142,7 +147,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "since_days": 2,
         "limit": None,
         "repair_limit": None,
-        "max_raw_mb": 16,
+        "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
         "graph_refresh_chunk_size": 32,
@@ -162,7 +167,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "since_days": 30,
         "limit": None,
         "repair_limit": None,
-        "max_raw_mb": 16,
+        "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 100,
         "graph_refresh_chunk_size": 64,
@@ -182,7 +187,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "since_days": None,
         "limit": None,
         "repair_limit": 25,
-        "max_raw_mb": 16,
+        "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 0,
         "graph_refresh_chunk_size": 64,
@@ -202,7 +207,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "since_days": None,
         "limit": None,
         "repair_limit": None,
-        "max_raw_mb": 16,
+        "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 250,
         "graph_refresh_chunk_size": 128,
@@ -23060,16 +23065,39 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
+        f"- raw_lexical_policy: `{(payload.get('raw_lexical_policy') or {}).get('mode') if isinstance(payload.get('raw_lexical_policy'), dict) else ''}`",
+        f"- raw_lexical_source: `{(payload.get('raw_lexical_policy') or {}).get('source') if isinstance(payload.get('raw_lexical_policy'), dict) else ''}`",
+        f"- raw_text_status_counts: `{payload.get('raw_text_status_counts')}`",
+        f"- raw_text_skipped_session_count: `{payload.get('raw_text_skipped_session_count')}`",
+        f"- inline_optimize_policy: `{payload.get('inline_optimize_policy')}`",
+        f"- inline_optimize_count: `{payload.get('inline_optimize_count')}`",
         f"- document_count: `{payload.get('document_count')}`",
         f"- removed_document_count: `{payload.get('removed_document_count')}`",
         f"- session_documents: `{payload.get('session_document_count')}`",
         f"- segment_documents: `{payload.get('segment_document_count')}`",
         f"- event_documents: `{payload.get('event_document_count')}`",
         f"- incident_documents: `{payload.get('incident_document_count')}`",
-        "",
-        "## Diagnostics",
-        "",
     ]
+    phase_timings = payload.get("phase_timings") if isinstance(payload.get("phase_timings"), list) else []
+    lines.extend(["", "## Phase Timings", "", "| phase | elapsed_ms | detail |", "| --- | ---: | --- |"])
+    if phase_timings:
+        for item in phase_timings:
+            if not isinstance(item, dict):
+                continue
+            detail = {
+                key: value
+                for key, value in item.items()
+                if key not in {"phase", "elapsed_ms", "index_timings"}
+            }
+            if "index_timings" in item:
+                detail["slowest_index_ms"] = max(
+                    (int_value(index.get("elapsed_ms")) for index in item.get("index_timings", []) if isinstance(index, dict)),
+                    default=0,
+                )
+            lines.append(f"| `{item.get('phase')}` | `{item.get('elapsed_ms')}` | `{json.dumps(detail, ensure_ascii=False, sort_keys=True)}` |")
+    else:
+        lines.append("| none | `0` | `{}` |")
+    lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         for item in diagnostics:
@@ -23528,6 +23556,8 @@ def sqlite_provider_status(
         "status": status,
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
+        "metadata": metadata,
+        "raw_lexical_policy": search_raw_lexical_policy_from_metadata(metadata),
         "search_schema_version": schema_version,
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "document_count": total,
@@ -23597,6 +23627,8 @@ def sqlite_provider_status_fast(aoa_root: Path) -> dict[str, Any]:
         "status": status,
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
+        "metadata": metadata,
+        "raw_lexical_policy": search_raw_lexical_policy_from_metadata(metadata),
         "search_schema_version": schema_version,
         "expected_search_schema_version": SEARCH_SCHEMA_VERSION,
         "has_documents": has_documents,
@@ -24099,9 +24131,31 @@ SEARCH_DB_INDEX_STATEMENTS = [
 ]
 
 
-def create_search_db_indexes(conn: sqlite3.Connection) -> None:
+def search_index_name_from_statement(statement: str) -> str:
+    marker = "INDEX IF NOT EXISTS "
+    if marker not in statement:
+        return ""
+    return statement.split(marker, 1)[1].split(None, 1)[0]
+
+
+def create_search_db_indexes(
+    conn: sqlite3.Connection,
+    *,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    timings: list[dict[str, Any]] = []
     for statement in SEARCH_DB_INDEX_STATEMENTS:
+        index_name = search_index_name_from_statement(statement)
+        started = time.monotonic()
+        if progress_callback is not None:
+            progress_callback("search_index_sqlite_index_start", {"index": index_name})
         conn.execute(statement)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        timing = {"index": index_name, "elapsed_ms": elapsed_ms}
+        timings.append(timing)
+        if progress_callback is not None:
+            progress_callback("search_index_sqlite_index_done", timing)
+    return timings
 
 
 def sqlite_sidecar_paths(db_path: Path) -> list[Path]:
@@ -24538,6 +24592,96 @@ def search_doc_text(parts: list[Any], *, max_chars: int = 4000) -> str:
     text = " ".join(part.strip() for part in (search_json_text(part) for part in parts) if part.strip())
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]
+
+
+def search_raw_lexical_policy(
+    max_raw_bytes: int | None = None,
+    *,
+    use_default_budget: bool = True,
+) -> dict[str, Any]:
+    requested_max_raw_bytes = max_raw_bytes
+    source = "default" if use_default_budget else "unbounded_no_default"
+    effective_max_raw_bytes: int | None
+    if max_raw_bytes is None:
+        effective_max_raw_bytes = SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES if use_default_budget else None
+    else:
+        explicit = int_value(max_raw_bytes)
+        if explicit < 0:
+            effective_max_raw_bytes = None
+            source = "explicit_unbounded"
+        else:
+            effective_max_raw_bytes = explicit
+            source = "explicit"
+    effective_max_raw_mb = (
+        effective_max_raw_bytes / (1024 * 1024)
+        if effective_max_raw_bytes is not None
+        else None
+    )
+    return {
+        "mode": SEARCH_RAW_LEXICAL_POLICY_MODE,
+        "source": source,
+        "requested_max_raw_bytes": requested_max_raw_bytes,
+        "default_max_raw_bytes": SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+        "default_max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
+        "effective_max_raw_bytes": effective_max_raw_bytes,
+        "effective_max_raw_mb": effective_max_raw_mb,
+        "unbounded": effective_max_raw_bytes is None,
+        "skip_status": "skipped_raw_too_large",
+        "quality_note": "Raw transcript remains authority; bounded lexical skips only remove heavy raw semantic text from generated FTS and keep refs for proof routes.",
+    }
+
+
+def search_raw_lexical_policy_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    if not metadata:
+        return {
+            "mode": "unknown",
+            "source": "metadata_missing",
+            "default_max_raw_bytes": SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+            "default_max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
+            "effective_max_raw_bytes": None,
+            "effective_max_raw_mb": None,
+            "unbounded": None,
+            "diagnostics": ["search_metadata_missing"],
+        }
+    raw_value = metadata.get("search_raw_lexical_max_bytes")
+    source = str(metadata.get("search_raw_lexical_policy_source") or "metadata")
+    diagnostics: list[str] = []
+    effective_max_raw_bytes: int | None
+    raw_text = "" if raw_value is None else str(raw_value)
+    if raw_text in {"", "None", "unbounded"}:
+        effective_max_raw_bytes = None
+    else:
+        try:
+            effective_max_raw_bytes = int(raw_text)
+        except (TypeError, ValueError):
+            effective_max_raw_bytes = None
+            diagnostics.append("search_raw_lexical_max_bytes_unreadable")
+    effective_max_raw_mb = (
+        effective_max_raw_bytes / (1024 * 1024)
+        if effective_max_raw_bytes is not None
+        else None
+    )
+    return {
+        "mode": str(metadata.get("search_raw_lexical_policy_mode") or "unknown"),
+        "source": source,
+        "default_max_raw_bytes": int_value(metadata.get("search_raw_lexical_default_max_bytes"), SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES),
+        "default_max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
+        "effective_max_raw_bytes": effective_max_raw_bytes,
+        "effective_max_raw_mb": effective_max_raw_mb,
+        "unbounded": effective_max_raw_bytes is None,
+        "skip_status": str(metadata.get("search_raw_lexical_skip_status") or "skipped_raw_too_large"),
+        "diagnostics": diagnostics,
+    }
+
+
+def search_raw_lexical_policy_status(policy: dict[str, Any]) -> str:
+    mode = str(policy.get("mode") or "")
+    unbounded = policy.get("unbounded")
+    if mode == SEARCH_RAW_LEXICAL_POLICY_MODE and unbounded is False:
+        return "bounded_policy_recorded"
+    if unbounded is True:
+        return "unbounded_or_legacy_policy"
+    return "policy_missing_or_unknown"
 
 
 def packed_route_values(values: Iterable[str]) -> str:
@@ -25439,6 +25583,7 @@ def search_index_sessions(
     until: str | None = None,
     limit: int | None = None,
     max_raw_bytes: int | None = None,
+    use_default_raw_lexical_budget: bool = True,
     rebuild: bool = True,
     write_report: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
@@ -25449,6 +25594,11 @@ def search_index_sessions(
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     db_path = search_db_path(aoa_root)
+    raw_lexical_policy = search_raw_lexical_policy(
+        max_raw_bytes,
+        use_default_budget=use_default_raw_lexical_budget,
+    )
+    effective_max_raw_bytes = raw_lexical_policy.get("effective_max_raw_bytes")
     write_db_path = db_path
     temp_db_path: Path | None = None
     if rebuild:
@@ -25472,7 +25622,9 @@ def search_index_sessions(
             "target": target,
             "selected_count": 0,
             "document_count": 0,
-            "max_raw_bytes": max_raw_bytes,
+            "max_raw_bytes": effective_max_raw_bytes,
+            "requested_max_raw_bytes": max_raw_bytes,
+            "raw_lexical_policy": raw_lexical_policy,
             "db_path": str(db_path),
             "diagnostics": [str(exc)],
             "sessions": [],
@@ -25487,7 +25639,9 @@ def search_index_sessions(
             "target": target,
             "selected_count": 0,
             "document_count": 0,
-            "max_raw_bytes": max_raw_bytes,
+            "max_raw_bytes": effective_max_raw_bytes,
+            "requested_max_raw_bytes": max_raw_bytes,
+            "raw_lexical_policy": raw_lexical_policy,
             "db_path": str(db_path),
             "diagnostics": ["no sessions selected"],
             "sessions": [],
@@ -25502,9 +25656,32 @@ def search_index_sessions(
     removed_document_count = 0
     diagnostics: list[str] = []
     session_results: list[dict[str, Any]] = []
+    raw_text_status_counts: Counter[str] = Counter()
+    phase_timings: list[dict[str, Any]] = []
+    inline_optimize_count = 0
     committed_count = 0
     removed_entity_registry_document_count = 0
     budget_exhausted = False
+
+    def progress_event(event: str, payload: dict[str, Any]) -> None:
+        if progress_every <= 0:
+            return
+        packet = {
+            "event": event,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            **payload,
+        }
+        print(json.dumps(packet, ensure_ascii=False), file=sys.stderr, flush=True)
+
+    def record_phase(phase: str, phase_started: float, **extra: Any) -> None:
+        item = {
+            "phase": phase,
+            "elapsed_ms": int((time.monotonic() - phase_started) * 1000),
+            **extra,
+        }
+        phase_timings.append(item)
+        progress_event("search_index_phase_done", item)
+
     try:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
@@ -25525,15 +25702,40 @@ def search_index_sessions(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_route_signals_preview_chars", str(SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)),
         )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_raw_lexical_policy_mode", str(raw_lexical_policy.get("mode") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_raw_lexical_policy_source", str(raw_lexical_policy.get("source") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (
+                "search_raw_lexical_max_bytes",
+                "unbounded" if effective_max_raw_bytes is None else str(effective_max_raw_bytes),
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_raw_lexical_default_max_bytes", str(SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_raw_lexical_skip_status", str(raw_lexical_policy.get("skip_status") or "skipped_raw_too_large")),
+        )
         conn.commit()
+        bulk_started = time.monotonic()
         for record_index, record in enumerate(records, start=1):
             if deadline is not None and record_index > 1 and time.monotonic() >= deadline:
                 budget_exhausted = True
                 break
             conn.execute("BEGIN")
             projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
-            documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=max_raw_bytes)
+            documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=effective_max_raw_bytes)
             session_results.append(result)
+            raw_text_status_counts[str(result.get("raw_text_status") or "unknown")] += 1
             record_counts: Counter[str] = Counter()
             record_removed_document_count = 0
             if result.get("diagnostics"):
@@ -25558,22 +25760,44 @@ def search_index_sessions(
             removed_document_count += record_removed_document_count
             committed_count += 1
             if progress_every > 0 and record_index % progress_every == 0:
-                print(
-                    json.dumps(
-                        {
-                            "event": "search_index_progress",
-                            "processed": record_index,
-                            "selected_count": len(records),
-                            "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    file=sys.stderr,
-                    flush=True,
+                progress_event(
+                    "search_index_progress",
+                    {
+                        "processed": record_index,
+                        "selected_count": len(records),
+                    },
                 )
-            if record_index % 10 == 0:
+            optimize_every = SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY if rebuild else SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY
+            if optimize_every > 0 and record_index % optimize_every == 0:
                 conn.execute("PRAGMA optimize")
+                inline_optimize_count += 1
+        record_phase(
+            "session_bulk_index",
+            bulk_started,
+            selected_count=len(records),
+            processed_count=committed_count,
+            inline_optimize_count=inline_optimize_count,
+        )
+        if rebuild:
+            index_started = time.monotonic()
+            progress_event("search_index_phase_start", {"phase": "sqlite_index_build"})
+            index_timings = create_search_db_indexes(
+                conn,
+                progress_callback=lambda event, payload: progress_event(
+                    event,
+                    {"phase": "sqlite_index_build", **payload},
+                ),
+            )
+            conn.commit()
+            record_phase(
+                "sqlite_index_build",
+                index_started,
+                index_count=len(index_timings),
+                index_timings=index_timings,
+            )
         if not budget_exhausted and (deadline is None or time.monotonic() < deadline):
+            registry_started = time.monotonic()
+            progress_event("search_index_phase_start", {"phase": "entity_registry_refresh"})
             registry_refresh = refresh_search_entity_registry_documents(
                 conn,
                 aoa_root=aoa_root,
@@ -25581,9 +25805,12 @@ def search_index_sessions(
             )
             counts["entity_registry"] += int_value(registry_refresh.get("inserted_count"))
             removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
-        if rebuild:
-            create_search_db_indexes(conn)
-            conn.commit()
+            record_phase(
+                "entity_registry_refresh",
+                registry_started,
+                inserted_count=int_value(registry_refresh.get("inserted_count")),
+                removed_count=removed_entity_registry_document_count,
+            )
     except sqlite3.Error as exc:
         interrupted = "interrupted" in str(exc).lower()
         if interrupted and deadline is not None and time.monotonic() >= deadline:
@@ -25614,7 +25841,17 @@ def search_index_sessions(
                 "document_count": sum(counts.values()),
                 "removed_document_count": removed_document_count,
                 "removed_entity_registry_document_count": removed_entity_registry_document_count,
-                "max_raw_bytes": max_raw_bytes,
+                "max_raw_bytes": effective_max_raw_bytes,
+                "requested_max_raw_bytes": max_raw_bytes,
+                "raw_lexical_policy": raw_lexical_policy,
+                "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
+                "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+                "phase_timings": phase_timings,
+                "inline_optimize_policy": {
+                    "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
+                    "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
+                },
+                "inline_optimize_count": inline_optimize_count,
                 "db_path": str(db_path),
                 "build_db_path": str(write_db_path),
                 "diagnostics": ["search_index_budget_exhausted"],
@@ -25635,7 +25872,17 @@ def search_index_sessions(
             "document_count": 0,
             "removed_document_count": removed_document_count,
             "removed_entity_registry_document_count": removed_entity_registry_document_count,
-            "max_raw_bytes": max_raw_bytes,
+            "max_raw_bytes": effective_max_raw_bytes,
+            "requested_max_raw_bytes": max_raw_bytes,
+            "raw_lexical_policy": raw_lexical_policy,
+            "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
+            "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+            "phase_timings": phase_timings,
+            "inline_optimize_policy": {
+                "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
+                "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
+            },
+            "inline_optimize_count": inline_optimize_count,
             "db_path": str(db_path),
             "build_db_path": str(write_db_path),
             "diagnostics": [f"sqlite_error:{exc}"],
@@ -25663,7 +25910,17 @@ def search_index_sessions(
         "since": since,
         "until": until,
         "limit": limit,
-        "max_raw_bytes": max_raw_bytes,
+        "max_raw_bytes": effective_max_raw_bytes,
+        "requested_max_raw_bytes": max_raw_bytes,
+        "raw_lexical_policy": raw_lexical_policy,
+        "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
+        "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+        "phase_timings": phase_timings,
+        "inline_optimize_policy": {
+            "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
+            "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
+        },
+        "inline_optimize_count": inline_optimize_count,
         "selected_count": len(records),
         "processed_count": processed_count,
         "remaining_count": max(0, len(records) - processed_count),
@@ -32535,6 +32792,7 @@ def sqlite_storage_stats(
                 metadata[str(row["key"])] = str(row["value"])
         if metadata:
             payload["metadata"] = metadata
+            payload["raw_lexical_policy"] = search_raw_lexical_policy_from_metadata(metadata)
         page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
         freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
@@ -32775,6 +33033,12 @@ def storage_audit(
     graph_store = sqlite_storage_stats(graph_paths_payload["store"], deep=deep_dbstat, row_counts=row_counts)
     search_store = sqlite_storage_stats(search_path, deep=deep_dbstat, row_counts=row_counts)
     sessions = session_storage_breakdown(aoa_root)
+    search_raw_lexical_policy = (
+        search_store.get("raw_lexical_policy")
+        if isinstance(search_store.get("raw_lexical_policy"), dict)
+        else {}
+    )
+    search_policy_status = search_raw_lexical_policy_status(search_raw_lexical_policy)
     table_sizes = {
         item.get("name"): int_value(item.get("size_bytes"))
         for item in graph_store.get("table_sizes", []) if isinstance(item, dict)
@@ -32828,12 +33092,13 @@ def storage_audit(
             },
             {
                 "id": "search_hot_store_v3",
-                "status": "implemented_for_new_rebuilds",
+                "status": search_policy_status,
                 "quality_tradeoff": "none_expected; FTS keeps searchable text, compressed bodies hydrate snippets, full route postings stay normalized while hot rows keep bounded route previews and compact payload deltas",
+                "raw_lexical_policy": search_raw_lexical_policy,
                 "estimated_reclaimable_bytes": 0,
                 "estimated_reclaimable_human": "0 B",
-                "estimate_status": "implemented_residual_not_estimated",
-                "next_route": "use --deep-dbstat to inspect residual search table weight before planning any further search-store compaction",
+                "estimate_status": "requires_bounded_rebuild_benchmark" if search_policy_status != "bounded_policy_recorded" else "bounded_policy_recorded_residual_not_estimated",
+                "next_route": "run search-index all with the bounded default raw lexical policy and compare storage-audit plus route-performance-baseline before considering deeper FTS sharding",
             },
         ],
         "stop_line": "Do not delete raw evidence. Prefer compact generated stores, offset refs, and rebuildable caches.",
@@ -35972,6 +36237,8 @@ def search_maintenance_status_from_provider(provider_status: dict[str, Any]) -> 
     providers = provider_status.get("providers") if isinstance(provider_status.get("providers"), dict) else {}
     portable = providers.get("portable_sqlite") if isinstance(providers.get("portable_sqlite"), dict) else {}
     freshness = portable.get("freshness") if isinstance(portable.get("freshness"), dict) else {}
+    raw_lexical_policy = portable.get("raw_lexical_policy") if isinstance(portable.get("raw_lexical_policy"), dict) else {}
+    storage_policy_status = search_raw_lexical_policy_status(raw_lexical_policy)
     return {
         "status": freshness.get("status") or portable.get("status"),
         "provider_status": portable.get("status"),
@@ -35980,6 +36247,10 @@ def search_maintenance_status_from_provider(provider_status: dict[str, Any]) -> 
         "has_documents": portable.get("has_documents"),
         "has_route_index": portable.get("has_route_index"),
         "has_route_terms": portable.get("has_route_terms"),
+        "metadata": portable.get("metadata") if isinstance(portable.get("metadata"), dict) else {},
+        "raw_lexical_policy": raw_lexical_policy,
+        "storage_policy_status": storage_policy_status,
+        "needs_storage_policy_rebuild": storage_policy_status != "bounded_policy_recorded",
         "actionable_dirty_session_count": int_value(freshness.get("actionable_dirty_session_count")),
         "deferred_live_session_count": int_value(freshness.get("deferred_live_session_count")),
         "dirty_session_count": int_value(freshness.get("dirty_session_count")),
@@ -36058,12 +36329,22 @@ def session_memory_maintenance_next_actions(
         if isinstance(entity_registry, dict)
         else route_status.get("entity_registry") if isinstance(route_status.get("entity_registry"), dict) else {}
     )
+    search_needs_storage_policy_rebuild = bool(search.get("needs_storage_policy_rebuild"))
     entity_registry_needs = bool(route_entity_registry.get("needs_maintenance"))
     route_or_cache_index_needs = (
         int_value(route_status.get("route_drift_count")) > 0
         or bool(route_search.get("needs_refresh"))
         or bool(route_atlas.get("needs_refresh"))
     )
+    if search_needs_storage_policy_rebuild:
+        actions.append(
+            {
+                "id": "repair_search_storage_policy",
+                "reason": search.get("storage_policy_status") or "search_raw_lexical_policy_not_bounded",
+                "command": ["python3", "scripts/aoa_session_memory.py", "search-index", "all", *root_args, "--write-report"],
+                "note": "Rebuilds generated search projection with the bounded default raw lexical policy; raw transcript remains the proof authority.",
+            }
+        )
     if int_value(search.get("actionable_dirty_session_count")) > 0:
         first = actionable_sessions[0] if actionable_sessions else {}
         target = str(first.get("session_label") or first.get("session_id") or "all") if isinstance(first, dict) else "all"
@@ -36431,6 +36712,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             "has_documents",
             "has_route_index",
             "has_route_terms",
+            "raw_lexical_policy",
+            "storage_policy_status",
+            "needs_storage_policy_rebuild",
             "actionable_dirty_session_count",
             "deferred_live_session_count",
             "dirty_session_count",
@@ -39826,7 +40110,11 @@ def command_search_index(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
-    max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    max_raw_bytes = (
+        -1
+        if getattr(args, "unbounded_raw_text", False)
+        else int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    )
     def run_search_index() -> dict[str, Any]:
         try:
             rebuild = search_index_default_rebuild(
@@ -39848,6 +40136,10 @@ def command_search_index(args: argparse.Namespace) -> int:
                 "selected_count": 0,
                 "document_count": 0,
                 "max_raw_bytes": max_raw_bytes,
+                "raw_lexical_policy": search_raw_lexical_policy(
+                    max_raw_bytes,
+                    use_default_budget=not getattr(args, "unbounded_raw_text", False),
+                ),
                 "db_path": str(search_db_path(root)),
                 "diagnostics": [str(exc)],
                 "sessions": [],
@@ -39859,6 +40151,7 @@ def command_search_index(args: argparse.Namespace) -> int:
             until=args.until,
             limit=args.limit,
             max_raw_bytes=max_raw_bytes,
+            use_default_raw_lexical_budget=not getattr(args, "unbounded_raw_text", False),
             rebuild=rebuild,
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
@@ -44361,6 +44654,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     search_index.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     search_index.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
+    search_index.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text rebuild.")
     search_index.add_argument("--rebuild", action="store_true", help="Force a destructive rebuild even for scoped targets. Unfiltered all already rebuilds by default.")
     search_index.add_argument("--no-rebuild", action="store_true", help="Force append/update into the existing search DB instead of rebuilding it.")
     search_index.add_argument("--budget-seconds", type=float, help="Stop after the current session transaction when this wall-clock budget is exhausted.")

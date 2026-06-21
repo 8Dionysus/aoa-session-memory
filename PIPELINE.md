@@ -66,7 +66,7 @@ Codex hook event
   -> session-registry.json
   -> token-accounting report/backfill diagnostics
   -> index-maintenance token-ledger backfill before search/atlas refresh
-  -> optional search-index runtime cache
+  -> optional search-index runtime cache with bounded raw lexical policy
   -> optional provider capability status for host overlays
   -> trace-route anchor resolver for skill/MCP/hook/tool/GitHub investigations
   -> entity usage audit and neighborhood windows for real skills, MCPs,
@@ -243,6 +243,11 @@ dumping transcript text into the diagnostic.
 The SQLite search route stores `agent_event` and `task_episode_id` as first
 class filters. MCP may expose these read-only packets, but maintenance,
 reindex, repair, and promotion stay outside MCP.
+
+Full `search-index` rebuilds keep raw lexical text bounded by default and do
+not run inline SQLite `PRAGMA optimize` inside the session loop. Rebuild
+reports carry phase timings for bulk session indexing, SQLite index build, and
+entity-registry refresh so a slow rebuild has an observable stage boundary.
 
 ### PostCompact
 

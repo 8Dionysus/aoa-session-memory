@@ -784,9 +784,20 @@ Build the portable SQLite search index from the generated archive layers:
 python3 scripts/aoa_session_memory.py search-index all \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
-  --max-raw-mb 16 \
   --write-report
 ```
+
+`search-index` uses the bounded raw lexical policy by default: raw semantic
+text is indexed only for sessions at or below the default `16 MiB` raw JSONL
+budget, while route documents, previews, freshness, and raw/segment refs remain
+available for larger sessions. Use `--max-raw-mb` for an explicit tighter or
+looser budget, and reserve `--unbounded-raw-text` for a deliberate full lexical
+rebuild/benchmark where the heavier FTS size is acceptable.
+
+Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
+loop; rebuild quality comes from the normalized route tables and explicit index
+build phase. Reports include phase timings for bulk session indexing, SQLite
+index build, and entity-registry refresh so long rebuilds are diagnosable.
 
 Build or inspect the generated entity registry for skills, MCPs, hooks, tools,
 APIs, scripts, validators, tests, evals, graph, and memory surfaces:

@@ -1603,6 +1603,10 @@ def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: 
 
     status = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
     assert status["recommendation"] == "run_maintenance"
+    assert status["search"]["raw_lexical_policy"]["mode"] == module.SEARCH_RAW_LEXICAL_POLICY_MODE
+    assert status["search"]["raw_lexical_policy"]["unbounded"] is False
+    assert status["search"]["storage_policy_status"] == "bounded_policy_recorded"
+    assert status["search"]["needs_storage_policy_rebuild"] is False
     assert status["next_actions"][0]["id"] == "entity_registry_refresh"
     assert "search-index" in status["next_actions"][0]["command"]
     assert "--no-rebuild" in status["next_actions"][0]["command"]
@@ -2449,12 +2453,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert storage["graph_store"]["deep_dbstat_status"] == "completed"
     assert storage["graph_store"]["row_count_status"] == "requested"
     assert storage["search_store"]["metadata"]["search_body_storage_mode"] == module.SEARCH_BODY_STORAGE_MODE
+    assert storage["search_store"]["raw_lexical_policy"]["mode"] == module.SEARCH_RAW_LEXICAL_POLICY_MODE
+    assert storage["search_store"]["raw_lexical_policy"]["unbounded"] is False
     assert storage["graph_store"]["table_sizes"]
     assert storage["graph_store"]["wal"]["size_bytes"] >= 0
     assert storage["graph_store"]["total_with_wal_bytes"] >= storage["graph_store"]["size_bytes"]
     assert storage["sessions"]["raw_block_duplication_candidate_bytes"] >= 0
     assert any(item.get("id") == "sqlite_wal_checkpoint" for item in storage["recommendations"])
     assert any(item.get("id") == "graph_compact_aggregate_payload" for item in storage["recommendations"])
+    search_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "search_hot_store_v3")
+    assert search_recommendation["status"] == "bounded_policy_recorded"
     assert Path(storage["report_json"]).exists()
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
     assert packet["ok"] is True
@@ -6287,6 +6295,11 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
                     "has_documents": True,
                     "has_route_index": True,
                     "has_route_terms": True,
+                    "raw_lexical_policy": {
+                        "mode": module.SEARCH_RAW_LEXICAL_POLICY_MODE,
+                        "effective_max_raw_bytes": module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+                        "unbounded": False,
+                    },
                     "freshness": {
                         "status": "current_with_deferred_live_updates",
                         "actionable_dirty_session_count": 0,
@@ -7079,6 +7092,15 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", write_report=True)
 
     assert indexed["ok"] is True
+    assert indexed["max_raw_bytes"] == module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES
+    assert indexed["raw_lexical_policy"]["mode"] == module.SEARCH_RAW_LEXICAL_POLICY_MODE
+    assert indexed["raw_lexical_policy"]["source"] == "default"
+    assert indexed["raw_text_status_counts"]["available"] >= 1
+    assert indexed["inline_optimize_policy"]["rebuild_every"] == 0
+    assert indexed["inline_optimize_policy"]["incremental_every"] == module.SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY
+    assert indexed["inline_optimize_count"] == 0
+    phase_names = {item.get("phase") for item in indexed["phase_timings"]}
+    assert {"session_bulk_index", "sqlite_index_build", "entity_registry_refresh"}.issubset(phase_names)
     assert indexed["session_document_count"] == 2
     assert indexed["event_document_count"] == 6
     assert indexed["incident_document_count"] >= 1
@@ -7087,6 +7109,8 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     body_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
     payload_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_payload_storage_mode",)).fetchone()[0]
+    lexical_policy_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_lexical_policy_mode",)).fetchone()[0]
+    lexical_max_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_lexical_max_bytes",)).fetchone()[0]
     preview_len, compressed_count = conn.execute(
         "SELECT MAX(LENGTH(body)), COUNT(*) FROM documents JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid"
     ).fetchone()
@@ -7098,6 +7122,8 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     conn.close()
     assert body_meta == module.SEARCH_BODY_STORAGE_MODE
     assert payload_meta == module.SEARCH_PAYLOAD_STORAGE_MODE
+    assert lexical_policy_meta == module.SEARCH_RAW_LEXICAL_POLICY_MODE
+    assert lexical_max_meta == str(module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES)
     assert preview_len <= module.SEARCH_BODY_PREVIEW_CHARS
     assert route_preview_len <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
     assert payload_len < 1000
@@ -7216,6 +7242,57 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
         if item.startswith("freshness_status_candidate_count:")
     )
     assert candidate_count > 200
+
+
+def test_search_index_default_raw_lexical_policy_is_bounded_but_explicit_unbounded_keeps_text(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-raw-budget.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "search-raw-budget", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "raw-budget-unique-anchor"}]},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-raw-budget",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    monkeypatch.setattr(module, "SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES", 1)
+    bounded = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    assert bounded["ok"] is True
+    assert bounded["max_raw_bytes"] == 1
+    assert bounded["raw_lexical_policy"]["source"] == "default"
+    assert bounded["raw_text_status_counts"]["skipped_raw_too_large"] == 1
+    assert bounded["raw_text_skipped_session_count"] == 1
+    bounded_results = module.search_sessions(aoa_root=aoa_root, query="raw-budget-unique-anchor")
+    assert bounded_results["result_count"] == 0
+
+    unbounded = module.search_index_sessions(aoa_root=aoa_root, target="all", max_raw_bytes=-1, rebuild=True)
+
+    assert unbounded["ok"] is True
+    assert unbounded["max_raw_bytes"] is None
+    assert unbounded["raw_lexical_policy"]["source"] == "explicit_unbounded"
+    assert unbounded["raw_text_status_counts"]["available"] == 1
+    unbounded_results = module.search_sessions(aoa_root=aoa_root, query="raw-budget-unique-anchor")
+    assert unbounded_results["result_count"] >= 1
 
 
 def test_search_index_raw_text_uses_segment_line_limits_without_reclassifying(tmp_path: Path, monkeypatch: Any) -> None:
@@ -7705,6 +7782,30 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
         is not None
     )
     conn.close()
+
+
+def test_maintenance_next_actions_route_legacy_search_storage_policy(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={
+            "needs_storage_policy_rebuild": True,
+            "storage_policy_status": "unbounded_or_legacy_policy",
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 0,
+        },
+        graph={"needs_maintenance": False, "needs_full_rebuild": False, "actionable_count": 0, "deferred_live_source_count": 0},
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": False, "needs_sidecar_export": False, "needs_offline_graph_build": False},
+        entity_registry={"needs_maintenance": False},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_search_storage_policy"
+    assert actions[0]["reason"] == "unbounded_or_legacy_policy"
+    assert actions[0]["command"][:3] == ["python3", "scripts/aoa_session_memory.py", "search-index"]
+    assert "--unbounded-raw-text" not in actions[0]["command"]
 
 
 def test_route_term_cache_is_scoped_to_search_connection(tmp_path: Path) -> None:
