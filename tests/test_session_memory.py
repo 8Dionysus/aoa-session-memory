@@ -7625,6 +7625,95 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert candidate_count > 200
 
 
+def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    def archive_session(session_id: str, timestamp: str, text: str) -> None:
+        stamp = timestamp.replace(":", "-")
+        transcript = tmp_path / f"rollout-{stamp}-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {"timestamp": timestamp, "type": "session_meta", "payload": {"id": session_id, "cwd": str(workspace)}},
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"answer for {text}"}]},
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    archive_session("may-shard-session", "2026-05-12T00:00:00Z", "may-shard-anchor")
+    archive_session("june-shard-session", "2026-06-03T00:00:00Z", "june-shard-anchor")
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert indexed["ok"] is True
+    assert indexed["search_catalog"]["status"] == "current"
+
+    shards = module.materialize_search_shards(aoa_root=aoa_root, target="all", write_report=True)
+    assert shards["ok"] is True
+    assert shards["shard_count"] == 2
+    assert {item["shard"] for item in shards["shards"]} == {"month/2026-05", "month/2026-06"}
+    assert all(Path(item["db_path"]).exists() for item in shards["shards"])
+    assert Path(shards["report_json"]).exists()
+
+    catalog = module.read_search_catalog(aoa_root)
+    assert catalog["ok"] is True
+    assert catalog["materialized_shard_count"] == 2
+    assert all(item["materialized"] for item in catalog["shards"])
+
+    fanout = module.search_sessions(
+        aoa_root=aoa_root,
+        query="may-shard-anchor",
+        doc_type="event",
+        use_shards=True,
+        explain=True,
+    )
+    assert fanout["ok"] is True
+    assert fanout["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert fanout["search_projection"]["queried_shard_count"] == 2
+    assert fanout["result_count"] >= 1
+    may_hit = fanout["results"][0]
+    assert may_hit["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+    assert may_hit["search_catalog"]["shard"] == "month/2026-05"
+    assert may_hit["search_catalog"]["shard_db_path"]
+    assert may_hit["refs"]["raw"]
+
+    june_sessions = module.search_sessions(
+        aoa_root=aoa_root,
+        doc_type="session",
+        date_from="2026-06-01",
+        date_to="2026-06-30",
+        use_shards=True,
+    )
+    assert june_sessions["ok"] is True
+    assert june_sessions["search_projection"]["candidate_shard_count"] == 1
+    assert june_sessions["search_projection"]["queried_shard_count"] == 1
+    assert june_sessions["results"][0]["search_catalog"]["shard"] == "month/2026-06"
+
+    scoped = module.materialize_search_shards(aoa_root=aoa_root, target="all", shard="month/2026-05")
+    assert scoped["ok"] is True
+    assert scoped["shard_count"] == 1
+    assert scoped["shards"][0]["shard"] == "month/2026-05"
+
+
 def test_search_index_default_raw_lexical_policy_is_bounded_but_explicit_unbounded_keeps_text(
     tmp_path: Path,
     monkeypatch: Any,

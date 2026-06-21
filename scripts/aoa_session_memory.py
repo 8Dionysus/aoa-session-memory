@@ -23254,6 +23254,8 @@ def search_db_path(aoa_root: Path) -> Path:
 SEARCH_CATALOG_NAME = "catalog.json"
 SEARCH_SHARD_STRATEGY = "monthly_session_date_v1"
 SEARCH_ACTIVE_PROJECTION_MONOLITH = "monolith_fallback"
+SEARCH_ACTIVE_PROJECTION_SHARD = "materialized_shard"
+SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT = "materialized_shard_fanout"
 
 
 def search_catalog_path(aoa_root: Path) -> Path:
@@ -23284,11 +23286,44 @@ def search_catalog_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "status": payload.get("status"),
         "session_count": payload.get("session_count"),
         "shard_count": payload.get("shard_count"),
+        "materialized_shard_count": payload.get("materialized_shard_count"),
         "shard_strategy": payload.get("shard_strategy"),
         "active_projection": payload.get("active_projection"),
         "generated_at": payload.get("generated_at"),
         "diagnostics": payload.get("diagnostics", []),
     }
+
+
+def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
+    if not db_path.exists():
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        if not sqlite_table_exists(conn, "session_index_state"):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT session_id, source_fingerprint, search_schema_version,
+                   route_signal_classifier_version, document_count
+            FROM session_index_state
+            """
+        ).fetchall()
+        return {
+            str(row["session_id"] or ""): {
+                "source_fingerprint": str(row["source_fingerprint"] or ""),
+                "search_schema_version": str(row["search_schema_version"] or ""),
+                "route_signal_classifier_version": int_value(row["route_signal_classifier_version"]),
+                "document_count": int_value(row["document_count"]),
+            }
+            for row in rows
+            if str(row["session_id"] or "")
+        }
+    except sqlite3.Error:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def build_search_catalog(
@@ -23405,9 +23440,32 @@ def build_search_catalog(
             conn.close()
     sessions: list[dict[str, Any]] = []
     shard_payloads: dict[str, dict[str, Any]] = {}
+    shard_state_cache: dict[str, dict[str, dict[str, Any]]] = {}
+    live_state_by_session: dict[str, dict[str, Any]] = {}
+    live_state_basis = "live_session_indexes"
+    try:
+        for record in chronological_session_records(aoa_root):
+            state = session_projection_fingerprint(record, include_rendered_markdown=False)
+            for key in (state.get("session_id"), state.get("session_label")):
+                if key:
+                    live_state_by_session[str(key)] = state
+    except Exception:
+        live_state_basis = "monolith_session_index_state_fallback"
     for row in rows:
         session_id = str(row["session_id"] or "")
         session_label = str(row["session_label"] or "")
+        live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
+        expected_fingerprint = str(live_state.get("fingerprint") or row["source_fingerprint"] or "")
+        expected_latest_mtime = float(live_state.get("latest_source_mtime") or row["source_latest_mtime"] or 0.0)
+        expected_search_schema_version = str(SEARCH_SCHEMA_VERSION)
+        expected_route_signal_classifier_version = ROUTE_SIGNAL_CLASSIFIER_VERSION
+        monolith_status = "current"
+        if (
+            expected_fingerprint != str(row["source_fingerprint"] or "")
+            or expected_search_schema_version != str(row["search_schema_version"] or "")
+            or expected_route_signal_classifier_version != int_value(row["route_signal_classifier_version"])
+        ):
+            monolith_status = "stale"
         doc = session_doc_by_key.get(session_id) or session_doc_by_key.get(session_label) or {}
         freshness = freshness_by_session.get(session_id) or freshness_by_session.get(session_label) or {
             "status": "unverifiable",
@@ -23423,6 +23481,19 @@ def build_search_catalog(
         session_date = str(doc.get("session_date") or search_session_date_from_label(session_label))
         shard = search_shard_key_for_session(session_label, session_date)
         shard_path = search_shard_db_path(aoa_root, shard)
+        if str(shard_path) not in shard_state_cache:
+            shard_state_cache[str(shard_path)] = search_shard_session_state(shard_path)
+        shard_session_state = shard_state_cache[str(shard_path)].get(session_id, {})
+        shard_status = "missing"
+        if shard_path.exists():
+            shard_status = "stale"
+            if (
+                shard_session_state
+                and str(shard_session_state.get("source_fingerprint") or "") == expected_fingerprint
+                and str(shard_session_state.get("search_schema_version") or "") == expected_search_schema_version
+                and int_value(shard_session_state.get("route_signal_classifier_version")) == expected_route_signal_classifier_version
+            ):
+                shard_status = "current"
         item = {
             "session_id": session_id,
             "session_label": session_label,
@@ -23435,8 +23506,11 @@ def build_search_catalog(
             "shard_strategy": SEARCH_SHARD_STRATEGY,
             "shard": shard,
             "shard_db_path": str(shard_path),
-            "shard_materialized": shard_path.exists(),
+            "shard_materialized": shard_status == "current",
+            "shard_status": shard_status,
             "monolith_db_path": str(db_path),
+            "monolith_status": monolith_status,
+            "catalog_state_basis": live_state_basis,
             "freshness": {
                 "status": freshness.get("status"),
                 "reason": freshness.get("reason"),
@@ -23453,8 +23527,10 @@ def build_search_catalog(
                 ),
             },
             "document_count": int_value(freshness.get("document_count"), int_value(row["document_count"])),
-            "source_fingerprint": str(row["source_fingerprint"] or ""),
-            "source_latest_mtime": float(row["source_latest_mtime"] or 0.0),
+            "source_fingerprint": expected_fingerprint,
+            "source_latest_mtime": expected_latest_mtime,
+            "monolith_source_fingerprint": str(row["source_fingerprint"] or ""),
+            "monolith_source_latest_mtime": float(row["source_latest_mtime"] or 0.0),
             "indexed_at": str(row["indexed_at"] or ""),
         }
         sessions.append(item)
@@ -23465,15 +23541,28 @@ def build_search_catalog(
                 "shard_db_path": str(shard_path),
                 "materialized": shard_path.exists(),
                 "session_count": 0,
+                "current_session_count": 0,
+                "stale_session_count": 0,
+                "missing_session_count": 0,
                 "document_count": 0,
                 "freshness_counts": {},
             },
         )
         shard_item["session_count"] += 1
+        if shard_status == "current":
+            shard_item["current_session_count"] += 1
+        elif shard_status == "missing":
+            shard_item["missing_session_count"] += 1
+        else:
+            shard_item["stale_session_count"] += 1
         shard_item["document_count"] += int_value(item["document_count"])
         freshness_status = str(item["freshness"].get("status") or "unverifiable")
         shard_item["freshness_counts"][freshness_status] = int_value(shard_item["freshness_counts"].get(freshness_status)) + 1
     shards = sorted(shard_payloads.values(), key=lambda item: str(item.get("shard") or ""))
+    for shard in shards:
+        shard["materialized"] = int_value(shard.get("session_count")) > 0 and int_value(shard.get("current_session_count")) == int_value(shard.get("session_count"))
+        shard["status"] = "current" if shard["materialized"] else ("missing" if int_value(shard.get("current_session_count")) == 0 else "stale")
+    materialized_shard_count = sum(1 for shard in shards if shard.get("materialized"))
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_catalog",
@@ -23486,6 +23575,7 @@ def build_search_catalog(
         "source_db_path": str(db_path),
         "source_db_mtime": path_mtime(db_path),
         "search_metadata": metadata,
+        "catalog_state_basis": live_state_basis,
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
         "fallback": {
@@ -23495,6 +23585,7 @@ def build_search_catalog(
         },
         "session_count": len(sessions),
         "shard_count": len(shards),
+        "materialized_shard_count": materialized_shard_count,
         "sessions": sessions,
         "shards": shards,
         "diagnostics": diagnostics,
@@ -23553,6 +23644,7 @@ def search_catalog_markdown(payload: dict[str, Any]) -> str:
         f"- shard_strategy: `{payload.get('shard_strategy')}`",
         f"- session_count: `{payload.get('session_count')}`",
         f"- shard_count: `{payload.get('shard_count')}`",
+        f"- materialized_shard_count: `{payload.get('materialized_shard_count', 0)}`",
         "",
         "## Shards",
         "",
@@ -23570,6 +23662,205 @@ def search_catalog_markdown(payload: dict[str, Any]) -> str:
     else:
         lines.append("- none")
     return "\n".join(lines)
+
+
+def search_records_for_target(
+    aoa_root: Path,
+    *,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if target and target != "all":
+        return [resolve_session_record(aoa_root, target)]
+    return chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+
+
+def search_shard_key_for_record(record: dict[str, Any]) -> str:
+    session_label = str(record.get("session_label") or session_dir_from_record(record).name)
+    return search_shard_key_for_session(session_label, session_record_date(record))
+
+
+def search_shards_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Search Shards",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- shard_strategy: `{payload.get('shard_strategy')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- processed_count: `{payload.get('processed_count')}`",
+        f"- shard_count: `{payload.get('shard_count')}`",
+        f"- document_count: `{payload.get('document_count')}`",
+        "",
+        "## Materialized Shards",
+        "",
+        "| shard | sessions | documents | ok | db |",
+        "| --- | ---: | ---: | --- | --- |",
+    ]
+    for shard in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
+        if isinstance(shard, dict):
+            lines.append(
+                f"| `{shard.get('shard')}` | `{shard.get('session_count')}` | "
+                f"`{shard.get('document_count')}` | `{shard.get('ok')}` | "
+                f"`{shard.get('db_path')}` |"
+            )
+    lines.extend(["", "## Diagnostics", ""])
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def materialize_search_shards(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    shard: str | None = None,
+    max_raw_bytes: int | None = None,
+    use_default_raw_lexical_budget: bool = True,
+    write_report: bool = False,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
+) -> dict[str, Any]:
+    now = utc_now()
+    started = time.monotonic()
+    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
+    diagnostics: list[str] = []
+    try:
+        records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "target_error",
+            "target": target,
+            "selected_count": 0,
+            "processed_count": 0,
+            "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "shard_count": 0,
+            "document_count": 0,
+            "shards": [],
+            "diagnostics": [str(exc)],
+        }
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        shard_key = search_shard_key_for_record(record)
+        if shard and shard_key != shard:
+            continue
+        groups[shard_key].append(record)
+    if not groups:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "no_sessions_selected",
+            "target": target,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "requested_shard": shard or "",
+            "selected_count": len(records),
+            "processed_count": 0,
+            "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "shard_count": 0,
+            "document_count": 0,
+            "shards": [],
+            "diagnostics": ["no sessions selected for shard materialization"],
+        }
+    shard_results: list[dict[str, Any]] = []
+    processed_count = 0
+    document_count = 0
+    for shard_key in sorted(groups):
+        if deadline is not None and processed_count > 0 and time.monotonic() >= deadline:
+            diagnostics.append("search_shard_materialization_budget_exhausted")
+            break
+        shard_records = groups[shard_key]
+        shard_path = search_shard_db_path(aoa_root, shard_key)
+        remaining_budget = max(0.1, deadline - time.monotonic()) if deadline is not None else None
+        result = search_index_sessions(
+            aoa_root=aoa_root,
+            target=f"shard:{shard_key}",
+            selected_records=shard_records,
+            max_raw_bytes=max_raw_bytes,
+            use_default_raw_lexical_budget=use_default_raw_lexical_budget,
+            rebuild=True,
+            write_report=False,
+            db_path_override=shard_path,
+            refresh_catalog=False,
+            include_entity_registry=False,
+            budget_seconds=remaining_budget,
+            progress_every=progress_every,
+        )
+        shard_ok = bool(result.get("ok"))
+        shard_diagnostics = [str(item) for item in result.get("diagnostics", []) if item]
+        diagnostics.extend(f"{shard_key}:{item}" for item in shard_diagnostics)
+        processed_count += int_value(result.get("processed_count"))
+        document_count += int_value(result.get("document_count"))
+        shard_results.append(
+            {
+                "shard": shard_key,
+                "db_path": str(shard_path),
+                "ok": shard_ok,
+                "status": "current" if shard_ok else "failed",
+                "session_count": len(shard_records),
+                "processed_count": int_value(result.get("processed_count")),
+                "document_count": int_value(result.get("document_count")),
+                "search_schema_version": result.get("search_schema_version"),
+                "generated_at": result.get("generated_at"),
+                "diagnostics": shard_diagnostics,
+            }
+        )
+    catalog_refresh = build_search_catalog(aoa_root, write=True)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_shard_materialization",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": bool(shard_results) and all(item.get("ok") for item in shard_results) and not diagnostics,
+        "status": "current" if shard_results and all(item.get("ok") for item in shard_results) and not diagnostics else "degraded",
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "requested_shard": shard or "",
+        "selected_count": len(records),
+        "processed_count": processed_count,
+        "shard_strategy": SEARCH_SHARD_STRATEGY,
+        "shard_count": len(shard_results),
+        "document_count": document_count,
+        "catalog": search_catalog_summary(catalog_refresh),
+        "shards": shard_results,
+        "diagnostics": diagnostics,
+    }
+    if not catalog_refresh.get("ok"):
+        payload["ok"] = False
+        payload["status"] = "degraded"
+        payload.setdefault("diagnostics", []).append(f"search_catalog_refresh_failed:{catalog_refresh.get('status')}")
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__search-shards"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, search_shards_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
 
 
 def search_report_markdown(payload: dict[str, Any]) -> str:
@@ -26128,11 +26419,14 @@ def search_index_sessions(
     selected_records: list[dict[str, Any]] | None = None,
     budget_seconds: float | None = None,
     progress_every: int = 0,
+    db_path_override: Path | None = None,
+    refresh_catalog: bool = True,
+    include_entity_registry: bool = True,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
-    db_path = search_db_path(aoa_root)
+    db_path = db_path_override or search_db_path(aoa_root)
     raw_lexical_policy = search_raw_lexical_policy(
         max_raw_bytes,
         use_default_budget=use_default_raw_lexical_budget,
@@ -26349,7 +26643,7 @@ def search_index_sessions(
                 index_count=len(index_timings),
                 index_timings=index_timings,
             )
-        if not budget_exhausted and (deadline is None or time.monotonic() < deadline):
+        if include_entity_registry and not budget_exhausted and (deadline is None or time.monotonic() < deadline):
             registry_started = time.monotonic()
             progress_event("search_index_phase_start", {"phase": "entity_registry_refresh"})
             registry_refresh = refresh_search_entity_registry_documents(
@@ -26365,6 +26659,8 @@ def search_index_sessions(
                 inserted_count=int_value(registry_refresh.get("inserted_count")),
                 removed_count=removed_entity_registry_document_count,
             )
+        elif not include_entity_registry:
+            record_phase("entity_registry_refresh", time.monotonic(), inserted_count=0, removed_count=0, skipped=True)
     except sqlite3.Error as exc:
         interrupted = "interrupted" in str(exc).lower()
         if interrupted and deadline is not None and time.monotonic() >= deadline:
@@ -26512,7 +26808,7 @@ def search_index_sessions(
         else:
             cleanup_search_rebuild_temp(temp_db_path)
             payload["discarded_build_db_path"] = str(temp_db_path)
-    if payload["ok"]:
+    if payload["ok"] and refresh_catalog:
         catalog_refresh = build_search_catalog(aoa_root, write=True)
         payload["search_catalog"] = search_catalog_summary(catalog_refresh)
         if not catalog_refresh.get("ok"):
@@ -26973,6 +27269,352 @@ def search_route_storage_counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def ymd_sort_value(value: Any) -> int:
+    text = str(value or "")
+    match = re.match(r"(20\d{2})-([01]\d)-([0-3]\d)", text)
+    if not match:
+        return 0
+    return int("".join(match.groups()))
+
+
+def search_shard_overlaps_date_filter(shard_key: str, date_from: str | None, date_to: str | None) -> bool:
+    match = re.match(r"month/(20\d{2})-([01]\d)$", str(shard_key or ""))
+    if not match:
+        return True
+    month_start = f"{match.group(1)}-{match.group(2)}-01"
+    year = int(match.group(1))
+    month = int(match.group(2))
+    next_year = year + 1 if month == 12 else year
+    next_month = 1 if month == 12 else month + 1
+    next_month_start = f"{next_year:04d}-{next_month:02d}-01"
+    if date_to and month_start > parse_date_arg(date_to):
+        return False
+    if date_from and next_month_start <= parse_date_arg(date_from):
+        return False
+    return True
+
+
+def search_result_order_key(result: dict[str, Any], *, query: str) -> tuple[float, int, str]:
+    try:
+        rank = float(result.get("rank") or 0.0)
+    except (TypeError, ValueError):
+        rank = 0.0
+    rank_key = rank if fts_query_from_user(query) else 0.0
+    return (rank_key, -ymd_sort_value(result.get("session_date")), str(result.get("doc_id") or ""))
+
+
+def search_shard_fanout_unavailable_payload(
+    *,
+    reason: str,
+    aoa_root: Path,
+    query: str,
+    limit: int,
+    provider: str,
+    include_host_context: bool,
+    include_semantic_context: bool,
+    rerank_local: bool,
+    rerank_candidate_limit: int | None,
+    allow_host_warnings: bool,
+    host_timeout: int,
+    session: str | None,
+    doc_type: str | None,
+    event_type: str | None,
+    family: str | None,
+    outcome: str | None,
+    conversation_act: str | None,
+    session_act: str | None,
+    agent_event: str | None,
+    task_episode_id: str | None,
+    route_layer: str | None,
+    route_signal: str | None,
+    archive_status: str | None,
+    freshness_status: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    explain: bool,
+    semantic_preview: bool,
+    hydrate_body: bool,
+) -> dict[str, Any]:
+    payload = search_sessions(
+        aoa_root=aoa_root,
+        query=query,
+        limit=limit,
+        provider=provider,
+        include_host_context=include_host_context,
+        include_semantic_context=include_semantic_context,
+        rerank_local=rerank_local,
+        rerank_candidate_limit=rerank_candidate_limit,
+        allow_host_warnings=allow_host_warnings,
+        host_timeout=host_timeout,
+        session=session,
+        doc_type=doc_type,
+        event_type=event_type,
+        family=family,
+        outcome=outcome,
+        conversation_act=conversation_act,
+        session_act=session_act,
+        agent_event=agent_event,
+        task_episode_id=task_episode_id,
+        route_layer=route_layer,
+        route_signal=route_signal,
+        archive_status=archive_status,
+        freshness_status=freshness_status,
+        date_from=date_from,
+        date_to=date_to,
+        explain=explain,
+        semantic_preview=semantic_preview,
+        hydrate_body=hydrate_body,
+        use_shards=False,
+    )
+    payload["search_projection"] = {
+        "mode": SEARCH_ACTIVE_PROJECTION_MONOLITH,
+        "requested_mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+        "fallback_reason": reason,
+        "fallback_db_path": str(search_db_path(aoa_root)),
+    }
+    payload.setdefault("diagnostics", []).append(reason)
+    return payload
+
+
+def search_sessions_shard_fanout(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    limit: int = 20,
+    provider: str = "portable_sqlite",
+    include_host_context: bool = False,
+    include_semantic_context: bool = False,
+    rerank_local: bool = False,
+    rerank_candidate_limit: int | None = None,
+    allow_host_warnings: bool = False,
+    host_timeout: int = 45,
+    session: str | None = None,
+    doc_type: str | None = None,
+    event_type: str | None = None,
+    family: str | None = None,
+    outcome: str | None = None,
+    conversation_act: str | None = None,
+    session_act: str | None = None,
+    agent_event: str | None = None,
+    task_episode_id: str | None = None,
+    route_layer: str | None = None,
+    route_signal: str | None = None,
+    archive_status: str | None = None,
+    freshness_status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    explain: bool = False,
+    semantic_preview: bool = True,
+    hydrate_body: bool = True,
+    max_shards: int = 24,
+) -> dict[str, Any]:
+    if provider != "portable_sqlite" or include_host_context or include_semantic_context or rerank_local:
+        return search_shard_fanout_unavailable_payload(
+            reason="search_shard_fanout_requires_portable_sqlite_without_host_overlays",
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            include_host_context=include_host_context,
+            include_semantic_context=include_semantic_context,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+        )
+    catalog = read_search_catalog(aoa_root)
+    shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
+    candidate_shards: list[dict[str, Any]] = []
+    for item in shards:
+        if not isinstance(item, dict) or not item.get("materialized"):
+            continue
+        shard_key = str(item.get("shard") or "")
+        shard_path = Path(str(item.get("shard_db_path") or ""))
+        if not shard_key or not shard_path.exists():
+            continue
+        if not search_shard_overlaps_date_filter(shard_key, date_from, date_to):
+            continue
+        candidate_shards.append(item)
+    candidate_shards.sort(key=lambda item: str(item.get("shard") or ""), reverse=True)
+    effective_max_shards = max(1, int_value(max_shards, 24))
+    truncated = len(candidate_shards) > effective_max_shards
+    queried_shards = candidate_shards[:effective_max_shards]
+    if not queried_shards:
+        return search_shard_fanout_unavailable_payload(
+            reason="search_shard_fanout_no_materialized_shards_fallback_monolith",
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            include_host_context=include_host_context,
+            include_semantic_context=include_semantic_context,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+        )
+    effective_limit = max(1, int_value(limit, 20))
+    shard_payloads: list[dict[str, Any]] = []
+    merged: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    for shard_item in queried_shards:
+        shard_key = str(shard_item.get("shard") or "")
+        shard_path = Path(str(shard_item.get("shard_db_path") or ""))
+        shard_payload = search_sessions(
+            aoa_root=aoa_root,
+            query=query,
+            limit=effective_limit,
+            provider=provider,
+            include_host_context=False,
+            include_semantic_context=False,
+            rerank_local=False,
+            rerank_candidate_limit=None,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+            use_shards=False,
+            db_path_override=shard_path,
+            projection_mode=SEARCH_ACTIVE_PROJECTION_SHARD,
+        )
+        shard_payloads.append(
+            {
+                "shard": shard_key,
+                "db_path": str(shard_path),
+                "ok": shard_payload.get("ok"),
+                "result_count": shard_payload.get("result_count"),
+                "diagnostics": shard_payload.get("diagnostics", []),
+            }
+        )
+        diagnostics.extend(f"{shard_key}:{item}" for item in shard_payload.get("diagnostics", []) if item)
+        for result in shard_payload.get("results", []) if isinstance(shard_payload.get("results"), list) else []:
+            doc_id = str(result.get("doc_id") or "")
+            if not doc_id or doc_id in merged:
+                continue
+            search_catalog = result.get("search_catalog") if isinstance(result.get("search_catalog"), dict) else {}
+            result["search_catalog"] = {
+                **search_catalog,
+                "active_projection": SEARCH_ACTIVE_PROJECTION_SHARD,
+                "shard_strategy": SEARCH_SHARD_STRATEGY,
+                "shard": shard_key,
+                "shard_db_path": str(shard_path),
+            }
+            merged[doc_id] = result
+    results = sorted(merged.values(), key=lambda item: search_result_order_key(item, query=query))[:effective_limit]
+    if truncated:
+        diagnostics.append(f"search_shard_fanout_truncated:{len(candidate_shards)}:{effective_max_shards}")
+    provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": True,
+        "query": query,
+        "normalized_query": fts_query_from_user(query),
+        "db_path": str(search_db_path(aoa_root)),
+        "index_generated_at": catalog.get("generated_at"),
+        "aoa_root": str(aoa_root),
+        "search_projection": {
+            "mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "catalog_status": catalog.get("status"),
+            "catalog_path": catalog.get("catalog_path"),
+            "candidate_shard_count": len(candidate_shards),
+            "queried_shard_count": len(queried_shards),
+            "max_shards": effective_max_shards,
+            "truncated": truncated,
+            "fallback_db_path": str(search_db_path(aoa_root)),
+            "queried_shards": shard_payloads,
+            "next_expansion_command": (
+                "python3 scripts/aoa_session_memory.py search --use-shards --max-shards "
+                f"{len(candidate_shards)} --query {shlex.quote(query)}"
+                if truncated
+                else ""
+            ),
+        },
+        "cost_profile": {
+            "lightweight_route": bool(
+                any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
+                and not fts_query_from_user(query)
+            ),
+            "structured_route_filter": bool(
+                any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
+            ),
+            "uses_fts": bool(fts_query_from_user(query)),
+            "hydrates_body": hydrate_body,
+            "semantic_preview": semantic_preview,
+            "uses_shards": True,
+            "shard_query_limit": effective_limit,
+        },
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "portable_sqlite",
+            "status": provider_payload,
+            "accelerator_provider": None,
+            "accelerator_status": None,
+            "overlay": None,
+            "semantic_overlay": None,
+            "local_rerank": None,
+            "authority_law": search_provider_config(aoa_root).get("authority_law"),
+        },
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+    }
+
+
 def search_sessions(
     *,
     aoa_root: Path,
@@ -27003,6 +27645,10 @@ def search_sessions(
     explain: bool = False,
     semantic_preview: bool = True,
     hydrate_body: bool = True,
+    use_shards: bool = False,
+    max_shards: int = 24,
+    db_path_override: Path | None = None,
+    projection_mode: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     provider_config = search_provider_config(aoa_root)
@@ -27020,7 +27666,42 @@ def search_sessions(
             "provider": {"selected": provider, "status": "unknown_provider"},
             "diagnostics": [f"unknown search provider: {provider}"],
         }
-    db_path = search_db_path(aoa_root)
+    if use_shards and db_path_override is None:
+        return search_sessions_shard_fanout(
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            include_host_context=include_host_context,
+            include_semantic_context=include_semantic_context,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+            max_shards=max_shards,
+        )
+    db_path = db_path_override or search_db_path(aoa_root)
+    effective_projection_mode = projection_mode or (
+        SEARCH_ACTIVE_PROJECTION_SHARD if db_path_override is not None else SEARCH_ACTIVE_PROJECTION_MONOLITH
+    )
     if not db_path.exists():
         return {
             "schema_version": SCHEMA_VERSION,
@@ -27313,6 +27994,11 @@ def search_sessions(
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
         "aoa_root": str(aoa_root),
+        "search_projection": {
+            "mode": effective_projection_mode,
+            "db_path": str(db_path),
+            "fallback_db_path": str(search_db_path(aoa_root)),
+        },
         "cost_profile": {
             "lightweight_route": lightweight_route,
             "structured_route_filter": structured_route_filter,
@@ -41851,6 +42537,45 @@ def command_search_catalog(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_shards(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    max_raw_bytes = (
+        -1
+        if getattr(args, "unbounded_raw_text", False)
+        else int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    )
+
+    def run_search_shards() -> dict[str, Any]:
+        return materialize_search_shards(
+            aoa_root=root,
+            target=args.session,
+            since=since,
+            until=args.until,
+            limit=args.limit,
+            shard=args.shard,
+            max_raw_bytes=max_raw_bytes,
+            use_default_raw_lexical_budget=not getattr(args, "unbounded_raw_text", False),
+            write_report=args.write_report,
+            budget_seconds=args.budget_seconds,
+            progress_every=args.progress_every,
+        )
+
+    payload = run_with_maintenance_lock(
+        root,
+        run_search_shards,
+        owner_job="search-shards",
+        mode="manual-bulk",
+        target=args.shard or args.session,
+        reason="operator_requested",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=False),
+        budget_seconds=args.budget_seconds,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -41882,6 +42607,8 @@ def command_search(args: argparse.Namespace) -> int:
         date_from=args.date_from,
         date_to=args.date_to,
         explain=args.explain,
+        use_shards=args.use_shards,
+        max_shards=args.max_shards,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -46359,6 +47086,25 @@ def build_parser() -> argparse.ArgumentParser:
     search_catalog.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-catalog reports under .aoa/diagnostics.")
     search_catalog.set_defaults(func=command_search_catalog)
 
+    search_shards = sub.add_parser(
+        "search-shards",
+        help="Materialize monthly search shard DBs from session indexes while keeping the monolith as fallback.",
+    )
+    search_shards.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    search_shards.add_argument("--workspace-root")
+    search_shards.add_argument("--aoa-root")
+    search_shards.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    search_shards.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    search_shards.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD.")
+    search_shards.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    search_shards.add_argument("--shard", help="Materialize only one shard key such as month/2026-06.")
+    search_shards.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
+    search_shards.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text shard rebuild.")
+    search_shards.add_argument("--budget-seconds", type=float, help="Stop after the current shard when this wall-clock budget is exhausted.")
+    search_shards.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
+    search_shards.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-shards reports under .aoa/diagnostics.")
+    search_shards.set_defaults(func=command_search_shards)
+
     search = sub.add_parser(
         "search",
         aliases=["aoa-search"],
@@ -46392,6 +47138,8 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--date-from", help="Filter sessions on or after YYYY-MM-DD.")
     search.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
     search.add_argument("--explain", action="store_true", help="Include route/freshness explanation for every result.")
+    search.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    search.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     search.set_defaults(func=command_search)
 
     agent_responses = sub.add_parser(

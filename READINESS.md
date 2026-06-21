@@ -46,12 +46,18 @@ Build the `.aoa` session-memory mechanism end to end:
   `schemas/atlas-route-entry.schema.json`
 - Distillation routes: `config/event-distillation-routes.json`
 - Batch distillation policy: `config/batch-distillation-policy.json`
-- Portable search route: `search-index`, `search`, `search-catalog`, runtime
-  `search/`, generated `search/catalog.json`, and `skills/aoa-session-search`
-  (`2026-06-21T09:40:03Z` live catalog: `ok=true`, `status=current`,
-  `session_count=282`, `shard_count=3`, `active_projection=monolith_fallback`,
-  diagnostics report
-  `diagnostics/20260621T094003Z__search-catalog.json`)
+- Portable search route: `search-index`, `search`, `search-catalog`,
+  `search-shards`, runtime `search/`, generated `search/catalog.json`, monthly
+  shard DBs under `search/shards/`, and `skills/aoa-session-search`
+  (`2026-06-21T10:20:10Z` live catalog: `ok=true`, `status=current`,
+  `session_count=282`, `shard_count=3`, `materialized_shard_count=3`,
+  `catalog_state_basis=live_session_indexes`, diagnostics report
+  `diagnostics/20260621T102032Z__search-catalog.json`; live
+  `search-shards all` report `diagnostics/20260621T101903Z__search-shards.json`,
+  coordinator elapsed `1287190ms`, search monolith `9.5G`, monthly shards
+  `9.4G`; structured shard fan-out for `assistant_answer` returned in `0.13s`,
+  while broad FTS `hook timed out` remains slow: shard fan-out `79.57s`,
+  monolith `127.63s`)
 - Generated entity registry: `entity-registry`,
   `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,

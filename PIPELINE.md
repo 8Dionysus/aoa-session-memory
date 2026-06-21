@@ -259,6 +259,15 @@ document count, active projection, and monthly shard key. While shard DBs are
 not materialized, `active_projection=monolith_fallback` must remain explicit.
 Future shard fan-out should start from this catalog instead of rediscovering
 session buckets through broad monolith scans.
+`search-shards` materializes monthly shard DBs from the same raw/session-index
+inputs and then refreshes the catalog. The catalog treats a shard as
+materialized only when the shard `session_index_state` matches the live
+session-index fingerprint and schema state for every session in that bucket.
+The monolith remains a fallback projection and is tracked separately.
+`search --use-shards` performs bounded fan-out across current materialized
+shards and returns shard refs; when shards are missing, stale, or incompatible
+with host overlays, the route falls back to the monolith with an explicit
+diagnostic.
 
 ### PostCompact
 

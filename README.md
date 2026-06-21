@@ -833,6 +833,31 @@ python3 scripts/aoa_session_memory.py search-catalog \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+Materialize monthly shard DBs from the same session indexes when the archive is
+large enough for bounded fan-out to be useful. Shards are generated projections:
+they are rebuilt with `search-shards`, checked against live session-index
+fingerprints by the catalog, and queried explicitly with `search --use-shards`.
+The monolith remains the fallback projection and is tracked separately from the
+live session-index basis.
+
+```bash
+python3 scripts/aoa_session_memory.py search-shards all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+
+python3 scripts/aoa_session_memory.py search "hook timed out" \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --use-shards \
+  --explain
+```
+
+For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
+`--session-act`, `--route-signal`, `--doc-type`, and date bounds. Broad FTS
+queries remain available for raw-text discovery, but on large archives they are
+a diagnostic route until the heavier FTS/raw-text slimming work is complete.
+
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index
 build phase. Reports include phase timings for bulk session indexing, SQLite
