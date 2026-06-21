@@ -33257,6 +33257,184 @@ def session_storage_breakdown(aoa_root: Path) -> dict[str, Any]:
     }
 
 
+def graph_aggregate_payload_compaction_sample(
+    db_path: Path,
+    *,
+    sample_limit: int = 400,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": "missing",
+        "mutates": False,
+        "sample_limit": max(1, int_value(sample_limit, 400)),
+        "tables": {},
+        "sample_count": 0,
+        "invalid_payload_count": 0,
+        "original_payload_bytes": 0,
+        "compacted_payload_bytes": 0,
+        "delta_bytes": 0,
+        "delta_ratio": 0.0,
+        "diagnostics": [],
+    }
+    if not db_path.exists():
+        payload["diagnostics"].append("sqlite_db_missing")
+        return payload
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        payload["status"] = "sqlite_error"
+        payload["diagnostics"].append(sqlite_error_diagnostic(exc))
+        return payload
+    try:
+        table_specs = (("nodes", "node"), ("edges", "edge"))
+        per_table_limit = max(1, payload["sample_limit"] // len(table_specs))
+        for table, kind in table_specs:
+            table_payload = {
+                "status": "empty",
+                "sample_limit": per_table_limit,
+                "rowid_max": 0,
+                "sample_count": 0,
+                "already_compact_count": 0,
+                "invalid_payload_count": 0,
+                "original_payload_bytes": 0,
+                "compacted_payload_bytes": 0,
+                "delta_bytes": 0,
+                "delta_ratio": 0.0,
+                "anchors": [],
+                "diagnostics": [],
+            }
+            try:
+                row = conn.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()
+                rowid_max = int_value(row[0]) if row else 0
+            except sqlite3.Error as exc:
+                table_payload["status"] = "sqlite_error"
+                table_payload["diagnostics"].append(sqlite_error_diagnostic(exc))
+                payload["diagnostics"].append(f"{table}:{sqlite_error_diagnostic(exc)}")
+                payload["tables"][table] = table_payload
+                continue
+            table_payload["rowid_max"] = rowid_max
+            if rowid_max <= 0:
+                payload["tables"][table] = table_payload
+                continue
+            anchors = sorted({0, rowid_max // 4, rowid_max // 2, (rowid_max * 3) // 4, max(0, rowid_max - per_table_limit)})
+            table_payload["anchors"] = anchors
+            per_anchor_limit = max(1, per_table_limit // len(anchors))
+            seen_rowids: set[int] = set()
+            for anchor in anchors:
+                remaining = per_table_limit - table_payload["sample_count"]
+                if remaining <= 0:
+                    break
+                try:
+                    rows = conn.execute(
+                        f"SELECT rowid, payload_json FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                        (anchor, min(per_anchor_limit, remaining)),
+                    ).fetchall()
+                except sqlite3.Error as exc:
+                    table_payload["status"] = "sqlite_error"
+                    table_payload["diagnostics"].append(sqlite_error_diagnostic(exc))
+                    payload["diagnostics"].append(f"{table}:{sqlite_error_diagnostic(exc)}")
+                    break
+                for row in rows:
+                    rowid = int_value(row["rowid"])
+                    if rowid in seen_rowids:
+                        continue
+                    seen_rowids.add(rowid)
+                    payload_json = str(row["payload_json"] or "")
+                    original_bytes = len(payload_json.encode("utf-8"))
+                    table_payload["sample_count"] += 1
+                    table_payload["original_payload_bytes"] += original_bytes
+                    try:
+                        row_payload = json.loads(payload_json)
+                    except json.JSONDecodeError:
+                        table_payload["invalid_payload_count"] += 1
+                        continue
+                    if not isinstance(row_payload, dict):
+                        table_payload["invalid_payload_count"] += 1
+                        continue
+                    compacted_json = graph_json(graph_compact_aggregate_payload(row_payload, kind=kind))
+                    compacted_bytes = len(compacted_json.encode("utf-8"))
+                    table_payload["compacted_payload_bytes"] += compacted_bytes
+                    table_payload["delta_bytes"] += max(0, original_bytes - compacted_bytes)
+                    if compacted_json == payload_json:
+                        table_payload["already_compact_count"] += 1
+            original = int_value(table_payload["original_payload_bytes"])
+            if original > 0:
+                table_payload["delta_ratio"] = round(int_value(table_payload["delta_bytes"]) / original, 8)
+            if table_payload["status"] != "sqlite_error":
+                table_payload["status"] = "completed" if table_payload["sample_count"] else "empty"
+            payload["tables"][table] = table_payload
+            payload["sample_count"] += int_value(table_payload["sample_count"])
+            payload["invalid_payload_count"] += int_value(table_payload["invalid_payload_count"])
+            payload["original_payload_bytes"] += original
+            payload["compacted_payload_bytes"] += int_value(table_payload["compacted_payload_bytes"])
+            payload["delta_bytes"] += int_value(table_payload["delta_bytes"])
+        if payload["original_payload_bytes"] > 0:
+            payload["delta_ratio"] = round(payload["delta_bytes"] / payload["original_payload_bytes"], 8)
+        if payload["sample_count"] <= 0:
+            payload["status"] = "empty"
+        elif payload["diagnostics"]:
+            payload["status"] = "completed_with_diagnostics"
+        else:
+            payload["status"] = "completed"
+    finally:
+        conn.close()
+    return payload
+
+
+def graph_aggregate_payload_compaction_recommendation(
+    *,
+    table_sizes: dict[str, int],
+    sample: dict[str, Any],
+) -> dict[str, Any]:
+    aggregate_table_bytes = int_value(table_sizes.get("nodes")) + int_value(table_sizes.get("edges"))
+    if not table_sizes:
+        return {
+            "status": "implemented_for_new_rebuilds_and_touched_sources",
+            "estimated_reclaimable_bytes": 0,
+            "estimated_reclaimable_human": "requires --deep-dbstat",
+            "estimate_status": "requires_deep_dbstat",
+            "aggregate_table_size_bytes": 0,
+            "aggregate_table_size_human": "requires --deep-dbstat",
+            "next_route": "run storage-audit --deep-dbstat before deciding whether aggregate compaction or graph cardinality is the real weight driver",
+        }
+    sample_status = str(sample.get("status") or "not_requested")
+    original_payload_bytes = int_value(sample.get("original_payload_bytes"))
+    delta_bytes = int_value(sample.get("delta_bytes"))
+    if sample_status in {"completed", "completed_with_diagnostics"} and original_payload_bytes > 0:
+        delta_ratio = max(0.0, min(1.0, float(delta_bytes) / float(original_payload_bytes)))
+        estimated = int(aggregate_table_bytes * delta_ratio)
+        if estimated <= 0:
+            return {
+                "status": "already_compact_sampled_cardinality_dominates",
+                "estimated_reclaimable_bytes": 0,
+                "estimated_reclaimable_human": "0 B",
+                "estimate_status": "sampled_no_payload_delta",
+                "aggregate_table_size_bytes": aggregate_table_bytes,
+                "aggregate_table_size_human": human_size(aggregate_table_bytes),
+                "sample_delta_ratio": round(delta_ratio, 8),
+                "next_route": "analyze graph cardinality, sharding, and query projections; do not rebuild solely for aggregate payload compaction",
+            }
+        return {
+            "status": "sampled_payload_delta_available",
+            "estimated_reclaimable_bytes": estimated,
+            "estimated_reclaimable_human": human_size(estimated),
+            "estimate_status": "sampled_payload_delta_ratio",
+            "aggregate_table_size_bytes": aggregate_table_bytes,
+            "aggregate_table_size_human": human_size(aggregate_table_bytes),
+            "sample_delta_ratio": round(delta_ratio, 8),
+            "next_route": "run a controlled graph-build all --write --store-only --in-place only if the sampled reclaim justifies the rebuild cost",
+        }
+    return {
+        "status": "aggregate_payload_sample_unavailable",
+        "estimated_reclaimable_bytes": 0,
+        "estimated_reclaimable_human": "0 B",
+        "estimate_status": f"sample_{sample_status}",
+        "aggregate_table_size_bytes": aggregate_table_bytes,
+        "aggregate_table_size_human": human_size(aggregate_table_bytes),
+        "next_route": "fix the aggregate payload sample before using table size as a reclaim estimate; table bytes alone are cardinality evidence, not reclaimable bytes",
+    }
+
+
 def storage_audit(
     *,
     aoa_root: Path,
@@ -33274,6 +33452,8 @@ def storage_audit(
     top_total = storage_size_entry(aoa_root, label=".aoa")
     graph_store = sqlite_storage_stats(graph_paths_payload["store"], deep=deep_dbstat, row_counts=row_counts)
     search_store = sqlite_storage_stats(search_path, deep=deep_dbstat, row_counts=row_counts)
+    if deep_dbstat:
+        graph_store["aggregate_payload_compaction_sample"] = graph_aggregate_payload_compaction_sample(graph_paths_payload["store"])
     sessions = session_storage_breakdown(aoa_root)
     search_raw_lexical_policy = (
         search_store.get("raw_lexical_policy")
@@ -33285,8 +33465,10 @@ def storage_audit(
         item.get("name"): int_value(item.get("size_bytes"))
         for item in graph_store.get("table_sizes", []) if isinstance(item, dict)
     }
-    graph_compactable_bytes = table_sizes.get("nodes", 0) + table_sizes.get("edges", 0)
-    graph_compactable_measured = bool(table_sizes)
+    graph_compaction = graph_aggregate_payload_compaction_recommendation(
+        table_sizes=table_sizes,
+        sample=graph_store.get("aggregate_payload_compaction_sample") if isinstance(graph_store.get("aggregate_payload_compaction_sample"), dict) else {},
+    )
     sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
         search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
     )
@@ -33316,13 +33498,16 @@ def storage_audit(
             },
             {
                 "id": "graph_compact_aggregate_payload",
-                "status": "implemented_for_new_rebuilds_and_touched_sources",
+                "status": graph_compaction["status"],
                 "quality_tradeoff": "none_expected",
                 "speed_tradeoff": "bounded graph packets hydrate refs on demand from contribution rows",
-                "estimated_reclaimable_bytes": graph_compactable_bytes,
-                "estimated_reclaimable_human": human_size(graph_compactable_bytes) if graph_compactable_measured else "requires --deep-dbstat",
-                "estimate_status": "measured_dbstat" if graph_compactable_measured else "requires_deep_dbstat",
-                "next_route": "run graph-build all --write --store-only --in-place when ready for a controlled live rebuild",
+                "estimated_reclaimable_bytes": graph_compaction["estimated_reclaimable_bytes"],
+                "estimated_reclaimable_human": graph_compaction["estimated_reclaimable_human"],
+                "estimate_status": graph_compaction["estimate_status"],
+                "aggregate_table_size_bytes": graph_compaction["aggregate_table_size_bytes"],
+                "aggregate_table_size_human": graph_compaction["aggregate_table_size_human"],
+                "sample_delta_ratio": graph_compaction.get("sample_delta_ratio"),
+                "next_route": graph_compaction["next_route"],
             },
             {
                 "id": "raw_block_offset_or_compressed_store",
@@ -33411,6 +33596,19 @@ def storage_audit_markdown(payload: dict[str, Any]) -> str:
             for item in table_sizes:
                 if isinstance(item, dict):
                     lines.append(f"| `{item.get('name')}` | `{item.get('size_human')}` |")
+        aggregate_sample = store.get("aggregate_payload_compaction_sample") if isinstance(store.get("aggregate_payload_compaction_sample"), dict) else {}
+        if aggregate_sample:
+            lines.extend(
+                [
+                    "",
+                    "### Aggregate Payload Compaction Sample",
+                    "",
+                    f"- status: `{aggregate_sample.get('status')}`",
+                    f"- sample_count: `{aggregate_sample.get('sample_count')}`",
+                    f"- delta: `{human_size(int_value(aggregate_sample.get('delta_bytes')))}`",
+                    f"- delta_ratio: `{aggregate_sample.get('delta_ratio')}`",
+                ]
+            )
     lines.extend(["", "## Recommendations", "", "| id | status | estimated reclaimable | next route |", "| --- | --- | ---: | --- |"])
     for item in payload.get("recommendations", []) if isinstance(payload.get("recommendations"), list) else []:
         if isinstance(item, dict):

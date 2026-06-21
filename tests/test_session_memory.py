@@ -25,6 +25,57 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
 
 
+def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
+    db_path = tmp_path / "graph.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes(id TEXT PRIMARY KEY, node_type TEXT NOT NULL, payload_json TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1)")
+    conn.execute(
+        """
+        CREATE TABLE edges(
+            id TEXT PRIMARY KEY,
+            edge_type TEXT NOT NULL,
+            source_node TEXT NOT NULL,
+            target_node TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    legacy_node = {
+        "id": "event:fixture",
+        "type": "event",
+        "route_signals": [f"skill:aoa-decision:{index}" for index in range(40)],
+        "refs": [{"raw": f"line:{index}", "segment": f"segment:{index}"} for index in range(40)],
+        "evidence_refs": [{"session_id": "s1", "refs": [{"raw": f"line:{index}", "segment": f"segment:{index}"}]} for index in range(40)],
+    }
+    legacy_edge = {
+        "id": "edge:fixture",
+        "type": "mentions_route_signal",
+        "source": "event:fixture",
+        "target": "route:skill:aoa-decision",
+        "route_signals": [f"skill:aoa-decision:{index}" for index in range(40)],
+        "evidence_refs": [{"session_id": "s1", "refs": [{"raw": f"line:{index}", "segment": f"segment:{index}"}]} for index in range(40)],
+    }
+    conn.execute(
+        "INSERT INTO nodes(id, node_type, payload_json, count) VALUES (?, ?, ?, ?)",
+        ("event:fixture", "event", module.graph_json(legacy_node), 1),
+    )
+    conn.execute(
+        "INSERT INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
+        ("edge:fixture", "mentions_route_signal", "event:fixture", "route:skill:aoa-decision", module.graph_json(legacy_edge), 1),
+    )
+    conn.commit()
+    conn.close()
+
+    sample = module.graph_aggregate_payload_compaction_sample(db_path, sample_limit=20)
+
+    assert sample["status"] == "completed"
+    assert sample["sample_count"] == 2
+    assert sample["delta_bytes"] > 0
+    assert sample["tables"]["nodes"]["delta_bytes"] > 0
+    assert sample["tables"]["edges"]["delta_bytes"] > 0
+
+
 def test_default_standalone_repo_prefers_bundles_topology(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -2456,11 +2507,17 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert storage["search_store"]["raw_lexical_policy"]["mode"] == module.SEARCH_RAW_LEXICAL_POLICY_MODE
     assert storage["search_store"]["raw_lexical_policy"]["unbounded"] is False
     assert storage["graph_store"]["table_sizes"]
+    assert storage["graph_store"]["aggregate_payload_compaction_sample"]["status"] == "completed"
+    assert storage["graph_store"]["aggregate_payload_compaction_sample"]["delta_bytes"] == 0
     assert storage["graph_store"]["wal"]["size_bytes"] >= 0
     assert storage["graph_store"]["total_with_wal_bytes"] >= storage["graph_store"]["size_bytes"]
     assert storage["sessions"]["raw_block_duplication_candidate_bytes"] >= 0
     assert any(item.get("id") == "sqlite_wal_checkpoint" for item in storage["recommendations"])
-    assert any(item.get("id") == "graph_compact_aggregate_payload" for item in storage["recommendations"])
+    graph_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "graph_compact_aggregate_payload")
+    assert graph_recommendation["status"] == "already_compact_sampled_cardinality_dominates"
+    assert graph_recommendation["estimate_status"] == "sampled_no_payload_delta"
+    assert graph_recommendation["estimated_reclaimable_bytes"] == 0
+    assert graph_recommendation["aggregate_table_size_bytes"] > 0
     search_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "search_hot_store_v3")
     assert search_recommendation["status"] == "bounded_policy_recorded"
     assert Path(storage["report_json"]).exists()

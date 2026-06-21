@@ -72,9 +72,9 @@ Build the `.aoa` session-memory mechanism end to end:
   plus aggregate refresh budget guards for `index-maintenance` /
   `auto-maintenance`
 - Storage weight controls: `storage-audit`, compact graph aggregate and
-  contribution payloads with evidence hydration from contribution rows, and
-  search body storage with full-text FTS plus compressed selected-hit
-  hydration
+  contribution payloads with evidence hydration from contribution rows, sampled
+  graph aggregate payload reclaim estimates, and search body storage with
+  full-text FTS plus compressed selected-hit hydration
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
   `graph-freshness-check`, `entity-dossier`, and GraphRAG packet
@@ -618,6 +618,17 @@ Last observed result:
   rebuilds and touched sources; raw-block cleanup remains a planned safe route
   until offset/compressed raw-block readers preserve stable refs. Report:
   `diagnostics/20260611T231448Z__storage-audit.json`.
+- 2026-06-21 graph storage correction proof: the earlier graph aggregate
+  reclaim estimate was table-size based and is superseded by sampled payload
+  delta. A read-only `storage-audit --deep-dbstat --write-report` on the live
+  archive measured graph `57.2 GiB`, aggregate `nodes` + `edges` tables
+  `17.8 GiB`, sampled `400` aggregate payload rows, and found
+  `sample_delta_ratio=0.0`. The graph aggregate recommendation is now
+  `status=already_compact_sampled_cardinality_dominates`,
+  `estimate_status=sampled_no_payload_delta`, and reclaim `0 B`; the next
+  route is graph cardinality, sharding, or query projections, not a rebuild
+  solely for aggregate payload compaction. Report:
+  `diagnostics/20260621T091705Z__storage-audit.json`.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

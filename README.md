@@ -482,7 +482,11 @@ Add `--deep-dbstat --row-counts` only when the machine has time for heavier
 SQLite inspection. The command is read-only. It reports top-level `.aoa`
 weight, session raw/block/segment buckets, SQLite page and freelist state,
 SQLite store metadata such as graph/search payload modes, and optional
-per-table sizes.
+per-table sizes. Deep graph audits also sample aggregate node/edge payloads
+before estimating reclaim: table bytes are cardinality evidence, not
+reclaimable bytes by themselves. If the sample shows no payload delta, the next
+route is graph cardinality, sharding, or query projections, not a rebuild solely
+for aggregate payload compaction.
 
 Use `storage-maintenance` for the current lossless shrink action:
 
@@ -502,7 +506,9 @@ The current safe storage route is:
 - SQLite WAL: checkpoint/truncate with `storage-maintenance`; if readers or
   writers are active, let it defer and retry later.
 - Graph store: aggregate node/edge payloads keep compact refs; packet reads
-  hydrate evidence from contribution rows.
+  hydrate evidence from contribution rows. Use the storage-audit aggregate
+  payload sample before planning any rebuild; a large `nodes`/`edges` table with
+  zero sample delta means topology/cardinality is the pressure center.
 - Search store: new search rebuilds keep full text in FTS and compressed
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
 - Raw blocks: do not delete duplicated raw blocks yet. They need an
