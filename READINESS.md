@@ -575,9 +575,34 @@ Last observed result:
   `entity=22,585,781`). Search schema 10 now caps route postings for aggregate
   docs while leaving event-level postings uncapped. A no-write sample over 10
   recent indexed sessions reduced generated postings from `10,479,376` to
-  `1,899,859` (`81.87%` lower), with `event` postings unchanged. Live store
-  shrink still requires a controlled search rebuild/catch-up after the schema
-  bump.
+  `1,899,859` (`81.87%` lower), with `event` postings unchanged. A controlled
+  live rebuild through `abyss-machine resource launch --class heavy --kind
+  indexing` completed in `30min 16s`, processed `282` sessions and
+  `1,630,446` documents, and replaced the live SQLite store with schema `10`.
+  `search-provider-status` returned `ok=true`, provider `ready`, freshness
+  `current`, and no diagnostics. The search store dropped from `13.3 GiB` to
+  `9.3 GiB`; `document_routes` dropped from `100,565,488` to `16,872,432`
+  postings. `maintenance-status --full` now reports
+  `agent_route=use_graph_search`, `needs_index_maintenance=false`, and only
+  the graph-size warning remains.
+  The failed timer-driven catch-up before the controlled rebuild left an
+  orphan `.rebuild-*` file and a stale coordinator event; cleanup plus the
+  successful manual-bulk run prove that schema-level full rebuilds need a
+  long/heavy maintenance lane rather than the ordinary bounded catch-up timer.
+- 2026-06-21 MCP live route proof after schema 10 rebuild:
+  `aoa_session_maintenance_status(full=true)` returned through MCP in about
+  `1.45s` with search ready, graph usable, no writer, and the completed
+  manual-bulk job as latest writer evidence. `aoa_session_entity_inventory`
+  for `layer=skill`, `query=aoa-session` returned indexed skill entities with
+  atlas, segment, and raw refs. `aoa_session_entity_usage_audit` for
+  `aoa_session_search` returned direct usage events, consequence events,
+  document refs, and provider schema `10` in about `1.09s`;
+  `aoa_session_entity_usage_neighborhood` returned bounded before/after
+  windows in about `1.74s` with raw previews intentionally disabled for the
+  fast route. MCP inventory accepts `layer=mcp`, but direct
+  `layer=mcp_service` currently returns an unsupported-layer error even
+  though the entity registry counts MCP services separately; normalize this
+  layer alias before treating inventory layers as fully symmetric.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite
