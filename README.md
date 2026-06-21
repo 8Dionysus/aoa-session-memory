@@ -561,15 +561,19 @@ The current safe storage route is:
   checked copy and does not replace the live store.
 - Search store: new search rebuilds keep full text in FTS and compressed
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
-- Raw blocks: do not delete duplicated raw blocks yet. They need an
-  offset/compressed-block reader route first so segment and raw refs remain
-  stable before any cleanup. The safe next slice is reader support,
-  ref-resolution tests over session/segment/raw-block refs, a dry-run reclaim
-  report, and only then a controlled cleanup route. Use
+- Raw blocks: do not blindly delete duplicated raw blocks. First run
   `raw-block-ref-audit all --limit 20 --sample-limit 80 --write-report` to
-  verify that sampled `raw:line:N` refs resolve through `raw/blocks/*.raw.jsonl`
-  and still match the full raw transcript before designing any compressed or
-  offset raw-block storage.
+  prove sampled `raw:line:N` refs resolve through the raw-block reader and
+  still match the full raw transcript. Then use
+  `raw-block-storage-compact all --skip-no-plain --limit 20 --estimate-compression --write-report`
+  as the dry-run storage route. `raw-block-storage-compact --apply` writes
+  gzip-backed raw-block sidecars and updates manifest/index storage metadata;
+  plaintext block removal requires the explicit `--confirm-remove-plain` flag
+  and keeps `raw/session.raw.jsonl` as authority. Apply runs through the
+  maintenance coordinator as a `manual-bulk` writer so timer-driven hot
+  maintenance can defer. `storage-audit` reports plaintext raw-block duplicate
+  bytes separately from compressed sidecar bytes; only the plaintext duplicate
+  bucket is the remaining reclaim candidate.
 
 ## Portable Route
 

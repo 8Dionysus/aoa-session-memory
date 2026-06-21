@@ -735,6 +735,25 @@ Last observed result:
   reads the block-local line, and compares it to the full raw transcript. This
   proves the reader path and mismatch detection; it does not delete raw blocks
   or replace raw transcript authority.
+- 2026-06-21 raw-block storage compact route: `raw-block-storage-compact`
+  stages gzip-backed raw-block storage after `raw-block-ref-audit` passes.
+  Dry-run can estimate compression without mutation; apply writes compressed
+  sidecars, updates manifest/index/segment source-block metadata, and reruns
+  the ref audit. Removing plaintext block duplicates requires the explicit
+  `--confirm-remove-plain` flag and keeps `raw/session.raw.jsonl` as authority.
+  Live cleanup completed in bounded batches: 4,584 plaintext raw-block
+  duplicates were converted to gzip-backed sidecars and removed. Final
+  `raw-block-storage-compact all --skip-no-plain --limit 200` reports
+  `current_no_plain_candidates`; `storage-audit` reports 0 B plaintext
+  duplicate candidate, 2.9 GiB compressed raw-block sidecars, and 29.2 GiB
+  session storage total. A broad post-cleanup `raw-block-ref-audit` sampled 400
+  refs across 240 sessions with 0 missing/mismatch and no raw text previews.
+  During the live batches, timer-driven `auto-maintenance hot` overlapped a
+  manual raw-block apply; the CLI apply route now runs under the maintenance
+  coordinator as `manual-bulk` for `raw_blocks`, `session_manifests`, and
+  `session_registry`. A live tail apply waited 339,859 ms for an active hot
+  maintenance lock, then completed with post-apply ref audit clean; future hot
+  maintenance should defer instead of competing.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

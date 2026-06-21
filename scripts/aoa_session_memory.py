@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -80,6 +81,8 @@ LEGACY_RAW_SOURCE_JSON = "raw-source.json"
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
+RAW_BLOCK_STORAGE_MODE_PLAIN = "plain_raw_jsonl_v1"
+RAW_BLOCK_STORAGE_MODE_GZIP = "compressed_gzip_v1"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
 AGENT_EVENT_SCHEMA_VERSION = 2
@@ -6238,14 +6241,16 @@ def update_artifact_paths_after_move(session_dir: Path, manifest: dict[str, Any]
         for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
             if not isinstance(block, dict):
                 continue
-            if block.get("path"):
-                block["path"] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(block["path"])).name)
+            for key in ("path", "plain_path", "compressed_path"):
+                if block.get(key):
+                    block[key] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(block[key])).name)
     for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
         if not isinstance(segment, dict):
             continue
         raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
-        if raw_block.get("path"):
-            raw_block["path"] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(raw_block["path"])).name)
+        for key in ("path", "plain_path", "compressed_path"):
+            if raw_block.get(key):
+                raw_block[key] = str(session_dir / "raw" / RAW_BLOCKS_DIR / Path(str(raw_block[key])).name)
         if segment.get("markdown"):
             segment["markdown"] = str(session_dir / "segments" / Path(str(segment["markdown"])).name)
         if segment.get("index"):
@@ -7438,7 +7443,7 @@ def clear_generated_raw_blocks(session_dir: Path) -> None:
     blocks_dir = raw_dir / RAW_BLOCKS_DIR
     if blocks_dir.exists():
         for path in blocks_dir.iterdir():
-            if path.name.endswith(".raw.jsonl") or path.name == RAW_BLOCK_INDEX_JSON:
+            if path.name.endswith(".raw.jsonl") or path.name.endswith(".raw.jsonl.gz") or path.name == RAW_BLOCK_INDEX_JSON:
                 path.unlink()
     compaction_events_path = raw_dir / RAW_COMPACTION_EVENTS_JSONL
     if compaction_events_path.exists():
@@ -7473,8 +7478,11 @@ def write_raw_block_artifacts(
             "segment_id": segment_id,
             "role": role,
             "status": raw_block_status_for_role(role),
+            "storage_mode": RAW_BLOCK_STORAGE_MODE_PLAIN,
             "path": str(block_path),
             "rel": f"raw/{RAW_BLOCKS_DIR}/{block_name}",
+            "plain_path": str(block_path),
+            "plain_rel": f"raw/{RAW_BLOCKS_DIR}/{block_name}",
             "source_raw": raw_rel,
             "source_range": {"from_line": first_line, "to_line": last_line},
             "line_count": len(block_events),
@@ -36154,13 +36162,28 @@ def session_storage_breakdown(aoa_root: Path) -> dict[str, Any]:
         "session_companions": 0,
         "hooks_incidents_distillation": 0,
     }
+    raw_block_plain_bytes = 0
+    raw_block_compressed_bytes = 0
+    raw_block_other_bytes = 0
     if not sessions_root.exists():
         return {"root": str(sessions_root), "exists": False, "buckets": buckets, "total_bytes": 0, "total_human": "0 B"}
     for session_dir in sessions_root.iterdir():
         if not session_dir.is_dir():
             continue
         buckets["raw_session_jsonl"] += path_total_size(session_dir / "raw" / "session.raw.jsonl")
-        buckets["raw_blocks"] += path_total_size(session_dir / "raw" / "blocks")
+        blocks_dir = session_dir / "raw" / "blocks"
+        buckets["raw_blocks"] += path_total_size(blocks_dir)
+        if blocks_dir.exists():
+            for path in blocks_dir.iterdir():
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+                if path.name.endswith(".raw.jsonl"):
+                    raw_block_plain_bytes += size
+                elif path.name.endswith(".raw.jsonl.gz"):
+                    raw_block_compressed_bytes += size
+                else:
+                    raw_block_other_bytes += size
         buckets["raw_ledgers"] += path_total_size(session_dir / "raw" / "blocks.index.json")
         buckets["raw_ledgers"] += path_total_size(session_dir / "raw" / "compaction-events.jsonl")
         for path in (session_dir / "segments").glob("*.md"):
@@ -36181,8 +36204,16 @@ def session_storage_breakdown(aoa_root: Path) -> dict[str, Any]:
         },
         "total_bytes": total,
         "total_human": human_size(total),
-        "raw_block_duplication_candidate_bytes": min(buckets["raw_session_jsonl"], buckets["raw_blocks"]),
-        "raw_block_duplication_candidate_human": human_size(min(buckets["raw_session_jsonl"], buckets["raw_blocks"])),
+        "raw_block_storage": {
+            "plain_bytes": raw_block_plain_bytes,
+            "plain_human": human_size(raw_block_plain_bytes),
+            "compressed_bytes": raw_block_compressed_bytes,
+            "compressed_human": human_size(raw_block_compressed_bytes),
+            "other_bytes": raw_block_other_bytes,
+            "other_human": human_size(raw_block_other_bytes),
+        },
+        "raw_block_duplication_candidate_bytes": min(buckets["raw_session_jsonl"], raw_block_plain_bytes),
+        "raw_block_duplication_candidate_human": human_size(min(buckets["raw_session_jsonl"], raw_block_plain_bytes)),
     }
 
 
@@ -36418,6 +36449,7 @@ def storage_audit(
     if deep_dbstat:
         graph_store["aggregate_payload_compaction_sample"] = graph_aggregate_payload_compaction_sample(graph_paths_payload["store"])
     sessions = session_storage_breakdown(aoa_root)
+    raw_block_reclaim_bytes = int_value(sessions.get("raw_block_duplication_candidate_bytes"))
     search_raw_lexical_policy = (
         search_store.get("raw_lexical_policy")
         if isinstance(search_store.get("raw_lexical_policy"), dict)
@@ -36509,11 +36541,15 @@ def storage_audit(
             },
             {
                 "id": "raw_block_offset_or_compressed_store",
-                "status": "planned_safe_route",
+                "status": "current_no_plain_duplicates" if raw_block_reclaim_bytes == 0 else "planned_safe_route",
                 "quality_tradeoff": "none_if_raw refs and readers support offset/compressed blocks before cleanup",
-                "estimated_reclaimable_bytes": sessions.get("raw_block_duplication_candidate_bytes", 0),
+                "estimated_reclaimable_bytes": raw_block_reclaim_bytes,
                 "estimated_reclaimable_human": sessions.get("raw_block_duplication_candidate_human", "0 B"),
-                "next_route": "run raw-block-ref-audit all --limit 20 --sample-limit 80 --write-report before designing compressed/offset raw-block cleanup",
+                "next_route": (
+                    "none for plaintext raw-block duplicates; keep raw-block-ref-audit in storage verification and monitor compressed sidecar weight"
+                    if raw_block_reclaim_bytes == 0
+                    else "run raw-block-ref-audit all --limit 20 --sample-limit 80 --write-report, then raw-block-storage-compact all --skip-no-plain --limit 20 --estimate-compression --write-report before any apply"
+                ),
             },
             {
                 "id": "search_hot_store_v3",
@@ -36565,6 +36601,19 @@ def storage_audit_markdown(payload: dict[str, Any]) -> str:
         for key, item in (sessions.get("buckets") or {}).items() if isinstance(sessions.get("buckets"), dict) else []:
             if isinstance(item, dict):
                 lines.append(f"| `{key}` | `{item.get('size_human')}` |")
+        raw_block_storage = sessions.get("raw_block_storage") if isinstance(sessions.get("raw_block_storage"), dict) else {}
+        if raw_block_storage:
+            lines.extend(
+                [
+                    "",
+                    "### Raw Block Storage",
+                    "",
+                    f"- plaintext_duplicate: `{raw_block_storage.get('plain_human')}`",
+                    f"- compressed_sidecars: `{raw_block_storage.get('compressed_human')}`",
+                    f"- other: `{raw_block_storage.get('other_human')}`",
+                    f"- remaining_duplication_candidate: `{sessions.get('raw_block_duplication_candidate_human')}`",
+                ]
+            )
     for key in ("graph_store", "search_store"):
         store = payload.get(key) if isinstance(payload.get(key), dict) else {}
         if not store:
@@ -44917,6 +44966,41 @@ def command_raw_block_ref_audit(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_raw_block_storage_compact(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+
+    def run_compact() -> dict[str, Any]:
+        return raw_block_storage_compact(
+            aoa_root=root,
+            target=args.session,
+            limit=args.limit,
+            skip_no_plain=args.skip_no_plain,
+            apply=args.apply,
+            confirm_remove_plain=args.confirm_remove_plain,
+            estimate_compression=args.estimate_compression,
+            compression_level=args.compression_level,
+            sample_limit=args.sample_limit,
+            write_report=args.write_report,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_compact,
+            owner_job="raw-block-storage-compact",
+            mode="manual-bulk",
+            target=args.session,
+            reason="operator_requested",
+            touched_surfaces=["raw_blocks", "session_manifests", "session_registry"],
+        )
+        if args.apply
+        else run_compact()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_storage_maintenance(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -46514,14 +46598,18 @@ def raw_line_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 360) -> d
     return {"status": "raw_line_not_found", "line": line_no, "text": ""}
 
 
-def text_line_packet(path: Path, line_no: int | None, *, max_chars: int = 360) -> dict[str, Any]:
+def text_line_packet(path: Path, line_no: int | None, *, max_chars: int = 360, compressed: bool = False) -> dict[str, Any]:
     line_no = int_value(line_no)
     if not line_no:
         return {"status": "missing_line", "line": None, "text": "", "sha256": ""}
     if not path.is_file():
         return {"status": "file_unavailable", "line": line_no, "text": "", "sha256": ""}
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+        if compressed:
+            handle_context = gzip.open(path, "rt", encoding="utf-8", errors="replace")
+        else:
+            handle_context = path.open("r", encoding="utf-8", errors="replace")
+        with handle_context as handle:
             for current_line, line in enumerate(handle, start=1):
                 if current_line != line_no:
                     if current_line > line_no:
@@ -46540,6 +46628,63 @@ def text_line_packet(path: Path, line_no: int | None, *, max_chars: int = 360) -
     return {"status": "line_not_found", "line": line_no, "text": "", "sha256": ""}
 
 
+def session_relative_path(session_dir: Path, value: Any) -> Path:
+    text = str(value or "")
+    if not text:
+        return Path("")
+    path = Path(text)
+    return path if path.is_absolute() else session_dir / path
+
+
+def raw_block_plain_path(session_dir: Path, record: dict[str, Any]) -> Path:
+    value = record.get("plain_path") or record.get("path") or ""
+    if value:
+        return session_relative_path(session_dir, value)
+    rel = record.get("plain_rel") or record.get("rel") or ""
+    if rel:
+        return session_relative_path(session_dir, rel)
+    block_id = str(record.get("block_id") or record.get("segment_id") or "")
+    role = str(record.get("role") or "segment")
+    return session_dir / "raw" / RAW_BLOCKS_DIR / f"{block_id}__{role}.raw.jsonl" if block_id else Path("")
+
+
+def raw_block_compressed_rel(record: dict[str, Any]) -> str:
+    rel = str(record.get("compressed_rel") or "")
+    if rel:
+        return rel
+    plain_rel = str(record.get("plain_rel") or record.get("rel") or "")
+    if plain_rel:
+        return f"{plain_rel}.gz"
+    path = Path(str(record.get("plain_path") or record.get("path") or "")).name
+    return f"raw/{RAW_BLOCKS_DIR}/{path}.gz" if path else ""
+
+
+def raw_block_compressed_path(session_dir: Path, record: dict[str, Any]) -> Path:
+    value = record.get("compressed_path") or ""
+    if value:
+        return session_relative_path(session_dir, value)
+    rel = raw_block_compressed_rel(record)
+    return session_relative_path(session_dir, rel) if rel else Path("")
+
+
+def raw_block_payload_path(session_dir: Path, record: dict[str, Any]) -> tuple[Path, bool, str]:
+    plain_path = raw_block_plain_path(session_dir, record)
+    compressed_path = raw_block_compressed_path(session_dir, record)
+    storage_mode = str(record.get("storage_mode") or RAW_BLOCK_STORAGE_MODE_PLAIN)
+    if storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP and compressed_path.is_file():
+        return compressed_path, True, storage_mode
+    if plain_path.is_file():
+        return plain_path, False, RAW_BLOCK_STORAGE_MODE_PLAIN
+    if compressed_path.is_file():
+        return compressed_path, True, RAW_BLOCK_STORAGE_MODE_GZIP
+    return plain_path, False, storage_mode
+
+
+def raw_block_payload_available(session_dir: Path, record: dict[str, Any]) -> bool:
+    path, _compressed, _storage_mode = raw_block_payload_path(session_dir, record)
+    return bool(str(path)) and path.is_file()
+
+
 def raw_block_records_for_session(session_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
     records = raw_blocks.get("blocks") if isinstance(raw_blocks.get("blocks"), list) else []
@@ -46556,6 +46701,10 @@ def raw_block_records_for_session(session_dir: Path, manifest: dict[str, Any]) -
             record["path"] = str(Path(str(record["path"])))
         elif record.get("rel"):
             record["path"] = str(session_dir / str(record["rel"]))
+        if record.get("compressed_path"):
+            record["compressed_path"] = str(Path(str(record["compressed_path"])))
+        if record.get("plain_path"):
+            record["plain_path"] = str(Path(str(record["plain_path"])))
         else:
             block_id = str(record.get("block_id") or record.get("segment_id") or "")
             role = str(record.get("role") or "segment")
@@ -46583,9 +46732,17 @@ def raw_block_record_for_ref(
         for record in records:
             candidates = {
                 Path(str(record.get("path") or "")).name,
+                Path(str(record.get("plain_path") or "")).name,
+                Path(str(record.get("compressed_path") or "")).name,
                 Path(str(record.get("rel") or "")).name,
+                Path(str(record.get("plain_rel") or "")).name,
+                Path(str(record.get("compressed_rel") or "")).name,
                 str(record.get("rel") or ""),
+                str(record.get("plain_rel") or ""),
+                str(record.get("compressed_rel") or ""),
                 str(record.get("path") or ""),
+                str(record.get("plain_path") or ""),
+                str(record.get("compressed_path") or ""),
             }
             if raw_block_ref_text in candidates or wanted in candidates:
                 return record, diagnostics
@@ -46623,9 +46780,11 @@ def raw_block_line_preview(
     if not (from_line <= line_no <= to_line):
         diagnostics.append("raw_ref_outside_raw_block_range")
         return {"status": "raw_ref_outside_raw_block_range", "line": line_no, "text": "", "diagnostics": diagnostics}
-    block_path = Path(str(record.get("path") or ""))
+    block_path, compressed, storage_mode = raw_block_payload_path(session_dir, record)
+    plain_path = raw_block_plain_path(session_dir, record)
+    compressed_path = raw_block_compressed_path(session_dir, record)
     block_line = line_no - from_line + 1
-    packet = text_line_packet(block_path, block_line, max_chars=max_chars)
+    packet = text_line_packet(block_path, block_line, max_chars=max_chars, compressed=compressed)
     status = "available" if packet.get("status") == "available" else str(packet.get("status") or "unavailable")
     return {
         "status": status,
@@ -46639,6 +46798,10 @@ def raw_block_line_preview(
         "role": record.get("role"),
         "raw_block_ref": record.get("rel") or record.get("path"),
         "raw_block_path": str(block_path),
+        "plain_raw_block_path": str(plain_path),
+        "compressed_raw_block_path": str(compressed_path),
+        "storage_mode": storage_mode,
+        "compressed": compressed,
         "source_range": source_range,
         "diagnostics": diagnostics,
     }
@@ -46684,10 +46847,13 @@ def raw_block_ref_audit(
     sample_limit: int = 80,
     max_chars: int = 0,
     write_report: bool = False,
+    selected_records_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     diagnostics: list[str] = []
     records = registry_sessions(aoa_root)
-    if target != "all":
+    if selected_records_override is not None:
+        selected_records = selected_records_override
+    elif target != "all":
         try:
             selected_records = [resolve_session_record(aoa_root, target)]
         except (SystemExit, ValueError):
@@ -46793,6 +46959,445 @@ def raw_block_ref_audit(
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
         write_markdown(report_md, raw_block_ref_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def select_session_records(aoa_root: Path, target: str, *, limit: int | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    diagnostics: list[str] = []
+    if target != "all":
+        try:
+            return [resolve_session_record(aoa_root, target)], diagnostics
+        except (SystemExit, ValueError):
+            return [], ["session_not_found"]
+    records = sorted(registry_sessions(aoa_root), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    if limit is not None:
+        records = records[: max(0, int_value(limit))]
+    return records, diagnostics
+
+
+def session_has_plain_raw_blocks(record: dict[str, Any]) -> bool:
+    session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return False
+    return any(raw_block_plain_path(session_dir, block).is_file() for block in raw_block_records_for_session(session_dir, manifest))
+
+
+def raw_block_record_key(record: dict[str, Any]) -> str:
+    return str(record.get("block_id") or record.get("segment_id") or record.get("rel") or record.get("path") or "")
+
+
+def compressed_raw_block_record(
+    session_dir: Path,
+    record: dict[str, Any],
+    *,
+    compressed_path: Path,
+    compressed_bytes: int,
+    compressed_sha256: str,
+    original_bytes: int,
+    original_sha256: str,
+    now: str,
+    plain_removed: bool = False,
+) -> dict[str, Any]:
+    updated = dict(record)
+    plain_path = raw_block_plain_path(session_dir, record)
+    plain_rel = str(record.get("plain_rel") or record.get("rel") or "")
+    compressed_rel = raw_block_compressed_rel(record)
+    updated.update(
+        {
+            "storage_mode": RAW_BLOCK_STORAGE_MODE_GZIP,
+            "path": str(plain_path),
+            "rel": plain_rel or str(record.get("rel") or ""),
+            "plain_path": str(plain_path),
+            "plain_rel": plain_rel or str(record.get("rel") or ""),
+            "compressed_path": str(compressed_path),
+            "compressed_rel": compressed_rel,
+            "compressed_bytes": compressed_bytes,
+            "compressed_sha256": compressed_sha256,
+            "uncompressed_bytes": original_bytes,
+            "uncompressed_sha256": original_sha256,
+            "sha256": original_sha256,
+            "storage_updated_at": now,
+            "plain_removed": plain_removed,
+        }
+    )
+    if plain_removed:
+        updated["plain_removed_at"] = now
+        updated["plain_removed_bytes"] = original_bytes
+    return updated
+
+
+def sync_raw_block_storage_records(session_dir: Path, manifest: dict[str, Any], updated_records: dict[str, dict[str, Any]]) -> None:
+    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+    blocks = raw_blocks.get("blocks") if isinstance(raw_blocks.get("blocks"), list) else []
+    for idx, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            continue
+        key = raw_block_record_key(block)
+        if key in updated_records:
+            blocks[idx] = dict(updated_records[key])
+    raw_blocks["blocks"] = blocks
+    manifest["raw_blocks"] = raw_blocks
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict):
+            continue
+        raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
+        key = raw_block_record_key(raw_block)
+        if key not in updated_records:
+            continue
+        updated = dict(updated_records[key])
+        segment["raw_block"] = updated
+        index_path = Path(str(segment.get("index") or ""))
+        if index_path.exists():
+            segment_index = read_json(index_path, {})
+            if isinstance(segment_index, dict):
+                segment_index["source_block"] = updated
+                write_json(index_path, segment_index)
+    raw_blocks_index = session_dir / "raw" / RAW_BLOCK_INDEX_JSON
+    write_json(
+        raw_blocks_index,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "source_raw": raw_blocks.get("source_raw") or "raw/session.raw.jsonl",
+            "blocks": blocks,
+        },
+    )
+
+
+def gzip_bytes(data: bytes, *, compression_level: int) -> bytes:
+    return gzip.compress(data, compresslevel=max(1, min(int_value(compression_level, 6), 9)), mtime=0)
+
+
+def raw_block_storage_compact_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Raw Block Storage Compact",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- confirm_remove_plain: `{payload.get('confirm_remove_plain')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- planned_count: `{payload.get('planned_count')}`",
+        f"- compressed_count: `{payload.get('compressed_count')}`",
+        f"- removed_plain_count: `{payload.get('removed_plain_count')}`",
+        f"- plain_bytes: `{payload.get('plain_bytes_human')}`",
+        f"- compressed_bytes: `{payload.get('compressed_bytes_human')}`",
+        f"- net_reclaim: `{payload.get('net_reclaim_human')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Results",
+        "",
+        "| session | status | planned | compressed | removed | bytes | compressed |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if isinstance(item, dict):
+            lines.append(
+                f"| `{item.get('session_label')}` | `{item.get('status')}` | `{item.get('planned_count')}` | `{item.get('compressed_count')}` | `{item.get('removed_plain_count')}` | `{item.get('plain_bytes_human')}` | `{item.get('compressed_bytes_human')}` |"
+            )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def raw_block_storage_compact(
+    *,
+    aoa_root: Path,
+    target: str = "latest",
+    limit: int | None = None,
+    skip_no_plain: bool = False,
+    apply: bool = False,
+    confirm_remove_plain: bool = False,
+    estimate_compression: bool = False,
+    compression_level: int = 6,
+    sample_limit: int = 80,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    selection_limit = None if target == "all" and skip_no_plain else limit
+    selected_records, selection_diagnostics = select_session_records(aoa_root, target, limit=selection_limit)
+    diagnostics.extend(selection_diagnostics)
+    if skip_no_plain:
+        selected_records = [record for record in selected_records if session_has_plain_raw_blocks(record)]
+        if limit is not None:
+            selected_records = selected_records[: max(0, int_value(limit))]
+    no_plain_candidates = bool(skip_no_plain and not selected_records and not selection_diagnostics)
+    if confirm_remove_plain and not apply:
+        diagnostics.append("confirm_remove_plain_requires_apply")
+    preflight = raw_block_ref_audit(
+        aoa_root=aoa_root,
+        target=target,
+        limit=limit,
+        sample_limit=sample_limit,
+        max_chars=0,
+        selected_records_override=selected_records,
+    )
+    if apply and not preflight.get("ok") and not no_plain_candidates:
+        diagnostics.append("raw_block_ref_audit_preflight_failed")
+    can_apply = bool(apply and selected_records) and not any(item in diagnostics for item in ("confirm_remove_plain_requires_apply", "raw_block_ref_audit_preflight_failed"))
+    now = utc_now()
+    results: list[dict[str, Any]] = []
+    planned_count = 0
+    compressed_count = 0
+    removed_plain_count = 0
+    plain_bytes_total = 0
+    compressed_bytes_total = 0
+    removed_plain_bytes_total = 0
+    created_compressed_bytes_total = 0
+    for record in selected_records:
+        session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+        manifest_path = session_dir / "session.manifest.json"
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict) or not manifest:
+            diagnostics.append(f"manifest_missing:{session_dir.name}")
+            continue
+        session_results: list[dict[str, Any]] = []
+        updated_records: dict[str, dict[str, Any]] = {}
+        session_plain_bytes = 0
+        session_compressed_bytes = 0
+        session_removed_bytes = 0
+        session_created_compressed_bytes = 0
+        session_planned = 0
+        session_compressed = 0
+        session_removed = 0
+        for block in raw_block_records_for_session(session_dir, manifest):
+            key = raw_block_record_key(block)
+            plain_path = raw_block_plain_path(session_dir, block)
+            compressed_path = raw_block_compressed_path(session_dir, block)
+            compressed_rel = raw_block_compressed_rel(block)
+            plain_exists = plain_path.is_file()
+            compressed_exists = compressed_path.is_file()
+            storage_mode = str(block.get("storage_mode") or RAW_BLOCK_STORAGE_MODE_PLAIN)
+            if not plain_exists and compressed_exists and storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP:
+                known_compressed_bytes = compressed_path.stat().st_size
+                session_compressed_bytes += known_compressed_bytes
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "already_compressed",
+                        "storage_mode": storage_mode,
+                        "compressed_rel": compressed_rel,
+                        "compressed_bytes": known_compressed_bytes,
+                    }
+                )
+                continue
+            if not plain_exists:
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "plain_unavailable",
+                        "storage_mode": storage_mode,
+                        "plain_path": str(plain_path),
+                        "compressed_rel": compressed_rel,
+                    }
+                )
+                continue
+            original_bytes = plain_path.stat().st_size
+            session_plain_bytes += original_bytes
+            plain_bytes_total += original_bytes
+            session_planned += 1
+            planned_count += 1
+            compressed_size = compressed_path.stat().st_size if compressed_exists else 0
+            compressed_sha = sha256_file(compressed_path) if compressed_exists else ""
+            if estimate_compression and not compressed_exists:
+                data = plain_path.read_bytes()
+                compressed_size = len(gzip_bytes(data, compression_level=compression_level))
+            if can_apply:
+                data = plain_path.read_bytes()
+                original_sha = hashlib.sha256(data).hexdigest()
+                compressed_path.parent.mkdir(parents=True, exist_ok=True)
+                created_now = False
+                if not compressed_exists:
+                    compressed_path.write_bytes(gzip_bytes(data, compression_level=compression_level))
+                    compressed_exists = True
+                    created_now = True
+                compressed_data = compressed_path.read_bytes()
+                decompressed = gzip.decompress(compressed_data)
+                if decompressed != data:
+                    session_results.append(
+                        {
+                            "block_id": block.get("block_id"),
+                            "status": "compressed_verify_failed",
+                            "plain_rel": block.get("rel"),
+                            "compressed_rel": compressed_rel,
+                        }
+                    )
+                    continue
+                compressed_size = len(compressed_data)
+                compressed_sha = hashlib.sha256(compressed_data).hexdigest()
+                if created_now:
+                    session_created_compressed_bytes += compressed_size
+                    created_compressed_bytes_total += compressed_size
+                updated = compressed_raw_block_record(
+                    session_dir,
+                    block,
+                    compressed_path=compressed_path,
+                    compressed_bytes=compressed_size,
+                    compressed_sha256=compressed_sha,
+                    original_bytes=original_bytes,
+                    original_sha256=original_sha,
+                    now=now,
+                    plain_removed=False,
+                )
+                updated_records[key] = updated
+                session_compressed += 1
+                compressed_count += 1
+                session_compressed_bytes += compressed_size
+                compressed_bytes_total += compressed_size
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "compressed_sidecar_written",
+                        "plain_rel": block.get("rel"),
+                        "compressed_rel": compressed_rel,
+                        "plain_bytes": original_bytes,
+                        "compressed_bytes": compressed_size,
+                    }
+                )
+            else:
+                session_compressed_bytes += compressed_size
+                compressed_bytes_total += compressed_size
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "planned",
+                        "plain_rel": block.get("rel"),
+                        "compressed_rel": compressed_rel,
+                        "plain_bytes": original_bytes,
+                        "compressed_bytes": compressed_size,
+                        "compression_estimated": bool(estimate_compression and compressed_size),
+                    }
+                )
+        if can_apply and updated_records:
+            sync_raw_block_storage_records(session_dir, manifest, updated_records)
+            manifest["updated_at"] = now
+            write_json(manifest_path, manifest)
+            update_registry(aoa_root, manifest, session_dir)
+            if confirm_remove_plain:
+                removal_updates: dict[str, dict[str, Any]] = {}
+                refreshed_manifest = read_json(manifest_path, {})
+                for block in raw_block_records_for_session(session_dir, refreshed_manifest):
+                    key = raw_block_record_key(block)
+                    if key not in updated_records:
+                        continue
+                    plain_path = raw_block_plain_path(session_dir, block)
+                    compressed_path = raw_block_compressed_path(session_dir, block)
+                    if not plain_path.is_file() or not compressed_path.is_file():
+                        continue
+                    before_unlink_bytes = plain_path.stat().st_size
+                    plain_path.unlink()
+                    removed_plain_count += 1
+                    session_removed += 1
+                    removed_plain_bytes_total += before_unlink_bytes
+                    session_removed_bytes += before_unlink_bytes
+                    removed_record = dict(block)
+                    removed_record["plain_removed"] = True
+                    removed_record["plain_removed_at"] = now
+                    removed_record["plain_removed_bytes"] = before_unlink_bytes
+                    removal_updates[key] = removed_record
+                if removal_updates:
+                    sync_raw_block_storage_records(session_dir, refreshed_manifest, removal_updates)
+                    refreshed_manifest["updated_at"] = now
+                    write_json(manifest_path, refreshed_manifest)
+                    update_registry(aoa_root, refreshed_manifest, session_dir)
+        results.append(
+            {
+                "session_id": record.get("session_id"),
+                "session_label": record.get("session_label") or session_dir.name,
+                "session_dir": str(session_dir),
+                "status": "applied" if can_apply and session_compressed else "planned" if session_planned else "no_plain_blocks",
+                "planned_count": session_planned,
+                "compressed_count": session_compressed,
+                "removed_plain_count": session_removed,
+                "plain_bytes": session_plain_bytes,
+                "plain_bytes_human": human_size(session_plain_bytes),
+                "compressed_bytes": session_compressed_bytes,
+                "compressed_bytes_human": human_size(session_compressed_bytes),
+                "created_compressed_bytes": session_created_compressed_bytes,
+                "removed_plain_bytes": session_removed_bytes,
+                "details": session_results[:50],
+            }
+        )
+    post_audit = (
+        raw_block_ref_audit(
+            aoa_root=aoa_root,
+            target=target,
+            limit=limit,
+            sample_limit=sample_limit,
+            max_chars=0,
+            selected_records_override=selected_records,
+        )
+        if can_apply
+        else {}
+    )
+    if can_apply and not post_audit.get("ok"):
+        diagnostics.append("raw_block_ref_audit_post_apply_failed")
+    net_reclaim_bytes = removed_plain_bytes_total - created_compressed_bytes_total
+    status = "current_no_plain_candidates" if no_plain_candidates else "applied" if can_apply else "planned"
+    if diagnostics and not can_apply:
+        status = "blocked"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_raw_block_storage_compact",
+        "generated_at": now,
+        "ok": (no_plain_candidates or bool(selected_records)) and not any(item.endswith("_failed") or item == "confirm_remove_plain_requires_apply" for item in diagnostics),
+        "mutates": bool(can_apply),
+        "target": target,
+        "apply": bool(apply),
+        "confirm_remove_plain": bool(confirm_remove_plain),
+        "skip_no_plain": bool(skip_no_plain),
+        "estimate_compression": bool(estimate_compression),
+        "compression": "gzip",
+        "compression_level": max(1, min(int_value(compression_level, 6), 9)),
+        "storage_mode": RAW_BLOCK_STORAGE_MODE_GZIP,
+        "status": status,
+        "selected_count": len(selected_records),
+        "planned_count": planned_count,
+        "compressed_count": compressed_count,
+        "removed_plain_count": removed_plain_count,
+        "plain_bytes": plain_bytes_total,
+        "plain_bytes_human": human_size(plain_bytes_total),
+        "compressed_bytes": compressed_bytes_total,
+        "compressed_bytes_human": human_size(compressed_bytes_total),
+        "created_compressed_bytes": created_compressed_bytes_total,
+        "created_compressed_bytes_human": human_size(created_compressed_bytes_total),
+        "removed_plain_bytes": removed_plain_bytes_total,
+        "removed_plain_bytes_human": human_size(removed_plain_bytes_total),
+        "net_reclaim_bytes": net_reclaim_bytes,
+        "net_reclaim_human": human_size(max(0, net_reclaim_bytes)),
+        "preflight_raw_block_ref_audit": {
+            "ok": preflight.get("ok"),
+            "status": preflight.get("status"),
+            "checked_count": preflight.get("checked_count"),
+            "missing_count": preflight.get("missing_count"),
+            "mismatch_count": preflight.get("mismatch_count"),
+        },
+        "post_apply_raw_block_ref_audit": {
+            "ok": post_audit.get("ok"),
+            "status": post_audit.get("status"),
+            "checked_count": post_audit.get("checked_count"),
+            "missing_count": post_audit.get("missing_count"),
+            "mismatch_count": post_audit.get("mismatch_count"),
+        }
+        if post_audit
+        else {},
+        "results": results,
+        "diagnostics": diagnostics,
+        "stop_line": "raw/session.raw.jsonl remains authority; this route only changes generated raw-block storage after ref-audit preflight.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__raw-block-storage-compact"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, raw_block_storage_compact_markdown(payload))
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
@@ -48168,7 +48773,7 @@ def validate_pipeline(*, workspace_root: Path | None = None, aoa_root: Path | No
                 and all(
                     isinstance(segment, dict)
                     and isinstance(segment.get("raw_block"), dict)
-                    and Path(str(segment["raw_block"].get("path") or "")).exists()
+                    and raw_block_payload_available(session_dir, segment["raw_block"])
                     for segment in segments
                 ),
                 [segment.get("raw_block") for segment in segments if isinstance(segment, dict)],
@@ -49051,8 +49656,7 @@ def command_doctor(args: argparse.Namespace) -> int:
                 if allowed_segment_roles and role not in allowed_segment_roles:
                     problems.append(f"invalid segment role {role}: {session_path}")
                 raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
-                raw_block_path = Path(str(raw_block.get("path") or ""))
-                if raw_blocks_required and not raw_block_path.exists():
+                if raw_blocks_required and not raw_block_payload_available(session_path, raw_block):
                     problems.append(f"missing segment raw block: {session_path}:{segment.get('segment_id')}")
                 md_path = Path(str(segment.get("markdown") or ""))
                 idx_path = Path(str(segment.get("index") or ""))
@@ -49831,6 +50435,23 @@ def build_parser() -> argparse.ArgumentParser:
     raw_block_ref_audit_parser.add_argument("--max-chars", type=int, default=0, help="Maximum preview chars per sample. Default 0 stores no raw text preview.")
     raw_block_ref_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown raw-block ref audit reports under .aoa/diagnostics.")
     raw_block_ref_audit_parser.set_defaults(func=command_raw_block_ref_audit)
+
+    raw_block_storage_compact_parser = sub.add_parser(
+        "raw-block-storage-compact",
+        help="Plan or apply gzip-backed raw-block storage while keeping raw transcript authority and raw refs readable.",
+    )
+    raw_block_storage_compact_parser.add_argument("session", nargs="?", default="latest", help="Session id/label/title, latest, or all.")
+    raw_block_storage_compact_parser.add_argument("--workspace-root")
+    raw_block_storage_compact_parser.add_argument("--aoa-root")
+    raw_block_storage_compact_parser.add_argument("--limit", type=int, help="Maximum sessions to inspect when session=all.")
+    raw_block_storage_compact_parser.add_argument("--sample-limit", type=int, default=80, help="Maximum pre/post raw-block ref-audit samples.")
+    raw_block_storage_compact_parser.add_argument("--skip-no-plain", action="store_true", help="When session=all, select the next sessions that still have plaintext raw-block duplicates.")
+    raw_block_storage_compact_parser.add_argument("--estimate-compression", action="store_true", help="Read plaintext blocks during dry-run to estimate gzip size.")
+    raw_block_storage_compact_parser.add_argument("--compression-level", type=int, default=6, help="gzip compression level, clamped to 1..9.")
+    raw_block_storage_compact_parser.add_argument("--apply", action="store_true", help="Write compressed raw-block sidecars and update manifest/index metadata.")
+    raw_block_storage_compact_parser.add_argument("--confirm-remove-plain", action="store_true", help="After verified apply, remove plaintext raw-block duplicates to reclaim disk.")
+    raw_block_storage_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown raw-block storage compact reports under .aoa/diagnostics.")
+    raw_block_storage_compact_parser.set_defaults(func=command_raw_block_storage_compact)
 
     storage_maintenance_parser = sub.add_parser(
         "storage-maintenance",

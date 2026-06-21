@@ -376,6 +376,17 @@ evidence and stable refs.
   `raw-block-ref-audit` is the current read-only gate for this: it maps sampled
   `raw:line:N` refs through `raw/blocks.index.json` and compares block-local
   lines back to the full raw transcript before any cleanup route exists.
+  `raw-block-storage-compact` is the staged storage route after that gate. Its
+  dry-run reports gzip sidecar and reclaim shape, `--apply` writes compressed
+  raw-block storage metadata, and plaintext block removal requires
+  `--confirm-remove-plain`. The full raw transcript remains the authority.
+  Apply is a `manual-bulk` maintenance-coordinator writer touching raw blocks,
+  session manifests, and the session registry.
+  Storage reports must distinguish remaining plaintext duplicate bytes from
+  compressed sidecar bytes; compressed sidecars are the active raw-block
+  storage representation once plaintext blocks are removed. Use
+  `--skip-no-plain` for archive-wide batches so already compressed sessions do
+  not consume the next bounded apply window.
 
 Use `storage-audit` to measure current weight and reclaim candidates. It is a
 read-only gate; actual shrinkage of graph/search stores requires controlled

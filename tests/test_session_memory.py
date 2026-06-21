@@ -1180,6 +1180,140 @@ def test_raw_block_ref_audit_reads_block_lines_and_detects_mismatch(tmp_path: Pa
     assert "session_not_found" in missing_target["diagnostics"]
 
 
+def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-raw-block-compact.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "raw-block-compact", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Compact raw block storage"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "turn_context", "payload": {"summary": "compact boundary"}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Compressed raw block reader should keep refs stable."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "raw-block-compact",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__compact-raw-block-storage"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    first_block = manifest["raw_blocks"]["blocks"][0]
+    first_plain_path = Path(first_block["path"])
+    first_rel = first_block["rel"]
+
+    plan = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        estimate_compression=True,
+        sample_limit=8,
+    )
+    assert plan["ok"] is True
+    assert plan["mutates"] is False
+    assert plan["planned_count"] == 2
+    assert plan["compressed_count"] == 0
+    assert plan["plain_bytes"] > 0
+    assert plan["compressed_bytes"] > 0
+
+    applied = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert applied["ok"] is True
+    assert applied["mutates"] is True
+    assert applied["compressed_count"] == 2
+    assert applied["removed_plain_count"] == 2
+    assert applied["post_apply_raw_block_ref_audit"]["ok"] is True
+
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    compressed_block = manifest["raw_blocks"]["blocks"][0]
+    assert compressed_block["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+    assert compressed_block["rel"] == first_rel
+    assert compressed_block["plain_removed"] is True
+    assert not first_plain_path.exists()
+    assert Path(compressed_block["compressed_path"]).exists()
+    assert manifest["segments"][0]["raw_block"]["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+
+    preview = module.raw_block_line_preview(
+        session_dir,
+        manifest,
+        "raw:line:2",
+        raw_block_ref=first_rel,
+    )
+    assert preview["status"] == "available"
+    assert preview["compressed"] is True
+    assert preview["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+    assert preview["block_line"] == 2
+
+    audit = module.raw_block_ref_audit(aoa_root=aoa_root, target=session_dir.name, sample_limit=8)
+    assert audit["ok"] is True
+    assert audit["mismatch_count"] == 0
+    assert audit["missing_count"] == 0
+
+    storage = module.session_storage_breakdown(aoa_root)
+    assert storage["raw_block_storage"]["plain_bytes"] == 0
+    assert storage["raw_block_storage"]["compressed_bytes"] > 0
+    assert storage["raw_block_duplication_candidate_bytes"] == 0
+
+    no_candidates = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target="all",
+        skip_no_plain=True,
+        limit=20,
+    )
+    assert no_candidates["ok"] is True
+    assert no_candidates["status"] == "current_no_plain_candidates"
+    assert no_candidates["selected_count"] == 0
+
+
+def test_raw_block_storage_compact_apply_uses_maintenance_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    calls: dict[str, Any] = {}
+
+    def fake_lock(root: Path, callback: Any, **kwargs: Any) -> dict[str, Any]:
+        calls["root"] = root
+        calls.update(kwargs)
+        payload = callback()
+        payload["maintenance_coordinator"] = {"status": "completed"}
+        return payload
+
+    monkeypatch.setattr(module, "run_with_maintenance_lock", fake_lock)
+    args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        session="all",
+        limit=1,
+        skip_no_plain=True,
+        apply=True,
+        confirm_remove_plain=True,
+        estimate_compression=False,
+        compression_level=6,
+        sample_limit=4,
+        write_report=False,
+    )
+
+    assert module.command_raw_block_storage_compact(args) == 0
+    assert calls["root"] == aoa_root
+    assert calls["owner_job"] == "raw-block-storage-compact"
+    assert calls["mode"] == "manual-bulk"
+    assert calls["target"] == "all"
+    assert {"raw_blocks", "session_manifests", "session_registry"} <= set(calls["touched_surfaces"])
+
+
 def test_segment_index_records_conversation_acts(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
