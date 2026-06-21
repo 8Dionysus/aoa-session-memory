@@ -195,6 +195,9 @@ GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
 GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 25
+GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
+GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
+GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
@@ -34754,13 +34757,25 @@ def graph_maintenance(
         key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")),
     )
     selected = cheap_sorted_actionable[:batch_limit]
-    candidate_pool_floor = batch_limit if apply else 50
-    candidate_pool_multiplier = 3 if apply else 10
-    candidate_pool_limit = min(
-        len(cheap_sorted_actionable),
-        max(batch_limit * candidate_pool_multiplier, batch_limit, candidate_pool_floor),
-    )
+    if apply:
+        candidate_pool_policy = "apply_batch_multiplier"
+        candidate_pool_requested_limit = max(
+            batch_limit * GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+            batch_limit,
+        )
+        candidate_pool_hard_limit = None
+    elif plan_refresh_costs:
+        candidate_pool_policy = "bounded_dry_exact_plan"
+        candidate_pool_requested_limit = max(batch_limit, GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR)
+        candidate_pool_hard_limit = GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT
+        candidate_pool_requested_limit = min(candidate_pool_requested_limit, candidate_pool_hard_limit)
+    else:
+        candidate_pool_policy = "stored_count_batch"
+        candidate_pool_requested_limit = batch_limit
+        candidate_pool_hard_limit = None
+    candidate_pool_limit = min(len(cheap_sorted_actionable), candidate_pool_requested_limit)
     candidate_pool = cheap_sorted_actionable[:candidate_pool_limit]
+    candidate_pool_truncated_count = max(0, len(cheap_sorted_actionable) - candidate_pool_limit)
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     diagnostics.extend(f"requested_graph_source_not_found:{source_key}" for source_key in missing_requested_source_keys)
     results: list[dict[str, Any]] = []
@@ -34779,6 +34794,11 @@ def graph_maintenance(
         "use_queue": bool(use_queue),
         "queue_selected_source_count": len(queue_selected_source_keys),
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
+        "candidate_pool_policy": candidate_pool_policy,
+        "candidate_pool_requested_limit": candidate_pool_requested_limit,
+        "candidate_pool_hard_limit": candidate_pool_hard_limit,
+        "candidate_pool_actionable_count": len(cheap_sorted_actionable),
+        "candidate_pool_truncated_count": candidate_pool_truncated_count,
         "matched_source_key_count": sum(
             1 for item in states if isinstance(item, dict) and item.get("source_key")
         ),
@@ -34987,6 +35007,11 @@ def graph_maintenance(
                         "planned_candidate_count": len(plan_entries),
                         "candidate_pool_count": len(candidate_pool),
                         "candidate_pool_limit": candidate_pool_limit,
+                        "candidate_pool_policy": candidate_pool_policy,
+                        "candidate_pool_requested_limit": candidate_pool_requested_limit,
+                        "candidate_pool_hard_limit": candidate_pool_hard_limit,
+                        "candidate_pool_actionable_count": len(cheap_sorted_actionable),
+                        "candidate_pool_truncated_count": candidate_pool_truncated_count,
                         "selected_planned_refresh_node_count": len(planned_node_ids),
                         "selected_planned_refresh_edge_count": len(planned_edge_ids),
                         "selected_sources": [str(entry.get("source_key") or "") for entry in selected_plan[:40]],
@@ -35282,6 +35307,13 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- matched_source_key_sample: `{json.dumps(detail.get('matched_source_key_sample', []), ensure_ascii=False)}`",
                 f"- missing_source_keys: `{json.dumps(detail.get('missing_source_keys', []), ensure_ascii=False)}`",
                 f"- planned_candidate_count: `{detail.get('planned_candidate_count')}`",
+                f"- candidate_pool_policy: `{detail.get('candidate_pool_policy')}`",
+                f"- candidate_pool_count: `{detail.get('candidate_pool_count')}`",
+                f"- candidate_pool_limit: `{detail.get('candidate_pool_limit')}`",
+                f"- candidate_pool_requested_limit: `{detail.get('candidate_pool_requested_limit')}`",
+                f"- candidate_pool_hard_limit: `{detail.get('candidate_pool_hard_limit')}`",
+                f"- candidate_pool_actionable_count: `{detail.get('candidate_pool_actionable_count')}`",
+                f"- candidate_pool_truncated_count: `{detail.get('candidate_pool_truncated_count')}`",
                 f"- selected_planned_refresh_node_count: `{detail.get('selected_planned_refresh_node_count')}`",
                 f"- selected_planned_refresh_edge_count: `{detail.get('selected_planned_refresh_edge_count')}`",
                 f"- selected_sources: `{json.dumps(detail.get('selected_sources', []), ensure_ascii=False)}`",
@@ -46026,7 +46058,13 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
                 "queue_selected_source_count",
                 "matched_source_key_count",
                 "matched_source_key_sample",
+                "candidate_pool_policy",
                 "candidate_pool_count",
+                "candidate_pool_limit",
+                "candidate_pool_requested_limit",
+                "candidate_pool_hard_limit",
+                "candidate_pool_actionable_count",
+                "candidate_pool_truncated_count",
                 "selected_sources",
                 "selected_planned_refresh_node_count",
                 "selected_planned_refresh_edge_count",

@@ -961,7 +961,13 @@ defaulting to a full rebuild. Use
 `graph-maintenance --plan-refresh-costs` for a dry exact-cost plan over the
 candidate pool before applying a bounded repair; it parses the candidate
 sources and reports planned aggregate node/edge refresh counts without mutating
-`graph.sqlite3`.
+`graph.sqlite3`. Dry exact-cost planning is intentionally capped by
+`GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT` instead of scaling as
+`batch-limit * N`; large backlog probes should read
+`maintenance_detail.candidate_pool_policy`,
+`candidate_pool_actionable_count`, and `candidate_pool_truncated_count` rather
+than treating dry-plan `batch-limit` as permission to price hundreds of
+sources in one foreground pass.
 Incremental maintenance plans exact old-plus-new refresh cost, sorts
 actionable sources cheap-first, and isolates individually oversized sources so
 one historical session does not block smaller repairs. `index-maintenance` and

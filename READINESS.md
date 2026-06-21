@@ -1105,6 +1105,16 @@ Maintenance gates:
   blocked lower-layer sources. Later bounded graph ticks may advance those
   counts. Continue with bounded graph maintenance; do not retry full rebuild by
   default until the weight profile is reduced further.
+- 2026-06-21 bounded dry exact-cost proof: after a prior unbounded dry
+  `graph-maintenance all --plan-refresh-costs --batch-limit 75` route expanded
+  into a large candidate pool and had to be stopped, dry exact-cost planning now
+  uses `candidate_pool_policy=bounded_dry_exact_plan`. A live resource-lane run
+  selected and priced `75` candidates from `4685` actionable graph sources in
+  `elapsed_ms=72829` with `budget_exhausted=false`, `candidate_pool_count=75`,
+  `candidate_pool_truncated_count=4610`, `planned_candidate_count=75`, and
+  no mutation. The `abyss-machine` wrapper completed in `73.93s` with service
+  runtime `1min 13.909s`, memory peak `4G`, and swap `0B`. Report:
+  `diagnostics/20260621T185958Z__graph-maintenance.json`.
 
 ## Probe Notes
 
