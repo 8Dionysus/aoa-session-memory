@@ -1114,6 +1114,72 @@ def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path
     assert "mechanics_candidate" not in profile["lanes"]
 
 
+def test_raw_block_ref_audit_reads_block_lines_and_detects_mismatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-raw-block-audit.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "raw-block-audit", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Audit raw blocks"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "turn_context", "payload": {"summary": "first compact boundary"}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Raw block reader should resolve this line."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "raw-block-audit",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__audit-raw-blocks"
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    first_block = manifest["raw_blocks"]["blocks"][0]
+
+    preview = module.raw_block_line_preview(
+        session_dir,
+        manifest,
+        "raw:line:2",
+        raw_block_ref=first_block["rel"],
+    )
+    assert preview["status"] == "available"
+    assert preview["block_line"] == 2
+    assert preview["raw_block_ref"] == "raw/blocks/000__initial-to-compaction.raw.jsonl"
+
+    audit = module.raw_block_ref_audit(aoa_root=aoa_root, target="all", sample_limit=8, write_report=True)
+    assert audit["ok"] is True
+    assert audit["status"] == "reader_ready"
+    assert audit["checked_count"] >= 2
+    assert audit["mismatch_count"] == 0
+    assert audit["missing_count"] == 0
+    assert all(item["raw_equals_block"] for item in audit["samples"])
+    assert Path(audit["report_json"]).exists()
+    assert Path(audit["report_markdown"]).exists()
+
+    block_path = Path(first_block["path"])
+    block_lines = block_path.read_text(encoding="utf-8").splitlines()
+    block_lines[0] = json.dumps({"timestamp": "2026-05-12T00:00:00Z", "type": "corrupted"}, ensure_ascii=False)
+    block_path.write_text("\n".join(block_lines) + "\n", encoding="utf-8")
+
+    mismatch = module.raw_block_ref_audit(aoa_root=aoa_root, target=session_dir.name, sample_limit=4)
+    assert mismatch["ok"] is False
+    assert mismatch["mismatch_count"] >= 1
+    assert any(item["raw_equals_block"] is False for item in mismatch["samples"])
+
+    missing_target = module.raw_block_ref_audit(aoa_root=aoa_root, target="missing-raw-block-audit-session")
+    assert missing_target["ok"] is False
+    assert missing_target["status"] == "no_sessions_selected"
+    assert "session_not_found" in missing_target["diagnostics"]
+
+
 def test_segment_index_records_conversation_acts(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

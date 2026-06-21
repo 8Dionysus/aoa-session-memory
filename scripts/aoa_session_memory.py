@@ -36513,7 +36513,7 @@ def storage_audit(
                 "quality_tradeoff": "none_if_raw refs and readers support offset/compressed blocks before cleanup",
                 "estimated_reclaimable_bytes": sessions.get("raw_block_duplication_candidate_bytes", 0),
                 "estimated_reclaimable_human": sessions.get("raw_block_duplication_candidate_human", "0 B"),
-                "next_route": "add raw-block offset/compression reader before removing duplicated raw block payloads",
+                "next_route": "run raw-block-ref-audit all --limit 20 --sample-limit 80 --write-report before designing compressed/offset raw-block cleanup",
             },
             {
                 "id": "search_hot_store_v3",
@@ -44902,6 +44902,21 @@ def command_storage_audit(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_raw_block_ref_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = raw_block_ref_audit(
+        aoa_root=root,
+        target=args.session,
+        limit=args.limit,
+        sample_limit=args.sample_limit,
+        max_chars=args.max_chars,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_storage_maintenance(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -46497,6 +46512,290 @@ def raw_line_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 360) -> d
             if current_line > line_no:
                 break
     return {"status": "raw_line_not_found", "line": line_no, "text": ""}
+
+
+def text_line_packet(path: Path, line_no: int | None, *, max_chars: int = 360) -> dict[str, Any]:
+    line_no = int_value(line_no)
+    if not line_no:
+        return {"status": "missing_line", "line": None, "text": "", "sha256": ""}
+    if not path.is_file():
+        return {"status": "file_unavailable", "line": line_no, "text": "", "sha256": ""}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for current_line, line in enumerate(handle, start=1):
+                if current_line != line_no:
+                    if current_line > line_no:
+                        break
+                    continue
+                text = line.rstrip("\n")
+                return {
+                    "status": "available",
+                    "line": line_no,
+                    "text": bounded_storage_text(text, max_chars=max_chars),
+                    "sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
+                    "byte_count": len(text.encode("utf-8", errors="replace")),
+                }
+    except OSError as exc:
+        return {"status": f"io_error:{exc}", "line": line_no, "text": "", "sha256": ""}
+    return {"status": "line_not_found", "line": line_no, "text": "", "sha256": ""}
+
+
+def raw_block_records_for_session(session_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+    records = raw_blocks.get("blocks") if isinstance(raw_blocks.get("blocks"), list) else []
+    if not records:
+        blocks_index = session_dir / "raw" / RAW_BLOCK_INDEX_JSON
+        index_payload = read_json(blocks_index, {})
+        records = index_payload.get("blocks") if isinstance(index_payload.get("blocks"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        if record.get("path"):
+            record["path"] = str(Path(str(record["path"])))
+        elif record.get("rel"):
+            record["path"] = str(session_dir / str(record["rel"]))
+        else:
+            block_id = str(record.get("block_id") or record.get("segment_id") or "")
+            role = str(record.get("role") or "segment")
+            if block_id:
+                record["path"] = str(session_dir / "raw" / RAW_BLOCKS_DIR / f"{block_id}__{role}.raw.jsonl")
+        normalized.append(record)
+    return normalized
+
+
+def raw_block_record_for_ref(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    raw_ref: Any,
+    *,
+    raw_block_ref: Any = "",
+) -> tuple[dict[str, Any] | None, list[str]]:
+    diagnostics: list[str] = []
+    line_no = line_from_raw_ref(raw_ref)
+    if not line_no:
+        return None, ["missing_raw_ref"]
+    records = raw_block_records_for_session(session_dir, manifest)
+    raw_block_ref_text = str(raw_block_ref or "")
+    if raw_block_ref_text:
+        wanted = Path(raw_block_ref_text.split("#", 1)[0]).name
+        for record in records:
+            candidates = {
+                Path(str(record.get("path") or "")).name,
+                Path(str(record.get("rel") or "")).name,
+                str(record.get("rel") or ""),
+                str(record.get("path") or ""),
+            }
+            if raw_block_ref_text in candidates or wanted in candidates:
+                return record, diagnostics
+        diagnostics.append("raw_block_ref_not_found")
+    for record in records:
+        source_range = record.get("source_range") if isinstance(record.get("source_range"), dict) else {}
+        from_line = int_value(source_range.get("from_line"))
+        to_line = int_value(source_range.get("to_line"))
+        if from_line and to_line and from_line <= line_no <= to_line:
+            return record, diagnostics
+    diagnostics.append("raw_ref_not_covered_by_raw_blocks")
+    return None, diagnostics
+
+
+def raw_block_line_preview(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    raw_ref: Any,
+    *,
+    raw_block_ref: Any = "",
+    max_chars: int = 0,
+) -> dict[str, Any]:
+    line_no = line_from_raw_ref(raw_ref)
+    record, diagnostics = raw_block_record_for_ref(session_dir, manifest, raw_ref, raw_block_ref=raw_block_ref)
+    if not line_no:
+        return {"status": "missing_raw_ref", "line": None, "text": "", "diagnostics": diagnostics}
+    if not record:
+        return {"status": "raw_block_unresolved", "line": line_no, "text": "", "diagnostics": diagnostics}
+    source_range = record.get("source_range") if isinstance(record.get("source_range"), dict) else {}
+    from_line = int_value(source_range.get("from_line"))
+    to_line = int_value(source_range.get("to_line"))
+    if not from_line or not to_line:
+        diagnostics.append("raw_block_source_range_missing")
+        return {"status": "raw_block_range_missing", "line": line_no, "text": "", "diagnostics": diagnostics}
+    if not (from_line <= line_no <= to_line):
+        diagnostics.append("raw_ref_outside_raw_block_range")
+        return {"status": "raw_ref_outside_raw_block_range", "line": line_no, "text": "", "diagnostics": diagnostics}
+    block_path = Path(str(record.get("path") or ""))
+    block_line = line_no - from_line + 1
+    packet = text_line_packet(block_path, block_line, max_chars=max_chars)
+    status = "available" if packet.get("status") == "available" else str(packet.get("status") or "unavailable")
+    return {
+        "status": status,
+        "line": line_no,
+        "block_line": block_line,
+        "text": packet.get("text", ""),
+        "sha256": packet.get("sha256", ""),
+        "byte_count": packet.get("byte_count", 0),
+        "block_id": record.get("block_id"),
+        "segment_id": record.get("segment_id"),
+        "role": record.get("role"),
+        "raw_block_ref": record.get("rel") or record.get("path"),
+        "raw_block_path": str(block_path),
+        "source_range": source_range,
+        "diagnostics": diagnostics,
+    }
+
+
+def raw_block_ref_audit_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Raw Block Ref Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- selected_count: `{payload.get('selected_count')}`",
+        f"- checked_count: `{payload.get('checked_count')}`",
+        f"- mismatch_count: `{payload.get('mismatch_count')}`",
+        f"- missing_count: `{payload.get('missing_count')}`",
+        f"- raw_block_duplication_candidate: `{payload.get('raw_block_duplication_candidate_human')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Samples",
+        "",
+        "| session | raw_ref | status | raw_block | raw_equals_block |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
+        if isinstance(item, dict):
+            lines.append(
+                f"| `{item.get('session_label')}` | `{item.get('raw_ref')}` | `{item.get('status')}` | `{item.get('raw_block_ref')}` | `{item.get('raw_equals_block')}` |"
+            )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def raw_block_ref_audit(
+    *,
+    aoa_root: Path,
+    target: str = "latest",
+    limit: int | None = None,
+    sample_limit: int = 80,
+    max_chars: int = 0,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    records = registry_sessions(aoa_root)
+    if target != "all":
+        try:
+            selected_records = [resolve_session_record(aoa_root, target)]
+        except (SystemExit, ValueError):
+            selected_records = []
+            diagnostics.append("session_not_found")
+    else:
+        selected_records = sorted(records, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        if limit is not None:
+            selected_records = selected_records[: max(0, int_value(limit))]
+    checked = 0
+    missing = 0
+    mismatch = 0
+    available = 0
+    samples: list[dict[str, Any]] = []
+    for record in selected_records:
+        if checked >= max(1, int_value(sample_limit, 80)):
+            break
+        session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+        manifest_path = session_dir / "session.manifest.json"
+        manifest = read_json(manifest_path, {})
+        if not isinstance(manifest, dict) or not manifest:
+            diagnostics.append(f"manifest_missing:{session_dir.name}")
+            continue
+        raw_path = manifest_raw_path(session_dir, manifest)
+        for block in raw_block_records_for_session(session_dir, manifest):
+            if checked >= max(1, int_value(sample_limit, 80)):
+                break
+            source_range = block.get("source_range") if isinstance(block.get("source_range"), dict) else {}
+            from_line = int_value(source_range.get("from_line"))
+            to_line = int_value(source_range.get("to_line"))
+            candidate_lines = [line for line in unique_preserving_order([from_line, to_line]) if line]
+            for line_no in candidate_lines:
+                if checked >= max(1, int_value(sample_limit, 80)):
+                    break
+                raw_ref = f"raw:line:{line_no}"
+                block_preview = raw_block_line_preview(
+                    session_dir,
+                    manifest,
+                    raw_ref,
+                    raw_block_ref=block.get("rel") or block.get("path"),
+                    max_chars=max_chars,
+                )
+                raw_packet = text_line_packet(raw_path, line_no, max_chars=max_chars)
+                raw_ok = raw_packet.get("status") == "available"
+                block_ok = block_preview.get("status") == "available"
+                raw_equals_block = bool(raw_ok and block_ok and raw_packet.get("sha256") == block_preview.get("sha256"))
+                status = "available" if raw_equals_block else "mismatch_or_missing"
+                if raw_equals_block:
+                    available += 1
+                else:
+                    if not raw_ok or not block_ok:
+                        missing += 1
+                    else:
+                        mismatch += 1
+                checked += 1
+                samples.append(
+                    {
+                        "session_id": record.get("session_id"),
+                        "session_label": record.get("session_label") or session_dir.name,
+                        "raw_ref": raw_ref,
+                        "status": status,
+                        "raw_status": raw_packet.get("status"),
+                        "raw_block_status": block_preview.get("status"),
+                        "raw_equals_block": raw_equals_block,
+                        "raw_block_ref": block_preview.get("raw_block_ref") or block.get("rel"),
+                        "block_line": block_preview.get("block_line"),
+                        "raw_sha256": raw_packet.get("sha256"),
+                        "block_sha256": block_preview.get("sha256"),
+                        "preview": block_preview.get("text", ""),
+                        "diagnostics": block_preview.get("diagnostics", []),
+                    }
+                )
+    sessions = session_storage_breakdown(aoa_root)
+    status = "reader_ready" if checked and not missing and not mismatch else "needs_repair"
+    if not selected_records:
+        status = "no_sessions_selected"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_raw_block_ref_audit",
+        "generated_at": utc_now(),
+        "ok": bool(checked and not missing and not mismatch),
+        "mutates": False,
+        "target": target,
+        "selected_count": len(selected_records),
+        "checked_count": checked,
+        "available_count": available,
+        "missing_count": missing,
+        "mismatch_count": mismatch,
+        "status": status,
+        "reader": "raw_block_source_range_line_offset_v1",
+        "raw_block_duplication_candidate_bytes": sessions.get("raw_block_duplication_candidate_bytes", 0),
+        "raw_block_duplication_candidate_human": sessions.get("raw_block_duplication_candidate_human", "0 B"),
+        "samples": samples[: max(1, min(int_value(sample_limit, 80), 200))],
+        "diagnostics": diagnostics,
+        "stop_line": "This audit only reads raw/session and raw-block evidence. It does not delete raw blocks or replace raw transcript authority.",
+        "next_route": "after this passes broadly, add compressed/offset raw-block storage and a dry-run cleanup plan before any deletion",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__raw-block-ref-audit"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, raw_block_ref_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
 
 
 def raw_semantic_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 420) -> dict[str, Any]:
@@ -49519,6 +49818,19 @@ def build_parser() -> argparse.ArgumentParser:
     storage_audit_parser.add_argument("--row-counts", action="store_true", help="Include SQLite row counts; can be slow on very large stores.")
     storage_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown storage audit reports under .aoa/diagnostics.")
     storage_audit_parser.set_defaults(func=command_storage_audit)
+
+    raw_block_ref_audit_parser = sub.add_parser(
+        "raw-block-ref-audit",
+        help="Verify raw refs can be read through raw block refs before any raw-block cleanup route.",
+    )
+    raw_block_ref_audit_parser.add_argument("session", nargs="?", default="latest", help="Session id/label/title, latest, or all.")
+    raw_block_ref_audit_parser.add_argument("--workspace-root")
+    raw_block_ref_audit_parser.add_argument("--aoa-root")
+    raw_block_ref_audit_parser.add_argument("--limit", type=int, help="Maximum sessions to inspect when session=all.")
+    raw_block_ref_audit_parser.add_argument("--sample-limit", type=int, default=80, help="Maximum raw/block line samples.")
+    raw_block_ref_audit_parser.add_argument("--max-chars", type=int, default=0, help="Maximum preview chars per sample. Default 0 stores no raw text preview.")
+    raw_block_ref_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown raw-block ref audit reports under .aoa/diagnostics.")
+    raw_block_ref_audit_parser.set_defaults(func=command_raw_block_ref_audit)
 
     storage_maintenance_parser = sub.add_parser(
         "storage-maintenance",

@@ -373,6 +373,9 @@ evidence and stable refs.
   just because `raw/session.raw.jsonl` also exists. Any cleanup first needs an
   offset/compressed raw-block reader and validation that segment/raw refs still
   resolve.
+  `raw-block-ref-audit` is the current read-only gate for this: it maps sampled
+  `raw:line:N` refs through `raw/blocks.index.json` and compares block-local
+  lines back to the full raw transcript before any cleanup route exists.
 
 Use `storage-audit` to measure current weight and reclaim candidates. It is a
 read-only gate; actual shrinkage of graph/search stores requires controlled

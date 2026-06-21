@@ -729,6 +729,12 @@ Last observed result:
   On the live 57.2 GiB graph store the default 25 GiB post-operation reserve
   currently blocks compaction until more disk headroom is reserved or graph
   cardinality is reduced.
+- 2026-06-21 raw-block ref reader route: `raw-block-ref-audit` is the read-only
+  gate before any raw-block duplication cleanup. It resolves sampled
+  `raw:line:N` refs through `raw/blocks.index.json` / manifest raw-block ranges,
+  reads the block-local line, and compares it to the full raw transcript. This
+  proves the reader path and mismatch detection; it does not delete raw blocks
+  or replace raw transcript authority.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

@@ -565,7 +565,11 @@ The current safe storage route is:
   offset/compressed-block reader route first so segment and raw refs remain
   stable before any cleanup. The safe next slice is reader support,
   ref-resolution tests over session/segment/raw-block refs, a dry-run reclaim
-  report, and only then a controlled cleanup route.
+  report, and only then a controlled cleanup route. Use
+  `raw-block-ref-audit all --limit 20 --sample-limit 80 --write-report` to
+  verify that sampled `raw:line:N` refs resolve through `raw/blocks/*.raw.jsonl`
+  and still match the full raw transcript before designing any compressed or
+  offset raw-block storage.
 
 ## Portable Route
 
