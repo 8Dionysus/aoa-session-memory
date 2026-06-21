@@ -358,6 +358,11 @@ size is not a reclaim estimate unless sampled payload rows actually shrink.
 When the sample delta is zero, route the next slice to graph cardinality,
 sharding, or task-specific projections instead of rebuilding for aggregate
 payload compaction.
+Use `graph-cardinality` for graph node/edge type counts. The read route uses
+the materialized `graph_type_counts` projection and should stay interactive;
+`graph-cardinality --refresh` is the heavy repair/materialization route and
+must be run through the machine resource lane on large live stores. Do not use
+ad hoc `GROUP BY node_type/edge_type` scans as the normal agent path.
 
 Use `storage-maintenance` for the current safe live shrink lane. It only runs
 SQLite WAL checkpoint/truncate for the graph and search stores, reports busy

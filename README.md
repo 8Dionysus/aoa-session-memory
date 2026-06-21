@@ -508,7 +508,10 @@ The current safe storage route is:
 - Graph store: aggregate node/edge payloads keep compact refs; packet reads
   hydrate evidence from contribution rows. Use the storage-audit aggregate
   payload sample before planning any rebuild; a large `nodes`/`edges` table with
-  zero sample delta means topology/cardinality is the pressure center.
+  zero sample delta means topology/cardinality is the pressure center. Use
+  `graph-cardinality` for fast materialized node/edge type counts; run
+  `graph-cardinality --refresh` through the heavy resource lane only when the
+  projection is missing or intentionally being rebuilt.
 - Search store: new search rebuilds keep full text in FTS and compressed
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
 - Raw blocks: do not delete duplicated raw blocks yet. They need an

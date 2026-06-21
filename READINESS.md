@@ -73,7 +73,8 @@ Build the `.aoa` session-memory mechanism end to end:
   `auto-maintenance`
 - Storage weight controls: `storage-audit`, compact graph aggregate and
   contribution payloads with evidence hydration from contribution rows, sampled
-  graph aggregate payload reclaim estimates, and search body storage with
+  graph aggregate payload reclaim estimates, materialized
+  `graph-cardinality` node/edge type counts, and search body storage with
   full-text FTS plus compressed selected-hit hydration
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
@@ -629,6 +630,17 @@ Last observed result:
   route is graph cardinality, sharding, or query projections, not a rebuild
   solely for aggregate payload compaction. Report:
   `diagnostics/20260621T091705Z__storage-audit.json`.
+- 2026-06-21 graph cardinality projection proof: before materialization,
+  read-only `graph-cardinality --limit 12` returned
+  `projection_missing` in `2 ms`. A resource-gated
+  `graph-cardinality --refresh --limit 12` materialized
+  `graph_type_counts` in `134.182s` for `3,483,100` nodes and `24,120,097`
+  edges. The next read-only `graph-cardinality --limit 12` returned
+  `projection.status=current`, `row_count=60`, and `elapsed_ms=1` with top
+  pressure at `mentions_route_signal=13,971,830`,
+  `event_mentions_registered_entity=2,297,969`, and `event/raw_ref=1,601,970`
+  each. Use this projection for agent graph size/cardinality questions instead
+  of ad hoc full `GROUP BY` scans.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

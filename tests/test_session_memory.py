@@ -2742,6 +2742,67 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
 
 
+def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(source_key: str, node_type: str, edge_type: str) -> dict[str, Any]:
+        node_id = f"{source_key}:node"
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": "session-cardinality",
+                "session_label": "2026-06-21__001__cardinality",
+                "segment_id": "000",
+                "source_path": str(tmp_path / f"{source_key}.json"),
+                "source_paths": [str(tmp_path / f"{source_key}.json")],
+                "source_sha": source_key,
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {"id": node_id, "type": node_type, "label": node_type},
+            ],
+            "edges": [
+                {
+                    "id": f"{source_key}:edge",
+                    "source": node_id,
+                    "target": f"{source_key}:target",
+                    "type": edge_type,
+                    "label": edge_type,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        rebuild = store.rebuild([contribution("source-one", "event", "mentions_route_signal")])
+        assert rebuild["type_counts_projection"]["status"] == "current"
+    finally:
+        store.close()
+
+    initial = module.graph_cardinality(aoa_root=aoa_root)
+    assert initial["ok"] is True
+    assert initial["projection"]["counts"]["node"]["event"] == 1
+    assert initial["projection"]["counts"]["edge"]["mentions_route_signal"] == 1
+
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        store.replace_sources([contribution("source-one", "task_episode", "has_event")])
+        store.conn.commit()
+    finally:
+        store.close()
+
+    updated = module.graph_cardinality(aoa_root=aoa_root)
+    assert updated["ok"] is True
+    assert "event" not in updated["projection"]["counts"]["node"]
+    assert updated["projection"]["counts"]["node"]["task_episode"] == 1
+    assert "mentions_route_signal" not in updated["projection"]["counts"]["edge"]
+    assert updated["projection"]["counts"]["edge"]["has_event"] == 1
+
+
 def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"

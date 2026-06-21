@@ -29742,6 +29742,16 @@ class GraphSqliteStore:
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_type_counts (
+                kind TEXT NOT NULL,
+                type TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                PRIMARY KEY (kind, type)
+            )
+            """
+        )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_sources_session ON graph_sources(session_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_node_contribs_node ON node_contribs(node_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_contribs_edge ON edge_contribs(edge_id)")
@@ -30036,8 +30046,11 @@ class GraphSqliteStore:
             touched_edge_ids.update(edge_ids)
             results.append({"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []})
         graph_check_budget(budget_deadline)
-        node_refresh = self._refresh_nodes(touched_node_ids, budget_deadline=budget_deadline)
-        edge_refresh = self._refresh_edges(touched_edge_ids, budget_deadline=budget_deadline)
+        node_refresh, edge_refresh = self._refresh_touched_aggregates_with_type_counts(
+            touched_node_ids,
+            touched_edge_ids,
+            budget_deadline=budget_deadline,
+        )
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
@@ -30075,8 +30088,11 @@ class GraphSqliteStore:
             touched_edge_ids.update(old_edge_ids)
             results.append({"source_key": source_key, "status": "removed", "node_count": len(old_node_ids), "edge_count": len(old_edge_ids)})
         graph_check_budget(budget_deadline)
-        node_refresh = self._refresh_nodes(touched_node_ids, budget_deadline=budget_deadline)
-        edge_refresh = self._refresh_edges(touched_edge_ids, budget_deadline=budget_deadline)
+        node_refresh, edge_refresh = self._refresh_touched_aggregates_with_type_counts(
+            touched_node_ids,
+            touched_edge_ids,
+            budget_deadline=budget_deadline,
+        )
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
@@ -30100,8 +30116,7 @@ class GraphSqliteStore:
         if source.get("status") == "blocked":
             self._insert_source_row(contribution, status="blocked")
             if not bulk:
-                self._refresh_nodes(old_node_ids)
-                self._refresh_edges(old_edge_ids)
+                self._refresh_touched_aggregates_with_type_counts(old_node_ids, old_edge_ids)
             self._upsert_metadata("updated_at", utc_now())
             return {"source_key": source_key, "status": "blocked", "diagnostics": source.get("diagnostics", [])}
         node_ids, edge_ids = self._insert_contrib_rows(contribution)
@@ -30114,8 +30129,7 @@ class GraphSqliteStore:
                 if isinstance(edge, dict):
                     self._add_aggregate_edge(edge)
         else:
-            self._refresh_nodes(old_node_ids | node_ids)
-            self._refresh_edges(old_edge_ids | edge_ids)
+            self._refresh_touched_aggregates_with_type_counts(old_node_ids | node_ids, old_edge_ids | edge_ids)
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
@@ -30149,6 +30163,7 @@ class GraphSqliteStore:
         self._upsert_metadata("updated_at", now)
         self._upsert_metadata("graph_store_aggregate_payload_mode", GRAPH_STORE_AGGREGATE_PAYLOAD_MODE)
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
+        type_counts_projection = self.refresh_type_counts(commit=False)
         self.conn.commit()
         return {
             "status": "rebuilt",
@@ -30157,6 +30172,7 @@ class GraphSqliteStore:
             "generated_at": now,
             "duplicate_node_refresh": duplicate_node_refresh,
             "duplicate_edge_refresh": duplicate_edge_refresh,
+            "type_counts_projection": type_counts_projection,
         }
 
     def state_counts(self) -> dict[str, int]:
@@ -30299,7 +30315,126 @@ class GraphSqliteStore:
     def metadata(self) -> dict[str, str]:
         return {str(row["key"]): str(row["value"]) for row in self.conn.execute("SELECT key, value FROM metadata").fetchall()}
 
+    def type_counts_projection_ready(self) -> bool:
+        metadata = self.metadata()
+        row = self.conn.execute("SELECT COUNT(*) FROM graph_type_counts").fetchone()
+        return str(metadata.get("graph_type_counts_status") or "") == "current" and bool(row and int_value(row[0]) > 0)
+
+    def type_counts_projection_state(self, *, limit: int = 40) -> dict[str, Any]:
+        metadata = self.metadata()
+        bounded_limit = max(1, min(int_value(limit, 40), 200))
+        counts: dict[str, dict[str, int]] = {}
+        top: dict[str, list[dict[str, Any]]] = {}
+        for kind in ("node", "edge"):
+            rows = self.conn.execute(
+                "SELECT type, count FROM graph_type_counts WHERE kind = ? ORDER BY type",
+                (kind,),
+            ).fetchall()
+            counts[kind] = {str(row["type"] or "unknown"): int_value(row["count"]) for row in rows}
+            top[kind] = [
+                {"type": str(row["type"] or "unknown"), "count": int_value(row["count"])}
+                for row in self.conn.execute(
+                    "SELECT type, count FROM graph_type_counts WHERE kind = ? ORDER BY count DESC, type LIMIT ?",
+                    (kind, bounded_limit),
+                ).fetchall()
+            ]
+        row = self.conn.execute("SELECT COUNT(*) FROM graph_type_counts").fetchone()
+        row_count = int_value(row[0]) if row else 0
+        status = "current" if self.type_counts_projection_ready() else "missing"
+        return {
+            "status": status,
+            "mutates": False,
+            "row_count": row_count,
+            "generated_at": metadata.get("graph_type_counts_generated_at", ""),
+            "updated_at": metadata.get("graph_type_counts_updated_at", ""),
+            "graph_updated_at": metadata.get("graph_type_counts_graph_updated_at", ""),
+            "counts": counts,
+            "top": top,
+            "diagnostics": [] if status == "current" else ["graph_type_counts_projection_missing"],
+        }
+
+    def refresh_type_counts(self, *, commit: bool = True, limit: int = 40) -> dict[str, Any]:
+        now = utc_now()
+        graph_metadata = self.metadata()
+        self.conn.execute("DELETE FROM graph_type_counts")
+        for kind, table, column in (("node", "nodes", "node_type"), ("edge", "edges", "edge_type")):
+            rows = self.conn.execute(f"SELECT {column} AS item_type, COUNT(*) AS item_count FROM {table} GROUP BY {column}").fetchall()
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO graph_type_counts(kind, type, count) VALUES (?, ?, ?)",
+                [(kind, str(row["item_type"] or "unknown"), int_value(row["item_count"])) for row in rows],
+            )
+        self._upsert_metadata("graph_type_counts_status", "current")
+        self._upsert_metadata("graph_type_counts_generated_at", now)
+        self._upsert_metadata("graph_type_counts_updated_at", now)
+        self._upsert_metadata(
+            "graph_type_counts_graph_updated_at",
+            graph_metadata.get("updated_at") or graph_metadata.get("generated_at") or now,
+        )
+        if commit:
+            self.conn.commit()
+        return self.type_counts_projection_state(limit=limit)
+
+    def _aggregate_type_counts_for_ids(self, table: str, column: str, ids: set[str]) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        if table not in {"nodes", "edges"} or column not in {"node_type", "edge_type"}:
+            return counts
+        for chunk in self._id_chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT {column} AS item_type, COUNT(*) AS item_count FROM {table} WHERE id IN ({placeholders}) GROUP BY {column}",
+                chunk,
+            ).fetchall():
+                counts[str(row["item_type"] or "unknown")] += int_value(row["item_count"])
+        return counts
+
+    def _apply_type_count_delta(self, kind: str, before: Counter[str], after: Counter[str]) -> None:
+        delta = Counter(after)
+        delta.subtract(before)
+        changed = False
+        for item_type, value in sorted(delta.items()):
+            if not value:
+                continue
+            changed = True
+            self.conn.execute(
+                """
+                INSERT INTO graph_type_counts(kind, type, count) VALUES (?, ?, ?)
+                ON CONFLICT(kind, type) DO UPDATE SET count = count + excluded.count
+                """,
+                (kind, item_type, int(value)),
+            )
+        if changed:
+            self.conn.execute("DELETE FROM graph_type_counts WHERE count <= 0")
+            self._upsert_metadata("graph_type_counts_status", "current")
+            self._upsert_metadata("graph_type_counts_updated_at", utc_now())
+
+    def _refresh_touched_aggregates_with_type_counts(
+        self,
+        node_ids: set[str],
+        edge_ids: set[str],
+        *,
+        budget_deadline: float | None = None,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        projection_ready = self.type_counts_projection_ready()
+        old_node_counts = self._aggregate_type_counts_for_ids("nodes", "node_type", node_ids) if projection_ready else Counter()
+        old_edge_counts = self._aggregate_type_counts_for_ids("edges", "edge_type", edge_ids) if projection_ready else Counter()
+        node_refresh = self._refresh_nodes(node_ids, budget_deadline=budget_deadline)
+        edge_refresh = self._refresh_edges(edge_ids, budget_deadline=budget_deadline)
+        if projection_ready:
+            new_node_counts = self._aggregate_type_counts_for_ids("nodes", "node_type", node_ids)
+            new_edge_counts = self._aggregate_type_counts_for_ids("edges", "edge_type", edge_ids)
+            self._apply_type_count_delta("node", old_node_counts, new_node_counts)
+            self._apply_type_count_delta("edge", old_edge_counts, new_edge_counts)
+        return node_refresh, edge_refresh
+
     def type_counts(self, table: str, column: str) -> dict[str, int]:
+        projection_kind = "node" if table == "nodes" and column == "node_type" else "edge" if table == "edges" and column == "edge_type" else ""
+        if projection_kind and self.type_counts_projection_ready():
+            rows = self.conn.execute(
+                "SELECT type, count FROM graph_type_counts WHERE kind = ? ORDER BY type",
+                (projection_kind,),
+            ).fetchall()
+            if rows:
+                return dict(sorted((str(row["type"] or "unknown"), int_value(row["count"])) for row in rows))
         rows = self.conn.execute(f"SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}").fetchall()
         return dict(sorted((str(row[0] or "unknown"), int(row[1] or 0)) for row in rows))
 
@@ -33759,6 +33894,154 @@ def graph_store_query_state(aoa_root: Path) -> dict[str, Any]:
         "diagnostics": [],
         "query_scope": "lightweight_store_availability_not_full_dirty_audit",
     }
+
+
+def graph_cardinality_projection_read(aoa_root: Path, *, limit: int = 40) -> dict[str, Any]:
+    paths = graph_paths(aoa_root)
+    bounded_limit = max(1, min(int_value(limit, 40), 200))
+    if not paths["store"].exists():
+        return {
+            "status": "missing",
+            "mutates": False,
+            "db_path": str(paths["store"]),
+            "counts": {"node": {}, "edge": {}},
+            "top": {"node": [], "edge": []},
+            "diagnostics": ["graph_store_missing"],
+        }
+    try:
+        conn = sqlite3.connect(f"{paths['store'].resolve().as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_type_counts' LIMIT 1"
+            ).fetchone() is not None
+            if not table_exists:
+                return {
+                    "status": "projection_missing",
+                    "mutates": False,
+                    "db_path": str(paths["store"]),
+                    "counts": {"node": {}, "edge": {}},
+                    "top": {"node": [], "edge": []},
+                    "diagnostics": ["graph_type_counts_projection_missing"],
+                }
+            metadata = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM metadata").fetchall()}
+            counts: dict[str, dict[str, int]] = {}
+            top: dict[str, list[dict[str, Any]]] = {}
+            for kind in ("node", "edge"):
+                rows = conn.execute(
+                    "SELECT type, count FROM graph_type_counts WHERE kind = ? ORDER BY type",
+                    (kind,),
+                ).fetchall()
+                counts[kind] = {str(row["type"] or "unknown"): int_value(row["count"]) for row in rows}
+                top[kind] = [
+                    {"type": str(row["type"] or "unknown"), "count": int_value(row["count"])}
+                    for row in conn.execute(
+                        "SELECT type, count FROM graph_type_counts WHERE kind = ? ORDER BY count DESC, type LIMIT ?",
+                        (kind, bounded_limit),
+                    ).fetchall()
+                ]
+            row = conn.execute("SELECT COUNT(*) FROM graph_type_counts").fetchone()
+            row_count = int_value(row[0]) if row else 0
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {
+            "status": "sqlite_error",
+            "mutates": False,
+            "db_path": str(paths["store"]),
+            "counts": {"node": {}, "edge": {}},
+            "top": {"node": [], "edge": []},
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    status = "current" if str(metadata.get("graph_type_counts_status") or "") == "current" and row_count > 0 else "projection_missing"
+    return {
+        "status": status,
+        "mutates": False,
+        "db_path": str(paths["store"]),
+        "row_count": row_count,
+        "generated_at": metadata.get("graph_type_counts_generated_at", ""),
+        "updated_at": metadata.get("graph_type_counts_updated_at", ""),
+        "graph_updated_at": metadata.get("graph_type_counts_graph_updated_at", ""),
+        "counts": counts,
+        "top": top,
+        "diagnostics": [] if status == "current" else ["graph_type_counts_projection_missing"],
+    }
+
+
+def graph_cardinality(
+    *,
+    aoa_root: Path,
+    refresh: bool = False,
+    limit: int = 40,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    graph_state = graph_store_query_state(aoa_root)
+    projection: dict[str, Any]
+    mutates = bool(refresh)
+    refresh_result: dict[str, Any] = {}
+    if refresh:
+        if graph_state.get("status") == "missing":
+            projection = {
+                "status": "missing",
+                "mutates": False,
+                "db_path": str(graph_paths(aoa_root)["store"]),
+                "counts": {"node": {}, "edge": {}},
+                "top": {"node": [], "edge": []},
+                "diagnostics": ["graph_store_missing"],
+            }
+        else:
+            store = GraphSqliteStore(aoa_root)
+            try:
+                projection = store.refresh_type_counts(limit=limit)
+                refresh_result = {
+                    "state_counts": store.state_counts(),
+                    "metadata": {
+                        key: store.metadata().get(key)
+                        for key in (
+                            "graph_type_counts_status",
+                            "graph_type_counts_generated_at",
+                            "graph_type_counts_updated_at",
+                            "graph_type_counts_graph_updated_at",
+                        )
+                    },
+                }
+            finally:
+                store.close()
+    else:
+        projection = graph_cardinality_projection_read(aoa_root, limit=limit)
+    node_total = sum(int_value(value) for value in (projection.get("counts", {}).get("node", {}) if isinstance(projection.get("counts"), dict) else {}).values())
+    edge_total = sum(int_value(value) for value in (projection.get("counts", {}).get("edge", {}) if isinstance(projection.get("counts"), dict) else {}).values())
+    diagnostics = projection.get("diagnostics") if isinstance(projection.get("diagnostics"), list) else []
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_cardinality",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": str(projection.get("status") or "") == "current",
+        "mutates": mutates,
+        "refresh": refresh,
+        "aoa_root": str(aoa_root),
+        "graph_state": graph_state,
+        "projection": projection,
+        "node_count": node_total,
+        "edge_count": edge_total,
+        "top_node_types": (projection.get("top", {}) or {}).get("node", []) if isinstance(projection.get("top"), dict) else [],
+        "top_edge_types": (projection.get("top", {}) or {}).get("edge", []) if isinstance(projection.get("top"), dict) else [],
+        "refresh_result": refresh_result,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+        "next_route": (
+            "use projection counts for graph size/cardinality questions"
+            if str(projection.get("status") or "") == "current"
+            else "run graph-cardinality --refresh through the heavy resource lane to materialize graph type counts"
+        ),
+    }
+    if not payload["ok"]:
+        payload["exact_next_command"] = (
+            f"python3 scripts/aoa_session_memory.py graph-cardinality "
+            f"--workspace-root {aoa_root.parent} --aoa-root {aoa_root} --refresh"
+        )
+    return payload
 
 
 def graph_node_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -41636,6 +41919,18 @@ def command_graph_prune_sidecar(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_graph_cardinality(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = graph_cardinality(
+        aoa_root=root,
+        refresh=args.refresh,
+        limit=args.limit,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_neighborhood(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -45982,6 +46277,16 @@ def build_parser() -> argparse.ArgumentParser:
     graph_prune_sidecar_parser.add_argument("--apply", action="store_true", help="Remove graph/nodes.jsonl, graph/edges.jsonl, and graph/index.json. Default is dry-run.")
     graph_prune_sidecar_parser.add_argument("--write-report", action="store_true", help="Write a sidecar prune report under .aoa/diagnostics.")
     graph_prune_sidecar_parser.set_defaults(func=command_graph_prune_sidecar)
+
+    graph_cardinality_parser = sub.add_parser(
+        "graph-cardinality",
+        help="Read or refresh materialized graph node/edge type counts without exporting sidecars.",
+    )
+    graph_cardinality_parser.add_argument("--workspace-root")
+    graph_cardinality_parser.add_argument("--aoa-root")
+    graph_cardinality_parser.add_argument("--refresh", action="store_true", help="Recompute the graph_type_counts projection from graph.sqlite3.")
+    graph_cardinality_parser.add_argument("--limit", type=int, default=40, help="Top type rows to include for each graph kind.")
+    graph_cardinality_parser.set_defaults(func=command_graph_cardinality)
 
     graph_neighborhood_parser = sub.add_parser(
         "graph-neighborhood",
