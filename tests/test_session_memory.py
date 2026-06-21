@@ -4353,6 +4353,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
 
     assert session_meta_event.event_type == "SESSION_META"
     assert session_meta_event.correlation_id is None
+
     assert "correlation:tool_call_output_link" not in session_meta_signals
 
     developer_context = {
@@ -5073,6 +5074,49 @@ def test_route_classifier_bounds_large_tool_outputs_and_keeps_tail_signals() -> 
     assert event.outcome == "succeeded"
     assert "delivery_state:tests_green" in signals
     assert "api:openai_responses" in signals
+
+
+def test_aggregate_route_fields_keep_frequent_signals_first() -> None:
+    _layers, signals = module.route_fields_from_counts(
+        {
+            "entity": {"rare_anchor": 1, "hot_anchor": 9, "middle_anchor": 3},
+            "path": {"z_path": 2, "a_path": 7},
+        }
+    )
+
+    ordered = module.unpacked_route_values(signals)
+    assert ordered.index("entity:hot_anchor") < ordered.index("entity:middle_anchor")
+    assert ordered.index("entity:middle_anchor") < ordered.index("entity:rare_anchor")
+    assert ordered.index("path:a_path") < ordered.index("path:z_path")
+
+
+def test_aggregate_route_postings_are_capped_without_limiting_event_postings() -> None:
+    route_signals = module.packed_route_values(
+        [
+            *(f"entity:entity_{index:02d}" for index in range(20)),
+            *(f"path:path_{index:02d}" for index in range(6)),
+            *(f"tool:tool_{index:02d}" for index in range(18)),
+        ]
+    )
+
+    aggregate_entries = module.document_route_entries("", route_signals, doc_type="task_episode")
+    event_entries = module.document_route_entries("", route_signals, doc_type="event")
+
+    aggregate_by_layer: dict[str, list[str]] = {}
+    for entry in aggregate_entries:
+        aggregate_by_layer.setdefault(entry["layer"], []).append(entry["key"])
+    assert len(aggregate_by_layer["entity"]) == module.SEARCH_AGGREGATE_ROUTE_POSTING_LAYER_LIMITS["entity"]
+    assert len(aggregate_by_layer["path"]) == module.SEARCH_AGGREGATE_ROUTE_POSTING_LAYER_LIMITS["path"]
+    assert len(aggregate_by_layer["tool"]) == module.SEARCH_AGGREGATE_ROUTE_POSTING_LAYER_LIMITS["tool"]
+    assert "entity_19" not in aggregate_by_layer["entity"]
+    assert "path_05" not in aggregate_by_layer["path"]
+
+    event_by_layer: dict[str, list[str]] = {}
+    for entry in event_entries:
+        event_by_layer.setdefault(entry["layer"], []).append(entry["key"])
+    assert len(event_by_layer["entity"]) == 20
+    assert len(event_by_layer["path"]) == 6
+    assert len(event_by_layer["tool"]) == 18
 
 
 def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:

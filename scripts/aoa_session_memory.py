@@ -95,7 +95,7 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 9
+SEARCH_SCHEMA_VERSION = 10
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
@@ -110,6 +110,26 @@ SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY = 0
 SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY = 50
 SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 512
 SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
+SEARCH_ROUTE_POSTING_POLICY_MODE = "aggregate_high_fanout_layer_caps_v1"
+SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES = frozenset({"session", "segment", "task_episode", "incident"})
+SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT = 16
+SEARCH_AGGREGATE_ROUTE_POSTING_LAYER_LIMITS = {
+    "path": 4,
+    "entity": 16,
+    "mechanic": 16,
+    "validator": 16,
+    "script": 16,
+    "technique": 16,
+    "test": 16,
+    "playbook": 16,
+    "skill": 16,
+    "tool": 16,
+    "mcp": 16,
+    "api": 16,
+    "plugin": 16,
+    "memory": 16,
+    "graph": 16,
+}
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
 ENTITY_REGISTRY_PATH = ATLAS_ROOT / "entity-registry.json"
@@ -23073,6 +23093,9 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- search_payload_storage_mode: `{payload.get('search_payload_storage_mode')}`",
         f"- search_route_layers_preview_chars: `{payload.get('search_route_layers_preview_chars')}`",
         f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
+        f"- search_route_posting_policy_mode: `{payload.get('search_route_posting_policy_mode')}`",
+        f"- search_aggregate_route_posting_doc_types: `{payload.get('search_aggregate_route_posting_doc_types')}`",
+        f"- search_aggregate_route_posting_default_layer_limit: `{payload.get('search_aggregate_route_posting_default_layer_limit')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
         f"- raw_lexical_policy: `{(payload.get('raw_lexical_policy') or {}).get('mode') if isinstance(payload.get('raw_lexical_policy'), dict) else ''}`",
@@ -24706,7 +24729,7 @@ def route_fields_from_counts(route_counts: dict[str, Any]) -> tuple[str, str]:
             continue
         layer_text = str(layer)
         layers.append(layer_text)
-        for key in keys:
+        for key, _count in sorted(keys.items(), key=lambda item: (-int_value(item[1]), str(item[0]))):
             signals.append(route_signal_token(layer_text, str(key)))
     return packed_route_values(layers), packed_route_values(signals)
 
@@ -24738,9 +24761,17 @@ def unpacked_route_values(value: Any) -> list[str]:
     return items
 
 
-def document_route_entries(route_layers: Any, route_signals: Any) -> list[dict[str, str]]:
+def aggregate_route_posting_limit(doc_type: str, layer: str) -> int | None:
+    if doc_type not in SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES:
+        return None
+    return SEARCH_AGGREGATE_ROUTE_POSTING_LAYER_LIMITS.get(layer, SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT)
+
+
+def document_route_entries(route_layers: Any, route_signals: Any, *, doc_type: str = "") -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    per_layer_counts: Counter[str] = Counter()
+    normalized_doc_type = str(doc_type or "")
     for signal in unpacked_route_values(route_signals):
         if ":" not in signal:
             continue
@@ -24749,10 +24780,14 @@ def document_route_entries(route_layers: Any, route_signals: Any) -> list[dict[s
         normalized_key = route_key_slug(key, fallback="")
         if not normalized_layer or not normalized_key:
             continue
+        layer_limit = aggregate_route_posting_limit(normalized_doc_type, normalized_layer)
+        if layer_limit is not None and per_layer_counts[normalized_layer] >= layer_limit:
+            continue
         token = (normalized_layer, normalized_key)
         if token in seen:
             continue
         seen.add(token)
+        per_layer_counts[normalized_layer] += 1
         entries.append(
             {
                 "layer": normalized_layer,
@@ -24942,7 +24977,11 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
     body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
     route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
     route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
-    route_entries = document_route_entries(doc.get("route_layers"), doc.get("route_signals"))
+    route_entries = document_route_entries(
+        doc.get("route_layers"),
+        doc.get("route_signals"),
+        doc_type=str(doc.get("doc_type") or ""),
+    )
     cursor = conn.execute(
         """
         INSERT INTO documents (
@@ -25713,6 +25752,21 @@ def search_index_sessions(
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_route_posting_policy_mode", SEARCH_ROUTE_POSTING_POLICY_MODE),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_aggregate_route_posting_doc_types", ",".join(sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES))),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (
+                "search_aggregate_route_posting_default_layer_limit",
+                str(SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT),
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_raw_lexical_policy_mode", str(raw_lexical_policy.get("mode") or "")),
         )
         conn.execute(
@@ -25855,6 +25909,9 @@ def search_index_sessions(
                 "raw_lexical_policy": raw_lexical_policy,
                 "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
                 "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+                "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
+                "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
+                "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
                 "phase_timings": phase_timings,
                 "inline_optimize_policy": {
                     "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
@@ -25886,6 +25943,9 @@ def search_index_sessions(
             "raw_lexical_policy": raw_lexical_policy,
             "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
             "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+            "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
+            "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
+            "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
             "phase_timings": phase_timings,
             "inline_optimize_policy": {
                 "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
@@ -25924,6 +25984,9 @@ def search_index_sessions(
         "raw_lexical_policy": raw_lexical_policy,
         "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
         "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
+        "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
+        "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
+        "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
         "phase_timings": phase_timings,
         "inline_optimize_policy": {
             "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,

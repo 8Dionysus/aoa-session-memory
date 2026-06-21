@@ -569,6 +569,15 @@ Last observed result:
   and `storage_policy_status=bounded_policy_recorded`. The remaining search
   weight is now dominated by `documents` (`5.76 GiB`) and route postings plus
   the required UNIQUE/route index (`4.82 GiB`), not raw lexical FTS.
+- 2026-06-21 aggregate route-posting policy proof: read-only dbstat on the
+  current search store showed `document_routes` has `100,565,488` postings,
+  dominated by aggregate `task_episode` rows (`path=47,260,244`,
+  `entity=22,585,781`). Search schema 10 now caps route postings for aggregate
+  docs while leaving event-level postings uncapped. A no-write sample over 10
+  recent indexed sessions reduced generated postings from `10,479,376` to
+  `1,899,859` (`81.87%` lower), with `event` postings unchanged. Live store
+  shrink still requires a controlled search rebuild/catch-up after the schema
+  bump.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

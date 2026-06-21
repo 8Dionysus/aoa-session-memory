@@ -797,6 +797,14 @@ available for larger sessions. Use `--max-raw-mb` for an explicit tighter or
 looser budget, and reserve `--unbounded-raw-text` for a deliberate full lexical
 rebuild/benchmark where the heavier FTS size is acceptable.
 
+Search schema 10 also bounds aggregate route postings. Event documents keep
+their full route postings, while aggregate `session`, `segment`,
+`task_episode`, and `incident` documents store only the most frequent route
+signals per high-fanout layer. The full route preview still stays in the search
+row, and raw/segment refs remain authoritative; the cap prevents aggregate
+documents from multiplying path/entity/mechanic postings into tens of millions
+of SQLite rows.
+
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index
 build phase. Reports include phase timings for bulk session indexing, SQLite

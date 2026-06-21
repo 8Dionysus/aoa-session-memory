@@ -248,6 +248,11 @@ Full `search-index` rebuilds keep raw lexical text bounded by default and do
 not run inline SQLite `PRAGMA optimize` inside the session loop. Rebuild
 reports carry phase timings for bulk session indexing, SQLite index build, and
 entity-registry refresh so a slow rebuild has an observable stage boundary.
+Search schema 10 additionally caps route postings for aggregate documents
+(`session`, `segment`, `task_episode`, `incident`) while leaving event-level
+route postings uncapped. Aggregate route fields are ordered by route-signal
+frequency before capping, so the retained aggregate postings are the strongest
+signals rather than alphabetic noise.
 
 ### PostCompact
 
