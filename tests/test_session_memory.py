@@ -3878,6 +3878,81 @@ def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(t
     assert scope_summary["materialization_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
 
 
+def test_graph_route_signal_materialization_caps_high_fanout_edges(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-21T00-25-00-route-fanout.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-21T00:25:00Z", "type": "session_meta", "payload": {"id": "route-fanout", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-21T00:25:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use many skills and tools."}]}},
+            {"timestamp": "2026-06-21T00:25:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I routed the work."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "route-fanout",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "route-fanout")
+    session_dir = Path(record["path"])
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    segment_index_path = next((session_dir / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    events = segment_index["events"]
+    assert events
+    wide_signals = [
+        {"layer": "skill", "key": f"wide_{index:03}", "route_signal": f"skill:wide_{index:03}"}
+        for index in range(module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT + 16)
+    ]
+    for event in events:
+        event.setdefault("facets", {})["route_signals"] = []
+    events[0].setdefault("facets", {})["route_signals"] = wide_signals
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    contributions, diagnostics = module.graph_contributions_for_record(record)
+
+    assert diagnostics == []
+    segment_contribution = next(
+        contribution for contribution in contributions
+        if contribution["source"]["source_type"] == "segment"
+    )
+    segment_id = str(segment_index["segment_id"])
+    session_id = str(manifest["session_id"])
+    event_node_id = f"event:{session_id}:{segment_id}:{events[0]['event_id']}"
+    segment_node_id = f"segment:{session_id}:{segment_id}"
+    edges = segment_contribution["edges"]
+    nodes = {node["id"]: node for node in segment_contribution["nodes"]}
+    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
+
+    assert len(mention_edges) == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT
+    assert len(summary_edges) == module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT
+    assert nodes[event_node_id]["route_signal_count"] == module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT + 16
+    assert nodes[event_node_id]["route_signal_edge_count"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT
+    assert nodes[event_node_id]["route_signal_omitted_edge_count"] == (
+        module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT + 16 - module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT
+    )
+    assert nodes[segment_node_id]["route_signal_count"] == module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT + 16
+    assert nodes[segment_node_id]["route_signal_materialized_count"] == module.GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT
+    assert nodes[segment_node_id]["route_signal_omitted_count"] == 16
+    assert all(edge["materialization_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY for edge in mention_edges + summary_edges)
+    assert all(edge["source"] == event_node_id for edge in mention_edges)
+    assert module.graph_route_node_id("skill", "wide_000") in {edge["target"] for edge in mention_edges}
+    assert module.graph_route_node_id("skill", "wide_079") not in {edge["target"] for edge in mention_edges}
+    assert module.graph_route_node_id("skill", "wide_079") not in {edge["target"] for edge in summary_edges}
+
+
 def test_graph_source_recommendation_routes_mass_classifier_drift_to_budgeted_repair() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4000,

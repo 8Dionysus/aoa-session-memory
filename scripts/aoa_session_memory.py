@@ -162,7 +162,10 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_column_evidence_refs_v3"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
-GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_segment_summary_v1"
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_bounded_segment_summary_v2"
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT = 8
+GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT = 8
+GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT = 64
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS = frozenset(
     {
         "skill",
@@ -186,6 +189,32 @@ GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS = frozenset(
         "goal",
     }
 )
+GRAPH_ROUTE_SIGNAL_EDGE_LAYER_PRIORITY = {
+    layer: index
+    for index, layer in enumerate(
+        (
+            "mcp",
+            "skill",
+            "hook",
+            "hook_health",
+            "tool",
+            "api",
+            "goal",
+            "agent",
+            "plugin",
+            "script",
+            "validator",
+            "test",
+            "eval",
+            "graph",
+            "memory",
+            "git",
+            "playbook",
+            "technique",
+            "mechanic",
+        )
+    )
+}
 GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE = "manual_bulk_single_transaction_delete_v1"
 GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
 GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
@@ -31146,6 +31175,90 @@ def graph_should_materialize_event_route_signal_edge(layer: str, key: str = "") 
     return normalized_layer in GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS
 
 
+def graph_route_signal_materialization_limits() -> dict[str, Any]:
+    return {
+        "event_route_signal_edge_limit": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT,
+        "event_registered_entity_edge_limit": GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT,
+        "segment_route_signal_edge_limit": GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT,
+        "layer_priority": GRAPH_ROUTE_SIGNAL_EDGE_LAYER_PRIORITY,
+        "truth_status": "generated_graph_projection_policy_not_raw_or_search_truth",
+    }
+
+
+def graph_route_signal_materialization_priority(layer: str) -> int:
+    normalized_layer = route_key_slug(layer, fallback="")
+    return GRAPH_ROUTE_SIGNAL_EDGE_LAYER_PRIORITY.get(normalized_layer, 999)
+
+
+def graph_route_signal_identity(layer: str, key: str, route_signal: str = "") -> tuple[str, str, str]:
+    normalized_layer = route_key_slug(layer, fallback="")
+    normalized_key = route_key_slug(key, fallback="")
+    value = str(route_signal or route_signal_token(normalized_layer, normalized_key))
+    return normalized_layer, normalized_key, value
+
+
+def graph_route_signal_selection_key(
+    item: tuple[str, str, str],
+    *,
+    count: int = 1,
+    registered: bool = False,
+) -> tuple[int, int, int, str, str, str]:
+    layer, key, value = item
+    return (
+        0 if registered else 1,
+        graph_route_signal_materialization_priority(layer),
+        -max(1, int_value(count, 1)),
+        layer,
+        key,
+        value,
+    )
+
+
+def graph_select_event_route_signal_identities(
+    route_signals: list[dict[str, str]],
+    *,
+    registry_entry_for_route: Callable[[str, str], dict[str, Any] | None],
+    require_registered: bool = False,
+    require_event_materialized: bool = False,
+    limit: int,
+) -> set[tuple[str, str, str]]:
+    candidates: list[tuple[tuple[int, int, int, str, str, str], tuple[str, str, str]]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for signal in route_signals:
+        if not isinstance(signal, dict):
+            continue
+        item = graph_route_signal_identity(signal.get("layer", ""), signal.get("key", ""), signal.get("route_signal", ""))
+        layer, key, _value = item
+        if not layer or not key or item in seen:
+            continue
+        registered = registry_entry_for_route(layer, key) is not None
+        if require_registered and not registered:
+            continue
+        if require_event_materialized and not graph_should_materialize_event_route_signal_edge(layer, key):
+            continue
+        seen.add(item)
+        candidates.append((graph_route_signal_selection_key(item, registered=registered), item))
+    candidates.sort(key=lambda pair: pair[0])
+    effective_limit = max(0, int_value(limit, 0))
+    return {item for _sort_key, item in candidates[:effective_limit]}
+
+
+def graph_select_segment_route_signal_identities(
+    counts: Counter[tuple[str, str, str]],
+    *,
+    registry_entry_for_route: Callable[[str, str], dict[str, Any] | None],
+    limit: int,
+) -> list[tuple[str, str, str]]:
+    candidates: list[tuple[tuple[int, int, int, str, str, str], tuple[str, str, str]]] = []
+    for item, count in counts.items():
+        layer, key, _value = item
+        registered = registry_entry_for_route(layer, key) is not None
+        candidates.append((graph_route_signal_selection_key(item, count=int_value(count, 1), registered=registered), item))
+    candidates.sort(key=lambda pair: pair[0])
+    effective_limit = max(0, int_value(limit, 0))
+    return [item for _sort_key, item in candidates[:effective_limit]]
+
+
 def graph_goal_lifecycle_node_id(session_id: str, goal_id: str) -> str:
     return f"goal_lifecycle:{route_key_slug(session_id, fallback='session', max_chars=80)}:{route_key_slug(goal_id, fallback='goal', max_chars=80)}"
 
@@ -32076,6 +32189,24 @@ def graph_contributions_for_record(
             conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
             session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
             route_signals = graph_route_signals_from_event(event)
+            event_route_signal_edges = graph_select_event_route_signal_identities(
+                route_signals,
+                registry_entry_for_route=registry_entry_for_route,
+                require_event_materialized=True,
+                limit=GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT,
+            )
+            event_registered_entity_edges = graph_select_event_route_signal_identities(
+                route_signals,
+                registry_entry_for_route=registry_entry_for_route,
+                require_registered=True,
+                limit=GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT,
+            )
+            event_materializable_route_signal_count = sum(
+                1 for signal in route_signals if graph_should_materialize_event_route_signal_edge(signal["layer"], signal["key"])
+            )
+            event_registered_route_signal_count = sum(
+                1 for signal in route_signals if registry_entry_for_route(signal["layer"], signal["key"]) is not None
+            )
             add_segment_node(
                 {
                     "id": event_node_id,
@@ -32098,6 +32229,12 @@ def graph_contributions_for_record(
                     "timestamp": event.get("timestamp"),
                     "line": event.get("line"),
                     "route_signals": route_signals,
+                    "route_signal_count": len(route_signals),
+                    "route_signal_edge_count": len(event_route_signal_edges),
+                    "route_signal_omitted_edge_count": max(0, event_materializable_route_signal_count - len(event_route_signal_edges)),
+                    "registered_entity_edge_count": len(event_registered_entity_edges),
+                    "registered_entity_omitted_edge_count": max(0, event_registered_route_signal_count - len(event_registered_entity_edges)),
+                    "route_signal_materialization_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                     "refs": event_refs,
                     "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                 }
@@ -32144,9 +32281,10 @@ def graph_contributions_for_record(
                 route_signal_value = signal["route_signal"]
                 route_node_id = graph_route_node_id(layer, key)
                 segment_route_signal_counts[(layer, key, route_signal_value)] += 1
-                materialize_event_edge = graph_should_materialize_event_route_signal_edge(layer, key)
-                registry_entry = registry_entry_for_route(layer, key)
-                if materialize_event_edge or registry_entry:
+                route_signal_identity = graph_route_signal_identity(layer, key, route_signal_value)
+                materialize_event_edge = route_signal_identity in event_route_signal_edges
+                materialize_registry_edge = route_signal_identity in event_registered_entity_edges
+                if materialize_event_edge or materialize_registry_edge:
                     add_segment_node(
                         {
                             "id": route_node_id,
@@ -32173,7 +32311,7 @@ def graph_contributions_for_record(
                             "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                         }
                     )
-                if registry_entry:
+                if materialize_registry_edge:
                     add_registry_route_links(
                         add_node=add_segment_node,
                         add_edge=add_segment_edge,
@@ -32202,7 +32340,17 @@ def graph_contributions_for_record(
                         "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                     }
                 )
-        for layer, key, route_signal_value in sorted(segment_route_signal_counts):
+        selected_segment_route_signals = graph_select_segment_route_signal_identities(
+            segment_route_signal_counts,
+            registry_entry_for_route=registry_entry_for_route,
+            limit=GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT,
+        )
+        if segment_node_id in segment_nodes:
+            segment_nodes[segment_node_id]["route_signal_count"] = len(segment_route_signal_counts)
+            segment_nodes[segment_node_id]["route_signal_materialized_count"] = len(selected_segment_route_signals)
+            segment_nodes[segment_node_id]["route_signal_omitted_count"] = max(0, len(segment_route_signal_counts) - len(selected_segment_route_signals))
+            segment_nodes[segment_node_id]["route_signal_materialization_policy"] = GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+        for layer, key, route_signal_value in selected_segment_route_signals:
             route_node_id = graph_route_node_id(layer, key)
             evidence_refs = [{"session_id": session_id, "segment_id": segment_id, "refs": segment_refs}]
             add_segment_node(
@@ -33284,6 +33432,7 @@ def graph_index_payload_from_counts(
         "artifact_type": "session_memory_graph_index",
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
         "generated_at": generated_at,
         "ok": node_count > 0 and not diagnostics,
         "truth_status": "derived_route_graph_not_reviewed_truth",
@@ -41135,6 +41284,7 @@ def session_memory_graph_pressure_summary(
         "top_edge_types": top_edge_types[:8],
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "graph_event_route_signal_edge_layers": sorted(GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS),
+        "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
         "physical_compaction": {
             "status": compaction_plan.get("status"),
             "apply_ready": compaction_plan.get("apply_ready"),
