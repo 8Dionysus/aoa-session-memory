@@ -618,12 +618,15 @@ Last observed result:
   sync no longer deletes and reinserts all `doc_type=entity_registry` rows.
   It excludes registry docs from route-term evidence to avoid projection
   self-feedback, does not carry retired snapshot signal counts as fresh
-  evidence, and compares stored rows by semantic storage fingerprint. The
-  one-time live catch-up replaced old rows in `76.1s`; the immediate no-op
-  refresh completed in `4.64s` with `3442` unchanged docs and `0` inserted,
-  updated, or removed. `maintenance-status --full` then reported `ok=true`,
-  search `current`, graph `current_with_retired_sources`, entity registry
-  `current`, `warning_count=0`, and no `slow_phases`.
+  evidence, and compares stored rows by semantic storage fingerprint. It also
+  records a stable snapshot fingerprint in SQLite `meta`, so a current
+  registry-only refresh can return a bounded fast no-op without a cold
+  route-term scan. The one-time live catch-up replaced old rows in `76.1s`;
+  after the meta catch-up, a `budget_seconds=10` no-op completed in `0.643s`
+  with `skipped=true`, `3442` unchanged docs, and `0` inserted, updated, or
+  removed. `maintenance-status --full` then reported `ok=true`, search
+  `current`, graph `current_with_retired_sources`, entity registry `current`,
+  `warning_count=0`, and no `slow_phases`.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event

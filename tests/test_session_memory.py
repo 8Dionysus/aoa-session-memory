@@ -1611,6 +1611,8 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
 
     noop_refresh = module.refresh_entity_registry_search_documents_only(aoa_root=aoa_root, budget_seconds=30)
     assert noop_refresh["ok"] is True
+    assert noop_refresh["skipped"] is True
+    assert noop_refresh["skip_reason"] == "entity_registry_search_sync_current"
     assert noop_refresh["entity_registry_document_count"] == refreshed_registry["entity_count"]
     assert noop_refresh["inserted_entity_registry_document_count"] == 0
     assert noop_refresh["updated_entity_registry_document_count"] == 0

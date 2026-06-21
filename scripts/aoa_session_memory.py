@@ -97,6 +97,7 @@ TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
 SEARCH_SCHEMA_VERSION = 10
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
+ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
@@ -17497,6 +17498,8 @@ def maintain_indexes(
                         "updated_entity_registry_document_count",
                         "unchanged_entity_registry_document_count",
                         "removed_entity_registry_document_count",
+                        "skipped",
+                        "skip_reason",
                         "entity_count",
                         "elapsed_ms",
                         "report_json",
@@ -25476,6 +25479,13 @@ def refresh_search_entity_registry_documents(
     changed_removed_count = max(0, removed_count - stale_removed_count)
     for doc in docs_to_insert:
         insert_search_document(conn, doc)
+    registry_snapshot = read_json(aoa_root / ENTITY_REGISTRY_PATH, {})
+    snapshot_signature = entity_registry_snapshot_signature(registry_snapshot if isinstance(registry_snapshot, dict) else {})
+    record_entity_registry_search_sync_meta(
+        conn,
+        snapshot_signature=snapshot_signature,
+        document_count=len(registry_documents_by_id),
+    )
     conn.commit()
     return {
         "inserted_count": inserted_count,
@@ -25485,6 +25495,8 @@ def refresh_search_entity_registry_documents(
         "replaced_count": changed_removed_count,
         "touched_count": inserted_count + updated_count + stale_removed_count,
         "target_count": len(registry_documents_by_id),
+        "skipped": False,
+        "snapshot_signature": snapshot_signature,
     }
 
 
@@ -25500,6 +25512,7 @@ def refresh_entity_registry_search_documents_only(
     db_path = search_db_path(aoa_root)
     conn: sqlite3.Connection | None = None
     diagnostics: list[str] = []
+    registry_state: dict[str, Any] = {}
     try:
         conn = init_search_db(db_path, rebuild=False, create_indexes=True, budget_deadline=deadline)
         if deadline is not None:
@@ -25508,11 +25521,19 @@ def refresh_entity_registry_search_documents_only(
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
         conn.commit()
-        registry_refresh = refresh_search_entity_registry_documents(
+        registry_state = entity_registry_maintenance_status(aoa_root)
+        registry_refresh = entity_registry_search_sync_current_noop(
             conn,
             aoa_root=aoa_root,
-            route_terms_db_path=db_path,
+            registry_state=registry_state,
         )
+        if registry_refresh is None:
+            registry_refresh = refresh_search_entity_registry_documents(
+                conn,
+                aoa_root=aoa_root,
+                route_terms_db_path=db_path,
+            )
+            registry_state = entity_registry_maintenance_status(aoa_root)
         entity_registry_document_count = int_value(
             conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0]
         )
@@ -25543,7 +25564,8 @@ def refresh_entity_registry_search_documents_only(
             except sqlite3.Error:
                 pass
             conn.close()
-    registry_state = entity_registry_maintenance_status(aoa_root)
+    if not registry_state:
+        registry_state = entity_registry_maintenance_status(aoa_root)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "entity_registry_search_sync",
@@ -25564,6 +25586,8 @@ def refresh_entity_registry_search_documents_only(
         "updated_entity_registry_document_count": updated_entity_registry_document_count,
         "unchanged_entity_registry_document_count": unchanged_entity_registry_document_count,
         "removed_entity_registry_document_count": removed_entity_registry_document_count,
+        "skipped": bool(registry_refresh.get("skipped")) if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else False,
+        "skip_reason": registry_refresh.get("skip_reason") if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else None,
         "entity_count": registry_state.get("entity_count"),
         "entity_registry": registry_state,
         "db_path": str(db_path),
@@ -26181,6 +26205,100 @@ def search_document_existing_signatures(conn: sqlite3.Connection, *, doc_type: s
             ),
         }
     return signatures
+
+
+ENTITY_REGISTRY_SNAPSHOT_SIGNATURE_IGNORED_KEYS = frozenset({"generated_at", "generated_at_epoch", "mutates"})
+
+
+def entity_registry_snapshot_signature(payload: dict[str, Any]) -> str:
+    def stable(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): stable(item)
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+                if str(key) not in ENTITY_REGISTRY_SNAPSHOT_SIGNATURE_IGNORED_KEYS
+            }
+        if isinstance(value, list):
+            return [stable(item) for item in value]
+        return value
+
+    comparable = stable(payload if isinstance(payload, dict) else {})
+    return hashlib.sha256(
+        json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def entity_registry_search_sync_meta(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT key, value
+        FROM meta
+        WHERE key IN (
+            'entity_registry_search_sync_version',
+            'entity_registry_search_snapshot_signature',
+            'entity_registry_search_document_count',
+            'entity_registry_search_schema_version'
+        )
+        """
+    ).fetchall()
+    return {str(row[0]): str(row[1]) for row in rows}
+
+
+def record_entity_registry_search_sync_meta(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_signature: str,
+    document_count: int,
+) -> None:
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        [
+            ("entity_registry_search_sync_version", str(ENTITY_REGISTRY_SEARCH_SYNC_VERSION)),
+            ("entity_registry_search_snapshot_signature", snapshot_signature),
+            ("entity_registry_search_document_count", str(max(0, int_value(document_count)))),
+            ("entity_registry_search_schema_version", str(SEARCH_SCHEMA_VERSION)),
+        ],
+    )
+
+
+def entity_registry_search_sync_current_noop(
+    conn: sqlite3.Connection,
+    *,
+    aoa_root: Path,
+    registry_state: dict[str, Any],
+) -> dict[str, Any] | None:
+    if registry_state.get("needs_maintenance"):
+        return None
+    registry_path = aoa_root / ENTITY_REGISTRY_PATH
+    registry = read_json(registry_path, {})
+    if not isinstance(registry, dict) or registry.get("artifact_type") != "entity_registry_snapshot":
+        return None
+    entity_count = int_value(registry.get("entity_count"))
+    actual_count = int_value(conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0])
+    if actual_count != entity_count:
+        return None
+    signature = entity_registry_snapshot_signature(registry)
+    meta = entity_registry_search_sync_meta(conn)
+    if meta.get("entity_registry_search_sync_version") != str(ENTITY_REGISTRY_SEARCH_SYNC_VERSION):
+        return None
+    if meta.get("entity_registry_search_schema_version") != str(SEARCH_SCHEMA_VERSION):
+        return None
+    if meta.get("entity_registry_search_document_count") != str(entity_count):
+        return None
+    if meta.get("entity_registry_search_snapshot_signature") != signature:
+        return None
+    return {
+        "inserted_count": 0,
+        "updated_count": 0,
+        "unchanged_count": entity_count,
+        "removed_count": 0,
+        "replaced_count": 0,
+        "touched_count": 0,
+        "target_count": entity_count,
+        "skipped": True,
+        "skip_reason": "entity_registry_search_sync_current",
+        "snapshot_signature": signature,
+    }
 
 
 def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, store_raw_text: bool = True) -> None:
@@ -41915,6 +42033,8 @@ def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "updated_entity_registry_document_count",
         "unchanged_entity_registry_document_count",
         "removed_entity_registry_document_count",
+        "skipped",
+        "skip_reason",
         "selected_count",
         "processed_count",
         "remaining_count",

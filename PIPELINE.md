@@ -648,7 +648,10 @@ The search projection sync for `doc_type=entity_registry` is intentionally
 delta-based. It rewrites the generated snapshot, then compares stored search
 docs by semantic storage fingerprint and only inserts, replaces, or removes
 changed rows. Snapshot-only volatility such as the registry file hash must not
-turn an otherwise unchanged inventory into a full FTS/body rewrite.
+turn an otherwise unchanged inventory into a full FTS/body rewrite. A
+successful sync stores a stable snapshot fingerprint in SQLite `meta`; a later
+registry-only refresh may return `skipped=true` when sources and synced docs
+are already current, avoiding a cold route-term scan for no-op maintenance.
 
 When an agent needs to debug or study one operational thing, use the resolver
 instead of guessing one axis by hand:

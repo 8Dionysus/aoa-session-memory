@@ -899,7 +899,10 @@ removed. Reports expose `inserted_entity_registry_document_count`,
 `updated_entity_registry_document_count`,
 `unchanged_entity_registry_document_count`, and
 `removed_entity_registry_document_count` so refresh latency does not hide a
-full registry rewrite.
+full registry rewrite. After a successful sync, SQLite `meta` records a stable
+registry snapshot fingerprint; if the registry sources are current and the
+fingerprint still matches, registry-only refresh returns a fast no-op with
+`skipped=true` instead of scanning route terms again.
 
 Ask how an entity was actually used, with consequences and evidence refs:
 
