@@ -841,9 +841,12 @@ Materialize monthly shard DBs from the same session indexes when the archive is
 large enough for bounded fan-out to be useful. Shards are generated projections:
 they are rebuilt with `search-shards`, checked against live session-index
 fingerprints by the catalog, and queried explicitly with `search --use-shards`
-or agent-event routes such as `agent-responses --use-shards`. The monolith
-remains the fallback projection and is tracked separately from the live
-session-index basis.
+or agent-event routes such as `agent-responses --use-shards`. By default,
+`search-shards` builds structured route projections: route tables, bounded hot
+previews, freshness state, and refs are local to the shard, while raw-text FTS
+and compressed body hydration stay in the monolith fallback. Use
+`search-shards --full-text` only for an explicit shard-level lexical benchmark
+or diagnostic rebuild where the extra weight is intentional.
 
 ```bash
 python3 scripts/aoa_session_memory.py search-shards all \
@@ -859,11 +862,12 @@ python3 scripts/aoa_session_memory.py search "hook timed out" \
 ```
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
-`--session-act`, `--route-signal`, `--doc-type`, and date bounds. Broad FTS
-queries remain available for raw-text discovery, but on large archives they are
-a diagnostic route until the heavier FTS/raw-text slimming work is complete.
-Agent-event shard routes filter stream-copy duplicates before limiting, so
-canonical response items are not crowded out by progress stream noise.
+`--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query
+targets structured-only shards, `--use-shards` falls back to the monolith with an
+explicit `search_shard_fanout_raw_text_uses_monolith_fallback` diagnostic so
+raw-text discovery remains available without broad FTS fan-out across every
+shard. Agent-event shard routes filter stream-copy duplicates before limiting,
+so canonical response items are not crowded out by progress stream noise.
 
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index

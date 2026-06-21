@@ -264,14 +264,18 @@ not materialized, `active_projection=monolith_fallback` must remain explicit.
 Future shard fan-out should start from this catalog instead of rediscovering
 session buckets through broad monolith scans.
 `search-shards` materializes monthly shard DBs from the same raw/session-index
-inputs and then refreshes the catalog. The catalog treats a shard as
-materialized only when the shard `session_index_state` matches the live
-session-index fingerprint and schema state for every session in that bucket.
-The monolith remains a fallback projection and is tracked separately.
+inputs and then refreshes the catalog. The default shard is a structured route
+projection: it keeps route tables, bounded hot previews, freshness state, and
+refs, but skips local raw-text FTS rows, compressed `document_bodies`, and raw
+event semantic-text extraction. `search-shards --full-text` is the explicit
+operator route for a heavier shard-level lexical diagnostic. The catalog treats
+a shard as materialized only when the shard `session_index_state` matches the
+live session-index fingerprint and schema state for every session in that
+bucket. The monolith remains a fallback projection and is tracked separately.
 `search --use-shards` performs bounded fan-out across current materialized
-shards and returns shard refs; when shards are missing, stale, or incompatible
-with host overlays, the route falls back to the monolith with an explicit
-diagnostic.
+shards and returns shard refs; when shards are missing, stale, incompatible with
+host overlays, or unable to satisfy a raw-text FTS query locally, the route
+falls back to the monolith with an explicit diagnostic.
 Agent-event routes share the same shard fan-out through `--use-shards`, while
 preserving pre-limit stream-copy filtering so progress stream duplicates do not
 hide canonical `response_item` answers or reports.
@@ -360,9 +364,11 @@ evidence and stable refs.
   session refs for quality gates. Full route-signal lists are represented by
   graph edges, not duplicated inside event-node payloads. Graph packets must
   hydrate bounded refs from contribution rows before an agent relies on them.
-- Search may keep full body text in FTS and compressed `document_bodies` while
-  `documents.body` stores only a hot preview. Query recall must still use full
-  text, and selected snippets may hydrate from compressed body storage.
+- The monolith search projection may keep full body text in FTS and compressed
+  `document_bodies` while `documents.body` stores only a hot preview. Default
+  monthly shards are structured route projections and intentionally omit local
+  FTS/body hydration; raw-text recall falls back to the monolith unless a shard
+  was explicitly built with `search-shards --full-text`.
 - Raw interval blocks are preserved evidence today. Do not remove block payloads
   just because `raw/session.raw.jsonl` also exists. Any cleanup first needs an
   offset/compressed raw-block reader and validation that segment/raw refs still

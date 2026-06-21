@@ -101,6 +101,11 @@ INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
+SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE = "structured_route_preview_only_no_compressed_body"
+SEARCH_FTS_STORAGE_MODE = "full_text_fts_with_compressed_body_v1"
+SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE = "omitted_for_structured_route_shard_v1"
+SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL = "local_fts"
+SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK = "monolith_fallback_required"
 SEARCH_BODY_PREVIEW_CHARS = 700
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
@@ -23326,6 +23331,42 @@ def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
             conn.close()
 
 
+def search_raw_text_query_support_from_metadata(metadata: dict[str, Any]) -> str:
+    support = str(metadata.get("search_raw_text_query_support") or "").strip()
+    if support:
+        return support
+    fts_mode = str(metadata.get("search_fts_storage_mode") or "").strip()
+    if fts_mode == SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE:
+        return SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    return SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
+
+
+def search_projection_storage_mode_from_metadata(metadata: dict[str, Any]) -> str:
+    mode = str(metadata.get("search_projection_storage_mode") or "").strip()
+    if mode:
+        return mode
+    body_mode = str(metadata.get("search_body_storage_mode") or "").strip()
+    if body_mode:
+        return body_mode
+    if search_raw_text_query_support_from_metadata(metadata) == SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL:
+        return "legacy_full_text_projection"
+    return ""
+
+
+def search_db_metadata_at_path(db_path: Path) -> dict[str, Any]:
+    if not db_path.exists():
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        return search_index_metadata(conn)
+    except sqlite3.Error:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def build_search_catalog(
     aoa_root: Path,
     *,
@@ -23441,6 +23482,7 @@ def build_search_catalog(
     sessions: list[dict[str, Any]] = []
     shard_payloads: dict[str, dict[str, Any]] = {}
     shard_state_cache: dict[str, dict[str, dict[str, Any]]] = {}
+    shard_metadata_cache: dict[str, dict[str, Any]] = {}
     live_state_by_session: dict[str, dict[str, Any]] = {}
     live_state_basis = "live_session_indexes"
     try:
@@ -23483,7 +23525,12 @@ def build_search_catalog(
         shard_path = search_shard_db_path(aoa_root, shard)
         if str(shard_path) not in shard_state_cache:
             shard_state_cache[str(shard_path)] = search_shard_session_state(shard_path)
+        if str(shard_path) not in shard_metadata_cache:
+            shard_metadata_cache[str(shard_path)] = search_db_metadata_at_path(shard_path)
         shard_session_state = shard_state_cache[str(shard_path)].get(session_id, {})
+        shard_metadata = shard_metadata_cache[str(shard_path)]
+        shard_storage_mode = search_projection_storage_mode_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_raw_text_query_support = search_raw_text_query_support_from_metadata(shard_metadata) if shard_metadata else ""
         shard_status = "missing"
         if shard_path.exists():
             shard_status = "stale"
@@ -23508,6 +23555,8 @@ def build_search_catalog(
             "shard_db_path": str(shard_path),
             "shard_materialized": shard_status == "current",
             "shard_status": shard_status,
+            "shard_storage_mode": shard_storage_mode,
+            "shard_raw_text_query_support": shard_raw_text_query_support,
             "monolith_db_path": str(db_path),
             "monolith_status": monolith_status,
             "catalog_state_basis": live_state_basis,
@@ -23546,8 +23595,14 @@ def build_search_catalog(
                 "missing_session_count": 0,
                 "document_count": 0,
                 "freshness_counts": {},
+                "storage_mode": shard_storage_mode,
+                "raw_text_query_support": shard_raw_text_query_support,
             },
         )
+        if shard_storage_mode and not shard_item.get("storage_mode"):
+            shard_item["storage_mode"] = shard_storage_mode
+        if shard_raw_text_query_support and not shard_item.get("raw_text_query_support"):
+            shard_item["raw_text_query_support"] = shard_raw_text_query_support
         shard_item["session_count"] += 1
         if shard_status == "current":
             shard_item["current_session_count"] += 1
@@ -23648,12 +23703,16 @@ def search_catalog_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Shards",
         "",
-        "| shard | sessions | documents | materialized |",
-        "| --- | ---: | ---: | --- |",
+        "| shard | sessions | documents | materialized | storage | raw text |",
+        "| --- | ---: | ---: | --- | --- | --- |",
     ]
     for shard in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
         if isinstance(shard, dict):
-            lines.append(f"| `{shard.get('shard')}` | `{shard.get('session_count')}` | `{shard.get('document_count')}` | `{shard.get('materialized')}` |")
+            lines.append(
+                f"| `{shard.get('shard')}` | `{shard.get('session_count')}` | "
+                f"`{shard.get('document_count')}` | `{shard.get('materialized')}` | "
+                f"`{shard.get('storage_mode') or ''}` | `{shard.get('raw_text_query_support') or ''}` |"
+            )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
@@ -23690,6 +23749,10 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- ok: `{payload.get('ok')}`",
         f"- status: `{payload.get('status')}`",
         f"- shard_strategy: `{payload.get('shard_strategy')}`",
+        f"- structured_only: `{payload.get('structured_only')}`",
+        f"- shard_storage_mode: `{payload.get('shard_storage_mode')}`",
+        f"- search_fts_storage_mode: `{payload.get('search_fts_storage_mode')}`",
+        f"- raw_text_query_support: `{payload.get('raw_text_query_support')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
         f"- shard_count: `{payload.get('shard_count')}`",
@@ -23730,11 +23793,27 @@ def materialize_search_shards(
     write_report: bool = False,
     budget_seconds: float | None = None,
     progress_every: int = 0,
+    structured_only: bool = True,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     diagnostics: list[str] = []
+    shard_storage_mode = (
+        SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE
+        if structured_only
+        else SEARCH_BODY_STORAGE_MODE
+    )
+    shard_fts_storage_mode = (
+        SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE
+        if structured_only
+        else SEARCH_FTS_STORAGE_MODE
+    )
+    raw_text_query_support = (
+        SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+        if structured_only
+        else SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
+    )
     try:
         records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
     except ValueError as exc:
@@ -23749,6 +23828,10 @@ def materialize_search_shards(
             "selected_count": 0,
             "processed_count": 0,
             "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "structured_only": structured_only,
+            "shard_storage_mode": shard_storage_mode,
+            "search_fts_storage_mode": shard_fts_storage_mode,
+            "raw_text_query_support": raw_text_query_support,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -23776,6 +23859,10 @@ def materialize_search_shards(
             "selected_count": len(records),
             "processed_count": 0,
             "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "structured_only": structured_only,
+            "shard_storage_mode": shard_storage_mode,
+            "search_fts_storage_mode": shard_fts_storage_mode,
+            "raw_text_query_support": raw_text_query_support,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -23802,6 +23889,9 @@ def materialize_search_shards(
             db_path_override=shard_path,
             refresh_catalog=False,
             include_entity_registry=False,
+            include_raw_event_text=not structured_only,
+            store_raw_text=not structured_only,
+            projection_storage_mode=shard_storage_mode,
             budget_seconds=remaining_budget,
             progress_every=progress_every,
         )
@@ -23820,6 +23910,10 @@ def materialize_search_shards(
                 "processed_count": int_value(result.get("processed_count")),
                 "document_count": int_value(result.get("document_count")),
                 "search_schema_version": result.get("search_schema_version"),
+                "structured_only": structured_only,
+                "shard_storage_mode": result.get("search_body_storage_mode") or shard_storage_mode,
+                "search_fts_storage_mode": result.get("search_fts_storage_mode") or shard_fts_storage_mode,
+                "raw_text_query_support": result.get("raw_text_query_support") or raw_text_query_support,
                 "generated_at": result.get("generated_at"),
                 "diagnostics": shard_diagnostics,
             }
@@ -23840,6 +23934,10 @@ def materialize_search_shards(
         "selected_count": len(records),
         "processed_count": processed_count,
         "shard_strategy": SEARCH_SHARD_STRATEGY,
+        "structured_only": structured_only,
+        "shard_storage_mode": shard_storage_mode,
+        "search_fts_storage_mode": shard_fts_storage_mode,
+        "raw_text_query_support": raw_text_query_support,
         "shard_count": len(shard_results),
         "document_count": document_count,
         "catalog": search_catalog_summary(catalog_refresh),
@@ -23872,6 +23970,10 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- db_path: `{payload.get('db_path')}`",
         f"- search_body_storage_mode: `{payload.get('search_body_storage_mode')}`",
+        f"- search_fts_storage_mode: `{payload.get('search_fts_storage_mode')}`",
+        f"- raw_text_query_support: `{payload.get('raw_text_query_support')}`",
+        f"- store_raw_text: `{payload.get('store_raw_text')}`",
+        f"- include_raw_event_text: `{payload.get('include_raw_event_text')}`",
         f"- search_payload_storage_mode: `{payload.get('search_payload_storage_mode')}`",
         f"- search_route_layers_preview_chars: `{payload.get('search_route_layers_preview_chars')}`",
         f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
@@ -25753,7 +25855,7 @@ def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in doc.items() if key not in SEARCH_DOCUMENT_COLUMN_KEYS}
 
 
-def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> None:
+def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, store_raw_text: bool = True) -> None:
     payload = search_doc_payload(doc)
     full_body = str(doc.get("body") or "")
     body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
@@ -25831,15 +25933,16 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any]) -> Non
         },
     )
     rowid = cursor.lastrowid
-    conn.execute(
-        "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
-        (rowid, doc.get("title") or "", full_body, doc.get("session_label") or "", doc.get("session_title") or ""),
-    )
-    body_bytes = full_body.encode("utf-8")
-    conn.execute(
-        "INSERT OR REPLACE INTO document_bodies(doc_rowid, body_zlib, body_sha256, body_chars) VALUES (?, ?, ?, ?)",
-        (rowid, sqlite3.Binary(zlib.compress(body_bytes, level=6)), hashlib.sha256(body_bytes).hexdigest(), len(full_body)),
-    )
+    if store_raw_text:
+        conn.execute(
+            "INSERT INTO documents_fts(rowid, title, body, session_label, session_title) VALUES (?, ?, ?, ?, ?)",
+            (rowid, doc.get("title") or "", full_body, doc.get("session_label") or "", doc.get("session_title") or ""),
+        )
+        body_bytes = full_body.encode("utf-8")
+        conn.execute(
+            "INSERT OR REPLACE INTO document_bodies(doc_rowid, body_zlib, body_sha256, body_chars) VALUES (?, ?, ?, ?)",
+            (rowid, sqlite3.Binary(zlib.compress(body_bytes, level=6)), hashlib.sha256(body_bytes).hexdigest(), len(full_body)),
+        )
     if route_entries:
         postings = [(rowid, route_term_id(conn, entry)) for entry in route_entries]
         conn.executemany(
@@ -26020,6 +26123,7 @@ def search_documents_for_record(
     record: dict[str, Any],
     *,
     max_raw_bytes: int | None = None,
+    include_raw_event_text: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -26052,7 +26156,9 @@ def search_documents_for_record(
     raw_freshness = search_manifest_freshness(manifest, raw_path)
     raw_bytes = raw_path.stat().st_size if raw_path and raw_path.exists() else 0
     raw_text_status = "not_available"
-    if raw_path and raw_path.exists():
+    if not include_raw_event_text:
+        raw_text_status = "skipped_structured_projection"
+    elif raw_path and raw_path.exists():
         raw_text_status = "available"
         if max_raw_bytes is not None and raw_bytes > max_raw_bytes:
             raw_text_status = "skipped_raw_too_large"
@@ -26264,7 +26370,7 @@ def search_documents_for_record(
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     raw_text_by_line = (
         {}
-        if raw_text_status == "skipped_raw_too_large"
+        if raw_text_status in {"skipped_raw_too_large", "skipped_structured_projection"}
         else raw_event_search_text_by_line(raw_path, line_limits=raw_search_text_line_limits_from_segments(segments))
     )
     for segment in segments:
@@ -26399,6 +26505,7 @@ def search_documents_for_record(
         "session_label": session_label,
         "document_count": len(documents),
         "raw_text_status": raw_text_status,
+        "include_raw_event_text": include_raw_event_text,
         "raw_bytes": raw_bytes,
         "max_raw_bytes": max_raw_bytes,
         "diagnostics": [],
@@ -26422,6 +26529,9 @@ def search_index_sessions(
     db_path_override: Path | None = None,
     refresh_catalog: bool = True,
     include_entity_registry: bool = True,
+    include_raw_event_text: bool = True,
+    store_raw_text: bool = True,
+    projection_storage_mode: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -26432,6 +26542,13 @@ def search_index_sessions(
         use_default_budget=use_default_raw_lexical_budget,
     )
     effective_max_raw_bytes = raw_lexical_policy.get("effective_max_raw_bytes")
+    effective_body_storage_mode = projection_storage_mode or (
+        SEARCH_BODY_STORAGE_MODE if store_raw_text else SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE
+    )
+    effective_fts_storage_mode = SEARCH_FTS_STORAGE_MODE if store_raw_text else SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE
+    raw_text_query_support = (
+        SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL if store_raw_text else SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    )
     write_db_path = db_path
     temp_db_path: Path | None = None
     if rebuild:
@@ -26458,6 +26575,9 @@ def search_index_sessions(
             "max_raw_bytes": effective_max_raw_bytes,
             "requested_max_raw_bytes": max_raw_bytes,
             "raw_lexical_policy": raw_lexical_policy,
+            "search_body_storage_mode": effective_body_storage_mode,
+            "search_fts_storage_mode": effective_fts_storage_mode,
+            "raw_text_query_support": raw_text_query_support,
             "db_path": str(db_path),
             "diagnostics": [str(exc)],
             "sessions": [],
@@ -26475,6 +26595,9 @@ def search_index_sessions(
             "max_raw_bytes": effective_max_raw_bytes,
             "requested_max_raw_bytes": max_raw_bytes,
             "raw_lexical_policy": raw_lexical_policy,
+            "search_body_storage_mode": effective_body_storage_mode,
+            "search_fts_storage_mode": effective_fts_storage_mode,
+            "raw_text_query_support": raw_text_query_support,
             "db_path": str(db_path),
             "diagnostics": ["no sessions selected"],
             "sessions": [],
@@ -26521,7 +26644,19 @@ def search_index_sessions(
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            ("search_body_storage_mode", SEARCH_BODY_STORAGE_MODE if rebuild else f"{SEARCH_BODY_STORAGE_MODE}_mixed"),
+            ("search_body_storage_mode", effective_body_storage_mode if rebuild else f"{effective_body_storage_mode}_mixed"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_fts_storage_mode", effective_fts_storage_mode),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_raw_text_query_support", raw_text_query_support),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_projection_storage_mode", effective_body_storage_mode),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
@@ -26581,7 +26716,12 @@ def search_index_sessions(
                 break
             conn.execute("BEGIN")
             projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
-            documents, result = search_documents_for_record(aoa_root, record, max_raw_bytes=effective_max_raw_bytes)
+            documents, result = search_documents_for_record(
+                aoa_root,
+                record,
+                max_raw_bytes=effective_max_raw_bytes,
+                include_raw_event_text=include_raw_event_text,
+            )
             session_results.append(result)
             raw_text_status_counts[str(result.get("raw_text_status") or "unknown")] += 1
             record_counts: Counter[str] = Counter()
@@ -26595,7 +26735,7 @@ def search_index_sessions(
                     session_id=str(record.get("session_id") or ""),
                 )
             for doc in documents:
-                insert_search_document(conn, doc)
+                insert_search_document(conn, doc, store_raw_text=store_raw_text)
                 record_counts[str(doc.get("doc_type") or "unknown")] += 1
             upsert_search_session_state(
                 conn,
@@ -26694,6 +26834,11 @@ def search_index_sessions(
                 "max_raw_bytes": effective_max_raw_bytes,
                 "requested_max_raw_bytes": max_raw_bytes,
                 "raw_lexical_policy": raw_lexical_policy,
+                "search_body_storage_mode": effective_body_storage_mode,
+                "search_fts_storage_mode": effective_fts_storage_mode,
+                "raw_text_query_support": raw_text_query_support,
+                "store_raw_text": store_raw_text,
+                "include_raw_event_text": include_raw_event_text,
                 "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
                 "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
                 "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
@@ -26728,6 +26873,11 @@ def search_index_sessions(
             "max_raw_bytes": effective_max_raw_bytes,
             "requested_max_raw_bytes": max_raw_bytes,
             "raw_lexical_policy": raw_lexical_policy,
+            "search_body_storage_mode": effective_body_storage_mode,
+            "search_fts_storage_mode": effective_fts_storage_mode,
+            "raw_text_query_support": raw_text_query_support,
+            "store_raw_text": store_raw_text,
+            "include_raw_event_text": include_raw_event_text,
             "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
             "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
             "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
@@ -26756,7 +26906,11 @@ def search_index_sessions(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_index",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
-        "search_body_storage_mode": SEARCH_BODY_STORAGE_MODE if rebuild else f"{SEARCH_BODY_STORAGE_MODE}_mixed",
+        "search_body_storage_mode": effective_body_storage_mode if rebuild else f"{effective_body_storage_mode}_mixed",
+        "search_fts_storage_mode": effective_fts_storage_mode,
+        "raw_text_query_support": raw_text_query_support,
+        "store_raw_text": store_raw_text,
+        "include_raw_event_text": include_raw_event_text,
         "search_payload_storage_mode": SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed",
         "search_route_layers_preview_chars": SEARCH_ROUTE_LAYERS_PREVIEW_CHARS,
         "search_route_signals_preview_chars": SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS,
@@ -27495,10 +27649,56 @@ def search_sessions_shard_fanout(
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
         )
     effective_limit = max(1, int_value(limit, 20))
+    uses_fts = bool(fts_query_from_user(query))
+    if uses_fts:
+        unsupported_raw_text_shards: list[str] = []
+        for shard_item in queried_shards:
+            shard_key = str(shard_item.get("shard") or "")
+            shard_path = Path(str(shard_item.get("shard_db_path") or ""))
+            raw_text_support = str(shard_item.get("raw_text_query_support") or "").strip()
+            if not raw_text_support:
+                raw_text_support = search_raw_text_query_support_from_metadata(search_db_metadata_at_path(shard_path))
+            if raw_text_support != SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL:
+                unsupported_raw_text_shards.append(shard_key)
+        if unsupported_raw_text_shards:
+            payload = search_shard_fanout_unavailable_payload(
+                reason="search_shard_fanout_raw_text_uses_monolith_fallback",
+                aoa_root=aoa_root,
+                query=query,
+                limit=limit,
+                provider=provider,
+                include_host_context=include_host_context,
+                include_semantic_context=include_semantic_context,
+                rerank_local=rerank_local,
+                rerank_candidate_limit=rerank_candidate_limit,
+                allow_host_warnings=allow_host_warnings,
+                host_timeout=host_timeout,
+                session=session,
+                doc_type=doc_type,
+                event_type=event_type,
+                family=family,
+                outcome=outcome,
+                conversation_act=conversation_act,
+                session_act=session_act,
+                agent_event=agent_event,
+                task_episode_id=task_episode_id,
+                route_layer=route_layer,
+                route_signal=route_signal,
+                archive_status=archive_status,
+                freshness_status=freshness_status,
+                date_from=date_from,
+                date_to=date_to,
+                explain=explain,
+                semantic_preview=semantic_preview,
+                hydrate_body=hydrate_body,
+                exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
+            )
+            payload.setdefault("search_projection", {})["unsupported_raw_text_shards"] = unsupported_raw_text_shards
+            payload.setdefault("search_projection", {})["raw_text_query_support"] = SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+            return payload
     structured_route_filter = bool(
         any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
     )
-    uses_fts = bool(fts_query_from_user(query))
     lightweight_route = bool(structured_route_filter and not uses_fts)
     effective_hydrate_body = bool(hydrate_body and not lightweight_route)
     effective_semantic_preview = bool(semantic_preview and not lightweight_route)
@@ -27548,6 +27748,8 @@ def search_sessions_shard_fanout(
                 "db_path": str(shard_path),
                 "ok": shard_payload.get("ok"),
                 "result_count": shard_payload.get("result_count"),
+                "raw_text_query_support": shard_item.get("raw_text_query_support") or "",
+                "storage_mode": shard_item.get("storage_mode") or "",
                 "diagnostics": shard_payload.get("diagnostics", []),
             }
         )
@@ -42788,6 +42990,7 @@ def command_search_shards(args: argparse.Namespace) -> int:
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
+            structured_only=not getattr(args, "full_text", False),
         )
 
     payload = run_with_maintenance_lock(
@@ -47332,6 +47535,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument("--shard", help="Materialize only one shard key such as month/2026-06.")
     search_shards.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
     search_shards.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text shard rebuild.")
+    search_shards.add_argument("--full-text", action="store_true", help="Store FTS and compressed bodies in shard DBs; default shards are structured route projections and use the monolith for raw-text queries.")
     search_shards.add_argument("--budget-seconds", type=float, help="Stop after the current shard when this wall-clock budget is exhausted.")
     search_shards.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
     search_shards.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-shards reports under .aoa/diagnostics.")

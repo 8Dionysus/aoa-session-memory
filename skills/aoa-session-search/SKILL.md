@@ -88,6 +88,23 @@ python3 scripts/aoa_session_memory.py agent-responses \
   --explain
 ```
 
+Default monthly shards are structured route projections. They are meant for
+filters such as `--agent-event`, `--session-act`, `--route-signal`,
+`--doc-type`, date bounds, goals, episodes, and entity inventory. If a query
+needs literal raw-text FTS, `--use-shards` may report
+`search_shard_fanout_raw_text_uses_monolith_fallback` and use the monolith
+fallback instead; this is expected and preserves raw-text recall without broad
+FTS fan-out across every shard. Build full-text shards only with an explicit
+operator intent:
+
+```bash
+python3 scripts/aoa_session_memory.py search-shards all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --full-text \
+  --write-report
+```
+
 Check optional provider status before using host overlays:
 
 ```bash

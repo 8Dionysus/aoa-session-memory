@@ -612,6 +612,16 @@ Last observed result:
   `auto-maintenance` now enforces that route by returning
   `deferred_full_search_rebuild_to_deep` from non-`deep` profiles when search
   freshness requires a full rewrite.
+- 2026-06-21 structured shard slimming contract: default `search-shards`
+  materialization now builds monthly structured-route shard projections that
+  skip local raw-text FTS inserts, compressed `document_bodies`, and raw event
+  semantic-text extraction. The shard catalog records `storage_mode` and
+  `raw_text_query_support`; text queries with `--use-shards` fall back to the
+  monolith via `search_shard_fanout_raw_text_uses_monolith_fallback`, while
+  structured routes still use bounded shard fan-out. Use
+  `search-shards --full-text` only for an explicit heavy lexical shard
+  benchmark. Existing live full-text shard files remain heavy until rebuilt
+  through the new default.
 - 2026-06-21 MCP live route proof after schema 10 rebuild:
   `aoa_session_maintenance_status(full=true)` returned through MCP in about
   `1.45s` with search ready, graph usable, no writer, and the completed

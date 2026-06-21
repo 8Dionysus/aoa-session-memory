@@ -7669,32 +7669,86 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
 
     shards = module.materialize_search_shards(aoa_root=aoa_root, target="all", write_report=True)
     assert shards["ok"] is True
+    assert shards["structured_only"] is True
+    assert shards["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
     assert shards["shard_count"] == 2
     assert {item["shard"] for item in shards["shards"]} == {"month/2026-05", "month/2026-06"}
     assert all(Path(item["db_path"]).exists() for item in shards["shards"])
+    may_shard = next(item for item in shards["shards"] if item["shard"] == "month/2026-05")
+    shard_conn = sqlite3.connect(str(may_shard["db_path"]))
+    shard_body_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
+    shard_fts_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_fts_storage_mode",)).fetchone()[0]
+    shard_raw_support = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_text_query_support",)).fetchone()[0]
+    shard_fts_match_count = shard_conn.execute(
+        "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+        (module.fts_query_from_user("may-shard-anchor"),),
+    ).fetchone()[0]
+    shard_body_count = shard_conn.execute("SELECT COUNT(*) FROM document_bodies").fetchone()[0]
+    shard_conn.close()
+    assert shard_body_meta == module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE
+    assert shard_fts_meta == module.SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE
+    assert shard_raw_support == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    assert shard_fts_match_count == 0
+    assert shard_body_count == 0
     assert Path(shards["report_json"]).exists()
 
     catalog = module.read_search_catalog(aoa_root)
     assert catalog["ok"] is True
     assert catalog["materialized_shard_count"] == 2
     assert all(item["materialized"] for item in catalog["shards"])
+    assert all(item["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK for item in catalog["shards"])
 
     fanout = module.search_sessions(
         aoa_root=aoa_root,
-        query="may-shard-anchor",
         doc_type="event",
+        date_from="2026-05-01",
+        date_to="2026-05-31",
         use_shards=True,
         explain=True,
     )
     assert fanout["ok"] is True
     assert fanout["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
-    assert fanout["search_projection"]["queried_shard_count"] == 2
+    assert fanout["search_projection"]["queried_shard_count"] == 1
     assert fanout["result_count"] >= 1
     may_hit = fanout["results"][0]
     assert may_hit["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
     assert may_hit["search_catalog"]["shard"] == "month/2026-05"
     assert may_hit["search_catalog"]["shard_db_path"]
     assert may_hit["refs"]["raw"]
+
+    raw_text_fallback = module.search_sessions(
+        aoa_root=aoa_root,
+        query="may-shard-anchor",
+        doc_type="event",
+        use_shards=True,
+        explain=True,
+    )
+    assert raw_text_fallback["ok"] is True
+    assert raw_text_fallback["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert raw_text_fallback["search_projection"]["requested_mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert raw_text_fallback["search_projection"]["fallback_reason"] == "search_shard_fanout_raw_text_uses_monolith_fallback"
+    assert raw_text_fallback["search_projection"]["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    assert raw_text_fallback["result_count"] >= 1
+
+    full_text_shard = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard="month/2026-05",
+        structured_only=False,
+    )
+    assert full_text_shard["ok"] is True
+    assert full_text_shard["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
+    full_text_fanout = module.search_sessions(
+        aoa_root=aoa_root,
+        query="may-shard-anchor",
+        doc_type="event",
+        date_from="2026-05-01",
+        date_to="2026-05-31",
+        use_shards=True,
+    )
+    assert full_text_fanout["ok"] is True
+    assert full_text_fanout["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert full_text_fanout["result_count"] >= 1
 
     june_sessions = module.search_sessions(
         aoa_root=aoa_root,
