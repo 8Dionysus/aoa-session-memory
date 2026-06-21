@@ -6376,11 +6376,154 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert payload["search"]["actionable_dirty_session_count"] == 0
     assert payload["search"]["deferred_live_session_count"] == 2
     assert payload["graph"]["actionable_count"] == 0
+    assert payload["operations"]["mutates"] is False
+    assert payload["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
     assert calls["search"]["freshness_mode"] == "hot"
     assert calls["route"]["target"] == "all"
     assert "auto-maintenance hot all" in payload["exact_next_command"]
     assert compact["agent_route"]["live_catchup_pending"] is True
+    assert compact["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
     assert compact["next_actions"][0]["id"] == "wait_live_catchup"
+
+
+def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    base_mtime = time.time()
+
+    search_report = diagnostics / "20260621T000000Z__search-index.json"
+    module.write_json(
+        search_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "generated_at": "2026-06-21T00:00:00Z",
+            "ok": True,
+            "target": "all",
+            "selected_count": 10,
+            "processed_count": 10,
+            "document_count": 100000,
+            "budget_exhausted": False,
+            "inline_optimize_count": 0,
+            "session_document_count": 10,
+            "segment_document_count": 20,
+            "event_document_count": 99960,
+            "entity_registry_document_count": 10,
+            "phase_timings": [
+                {"phase": "session_bulk_index", "elapsed_ms": 720000, "selected_count": 10, "processed_count": 10},
+                {
+                    "phase": "sqlite_index_build",
+                    "elapsed_ms": 90000,
+                    "index_count": 2,
+                    "index_timings": [
+                        {"index": "idx_document_routes_route", "elapsed_ms": 70000},
+                        {"index": "idx_documents_session", "elapsed_ms": 20000},
+                    ],
+                },
+            ],
+            "diagnostics": [],
+        },
+    )
+    os.utime(search_report, (base_mtime + 1, base_mtime + 1))
+
+    hot_report = diagnostics / "20260621T000010Z__auto-maintenance-hot.json"
+    module.write_json(
+        hot_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance",
+            "generated_at": "2026-06-21T00:00:10Z",
+            "ok": True,
+            "status": "applied",
+            "profile": "hot",
+            "target": "all",
+            "maintenance_coordinator": {
+                "status": "completed",
+                "owner_job": "auto-maintenance:hot",
+                "profile": "hot",
+                "elapsed_ms": 2300,
+                "lock_wait_ms": 0,
+            },
+            "diagnostics": [],
+        },
+    )
+    os.utime(hot_report, (base_mtime + 2, base_mtime + 2))
+
+    catchup_report = diagnostics / "20260621T000020Z__auto-maintenance-catchup.json"
+    module.write_json(
+        catchup_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance",
+            "generated_at": "2026-06-21T00:00:20Z",
+            "ok": True,
+            "status": "nothing_to_do",
+            "profile": "catchup",
+            "target": "all",
+            "maintenance_coordinator": {
+                "status": "completed",
+                "owner_job": "auto-maintenance:catchup",
+                "profile": "catchup",
+                "elapsed_ms": 900,
+                "lock_wait_ms": 0,
+            },
+            "diagnostics": [],
+        },
+    )
+    os.utime(catchup_report, (base_mtime + 3, base_mtime + 3))
+
+    failed_report = diagnostics / "20260621T000030Z__graph-maintenance.json"
+    module.write_json(
+        failed_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "graph_maintenance",
+            "generated_at": "2026-06-21T00:00:30Z",
+            "ok": False,
+            "status": "failed",
+            "target": "all",
+            "diagnostics": ["graph_failed"],
+        },
+    )
+    os.utime(failed_report, (base_mtime + 4, base_mtime + 4))
+
+    storage = {
+        "search_db": {
+            "size_bytes": 13 * 1024 * 1024 * 1024,
+            "total_with_wal_bytes": 13 * 1024 * 1024 * 1024,
+            "total_with_wal_human": "13.0 GiB",
+            "wal": {"size_bytes": 700 * 1024 * 1024, "size_human": "700.0 MiB"},
+        },
+        "graph_db": {
+            "size_bytes": 50 * 1024 * 1024 * 1024,
+            "total_with_wal_bytes": 50 * 1024 * 1024 * 1024,
+            "total_with_wal_human": "50.0 GiB",
+            "wal": {"size_bytes": 0, "size_human": "0 B"},
+        },
+    }
+    ops = module.session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 1, "deferred_live_session_count": 0},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+        entity_registry={"status": "current", "needs_maintenance": False, "entity_count": 7},
+        coordinator={"active": False, "last_job": {"owner_job": "auto-maintenance:hot", "status": "completed", "elapsed_ms": 2300}},
+        storage=storage,
+    )
+
+    assert ops["mutates"] is False
+    assert ops["latest_search_index"]["elapsed_ms"] == 810000
+    assert ops["latest_search_index"]["documents_per_second"] == 123.46
+    assert ops["latest_search_index"]["slow_phases"][0]["phase"] == "session_bulk_index"
+    assert ops["latest_search_index"]["slow_indexes"][0]["index"] == "idx_document_routes_route"
+    assert ops["last_successful_auto_maintenance"]["hot"]["coordinator"]["elapsed_ms"] == 2300
+    assert ops["last_successful_auto_maintenance"]["catchup"]["status"] == "nothing_to_do"
+    assert ops["recent_problem_jobs"][0]["status"] == "failed"
+    warning_codes = {item["code"] for item in ops["warnings"]}
+    assert {"search_db_large", "graph_db_large", "search_wal_large", "search_actionable_dirty_sessions", "recent_problem_jobs"} <= warning_codes
+    reason_kinds = {item["reason"] for item in ops["why_maintenance_long"]}
+    assert {"search_index_phase", "sqlite_index_build", "large_sqlite_projection"} <= reason_kinds
 
 
 def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: Path, monkeypatch: Any) -> None:

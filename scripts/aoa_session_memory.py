@@ -135,6 +135,16 @@ GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
+OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
+OPS_SEARCH_DB_CRITICAL_BYTES = 20 * 1024 * 1024 * 1024
+OPS_GRAPH_DB_WARNING_BYTES = 40 * 1024 * 1024 * 1024
+OPS_GRAPH_DB_CRITICAL_BYTES = 80 * 1024 * 1024 * 1024
+OPS_SQLITE_WAL_WARNING_BYTES = 512 * 1024 * 1024
+OPS_WRITER_WARNING_MS = 10 * 60 * 1000
+OPS_LOCK_WAIT_WARNING_MS = 1000
+OPS_SEARCH_PHASE_WARNING_MS = 10 * 60 * 1000
+OPS_SEARCH_INDEX_WARNING_MS = 60 * 1000
+OPS_DIAGNOSTIC_SCAN_LIMIT = 80
 CLASSIFIER_TEXT_HEAD_CHARS = 12000
 CLASSIFIER_TEXT_TAIL_CHARS = 6000
 CLASSIFIER_TEXT_MAX_CHARS = CLASSIFIER_TEXT_HEAD_CHARS + CLASSIFIER_TEXT_TAIL_CHARS + 128
@@ -36309,6 +36319,508 @@ def maintenance_storage_status(aoa_root: Path) -> dict[str, Any]:
     }
 
 
+def ops_float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def diagnostic_json_payloads(aoa_root: Path, glob_pattern: str, *, limit: int = OPS_DIAGNOSTIC_SCAN_LIMIT) -> list[dict[str, Any]]:
+    diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+    if not diagnostics_dir.exists():
+        return []
+    candidates = sorted(
+        (path for path in diagnostics_dir.glob(glob_pattern) if path.is_file() and path.suffix == ".json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    reports: list[dict[str, Any]] = []
+    for path in candidates[: max(0, limit)]:
+        payload = read_json(path, {})
+        report = dict(payload) if isinstance(payload, dict) else {}
+        markdown = path.with_suffix(".md")
+        report["_diagnostic_path"] = str(path)
+        report["_diagnostic_markdown"] = str(markdown) if markdown.exists() else ""
+        report["_diagnostic_mtime"] = path_mtime(path)
+        reports.append(report)
+    return reports
+
+
+def diagnostic_report_source(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": report.get("_diagnostic_path"),
+        "markdown": report.get("_diagnostic_markdown") or "",
+        "mtime": report.get("_diagnostic_mtime"),
+        "artifact_type": report.get("artifact_type"),
+        "generated_at": report.get("generated_at"),
+    }
+
+
+def maintenance_report_coordinator(report: dict[str, Any]) -> dict[str, Any]:
+    for key in ("maintenance_coordinator", "coordinator"):
+        value = report.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def maintenance_coordinator_brief(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "status",
+            "owner_job",
+            "mode",
+            "profile",
+            "pid",
+            "started_at",
+            "deadline_at",
+            "finished_at",
+            "elapsed_ms",
+            "lock_wait_ms",
+            "target",
+            "reason",
+            "touched_surfaces",
+        )
+        if key in job
+    }
+
+
+def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
+    coordinator = maintenance_report_coordinator(report)
+    maintenance = report.get("maintenance") if isinstance(report.get("maintenance"), dict) else {}
+    return {
+        "source": diagnostic_report_source(report),
+        "ok": report.get("ok"),
+        "status": report.get("status"),
+        "profile": report.get("profile"),
+        "target": report.get("target"),
+        "budget_seconds": report.get("budget_seconds"),
+        "budget_exhausted": report.get("budget_exhausted", maintenance.get("budget_exhausted")),
+        "maintenance_status": maintenance.get("status"),
+        "maintenance_budget_exhausted": maintenance.get("budget_exhausted"),
+        "coordinator": maintenance_coordinator_brief(coordinator) if coordinator else {},
+        "diagnostics": report.get("diagnostics", []) if isinstance(report.get("diagnostics"), list) else [],
+        "hard_diagnostics": report.get("hard_diagnostics", []) if isinstance(report.get("hard_diagnostics"), list) else [],
+    }
+
+
+def search_index_ops_summary(report: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(report, dict) or not report:
+        return {"exists": False}
+    phase_timings = report.get("phase_timings") if isinstance(report.get("phase_timings"), list) else []
+    phase_rows: list[dict[str, Any]] = []
+    index_rows: list[dict[str, Any]] = []
+    for item in phase_timings:
+        if not isinstance(item, dict):
+            continue
+        phase_elapsed = int_value(item.get("elapsed_ms"))
+        phase_rows.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "phase",
+                    "elapsed_ms",
+                    "selected_count",
+                    "processed_count",
+                    "inserted_count",
+                    "removed_count",
+                    "index_count",
+                    "inline_optimize_count",
+                )
+                if key in item
+            }
+        )
+        for index_item in item.get("index_timings", []) if isinstance(item.get("index_timings"), list) else []:
+            if not isinstance(index_item, dict):
+                continue
+            index_rows.append(
+                {
+                    "phase": item.get("phase"),
+                    "index": index_item.get("index"),
+                    "elapsed_ms": int_value(index_item.get("elapsed_ms")),
+                    "warning": int_value(index_item.get("elapsed_ms")) >= OPS_SEARCH_INDEX_WARNING_MS,
+                }
+            )
+        if phase_rows:
+            phase_rows[-1]["warning"] = phase_elapsed >= OPS_SEARCH_PHASE_WARNING_MS
+    elapsed_ms = int_value(report.get("elapsed_ms"))
+    if elapsed_ms <= 0:
+        elapsed_ms = sum(int_value(item.get("elapsed_ms")) for item in phase_rows)
+    document_count = int_value(report.get("document_count"))
+    processed_count = int_value(report.get("processed_count"))
+    elapsed_seconds = elapsed_ms / 1000.0 if elapsed_ms > 0 else 0.0
+    slow_phases = sorted(phase_rows, key=lambda item: int_value(item.get("elapsed_ms")), reverse=True)[:5]
+    slow_indexes = sorted(
+        (item for item in index_rows if int_value(item.get("elapsed_ms")) >= OPS_SEARCH_INDEX_WARNING_MS),
+        key=lambda item: int_value(item.get("elapsed_ms")),
+        reverse=True,
+    )[:8]
+    return {
+        "exists": True,
+        "source": diagnostic_report_source(report),
+        "ok": report.get("ok"),
+        "target": report.get("target"),
+        "selected_count": report.get("selected_count"),
+        "processed_count": processed_count,
+        "remaining_count": report.get("remaining_count"),
+        "document_count": document_count,
+        "budget_seconds": report.get("budget_seconds"),
+        "budget_exhausted": report.get("budget_exhausted"),
+        "partial": report.get("partial"),
+        "elapsed_ms": elapsed_ms,
+        "documents_per_second": round(document_count / elapsed_seconds, 2) if elapsed_seconds > 0 and document_count > 0 else None,
+        "sessions_per_second": round(processed_count / elapsed_seconds, 3) if elapsed_seconds > 0 and processed_count > 0 else None,
+        "inline_optimize_count": report.get("inline_optimize_count"),
+        "raw_text_skipped_session_count": report.get("raw_text_skipped_session_count"),
+        "document_counts": {
+            "session": report.get("session_document_count"),
+            "segment": report.get("segment_document_count"),
+            "event": report.get("event_document_count"),
+            "incident": report.get("incident_document_count"),
+            "entity_registry": report.get("entity_registry_document_count"),
+        },
+        "slow_phases": slow_phases,
+        "slow_indexes": slow_indexes,
+        "diagnostics": report.get("diagnostics", []) if isinstance(report.get("diagnostics"), list) else [],
+    }
+
+
+def latest_successful_auto_maintenance_reports(aoa_root: Path) -> dict[str, Any]:
+    profiles: dict[str, Any] = {}
+    for report in diagnostic_json_payloads(aoa_root, "*__auto-maintenance-*.json"):
+        if report.get("ok") is not True:
+            continue
+        profile = str(report.get("profile") or "").strip()
+        if not profile:
+            profile = safe_slug(Path(str(report.get("_diagnostic_path") or "")).stem.rsplit("__auto-maintenance-", 1)[-1], fallback="unknown")
+        if profile not in profiles:
+            profiles[profile] = maintenance_report_brief(report)
+    return profiles
+
+
+def diagnostic_report_problem(report: dict[str, Any]) -> bool:
+    status = str(report.get("status") or "").lower()
+    coordinator = maintenance_report_coordinator(report)
+    coordinator_status = str(coordinator.get("status") or "").lower()
+    maintenance = report.get("maintenance") if isinstance(report.get("maintenance"), dict) else {}
+    maintenance_status = str(maintenance.get("status") or "").lower()
+    diagnostic_text = " ".join(
+        str(item).lower()
+        for values in (report.get("diagnostics"), report.get("hard_diagnostics"), maintenance.get("diagnostics"))
+        if isinstance(values, list)
+        for item in values
+    )
+    return any(
+        [
+            report.get("ok") is False,
+            bool(report.get("budget_exhausted")),
+            bool(maintenance.get("budget_exhausted")),
+            any(marker in status for marker in ("fail", "timeout", "killed", "aborted", "budget", "partial")),
+            any(marker in coordinator_status for marker in ("fail", "timeout", "killed", "aborted", "deferred")),
+            any(marker in maintenance_status for marker in ("fail", "timeout", "killed", "aborted", "budget", "partial", "remaining")),
+            any(marker in diagnostic_text for marker in ("failed", "failure", "timeout", "killed", "budget_exhausted", "error")),
+        ]
+    )
+
+
+def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+    problems: list[dict[str, Any]] = []
+    for report in diagnostic_json_payloads(aoa_root, "*.json", limit=OPS_DIAGNOSTIC_SCAN_LIMIT):
+        artifact_type = str(report.get("artifact_type") or "")
+        path = str(report.get("_diagnostic_path") or "")
+        if not (
+            artifact_type
+            in {
+                "auto_maintenance",
+                "index_maintenance",
+                "search_index",
+                "graph_maintenance",
+                "agent_atlas_index",
+                "performance_baseline",
+            }
+            or "__auto-maintenance-" in path
+            or "__index-maintenance" in path
+            or "__search-index" in path
+            or "__graph-maintenance" in path
+            or "__performance-baseline" in path
+        ):
+            continue
+        if diagnostic_report_problem(report):
+            problems.append(maintenance_report_brief(report))
+        if len(problems) >= limit:
+            break
+    return problems
+
+
+def ops_size_warning(*, code: str, label: str, entry: dict[str, Any], warning_bytes: int, critical_bytes: int) -> dict[str, Any] | None:
+    total_bytes = int_value(entry.get("total_with_wal_bytes"), int_value(entry.get("size_bytes")))
+    if total_bytes < warning_bytes:
+        return None
+    return {
+        "code": code,
+        "severity": "critical" if total_bytes >= critical_bytes else "warning",
+        "label": label,
+        "size_bytes": total_bytes,
+        "size_human": human_size(total_bytes),
+        "warning_bytes": warning_bytes,
+        "critical_bytes": critical_bytes,
+    }
+
+
+def ops_sqlite_wal_warning(*, code: str, label: str, entry: dict[str, Any]) -> dict[str, Any] | None:
+    wal = entry.get("wal") if isinstance(entry.get("wal"), dict) else {}
+    wal_bytes = int_value(wal.get("size_bytes"))
+    if wal_bytes < OPS_SQLITE_WAL_WARNING_BYTES:
+        return None
+    return {
+        "code": code,
+        "severity": "warning",
+        "label": label,
+        "size_bytes": wal_bytes,
+        "size_human": human_size(wal_bytes),
+        "warning_bytes": OPS_SQLITE_WAL_WARNING_BYTES,
+    }
+
+
+def session_memory_ops_writer_summary(coordinator: dict[str, Any]) -> dict[str, Any]:
+    owner = coordinator.get("owner") if isinstance(coordinator.get("owner"), dict) else {}
+    last_job = coordinator.get("last_job") if isinstance(coordinator.get("last_job"), dict) else {}
+    active_elapsed_ms = 0
+    if coordinator.get("active") and owner:
+        started_epoch = ops_float_value(owner.get("started_epoch"))
+        if started_epoch > 0:
+            active_elapsed_ms = max(0, int((time.time() - started_epoch) * 1000))
+    return {
+        "active": coordinator.get("active"),
+        "stale_active_job": coordinator.get("stale_active_job"),
+        "active_elapsed_ms": active_elapsed_ms,
+        "owner": maintenance_coordinator_brief(owner) if owner else {},
+        "last_job": maintenance_coordinator_brief(last_job) if last_job else {},
+        "diagnostics": coordinator.get("diagnostics", []) if isinstance(coordinator.get("diagnostics"), list) else [],
+    }
+
+
+def session_memory_ops_warnings(
+    *,
+    storage: dict[str, Any],
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    entity_registry: dict[str, Any],
+    writer: dict[str, Any],
+    latest_search_index: dict[str, Any],
+    recent_problem_jobs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    search_db = storage.get("search_db") if isinstance(storage.get("search_db"), dict) else {}
+    graph_db = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
+    for item in (
+        ops_size_warning(
+            code="search_db_large",
+            label="search_db",
+            entry=search_db,
+            warning_bytes=OPS_SEARCH_DB_WARNING_BYTES,
+            critical_bytes=OPS_SEARCH_DB_CRITICAL_BYTES,
+        ),
+        ops_size_warning(
+            code="graph_db_large",
+            label="graph_db",
+            entry=graph_db,
+            warning_bytes=OPS_GRAPH_DB_WARNING_BYTES,
+            critical_bytes=OPS_GRAPH_DB_CRITICAL_BYTES,
+        ),
+        ops_sqlite_wal_warning(code="search_wal_large", label="search_db_wal", entry=search_db),
+        ops_sqlite_wal_warning(code="graph_wal_large", label="graph_db_wal", entry=graph_db),
+    ):
+        if item is not None:
+            warnings.append(item)
+    last_job = writer.get("last_job") if isinstance(writer.get("last_job"), dict) else {}
+    owner = writer.get("owner") if isinstance(writer.get("owner"), dict) else {}
+    if int_value(writer.get("active_elapsed_ms")) >= OPS_WRITER_WARNING_MS:
+        warnings.append(
+            {
+                "code": "maintenance_writer_long_running",
+                "severity": "warning",
+                "elapsed_ms": writer.get("active_elapsed_ms"),
+                "owner_job": owner.get("owner_job"),
+                "profile": owner.get("profile"),
+            }
+        )
+    for job, job_kind in ((owner, "active"), (last_job, "last")):
+        lock_wait_ms = int_value(job.get("lock_wait_ms")) if isinstance(job, dict) else 0
+        if lock_wait_ms >= OPS_LOCK_WAIT_WARNING_MS:
+            warnings.append(
+                {
+                    "code": f"{job_kind}_maintenance_lock_wait",
+                    "severity": "warning",
+                    "lock_wait_ms": lock_wait_ms,
+                    "owner_job": job.get("owner_job"),
+                    "profile": job.get("profile"),
+                }
+            )
+    if int_value(graph.get("actionable_count")) > 0 or int_value(graph.get("dirty_count")) > 0:
+        warnings.append(
+            {
+                "code": "graph_actionable_sources",
+                "severity": "warning",
+                "actionable_count": graph.get("actionable_count"),
+                "dirty_count": graph.get("dirty_count"),
+                "missing_count": graph.get("missing_count"),
+            }
+        )
+    if int_value(search.get("actionable_dirty_session_count")) > 0:
+        warnings.append(
+            {
+                "code": "search_actionable_dirty_sessions",
+                "severity": "warning",
+                "actionable_dirty_session_count": search.get("actionable_dirty_session_count"),
+            }
+        )
+    if entity_registry.get("needs_maintenance"):
+        warnings.append(
+            {
+                "code": "entity_registry_needs_maintenance",
+                "severity": "warning",
+                "diagnostics": entity_registry.get("diagnostics", []),
+            }
+        )
+    if latest_search_index.get("budget_exhausted"):
+        warnings.append(
+            {
+                "code": "latest_search_index_budget_exhausted",
+                "severity": "warning",
+                "source": latest_search_index.get("source"),
+            }
+        )
+    if recent_problem_jobs:
+        warnings.append(
+            {
+                "code": "recent_problem_jobs",
+                "severity": "warning",
+                "count": len(recent_problem_jobs),
+                "latest": recent_problem_jobs[0].get("source", {}) if isinstance(recent_problem_jobs[0], dict) else {},
+            }
+        )
+    return warnings
+
+
+def session_memory_ops_long_maintenance_reasons(
+    *,
+    storage: dict[str, Any],
+    writer: dict[str, Any],
+    latest_search_index: dict[str, Any],
+) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    for phase in latest_search_index.get("slow_phases", []) if isinstance(latest_search_index.get("slow_phases"), list) else []:
+        if not isinstance(phase, dict):
+            continue
+        reasons.append(
+            {
+                "reason": "search_index_phase",
+                "phase": phase.get("phase"),
+                "elapsed_ms": phase.get("elapsed_ms"),
+                "warning": phase.get("warning"),
+            }
+        )
+    for index_item in latest_search_index.get("slow_indexes", []) if isinstance(latest_search_index.get("slow_indexes"), list) else []:
+        if not isinstance(index_item, dict):
+            continue
+        reasons.append(
+            {
+                "reason": "sqlite_index_build",
+                "index": index_item.get("index"),
+                "phase": index_item.get("phase"),
+                "elapsed_ms": index_item.get("elapsed_ms"),
+            }
+        )
+    last_job = writer.get("last_job") if isinstance(writer.get("last_job"), dict) else {}
+    if int_value(last_job.get("elapsed_ms")) >= OPS_WRITER_WARNING_MS:
+        reasons.append(
+            {
+                "reason": "last_maintenance_job_long",
+                "owner_job": last_job.get("owner_job"),
+                "profile": last_job.get("profile"),
+                "elapsed_ms": last_job.get("elapsed_ms"),
+            }
+        )
+    for key, label in (("search_db", "search_db"), ("graph_db", "graph_db")):
+        entry = storage.get(key) if isinstance(storage.get(key), dict) else {}
+        total_bytes = int_value(entry.get("total_with_wal_bytes"), int_value(entry.get("size_bytes")))
+        threshold = OPS_SEARCH_DB_WARNING_BYTES if key == "search_db" else OPS_GRAPH_DB_WARNING_BYTES
+        if total_bytes >= threshold:
+            reasons.append(
+                {
+                    "reason": "large_sqlite_projection",
+                    "label": label,
+                    "size_bytes": total_bytes,
+                    "size_human": human_size(total_bytes),
+                }
+            )
+    return reasons[:12]
+
+
+def session_memory_operations_summary(
+    *,
+    aoa_root: Path,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    entity_registry: dict[str, Any],
+    coordinator: dict[str, Any],
+    storage: dict[str, Any],
+) -> dict[str, Any]:
+    latest_search_reports = diagnostic_json_payloads(aoa_root, "*__search-index.json", limit=1)
+    latest_search_index = search_index_ops_summary(latest_search_reports[0] if latest_search_reports else None)
+    writer = session_memory_ops_writer_summary(coordinator)
+    last_successful_auto_maintenance = latest_successful_auto_maintenance_reports(aoa_root)
+    recent_problem_jobs = recent_problem_maintenance_reports(aoa_root)
+    warnings = session_memory_ops_warnings(
+        storage=storage,
+        search=search,
+        graph=graph,
+        entity_registry=entity_registry,
+        writer=writer,
+        latest_search_index=latest_search_index,
+        recent_problem_jobs=recent_problem_jobs,
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_operations_summary",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "storage": {
+            "search_db_total_bytes": (storage.get("search_db") or {}).get("total_with_wal_bytes") if isinstance(storage.get("search_db"), dict) else None,
+            "search_db_total_human": (storage.get("search_db") or {}).get("total_with_wal_human") if isinstance(storage.get("search_db"), dict) else None,
+            "graph_db_total_bytes": (storage.get("graph_db") or {}).get("total_with_wal_bytes") if isinstance(storage.get("graph_db"), dict) else None,
+            "graph_db_total_human": (storage.get("graph_db") or {}).get("total_with_wal_human") if isinstance(storage.get("graph_db"), dict) else None,
+        },
+        "dirty_counts": {
+            "search_actionable_dirty_session_count": search.get("actionable_dirty_session_count"),
+            "search_deferred_live_session_count": search.get("deferred_live_session_count"),
+            "graph_actionable_source_count": graph.get("actionable_count"),
+            "graph_dirty_count": graph.get("dirty_count"),
+            "graph_missing_count": graph.get("missing_count"),
+            "graph_blocked_count": graph.get("blocked_count"),
+            "graph_retired_count": graph.get("retired_count"),
+            "entity_registry_status": entity_registry.get("status"),
+            "entity_registry_entity_count": entity_registry.get("entity_count"),
+        },
+        "writer": writer,
+        "latest_search_index": latest_search_index,
+        "last_successful_auto_maintenance": last_successful_auto_maintenance,
+        "recent_problem_jobs": recent_problem_jobs,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+        "why_maintenance_long": session_memory_ops_long_maintenance_reasons(
+            storage=storage,
+            writer=writer,
+            latest_search_index=latest_search_index,
+        ),
+        "truth_status": "diagnostic_projection_for_operator_routing_not_archive_truth",
+    }
+
+
 def session_memory_maintenance_next_actions(
     *,
     workspace_root: Path,
@@ -36631,6 +37143,14 @@ def session_memory_maintenance_status(
     }
     coordinator = maintenance_lock_snapshot(aoa_root)
     storage = maintenance_storage_status(aoa_root)
+    operations = session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search=search,
+        graph=graph,
+        entity_registry=entity_registry,
+        coordinator=coordinator,
+        storage=storage,
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
@@ -36648,6 +37168,7 @@ def session_memory_maintenance_status(
         "route": route,
         "coordinator": coordinator,
         "storage": storage,
+        "operations": operations,
         "portable_clean_runtime": portable_clean_runtime,
         "next_actions": next_actions,
         "exact_next_command": shlex.join(next_actions[0]["command"]) if next_actions and isinstance(next_actions[0].get("command"), list) else "",
@@ -36813,6 +37334,64 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             compact_storage[key]["wal_size_bytes"] = wal.get("size_bytes")
             compact_storage[key]["wal_size_human"] = wal.get("size_human")
 
+    operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
+    latest_search_index = operations.get("latest_search_index") if isinstance(operations.get("latest_search_index"), dict) else {}
+    compact_operations = {
+        "warning_count": operations.get("warning_count"),
+        "warnings": [
+            {
+                key: warning.get(key)
+                for key in ("code", "severity", "label", "size_human", "elapsed_ms", "lock_wait_ms", "count")
+                if key in warning
+            }
+            for warning in (operations.get("warnings") or [])[:6]
+            if isinstance(warning, dict)
+        ],
+        "dirty_counts": operations.get("dirty_counts"),
+        "writer": {
+            "active": (operations.get("writer") or {}).get("active") if isinstance(operations.get("writer"), dict) else None,
+            "active_elapsed_ms": (operations.get("writer") or {}).get("active_elapsed_ms") if isinstance(operations.get("writer"), dict) else None,
+            "last_job": {
+                key: ((operations.get("writer") or {}).get("last_job") or {}).get(key)
+                for key in ("owner_job", "profile", "status", "finished_at", "elapsed_ms")
+                if isinstance(operations.get("writer"), dict)
+                and isinstance((operations.get("writer") or {}).get("last_job"), dict)
+                and key in ((operations.get("writer") or {}).get("last_job") or {})
+            },
+        },
+        "latest_search_index": {
+            key: latest_search_index.get(key)
+            for key in (
+                "exists",
+                "ok",
+                "target",
+                "processed_count",
+                "document_count",
+                "elapsed_ms",
+                "documents_per_second",
+                "sessions_per_second",
+                "budget_exhausted",
+            )
+            if key in latest_search_index
+        },
+        "slow_phases": latest_search_index.get("slow_phases", [])[:4] if isinstance(latest_search_index.get("slow_phases"), list) else [],
+        "slow_indexes": latest_search_index.get("slow_indexes", [])[:4] if isinstance(latest_search_index.get("slow_indexes"), list) else [],
+        "last_successful_auto_maintenance": {
+            profile: {
+                "status": report.get("status"),
+                "generated_at": (report.get("source") or {}).get("generated_at") if isinstance(report.get("source"), dict) else None,
+                "elapsed_ms": ((report.get("coordinator") or {}).get("elapsed_ms") if isinstance(report.get("coordinator"), dict) else None),
+            }
+            for profile, report in (operations.get("last_successful_auto_maintenance") or {}).items()
+            if isinstance(report, dict)
+        }
+        if isinstance(operations.get("last_successful_auto_maintenance"), dict)
+        else {},
+        "recent_problem_job_count": len(operations.get("recent_problem_jobs", [])) if isinstance(operations.get("recent_problem_jobs"), list) else 0,
+        "why_maintenance_long": operations.get("why_maintenance_long", [])[:8] if isinstance(operations.get("why_maintenance_long"), list) else [],
+        "truth_status": operations.get("truth_status"),
+    }
+
     return {
         "schema_version": payload.get("schema_version"),
         "artifact_type": payload.get("artifact_type"),
@@ -36828,6 +37407,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "route": payload.get("route"),
         "coordinator": compact_coordinator,
         "storage": compact_storage,
+        "operations": compact_operations,
         "portable_clean_runtime": payload.get("portable_clean_runtime"),
         "next_actions": [
             {
@@ -36859,6 +37439,8 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     search_db = storage.get("search_db") if isinstance(storage.get("search_db"), dict) else {}
     graph_db = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
+    operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
+    latest_search_index = operations.get("latest_search_index") if isinstance(operations.get("latest_search_index"), dict) else {}
     lines = [
         "# Session Memory Maintenance Status",
         "",
@@ -36874,12 +37456,31 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- last_maintenance: `{last_job.get('owner_job', '')}` status=`{last_job.get('status', '')}` finished_at=`{last_job.get('finished_at', '')}` elapsed_ms=`{last_job.get('elapsed_ms', '')}`",
         f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
         f"- graph_db: `{graph_db.get('size_human')}` wal=`{(graph_db.get('wal') or {}).get('size_human') if isinstance(graph_db.get('wal'), dict) else ''}` total=`{graph_db.get('total_with_wal_human')}`",
+        f"- ops_warnings: `{operations.get('warning_count')}`",
+        f"- latest_search_index: processed=`{latest_search_index.get('processed_count')}` docs=`{latest_search_index.get('document_count')}` elapsed_ms=`{latest_search_index.get('elapsed_ms')}` docs_per_sec=`{latest_search_index.get('documents_per_second')}`",
         f"- exact_next_command: `{payload.get('exact_next_command')}`",
         "",
         "## Boundary",
         "",
         str(payload.get("mcp_boundary") or ""),
     ]
+    warnings = operations.get("warnings") if isinstance(operations.get("warnings"), list) else []
+    if warnings:
+        lines.extend(["", "## Operations Warnings", ""])
+        for item in warnings[:12]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- `{item.get('code')}` severity=`{item.get('severity')}` size=`{item.get('size_human', '')}` elapsed_ms=`{item.get('elapsed_ms', '')}`"
+            )
+    reasons = operations.get("why_maintenance_long") if isinstance(operations.get("why_maintenance_long"), list) else []
+    if reasons:
+        lines.extend(["", "## Why Maintenance Can Be Long", ""])
+        for item in reasons[:12]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("phase") or item.get("index") or item.get("label") or item.get("owner_job") or item.get("reason")
+            lines.append(f"- `{item.get('reason')}` `{label}` elapsed_ms=`{item.get('elapsed_ms', '')}` size=`{item.get('size_human', '')}`")
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
