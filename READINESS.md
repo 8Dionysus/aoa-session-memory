@@ -550,6 +550,15 @@ Last observed result:
   MCP, hook health, tool, goal, and API samples returned `6/6` passed with raw
   previews available for proof windows in
   `diagnostics/20260621T015349Z__entity-usage-scenario-audit__codex_goal_fastpath_20260621.json`.
+- 2026-06-21 usage-scenario audit hygiene proof: the randomized live scenario
+  default now samples operational agent routes (`skill`, `mcp`, `tool`, `api`,
+  `hook_health`, `goal`, `agent_event`) from event-scoped route postings,
+  filters generated/runtime keys such as `__pycache__`, and treats
+  hook/agent-event evidence by layer semantics instead of requiring fake direct
+  usage. The regression seed `20260621` returned `8/8` passed, `0` warnings,
+  `0` failures, raw previews available for all samples, `elapsed_ms=6353`, and
+  slowest sample `api:graphql` at `843ms` in
+  `diagnostics/20260621T124512Z__entity-usage-scenario-audit__20260621.json`.
 - 2026-06-21 structured agent-route proof: broad
   `agent-responses --limit 10 --explain` initially exceeded `90s` and had to be
   killed because the default SQL ordered by a computed stream-copy rank and

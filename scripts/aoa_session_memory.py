@@ -29773,6 +29773,7 @@ TRACE_ROUTE_KINDS = {
     "hook",
     "tool",
     "api",
+    "agent_event",
     "plugin",
     "agent",
     "script",
@@ -29791,6 +29792,44 @@ TRACE_ROUTE_KINDS = {
     "failure",
     "decision",
     "external",
+}
+
+AGENT_EVENT_ROUTE_ALIASES = {
+    "answer": "assistant_answer",
+    "assistant_answer": "assistant_answer",
+    "response": "assistant_answer",
+    "assistant_response": "assistant_answer",
+    "open_thread": "assistant_open_thread",
+    "assistant_open_thread": "assistant_open_thread",
+    "final": "assistant_final_closeout",
+    "closeout": "assistant_final_closeout",
+    "final_closeout": "assistant_final_closeout",
+    "assistant_final_closeout": "assistant_final_closeout",
+    "reasoning": "assistant_reasoning_boundary",
+    "reasoning_boundary": "assistant_reasoning_boundary",
+    "reasoning_window": "assistant_reasoning_boundary",
+    "assistant_reasoning_boundary": "assistant_reasoning_boundary",
+    "plan": "assistant_plan",
+    "assistant_plan": "assistant_plan",
+    "progress": "assistant_progress_update",
+    "assistant_progress_update": "assistant_progress_update",
+    "verification": "assistant_verification_report",
+    "assistant_verification_report": "assistant_verification_report",
+    "decision": "assistant_decision",
+    "assistant_decision": "assistant_decision",
+    "assumption": "assistant_assumption",
+    "assistant_assumption": "assistant_assumption",
+    "checkpoint": "assistant_checkpoint",
+    "assistant_checkpoint": "assistant_checkpoint",
+    "handoff": "assistant_handoff_or_resume",
+    "resume": "assistant_handoff_or_resume",
+    "assistant_handoff_or_resume": "assistant_handoff_or_resume",
+    "correction": "assistant_correction_ack",
+    "assistant_correction_ack": "assistant_correction_ack",
+    "blocker": "assistant_blocker_report",
+    "assistant_blocker_report": "assistant_blocker_report",
+    "process_lesson": "assistant_process_lesson",
+    "assistant_process_lesson": "assistant_process_lesson",
 }
 
 
@@ -29857,6 +29896,8 @@ def infer_trace_route_kinds(anchor: str, explicit_kind: str = "auto") -> list[st
         add_kind("hook")
     if "api" in lowered or any(api_entity_candidates_from_texts([alias]) for alias in aliases):
         add_kind("api")
+    if any(AGENT_EVENT_ROUTE_ALIASES.get(route_key_slug(alias, fallback="")) for alias in aliases) or "agent_event" in lowered:
+        add_kind("agent_event")
     if "plugin" in lowered or "plugin://" in lowered:
         add_kind("plugin")
     if "agent" in lowered or "agents/" in lowered:
@@ -30093,6 +30134,14 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
             add_candidate(layer, key, source=f"{layer}_alias", confidence="high", detail=anchor)
             if layer != "memory":
                 add_candidate("entity", key, source=f"{layer}_entity_alias", confidence="medium", detail=anchor)
+
+    if "agent_event" in kinds:
+        add_candidate("agent_event", "", source="agent_event_layer_hint", confidence="low", detail="generic agent event route layer")
+        for alias in aliases:
+            slug = route_key_slug(alias, fallback="")
+            key = AGENT_EVENT_ROUTE_ALIASES.get(slug, slug if slug.startswith("assistant_") else "")
+            if key:
+                add_candidate("agent_event", key, source="agent_event_alias", confidence="high", detail=alias)
 
     if "path" in kinds:
         for alias in aliases:
@@ -40792,6 +40841,28 @@ ENTITY_USAGE_ROLE_PRIORITY = {
     "context": 4,
 }
 ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT = 24
+ENTITY_USAGE_DIRECT_TRACE_KINDS = {
+    "agent",
+    "api",
+    "entity",
+    "eval",
+    "git",
+    "github",
+    "goal",
+    "graph",
+    "mcp",
+    "memory",
+    "mechanic",
+    "path",
+    "playbook",
+    "plugin",
+    "script",
+    "skill",
+    "technique",
+    "test",
+    "tool",
+    "validator",
+}
 ENTITY_USAGE_DOCUMENT_PATH_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_@+.-])(?:[~/A-Za-z0-9_@+.-]+/)+[A-Za-z0-9_@+.-]+\.(?:md|py|json|toml|ya?ml|txt|sh|mjs|ts|tsx|js|jsx|rs|go|java|rb|sql)",
     flags=re.IGNORECASE,
@@ -41358,9 +41429,74 @@ def entity_usage_audit(
         for hit in merged.values()
         if compact_usage_event_from_search_hit(hit).get("role") == "usage"
     )
+    route_evidence_hit_count = sum(
+        1
+        for hit in merged.values()
+        if compact_usage_event_from_search_hit(hit).get("role") != "context"
+    )
+    route_usage_retry_applied = False
+    route_usage_retry_fetch_limit = 0
+    if (
+        lookup_candidates
+        and route_hit_count > 0
+        and route_usage_hit_count == 0
+        and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
+        and route_fetch_limit < 100
+    ):
+        route_usage_retry_fetch_limit = min(100, max(route_fetch_limit * 4, limit * 12))
+        if route_usage_retry_fetch_limit > route_fetch_limit:
+            route_usage_retry_applied = True
+            for candidate in lookup_candidates:
+                route_signal_value = str(candidate.get("route_signal") or "")
+                route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
+                matched_route = route_signal_value or f"{candidate.get('layer')}:*"
+                payload = search_sessions(
+                    aoa_root=aoa_root,
+                    query="",
+                    limit=route_usage_retry_fetch_limit,
+                    provider=provider,
+                    session=session,
+                    doc_type="event",
+                    route_layer=route_layer_value,
+                    route_signal=route_signal_value or None,
+                    explain=True,
+                    semantic_preview=False,
+                    hydrate_body=False,
+                )
+                route_result_summaries.append(
+                    {
+                        "candidate": candidate,
+                        "ok": payload.get("ok"),
+                        "result_count": payload.get("result_count"),
+                        "requested_per_route_limit": per_route_limit,
+                        "fetch_limit": route_usage_retry_fetch_limit,
+                        "retry_reason": "direct_usage_not_found_in_initial_route_window",
+                        "diagnostics": payload.get("diagnostics", []),
+                    }
+                )
+                if not payload.get("ok"):
+                    diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
+                    continue
+                for hit in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+                    if isinstance(hit, dict):
+                        merge_usage_hit(merged, hit, matched_route)
+            route_hit_count = len(merged)
+            route_usage_hit_count = sum(
+                1
+                for hit in merged.values()
+                if compact_usage_event_from_search_hit(hit).get("role") == "usage"
+            )
+            route_evidence_hit_count = sum(
+                1
+                for hit in merged.values()
+                if compact_usage_event_from_search_hit(hit).get("role") != "context"
+            )
     text_search_skipped = False
     skip_text_search = bool(diagnostics) and not lookup_candidates
-    if not skip_text_search and lookup_candidates and route_hit_count >= limit and route_usage_hit_count > 0:
+    route_evidence_satisfies_kind = route_usage_hit_count > 0 or (
+        normalized_kind not in ENTITY_USAGE_DIRECT_TRACE_KINDS and route_evidence_hit_count > 0
+    )
+    if not skip_text_search and lookup_candidates and route_hit_count >= limit and route_evidence_satisfies_kind:
         skip_text_search = True
         text_search_skipped = True
     text_result_count = 0
@@ -41430,6 +41566,9 @@ def entity_usage_audit(
         "text_search_skipped": text_search_skipped,
         "route_hit_count_before_text_fallback": route_hit_count,
         "route_usage_hit_count_before_text_fallback": route_usage_hit_count,
+        "route_evidence_hit_count_before_text_fallback": route_evidence_hit_count,
+        "route_usage_retry_applied": route_usage_retry_applied,
+        "route_usage_retry_fetch_limit": route_usage_retry_fetch_limit,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
         "search_has_route_index": bool(
@@ -41708,23 +41847,105 @@ def entity_usage_neighborhood_markdown(payload: dict[str, Any]) -> str:
 
 ENTITY_USAGE_SCENARIO_LAYER_KIND = {
     "entity": "entity",
+    "skill": "skill",
     "mcp": "mcp",
     "tool": "tool",
+    "api": "api",
     "hook_health": "hook",
     "path": "path",
     "goal": "goal",
+    "agent_event": "agent_event",
     "failure_mode": "failure",
     "decision_thread": "decision",
     "external_snapshot": "external",
     "delivery_state": "git",
 }
-ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS = tuple(sorted(ENTITY_USAGE_SCENARIO_LAYER_KIND))
+ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS = (
+    "agent_event",
+    "api",
+    "goal",
+    "hook_health",
+    "mcp",
+    "skill",
+    "tool",
+)
+ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS = {
+    "api",
+    "entity",
+    "eval",
+    "git",
+    "goal",
+    "graph",
+    "mcp",
+    "memory",
+    "mechanic",
+    "path",
+    "playbook",
+    "plugin",
+    "script",
+    "skill",
+    "technique",
+    "test",
+    "tool",
+    "validator",
+}
+ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS = (
+    "__pycache__",
+    "pycache",
+    "_cpython_",
+    "_pytest_",
+    "site_packages",
+    "dist_info",
+    "egg_info",
+    "node_modules",
+    "pytest_cache",
+)
 
 
 def entity_usage_scenario_anchor(layer: str, key: str) -> str:
     if layer == "mcp":
         return key.replace("_", "-")
     return key
+
+
+def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> str:
+    layer = str(candidate.get("layer") or "")
+    key = str(candidate.get("key") or "")
+    if not key:
+        return "empty_key"
+    if key.startswith("namespace_"):
+        return "namespace_key"
+    if any(fragment in key for fragment in ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS):
+        return "generated_runtime_key"
+    event_count = int_value(candidate.get("event_document_count"))
+    usage_count = int_value(candidate.get("usage_event_count"))
+    result_count = int_value(candidate.get("result_event_count"))
+    outcome_count = int_value(candidate.get("outcome_event_count"))
+    evidence_count = usage_count + result_count + outcome_count
+    if event_count <= 0:
+        return "no_event_documents"
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count <= 0:
+        return "no_direct_usage_events"
+    if layer == "agent_event" and evidence_count <= 0:
+        return "no_agent_event_evidence"
+    if layer in {"hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"} and evidence_count <= 0:
+        return "no_layer_evidence_events"
+    return ""
+
+
+def entity_usage_scenario_candidate_score(candidate: dict[str, Any]) -> int:
+    usage_count = int_value(candidate.get("usage_event_count"))
+    result_count = int_value(candidate.get("result_event_count"))
+    outcome_count = int_value(candidate.get("outcome_event_count"))
+    event_count = int_value(candidate.get("event_document_count"))
+    document_count = int_value(candidate.get("document_count"))
+    return (
+        min(usage_count, 50) * 1000
+        + min(outcome_count, 50) * 250
+        + min(result_count, 50) * 150
+        + min(event_count, 100) * 10
+        + min(document_count, 100)
+    )
 
 
 def entity_usage_scenario_candidates(
@@ -41750,6 +41971,10 @@ def entity_usage_scenario_candidates(
         selected_layers = [route_key_slug(layer, fallback=layer) for layer in (layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS))]
         selected_layers = [layer for layer in selected_layers if layer]
         placeholders = ",".join("?" for _ in selected_layers)
+        usage_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_DIRECT_TYPES))
+        goal_act_placeholders = ",".join("?" for _ in sorted(GOAL_SESSION_ACTS))
+        result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
+        outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
         rows = conn.execute(
             f"""
             SELECT
@@ -41758,15 +41983,48 @@ def entity_usage_scenario_candidates(
               route_terms.key AS key,
               route_terms.route_signal AS route_signal,
               COUNT(document_routes.doc_rowid) AS posting_count,
-              COUNT(DISTINCT document_routes.doc_rowid) AS document_count
+              COUNT(DISTINCT document_routes.doc_rowid) AS document_count,
+              SUM(CASE WHEN documents.doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
+              SUM(
+                CASE
+                  WHEN documents.doc_type = 'event'
+                    AND (
+                      documents.event_type IN ({usage_type_placeholders})
+                      OR documents.session_act IN ({goal_act_placeholders})
+                    )
+                  THEN 1 ELSE 0
+                END
+              ) AS usage_event_count,
+              SUM(
+                CASE
+                  WHEN documents.doc_type = 'event'
+                    AND documents.event_type IN ({result_type_placeholders})
+                  THEN 1 ELSE 0
+                END
+              ) AS result_event_count,
+              SUM(
+                CASE
+                  WHEN documents.doc_type = 'event'
+                    AND documents.event_type IN ({outcome_type_placeholders})
+                  THEN 1 ELSE 0
+                END
+              ) AS outcome_event_count
             FROM route_terms
             JOIN document_routes ON document_routes.route_id = route_terms.id
+            JOIN documents ON documents.rowid = document_routes.doc_rowid
             WHERE route_terms.key <> ''
               AND route_terms.layer IN ({placeholders})
             GROUP BY route_terms.id
-            HAVING posting_count >= ?
+            HAVING event_document_count >= ?
             """,
-            [*selected_layers, max(1, int_value(min_postings, 1))],
+            [
+                *sorted(ENTITY_USAGE_DIRECT_TYPES),
+                *sorted(GOAL_SESSION_ACTS),
+                *sorted(ENTITY_USAGE_RESULT_TYPES),
+                *sorted(ENTITY_USAGE_OUTCOME_TYPES),
+                *selected_layers,
+                max(1, int_value(min_postings, 1)),
+            ],
         ).fetchall()
     except sqlite3.Error as exc:
         if conn is not None:
@@ -41775,8 +42033,10 @@ def entity_usage_scenario_candidates(
     finally:
         if conn is not None:
             conn.close()
-    candidates = [
-        {
+    candidates: list[dict[str, Any]] = []
+    rejected_counts: Counter[str] = Counter()
+    for row in rows:
+        candidate = {
             "route_id": int(row["route_id"]),
             "layer": str(row["layer"]),
             "key": str(row["key"]),
@@ -41785,10 +42045,19 @@ def entity_usage_scenario_candidates(
             "route_signal": str(row["route_signal"]),
             "posting_count": int(row["posting_count"]),
             "document_count": int(row["document_count"]),
+            "event_document_count": int_value(row["event_document_count"]),
+            "usage_event_count": int_value(row["usage_event_count"]),
+            "result_event_count": int_value(row["result_event_count"]),
+            "outcome_event_count": int_value(row["outcome_event_count"]),
         }
-        for row in rows
-        if not str(row["key"] or "").startswith("namespace_")
-    ]
+        reject_reason = entity_usage_scenario_candidate_reject_reason(candidate)
+        if reject_reason:
+            rejected_counts[reject_reason] += 1
+            continue
+        candidate["scenario_score"] = entity_usage_scenario_candidate_score(candidate)
+        candidates.append(candidate)
+    for reason, count in sorted(rejected_counts.items()):
+        diagnostics.append(f"candidate_pool_filtered:{reason}:{count}")
     rng = random.Random(str(seed))
     requested = max(1, min(int_value(sample_size, 8), 50))
     by_layer: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -41796,6 +42065,7 @@ def entity_usage_scenario_candidates(
         by_layer[str(candidate.get("layer") or "")].append(candidate)
     for items in by_layer.values():
         rng.shuffle(items)
+        items.sort(key=lambda item: int_value(item.get("scenario_score")), reverse=True)
     layer_order = sorted(by_layer)
     rng.shuffle(layer_order)
     selected: list[dict[str, Any]] = []
@@ -41831,6 +42101,48 @@ def entity_usage_raw_preview_counts(events: list[dict[str, Any]], *, limit: int 
     return dict(sorted(counts.items()))
 
 
+def entity_usage_scenario_sample_status(
+    *,
+    candidate: dict[str, Any],
+    audit: dict[str, Any],
+    preview_counts: dict[str, int],
+    raw_preview_limit: int,
+) -> tuple[str, list[str]]:
+    layer = str(candidate.get("layer") or "")
+    usage_count = int_value(audit.get("usage_event_count"))
+    result_count = int_value(audit.get("result_event_count"))
+    outcome_count = int_value(audit.get("outcome_event_count"))
+    entrypoint_count = int_value(audit.get("entrypoint_event_count"))
+    context_count = int_value(audit.get("context_event_count"))
+    consequence_count = int_value(audit.get("consequence_event_count"))
+    event_count = int_value(audit.get("event_count"))
+    evidence_count = usage_count + result_count + outcome_count + entrypoint_count + context_count
+    failure_reasons: list[str] = []
+    if not audit.get("ok"):
+        failure_reasons.append("audit_not_ok")
+    if event_count <= 0:
+        failure_reasons.append("no_events")
+    if not audit.get("document_refs"):
+        failure_reasons.append("no_document_refs")
+    if raw_preview_limit > 0 and int_value(preview_counts.get("available")) <= 0:
+        failure_reasons.append("raw_preview_unavailable")
+    if failure_reasons:
+        return "failed", failure_reasons
+
+    warning_reasons: list[str] = []
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count <= 0:
+        warning_reasons.append("no_usage_events")
+    if layer == "agent_event" and outcome_count <= 0 and event_count <= 0:
+        warning_reasons.append("no_agent_event_evidence")
+    if layer in {"hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"} and evidence_count <= 0:
+        warning_reasons.append("no_layer_evidence_events")
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and consequence_count <= 0 and result_count <= 0 and outcome_count <= 0:
+        warning_reasons.append("no_consequence_or_result_events")
+    if warning_reasons:
+        return "warn", warning_reasons
+    return "passed", []
+
+
 def entity_usage_scenario_audit(
     *,
     aoa_root: Path,
@@ -41847,6 +42159,7 @@ def entity_usage_scenario_audit(
     full: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
+    scenario_started = time.monotonic()
     candidates, diagnostics = entity_usage_scenario_candidates(
         aoa_root=aoa_root,
         layers=layers,
@@ -41859,6 +42172,8 @@ def entity_usage_scenario_audit(
     freshness_counts: Counter[str] = Counter()
     raw_preview_totals: Counter[str] = Counter()
     for candidate in candidates:
+        sample_started = time.monotonic()
+        audit_started = time.monotonic()
         audit = entity_usage_audit(
             aoa_root=aoa_root,
             anchor=str(candidate["anchor"]),
@@ -41868,6 +42183,7 @@ def entity_usage_scenario_audit(
             consequence_window=consequence_window,
             document_limit=document_limit,
         )
+        audit_elapsed_ms = int((time.monotonic() - audit_started) * 1000)
         quality = audit.get("quality") if isinstance(audit.get("quality"), dict) else {}
         event_buckets: list[dict[str, Any]] = []
         for bucket_name in ["usage_events", "consequence_events", "result_events", "outcome_events", "entrypoint_events", "context_events"]:
@@ -41875,35 +42191,34 @@ def entity_usage_scenario_audit(
             event_buckets.extend(event for event in bucket if isinstance(event, dict))
         usage_events = audit.get("usage_events") if isinstance(audit.get("usage_events"), list) else []
         consequence_events = audit.get("consequence_events") if isinstance(audit.get("consequence_events"), list) else []
+        preview_started = time.monotonic()
         preview_counts = entity_usage_raw_preview_counts(event_buckets, limit=raw_preview_limit)
+        raw_preview_elapsed_ms = int((time.monotonic() - preview_started) * 1000)
         raw_preview_totals.update(preview_counts)
         sample_freshness = quality.get("freshness_counts") if isinstance(quality.get("freshness_counts"), dict) else {}
         for key, value in sample_freshness.items():
             freshness_counts[str(key)] += int_value(value)
-        failure_reasons: list[str] = []
-        if not audit.get("ok"):
-            failure_reasons.append("audit_not_ok")
-        if int_value(audit.get("event_count")) <= 0:
-            failure_reasons.append("no_events")
-        if not audit.get("document_refs"):
-            failure_reasons.append("no_document_refs")
-        if raw_preview_limit > 0 and int_value(preview_counts.get("available")) <= 0:
-            failure_reasons.append("raw_preview_unavailable")
-        status = "passed" if not failure_reasons else "failed"
-        if status == "passed" and int_value(audit.get("usage_event_count")) <= 0:
-            status = "warn"
-            failure_reasons.append("no_usage_events")
-        if status == "passed" and int_value(audit.get("consequence_event_count")) <= 0:
-            status = "warn"
-            failure_reasons.append("no_consequence_events")
+        status, failure_reasons = entity_usage_scenario_sample_status(
+            candidate=candidate,
+            audit=audit,
+            preview_counts=preview_counts,
+            raw_preview_limit=raw_preview_limit,
+        )
         status_counts[status] += 1
         sample = {
             "status": status,
             "failure_reasons": failure_reasons,
             "candidate": candidate,
+            "elapsed_ms": int((time.monotonic() - sample_started) * 1000),
+            "audit_elapsed_ms": audit_elapsed_ms,
+            "raw_preview_elapsed_ms": raw_preview_elapsed_ms,
             "audit_ok": audit.get("ok"),
             "event_count": audit.get("event_count"),
+            "entrypoint_event_count": audit.get("entrypoint_event_count"),
             "usage_event_count": audit.get("usage_event_count"),
+            "result_event_count": audit.get("result_event_count"),
+            "outcome_event_count": audit.get("outcome_event_count"),
+            "context_event_count": audit.get("context_event_count"),
             "consequence_event_count": audit.get("consequence_event_count"),
             "document_ref_count": len(audit.get("document_refs", []) if isinstance(audit.get("document_refs"), list) else []),
             "freshness_counts": sample_freshness,
@@ -41919,11 +42234,20 @@ def entity_usage_scenario_audit(
         provider_name="portable_sqlite",
     )
     provider_payload = provider_status.get("providers", {}).get("portable_sqlite") if isinstance(provider_status.get("providers"), dict) else {}
+    elapsed_ms = int((time.monotonic() - scenario_started) * 1000)
+    slowest_sample = max(
+        (sample for sample in samples if isinstance(sample, dict)),
+        key=lambda item: int_value(item.get("elapsed_ms")),
+        default={},
+    )
     quality = {
+        "elapsed_ms": elapsed_ms,
         "sample_count": len(samples),
         "passed_count": status_counts.get("passed", 0),
         "warn_count": status_counts.get("warn", 0),
         "failed_count": status_counts.get("failed", 0),
+        "slowest_sample_elapsed_ms": slowest_sample.get("elapsed_ms") if isinstance(slowest_sample, dict) else None,
+        "slowest_sample_route": (slowest_sample.get("candidate") or {}).get("route_signal") if isinstance(slowest_sample.get("candidate"), dict) else None,
         "freshness_counts": dict(sorted(freshness_counts.items())),
         "raw_preview_counts": dict(sorted(raw_preview_totals.items())),
         "search_schema_version": provider_payload.get("search_schema_version") if isinstance(provider_payload, dict) else None,
@@ -41978,17 +42302,19 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- seed: `{payload.get('seed')}`",
         f"- ok: `{payload.get('ok')}`",
+        f"- elapsed_ms: `{quality.get('elapsed_ms')}`",
         f"- samples: `{quality.get('sample_count')}`",
         f"- passed: `{quality.get('passed_count')}`",
         f"- warn: `{quality.get('warn_count')}`",
         f"- failed: `{quality.get('failed_count')}`",
+        f"- slowest_sample: `{quality.get('slowest_sample_route')}` `{quality.get('slowest_sample_elapsed_ms')}` ms",
         f"- route_terms: `{quality.get('search_route_term_count')}`",
         f"- route_postings: `{quality.get('search_route_index_count')}`",
         "",
         "## Samples",
         "",
-        "| status | kind | anchor | route | usage | consequences | refs | raw previews | reasons |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| status | kind | anchor | route | ms | usage | consequences | refs | raw previews | reasons |",
+        "| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
     ]
     for sample in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
         if not isinstance(sample, dict):
@@ -41996,11 +42322,12 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         candidate = sample.get("candidate") if isinstance(sample.get("candidate"), dict) else {}
         previews = sample.get("raw_preview_counts") if isinstance(sample.get("raw_preview_counts"), dict) else {}
         lines.append(
-            "| `{status}` | `{kind}` | `{anchor}` | `{route}` | `{usage}` | `{conseq}` | `{refs}` | `{previews}` | {reasons} |".format(
+            "| `{status}` | `{kind}` | `{anchor}` | `{route}` | `{elapsed}` | `{usage}` | `{conseq}` | `{refs}` | `{previews}` | {reasons} |".format(
                 status=sample.get("status"),
                 kind=candidate.get("kind"),
                 anchor=markdown_cell(candidate.get("anchor")),
                 route=markdown_cell(candidate.get("route_signal")),
+                elapsed=sample.get("elapsed_ms"),
                 usage=sample.get("usage_event_count"),
                 conseq=sample.get("consequence_event_count"),
                 refs=sample.get("document_ref_count"),
@@ -48692,7 +49019,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_scenario.add_argument("--aoa-root")
     entity_usage_scenario.add_argument("--seed", default="entity-usage-scenario-audit")
     entity_usage_scenario.add_argument("--sample-size", type=int, default=8)
-    entity_usage_scenario.add_argument("--layer", action="append", help="Repeatable route layer to sample. Defaults to entity/MCP/tool/hook/path/goal/failure/decision/external/delivery layers.")
+    entity_usage_scenario.add_argument("--layer", action="append", help="Repeatable route layer to sample. Defaults to operational agent routes: skill/MCP/tool/API/hook/goal/agent_event.")
     entity_usage_scenario.add_argument("--min-postings", type=int, default=1, help="Minimum route postings for sampled route terms.")
     entity_usage_scenario.add_argument("--limit", type=int, default=8, help="Maximum merged direct evidence hits per sampled anchor.")
     entity_usage_scenario.add_argument("--per-route-limit", type=int, default=8, help="Maximum hits fetched per route candidate.")

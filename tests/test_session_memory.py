@@ -1877,6 +1877,271 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     assert audit["usage_events"][0]["doc_id"] == "event:session:001:000007"
 
 
+def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+    result_hits = [
+        {
+            "doc_id": f"event:session:001:{index:06d}",
+            "event_type": "COMMAND_OUTPUT",
+            "conversation_act": "tool_output_success",
+            "session_act": "memory_observation",
+            "title": f"MCP result {index}",
+            "route_signals": "mcp:aoa_decisions_mcp",
+            "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
+        }
+        for index in range(1, 31)
+    ]
+    usage_hit = {
+        "doc_id": "event:session:001:000031",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "title": "MCP usage",
+        "route_signals": "mcp:aoa_decisions_mcp",
+        "refs": {"raw": "raw:line:31", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    candidate_hits = [*result_hits, usage_hit]
+    called_limits: list[int] = []
+    called_queries: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_limits.append(int(kwargs.get("limit") or 0))
+        called_queries.append(str(kwargs.get("query") or ""))
+        limit = int(kwargs.get("limit") or 0)
+        return {"ok": True, "result_count": min(limit, len(candidate_hits)), "results": candidate_hits[:limit], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=3,
+        per_route_limit=3,
+    )
+
+    assert audit["ok"] is True
+    assert audit["usage_event_count"] == 1
+    assert audit["usage_events"][0]["doc_id"] == "event:session:001:000031"
+    assert audit["quality"]["route_usage_retry_applied"] is True
+    assert max(called_limits) > 12
+    assert set(called_queries) == {""}
+    assert audit["quality"]["text_search_skipped"] is True
+
+
+def test_entity_usage_audit_skips_text_fallback_for_agent_event_route_evidence(tmp_path: Path, monkeypatch: Any) -> None:
+    outcome_hits = [
+        {
+            "doc_id": f"event:session:001:{index:06d}",
+            "event_type": "ASSISTANT_MESSAGE",
+            "conversation_act": "assistant_response",
+            "session_act": "assistant_message",
+            "title": f"Assistant answer {index}",
+            "route_signals": "agent_event:assistant_answer",
+            "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
+        }
+        for index in range(1, 5)
+    ]
+    called_queries: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_queries.append(str(kwargs.get("query") or ""))
+        return {"ok": True, "result_count": len(outcome_hits), "results": outcome_hits, "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="assistant_answer",
+        kind="agent_event",
+        limit=3,
+        per_route_limit=3,
+    )
+
+    assert audit["ok"] is True
+    assert audit["outcome_event_count"] == 3
+    assert audit["quality"]["text_search_skipped"] is True
+    assert set(called_queries) == {""}
+
+
+def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+
+    def add_route_doc(route_signal: str, *, doc_id: str, doc_type: str = "event", event_type: str = "COMMAND", session_act: str = "tool_call") -> None:
+        layer, key = route_signal.split(":", 1)
+        conn.execute(
+            "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
+        )
+        route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (route_signal,)).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, route_signals, raw_ref, manifest_path, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc_id,
+                doc_type,
+                "scenario-session",
+                "scenario-session",
+                "2026-06-21",
+                doc_id,
+                event_type if doc_type == "event" else None,
+                session_act if doc_type == "event" else None,
+                f"|{route_signal}|",
+                "raw:line:1" if doc_type == "event" else "",
+                "session.manifest.json",
+                "{}",
+            ),
+        )
+        conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+
+    add_route_doc("mcp:aoa_session_memory_mcp", doc_id="good-mcp", event_type="COMMAND", session_act="memory_read")
+    add_route_doc("hook_health:postcompact", doc_id="good-hook", event_type="COMMAND_OUTPUT", session_act="memory_observation")
+    add_route_doc("agent_event:assistant_answer", doc_id="good-agent-answer", event_type="ASSISTANT_MESSAGE", session_act="assistant_message")
+    add_route_doc("mcp:abyss_stack_mcp", doc_id="service-only-mcp", event_type="COMMAND_OUTPUT", session_act="memory_observation")
+    add_route_doc("entity:config_projectio", doc_id="truncated-entity", event_type="COMMAND_OUTPUT", session_act="command_result")
+    add_route_doc(
+        "path:tests_pycache_test_agon_epistemic_skill_candidates_cpython_314_pytest_8_4_2_pyc",
+        doc_id="pycache-path",
+        event_type="COMMAND_OUTPUT",
+        session_act="command_result",
+    )
+    add_route_doc("skill:aoa_decision", doc_id="session-only-skill", doc_type="session")
+    conn.commit()
+    conn.close()
+
+    candidates, diagnostics = module.entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=["mcp", "hook_health", "agent_event", "entity", "path", "skill"],
+        sample_size=8,
+        seed="scenario-candidate-filter",
+    )
+    route_signals = {candidate["route_signal"] for candidate in candidates}
+
+    assert "mcp:aoa_session_memory_mcp" in route_signals
+    assert "hook_health:postcompact" in route_signals
+    assert "agent_event:assistant_answer" in route_signals
+    assert "mcp:abyss_stack_mcp" not in route_signals
+    assert "entity:config_projectio" not in route_signals
+    assert not any("pycache" in signal for signal in route_signals)
+    assert "skill:aoa_decision" not in route_signals
+    assert any(item.startswith("candidate_pool_filtered:no_direct_usage_events:") for item in diagnostics)
+    assert any(item.startswith("candidate_pool_filtered:generated_runtime_key:") for item in diagnostics)
+
+
+def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tmp_path: Path, monkeypatch: Any) -> None:
+    candidates = [
+        {
+            "route_id": 1,
+            "layer": "hook_health",
+            "key": "postcompact",
+            "kind": "hook",
+            "anchor": "postcompact",
+            "route_signal": "hook_health:postcompact",
+        },
+        {
+            "route_id": 2,
+            "layer": "agent_event",
+            "key": "assistant_answer",
+            "kind": "agent_event",
+            "anchor": "assistant_answer",
+            "route_signal": "agent_event:assistant_answer",
+        },
+    ]
+
+    def fake_candidates(**_kwargs: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        return candidates, []
+
+    def fake_usage_audit(**kwargs: Any) -> dict[str, Any]:
+        anchor = kwargs["anchor"]
+        if anchor == "postcompact":
+            event = {
+                "role": "result",
+                "event_type": "COMMAND_OUTPUT",
+                "refs": {"raw": "raw:line:10", "session": "session.manifest.json"},
+            }
+            return {
+                "ok": True,
+                "event_count": 2,
+                "entrypoint_event_count": 0,
+                "usage_event_count": 0,
+                "result_event_count": 2,
+                "outcome_event_count": 0,
+                "context_event_count": 0,
+                "consequence_event_count": 0,
+                "usage_events": [],
+                "result_events": [event],
+                "outcome_events": [],
+                "entrypoint_events": [],
+                "context_events": [],
+                "consequence_events": [],
+                "document_refs": [{"kind": "raw_line", "value": "raw:line:10"}],
+                "quality": {"freshness_counts": {"fresh": 1}},
+                "diagnostics": [],
+            }
+        event = {
+            "role": "outcome",
+            "event_type": "ASSISTANT_MESSAGE",
+            "refs": {"raw": "raw:line:20", "session": "session.manifest.json"},
+        }
+        return {
+            "ok": True,
+            "event_count": 1,
+            "entrypoint_event_count": 0,
+            "usage_event_count": 0,
+            "result_event_count": 0,
+            "outcome_event_count": 1,
+            "context_event_count": 0,
+            "consequence_event_count": 0,
+            "usage_events": [],
+            "result_events": [],
+            "outcome_events": [event],
+            "entrypoint_events": [],
+            "context_events": [],
+            "consequence_events": [],
+            "document_refs": [{"kind": "raw_line", "value": "raw:line:20"}],
+            "quality": {"freshness_counts": {"fresh": 1}},
+            "diagnostics": [],
+        }
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+
+    monkeypatch.setattr(module, "entity_usage_scenario_candidates", fake_candidates)
+    monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "raw_preview_for_usage_event", lambda *_args, **_kwargs: {"status": "available", "line": 1, "text": "ok"})
+
+    audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=2, seed="layer-aware")
+
+    assert audit["ok"] is True
+    assert audit["quality"]["passed_count"] == 2
+    assert audit["quality"]["warn_count"] == 0
+    assert audit["quality"]["failed_count"] == 0
+
+
+def test_trace_route_supports_agent_event_kind() -> None:
+    candidates = module.trace_route_candidates("assistant_answer", kind="agent_event")
+
+    assert any(
+        candidate.get("layer") == "agent_event" and candidate.get("key") == "assistant_answer"
+        for candidate in candidates
+    )
+
+
 def test_search_index_incremental_replaces_selected_session_documents(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
