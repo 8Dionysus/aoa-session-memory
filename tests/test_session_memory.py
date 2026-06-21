@@ -6896,6 +6896,56 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert candidate_count > 200
 
 
+def test_search_index_raw_text_uses_segment_line_limits_without_reclassifying(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-index-fast-raw.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "search-index-fast-raw", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Осталось проверить fast-raw-anchor отдельно."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-index-fast-raw",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def fail_reclassify(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("search-index raw text extraction must not run full raw classification")
+
+    monkeypatch.setattr(module, "classify_raw_event", fail_reclassify)
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+
+    assert indexed["ok"] is True
+    assert indexed["event_document_count"] == 2
+    results = module.search_sessions(
+        aoa_root=aoa_root,
+        query="fast-raw-anchor",
+        agent_event="assistant_open_thread",
+        explain=True,
+    )
+    assert results["result_count"] == 1
+    assert results["results"][0]["agent_event"] == "assistant_open_thread"
+    assert results["results"][0]["refs"]["raw"] == "raw:line:2"
+
+
 def test_freshness_filter_preserves_search_order_before_stored_hits(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

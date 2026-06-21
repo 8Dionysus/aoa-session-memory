@@ -24438,12 +24438,36 @@ def session_semantic_names_text(manifest: dict[str, Any]) -> str:
     return search_doc_text(parts, max_chars=1600)
 
 
-def raw_event_search_text_by_line(raw_path: Path | None) -> dict[int, str]:
+def raw_search_text_line_limits_from_segments(segments: list[dict[str, Any]]) -> dict[int, int]:
+    line_limits: dict[int, int] = {}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        index_path = Path(str(segment.get("index") or ""))
+        segment_index = read_json(index_path, {}) if index_path.exists() else {}
+        for event in segment_index.get("events", []) if isinstance(segment_index.get("events"), list) else []:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "")
+            outcome = str(event.get("outcome") or "")
+            if not event_type_gets_raw_search_text(event_type, outcome):
+                continue
+            line_no = int_value(event.get("line"))
+            if line_no <= 0:
+                continue
+            line_limits[line_no] = max(line_limits.get(line_no, 0), event_search_text_limit(event_type))
+    return line_limits
+
+
+def raw_event_search_text_by_line(raw_path: Path | None, *, line_limits: dict[int, int] | None = None) -> dict[int, str]:
     if not raw_path or not raw_path.exists():
         return {}
     texts: dict[int, str] = {}
+    wanted_lines = set(line_limits) if line_limits is not None else None
     with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
+            if wanted_lines is not None and line_no not in wanted_lines:
+                continue
             raw = line.rstrip("\n")
             parsed: dict[str, Any] | None = None
             try:
@@ -24452,12 +24476,13 @@ def raw_event_search_text_by_line(raw_path: Path | None) -> dict[int, str]:
                     parsed = loaded
             except json.JSONDecodeError:
                 parsed = None
-            event = classify_raw_event(raw, parsed, line_no)
-            if not event_type_gets_raw_search_text(event.event_type, event.outcome):
+            if parsed is None:
                 continue
-            semantic = event_semantic_text(event)
+            source_type = str(parsed.get("type") or "unresolved-source")
+            semantic = semantic_text_for_classification(source_type, parsed.get("payload"))
             if semantic:
-                texts[line_no] = short_text(semantic, max_chars=event_search_text_limit(event.event_type))
+                max_chars = line_limits.get(line_no, 500) if line_limits is not None else 500
+                texts[line_no] = short_text(semantic, max_chars=max_chars)
     return texts
 
 
@@ -24707,12 +24732,12 @@ def search_documents_for_record(
             }
         )
 
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     raw_text_by_line = (
         {}
         if raw_text_status == "skipped_raw_too_large"
-        else raw_event_search_text_by_line(raw_path)
+        else raw_event_search_text_by_line(raw_path, line_limits=raw_search_text_line_limits_from_segments(segments))
     )
-    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     for segment in segments:
         if not isinstance(segment, dict):
             continue
