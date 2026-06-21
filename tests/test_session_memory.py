@@ -7550,6 +7550,58 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert "storage-audit" in summary["optional_deep_audit_command"]
 
 
+def test_graph_store_sqlite_lock_is_not_structural_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.graph_paths(aoa_root)["store"].parent.mkdir(parents=True)
+    module.graph_paths(aoa_root)["store"].touch()
+
+    class LockedGraphStore:
+        def __init__(self, _aoa_root: Path) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(module, "GraphSqliteStore", LockedGraphStore)
+
+    hot_state = module.graph_store_hot_state(aoa_root)
+    deep_state = module.graph_store_state(aoa_root=aoa_root)
+
+    assert hot_state["status"] == "sqlite_locked"
+    assert hot_state["needs_full_rebuild"] is False
+    assert hot_state["diagnostics"] == ["graph_store_sqlite_locked:database is locked"]
+    assert deep_state["status"] == "sqlite_locked"
+    assert deep_state["needs_full_rebuild"] is False
+    assert deep_state["diagnostics"] == ["graph_store_sqlite_locked:database is locked"]
+
+
+def test_maintenance_status_routes_graph_sqlite_lock_to_active_writer_wait(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={"status": "sqlite_locked", "diagnostics": ["graph_store_sqlite_locked:database is locked"]},
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": False, "needs_offline_graph_build": False},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={"active": True, "owner": {"owner_job": "auto-maintenance:hot"}},
+    )
+    agent_route = module.session_memory_agent_route_status(
+        recommendation=recommendation,
+        search={},
+        graph={},
+        route={},
+        live_tail={},
+    )
+
+    assert recommendation == "wait_active_writer"
+    assert actions[0]["id"] == "wait_active_writer"
+    assert actions[0]["reason"] == "graph_store_locked_by_active_writer"
+    assert "graph-build" not in module.shlex.join(actions[0]["command"])
+    assert agent_route["action"] == "wait_for_active_projection_writer"
+    assert agent_route["can_use_graph_search"] is False
+
+
 def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

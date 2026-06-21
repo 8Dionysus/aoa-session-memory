@@ -34125,12 +34125,22 @@ def graph_store_state(
         counts = store.state_counts()
         store.close()
     except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        diagnostic = f"graph_store_{status}:{exc}" if status != "sqlite_error" else f"graph_store_sqlite_error:{exc}"
+        if status == "sqlite_locked":
+            return {
+                "status": status,
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "db_path": str(paths["store"]),
+                "diagnostics": [diagnostic],
+            }
         return {
-            "status": "sqlite_error",
+            "status": status,
             "needs_maintenance": False,
             "needs_full_rebuild": True,
             "db_path": str(paths["store"]),
-            "diagnostics": [f"graph_store_sqlite_error:{exc}"],
+            "diagnostics": [diagnostic],
         }
     source_states = graph_source_states(
         aoa_root=aoa_root,
@@ -40722,9 +40732,26 @@ def session_memory_maintenance_next_actions(
     graph: dict[str, Any],
     route_status: dict[str, Any],
     entity_registry: dict[str, Any] | None = None,
+    coordinator: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
     actions: list[dict[str, Any]] = []
+    coordinator = coordinator if isinstance(coordinator, dict) else {}
+    graph_diagnostics = graph.get("diagnostics") if isinstance(graph.get("diagnostics"), list) else []
+    graph_locked = str(graph.get("status") or "") == "sqlite_locked" or any(
+        str(item).startswith("graph_store_sqlite_locked:") for item in graph_diagnostics
+    )
+    if graph_locked:
+        active_writer = bool(coordinator.get("active"))
+        actions.append(
+            {
+                "id": "wait_active_writer" if active_writer else "retry_graph_status",
+                "reason": "graph_store_locked_by_active_writer" if active_writer else "graph_store_sqlite_locked",
+                "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", *root_args, "--no-timers"],
+                "note": "A graph SQLite busy lock is a transient writer/read contention state, not schema drift or corruption; wait for the active writer and retry status before planning rebuilds.",
+            }
+        )
+        return ("wait_active_writer" if active_writer else "retry_graph_status"), actions
     actionable_sessions = search.get("actionable_dirty_sessions") if isinstance(search.get("actionable_dirty_sessions"), list) else []
     route_search = route_status.get("search_index") if isinstance(route_status.get("search_index"), dict) else {}
     route_atlas = route_status.get("atlas_index") if isinstance(route_status.get("atlas_index"), dict) else {}
@@ -40858,6 +40885,12 @@ def session_memory_agent_route_status(
     if recommendation == "run_maintenance":
         action = "run_maintenance_before_graph_search"
         raw_or_deep_route = "Use raw refs for urgent proof only; repair the stale projection first."
+    elif recommendation == "wait_active_writer":
+        action = "wait_for_active_projection_writer"
+        raw_or_deep_route = "A projection writer currently owns the graph/search maintenance lane; retry status after the writer finishes before planning rebuilds."
+    elif recommendation == "retry_graph_status":
+        action = "retry_graph_status_after_sqlite_lock"
+        raw_or_deep_route = "The graph store reported a SQLite busy lock; retry the read gate before treating it as projection damage."
     elif recommendation == "install_or_bootstrap_runtime":
         action = "install_or_bootstrap_runtime"
         raw_or_deep_route = "Clean portable bundles have no live archive proof layer until installed or populated."
@@ -41008,6 +41041,7 @@ def session_memory_maintenance_status(
     }
     portable_clean_runtime = session_memory_portable_clean_runtime_state(aoa_root)
     live_tail = session_memory_live_tail_status(search=search, graph=graph)
+    coordinator = maintenance_lock_snapshot(aoa_root)
     if portable_clean_runtime.get("ok"):
         root_args = ["--workspace-root", str(workspace_root), "--source-aoa-root", str(aoa_root), "--force"]
         recommendation = "install_or_bootstrap_runtime"
@@ -41027,6 +41061,7 @@ def session_memory_maintenance_status(
             graph=graph,
             route_status=route_status,
             entity_registry=entity_registry,
+            coordinator=coordinator,
         )
     if int_value(live_tail.get("deferred_count")) > 0:
         catchup_route = session_memory_live_tail_catchup_route(
@@ -41084,7 +41119,6 @@ def session_memory_maintenance_status(
         "route_cache_freshness": latest_diagnostic_summary(aoa_root, "*__route-cache-freshness-gates.json"),
         "storage_audit": latest_diagnostic_summary(aoa_root, "*__storage-audit.json"),
     }
-    coordinator = maintenance_lock_snapshot(aoa_root)
     storage = maintenance_storage_status(aoa_root)
     operations = session_memory_operations_summary(
         aoa_root=aoa_root,
@@ -41098,7 +41132,14 @@ def session_memory_maintenance_status(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
         "generated_at": now,
-        "ok": recommendation in {"use_graph_search", "wait_live_catchup", "run_live_catchup", "install_or_bootstrap_runtime"},
+        "ok": recommendation
+        in {
+            "use_graph_search",
+            "wait_live_catchup",
+            "run_live_catchup",
+            "wait_active_writer",
+            "install_or_bootstrap_runtime",
+        },
         "mutates": False,
         "mode": mode,
         "workspace_root": str(workspace_root),
@@ -41753,13 +41794,24 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             source_version_state = store.source_version_state()
         store.close()
     except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        diagnostic = f"graph_store_{status}:{exc}" if status != "sqlite_error" else f"graph_store_sqlite_error:{exc}"
+        if status == "sqlite_locked":
+            return {
+                "status": status,
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "db_path": str(paths["store"]),
+                "truth_status": "hot_gate_store_sqlite_locked_wait_for_writer",
+                "diagnostics": [diagnostic],
+            }
         return {
-            "status": "sqlite_error",
+            "status": status,
             "needs_maintenance": False,
             "needs_full_rebuild": True,
             "db_path": str(paths["store"]),
             "truth_status": "hot_gate_store_sqlite_error",
-            "diagnostics": [f"graph_store_sqlite_error:{exc}"],
+            "diagnostics": [diagnostic],
         }
     ledger_exists = paths["source_state_ledger"].exists()
     queue_exists = paths["maintenance_queue"].exists()
