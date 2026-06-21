@@ -620,8 +620,14 @@ Last observed result:
   monolith via `search_shard_fanout_raw_text_uses_monolith_fallback`, while
   structured routes still use bounded shard fan-out. Use
   `search-shards --full-text` only for an explicit heavy lexical shard
-  benchmark. Existing live full-text shard files remain heavy until rebuilt
-  through the new default.
+  benchmark. A live `search-shards all --write-report` rebuild processed `282`
+  sessions and `1,640,926` shard documents into structured-only shards
+  (`monolith_fallback_required` for raw text); `search/shards` dropped from
+  about `9.4 GiB` to `7.9 GiB`. `agent-responses --use-shards --agent-event
+  assistant_answer --limit 5` returned through `materialized_shard_fanout` with
+  `uses_fts=false`, `hydrates_body=false`, `uses_shards=true`, and
+  `maintenance-status --full` returned `ok=true`, route `current`, and
+  `agent_route=use_graph_search`.
 - 2026-06-21 MCP live route proof after schema 10 rebuild:
   `aoa_session_maintenance_status(full=true)` returned through MCP in about
   `1.45s` with search ready, graph usable, no writer, and the completed
