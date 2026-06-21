@@ -755,15 +755,25 @@ Last observed result:
 - 2026-06-21 graph partial-store and lock-conflict proof:
   `maintenance-status --full` now detects a partial generated graph store by
   comparing non-retired source-state ledger entries with stored
-  `graph_sources`, carries the latest fresh `graph-maintenance.remaining_count`
-  as a hot-gate signal, and emits real-root bounded graph-maintenance commands
-  without `/path/to/workspace` placeholders. Manual maintenance lock conflicts
-  return a bounded `session_memory_maintenance_lock_conflict` packet instead
-  of blocking indefinitely. Regression proof:
+  `graph_sources`, carries only global fresh `graph-maintenance.remaining_count`
+  as a global hot-gate signal, and ignores scoped latest reports for global
+  remaining counts. It emits real-root bounded graph-maintenance commands
+  without `/path/to/workspace` placeholders; large manual budgeted routes use
+  batch `25`, while hot timer ticks stay small. Manual maintenance lock
+  conflicts return a bounded `session_memory_maintenance_lock_conflict` packet
+  instead of blocking indefinitely. Regression proof:
   `test_graph_hot_state_detects_ledger_store_source_count_mismatch`,
   `test_graph_hot_state_uses_latest_graph_maintenance_remaining_count`,
+  `test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count`,
   `test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply`,
+  `test_maintenance_next_actions_uses_budgeted_graph_batch_limit`,
   and `test_manual_maintenance_lock_returns_conflict_instead_of_blocking`.
+  Live proof: a 2026-06-21 resource-gated manual batch
+  `graph-maintenance all --apply --batch-limit 25 --budget-seconds 300
+  --refresh-chunk-size 64 --write-report` completed under
+  `abyss-machine resource launch --class medium --kind indexing` in `102.559s`,
+  selected `25` sources, left `4679` global missing sources, consumed `4G`
+  peak memory, and used `0B` swap.
 - 2026-06-21 raw-ref prune route: `graph-raw-ref-prune` is the controlled lane
   for that mixed-store tail. Dry-run is read-only and uses materialized
   `graph_type_counts`; apply runs under the maintenance coordinator, deletes only

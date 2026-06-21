@@ -194,6 +194,7 @@ GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
+GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 25
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
@@ -472,6 +473,7 @@ PORTABLE_BUNDLE_ITEMS = [
     "README.md",
     "config",
     "hooks",
+    "manifests",
     "maps",
     "schemas",
     "scripts",
@@ -34033,6 +34035,16 @@ def graph_source_maintenance_recommendation(
     missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
     blocked = max(0, int_value(blocked_count))
     root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
+    bounded_batch_limit = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
+    budgeted_batch_limit = GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+
+    def graph_maintenance_command(batch_limit: int) -> str:
+        return (
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit {batch_limit} --budget-seconds 300 "
+            f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report"
+        )
+
     if actionable_count <= 0:
         route = "none"
         reason = "graph_sources_current"
@@ -34044,10 +34056,7 @@ def graph_source_maintenance_recommendation(
     ):
         route = "budgeted_graph_maintenance"
         reason = "route_signal_classifier_drift_budgeted_repair"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(budgeted_batch_limit)
     elif (
         source_total
         and int_value(dirty_count) >= max(20, int(source_total * 0.25))
@@ -34055,38 +34064,23 @@ def graph_source_maintenance_recommendation(
     ):
         route = "budgeted_graph_maintenance"
         reason = "graph_event_route_signal_edge_policy_drift_budgeted_repair"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(budgeted_batch_limit)
     elif source_total and int_value(dirty_count) >= max(100, int(source_total * 0.35)) and source_sha_mismatch >= max(1, int(int_value(dirty_count) * 0.8)):
         route = "budgeted_graph_maintenance"
         reason = "mass_source_fingerprint_drift_budgeted_repair"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(budgeted_batch_limit)
     elif source_total and graph_missing >= max(500, int(source_total * 0.5)):
         route = "budgeted_graph_maintenance"
         reason = "graph_store_missing_sources_budgeted_recovery"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(budgeted_batch_limit)
     elif actionable_count <= 100:
         route = "bounded_graph_maintenance"
         reason = "small_incremental_backlog"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(bounded_batch_limit)
     else:
         route = "budgeted_graph_maintenance"
         reason = "mixed_or_medium_backlog"
-        command = (
-            "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
-        )
+        command = graph_maintenance_command(budgeted_batch_limit)
     notes: list[str] = []
     if blocked:
         notes.append("blocked_sources_need_lower_layer_repair")
@@ -41055,6 +41049,11 @@ def session_memory_maintenance_next_actions(
             )
             return "run_maintenance", actions
         if graph_recommendation.get("route") in {"bounded_graph_maintenance", "budgeted_graph_maintenance"} and graph_recommendation.get("command"):
+            graph_batch_limit = (
+                GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+                if graph_recommendation.get("route") == "budgeted_graph_maintenance"
+                else GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
+            )
             actions.append(
                 {
                     "id": "repair_graph_budgeted",
@@ -41067,14 +41066,14 @@ def session_memory_maintenance_next_actions(
                         *root_args,
                         "--apply",
                         "--batch-limit",
-                        "3",
+                        str(graph_batch_limit),
                         "--budget-seconds",
                         "300",
                         "--refresh-chunk-size",
-                        "64",
+                        str(GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
                         "--write-report",
                     ],
-                    "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild.",
+                    "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers.",
                 }
             )
             return "run_maintenance", actions
@@ -42084,7 +42083,16 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         store_metadata_updated_at = parse_utc_timestamp(str(metadata.get("updated_at") or ""))
         store_updated_epoch = store_metadata_updated_at.timestamp() if store_metadata_updated_at is not None else path_mtime(paths["store"])
         remaining_count = int_value(latest_report.get("remaining_count"))
-        usable_for_hot_gate = bool(report_mtime and report_mtime >= store_updated_epoch and remaining_count > 0)
+        report_source_state = latest_report.get("source_state") if isinstance(latest_report.get("source_state"), dict) else {}
+        report_selection_scope = str(report_source_state.get("selection_scope") or "")
+        report_scope_is_global = (
+            str(latest_report.get("target") or "") == "all"
+            and not latest_report.get("since")
+            and not latest_report.get("until")
+            and latest_report.get("limit") in (None, 0, "0", "")
+            and report_selection_scope in {"", "global"}
+        )
+        usable_for_hot_gate = bool(report_scope_is_global and report_mtime and report_mtime >= store_updated_epoch and remaining_count > 0)
         latest_maintenance = {
             "exists": True,
             "path": latest_report.get("_diagnostic_path"),
@@ -42094,6 +42102,11 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "ok": latest_report.get("ok"),
             "apply": latest_report.get("apply"),
             "target": latest_report.get("target"),
+            "since": latest_report.get("since"),
+            "until": latest_report.get("until"),
+            "limit": latest_report.get("limit"),
+            "selection_scope": report_selection_scope,
+            "scope_is_global": report_scope_is_global,
             "remaining_count": remaining_count,
             "selected_count": latest_report.get("selected_count"),
             "usable_for_hot_gate": usable_for_hot_gate,

@@ -1,0 +1,63 @@
+{
+  "schema": "abyss_machine_artifact_bundle_manifest_v1",
+  "id": "aoa-session-memory-portable-bundle",
+  "artifact_class": "aoa_session_memory_portable_bundle",
+  "owner_repo": "aoa-session-memory",
+  "policy_ref": "repo:abyss-machine/manifests/artifact_signature_policy.manifest.json",
+  "mode": "os_abyss_local",
+  "public_safe": true,
+  "subject_repo_root": "../..",
+  "artifact_identity": {
+    "artifact_class": "aoa_session_memory_portable_bundle",
+    "abi_epoch": "aoa_session_memory_portable_bundle_v1"
+  },
+  "abi_subject": {
+    "path": "manifests/artifact_bundles/portable_bundle.bundle.json",
+    "artifact_identity_pointer": "/artifact_identity"
+  },
+  "artifact_subjects": [
+    {"path": "manifests/artifact_bundles/portable_bundle.bundle.json", "role": "bundle_manifest"},
+    {"path": "manifests/AGENTS.md", "role": "manifest_route"},
+    {"path": "AGENTS.md", "role": "route_doc"},
+    {"path": "DESIGN.md", "role": "design_doc"},
+    {"path": "DESIGN.AGENTS.md", "role": "agent_design_doc"},
+    {"path": "PIPELINE.md", "role": "pipeline_doc"},
+    {"path": "INSTALL.md", "role": "install_doc"},
+    {"path": "READINESS.md", "role": "readiness_doc"},
+    {"path": "README.md", "role": "readme"},
+    {"path": "NAMING.md", "role": "naming_doc"},
+    {"path": "scripts/aoa_session_memory.py", "role": "portable_cli"},
+    {"path": "scripts/AGENTS.md", "role": "script_route"},
+    {"glob": "schemas/*.json", "role": "schema"},
+    {"path": "schemas/AGENTS.md", "role": "schema_route"},
+    {"glob": "config/*.json", "role": "config"},
+    {"path": "config/AGENTS.md", "role": "config_route"},
+    {"path": "hooks/README.md", "role": "hook_doc"},
+    {"path": "hooks/AGENTS.md", "role": "hook_route"},
+    {"path": "hooks/codex-hooks.user.example.json", "role": "hook_example"},
+    {"path": "tests/AGENTS.md", "role": "test_route"},
+    {"path": "tests/test_session_memory.py", "role": "test"},
+    {"path": "skills/AGENTS.md", "role": "skills_route"},
+    {"glob": "skills/*/SKILL.md", "role": "skill_route"},
+    {"path": "maps/README.md", "role": "atlas_doc"},
+    {"path": "maps/START.md", "role": "atlas_start"},
+    {"path": "maps/AGENTS.md", "role": "atlas_route"},
+    {"glob": "maps/*/README.md", "role": "atlas_axis_doc"}
+  ],
+  "build_type": "https://abyssos.local/buildtypes/aoa-session-memory-portable-bundle/v1",
+  "package": {
+    "ecosystem": "portable-kernel",
+    "name": "aoa-session-memory-portable-bundle",
+    "purl": "pkg:generic/aoa-session-memory-portable-bundle@0"
+  },
+  "lifecycle": {
+    "initial_state": "built-local",
+    "promotion_path": ["built-local", "manually-verified", "release-ready", "published", "superseded", "revoked"],
+    "latest_eligible_states": ["release-ready", "published"]
+  },
+  "consumer_contract": {
+    "stable_interface": "abyss-machine artifacts trust-gate --artifact-class aoa_session_memory_portable_bundle --consumer-intent update_client --json",
+    "consumer_expectation": "Workspace installers select the portable session-memory bundle only after registry latest selection, ABI/SBOM/SLSA verification, portable audit evidence, and update-client trust-gate allow or warn.",
+    "privacy_boundary": "Clean portable kernel subjects only; raw sessions and host-local runtime evidence require a separate private evidence route."
+  }
+}

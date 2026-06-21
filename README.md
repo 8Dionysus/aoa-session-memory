@@ -280,6 +280,22 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --write-report
 ```
 
+Hot timers intentionally keep small graph ticks. For a large global backlog,
+`maintenance-status` may recommend a manual budgeted route with a larger source
+batch; run it through the machine resource lane when possible:
+
+```bash
+abyss-machine resource launch --class medium --kind indexing --timeout 900 --json -- \
+  python3 scripts/aoa_session_memory.py graph-maintenance all \
+    --workspace-root /path/to/workspace \
+    --aoa-root /path/to/workspace/.aoa \
+    --apply \
+    --batch-limit 25 \
+    --budget-seconds 300 \
+    --refresh-chunk-size 64 \
+    --write-report
+```
+
 Each session or segment contributes its own graph slice. When a source changes,
 `graph-maintenance` deletes that source's old contribution and inserts the new
 one in one SQLite transaction. Maintenance groups dirty/missing sources by

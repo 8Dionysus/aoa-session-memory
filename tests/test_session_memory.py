@@ -3780,7 +3780,7 @@ def test_graph_source_recommendation_routes_mass_classifier_drift_to_budgeted_re
     assert recommendation["route"] == "budgeted_graph_maintenance"
     assert recommendation["reason"] == "route_signal_classifier_drift_budgeted_repair"
     assert "graph-maintenance all" in recommendation["command"]
-    assert "--batch-limit 3" in recommendation["command"]
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert "blocked_sources_need_lower_layer_repair" in recommendation["notes"]
     assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
 
@@ -3801,7 +3801,7 @@ def test_graph_source_recommendation_routes_event_edge_policy_drift_to_budgeted_
     assert recommendation["route"] == "budgeted_graph_maintenance"
     assert recommendation["reason"] == "graph_event_route_signal_edge_policy_drift_budgeted_repair"
     assert "graph-maintenance all" in recommendation["command"]
-    assert "--batch-limit 3" in recommendation["command"]
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
 
 
@@ -3821,7 +3821,7 @@ def test_graph_source_recommendation_routes_mass_missing_sources_to_budgeted_rec
     assert recommendation["route"] == "budgeted_graph_maintenance"
     assert recommendation["reason"] == "graph_store_missing_sources_budgeted_recovery"
     assert "graph-maintenance all" in recommendation["command"]
-    assert "--batch-limit 3" in recommendation["command"]
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert "missing_sources_can_be_inserted_by_incremental_or_rebuild_route" in recommendation["notes"]
     assert "missing_graph_source_paths_are_blocked_evidence_sources" in recommendation["notes"]
     assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
@@ -3848,9 +3848,43 @@ def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> 
     assert "--workspace-root /srv/AbyssOS" in recommendation["command"]
     assert "--aoa-root /srv/AbyssOS/.aoa" in recommendation["command"]
     assert "--apply" in recommendation["command"]
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert "--refresh-chunk-size 64" in recommendation["command"]
     assert "--plan-refresh-costs" not in recommendation["command"]
     assert "/path/to/workspace" not in recommendation["command"]
+
+
+def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 4679,
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_budgeted"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in command_text
+    assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in command_text
+    assert str(workspace) in command_text
+    assert str(aoa_root) in command_text
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5479,6 +5513,7 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
     assert str(aoa_root) in nested_command
     assert "/path/to/workspace" not in nested_command
     assert "--apply" in nested_command
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT}" in nested_command
     assert "--refresh-chunk-size 64" in nested_command
     assert recommendation == "run_maintenance"
     assert actions[0]["id"] == "repair_graph_budgeted"
@@ -5486,6 +5521,7 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
     assert "graph-maintenance" in command_text
     assert str(workspace) in command_text
     assert str(aoa_root) in command_text
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT}" in command_text
     assert "/path/to/workspace" not in command_text
     assert "graph-build" not in command_text
 
@@ -5562,6 +5598,82 @@ def test_graph_hot_state_uses_latest_graph_maintenance_remaining_count(tmp_path:
     assert summary["missing_count"] == 10
     assert summary["actionable_count"] == 10
     assert summary["reason_group_counts"]["latest_graph_maintenance_remaining_sources"] == 10
+
+
+def test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:scoped-report:000",
+            "source_type": "segment",
+            "session_id": "scoped-report",
+            "session_label": "2026-06-21__001__scoped-report",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-scoped-report",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": "event:scoped-report:000:000001", "type": "event"},
+            {"id": "route:skill:aoa_decision", "type": "skill"},
+        ],
+        "edges": [
+            {
+                "id": "event:scoped-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "source": "event:scoped-report:000:000001",
+                "target": "route:skill:aoa_decision",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {"sources": {"segment:scoped-report:000": {"source_key": "segment:scoped-report:000", "status": "clean"}}},
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+    diagnostics_dir = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics_dir.mkdir(parents=True)
+    report_path = diagnostics_dir / "20260621T180000Z__graph-maintenance.json"
+    module.write_json(
+        report_path,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_maintenance",
+            "generated_at": "2026-06-21T18:00:00Z",
+            "ok": True,
+            "apply": True,
+            "target": "all",
+            "since": "2026-06-19",
+            "selected_count": 3,
+            "remaining_count": 10,
+            "source_state": {"selection_scope": "selected_sessions"},
+        },
+    )
+    graph_store_mtime = module.path_mtime(module.graph_paths(aoa_root)["store"])
+    os.utime(report_path, (graph_store_mtime + 10, graph_store_mtime + 10))
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_maintenance_status_from_state(state)
+
+    assert state["status"] == "current"
+    assert state["needs_maintenance"] is False
+    assert state["latest_maintenance"]["scope_is_global"] is False
+    assert state["latest_maintenance"]["usable_for_hot_gate"] is False
+    assert state["latest_maintenance"]["remaining_count"] == 10
+    assert "latest_graph_maintenance_remaining_sources" not in state["diagnostics"]
+    assert summary["missing_count"] == 0
+    assert summary["actionable_count"] == 0
 
 
 def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
@@ -12507,6 +12619,8 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
+    assert (aoa_root / "manifests" / "AGENTS.md").exists()
+    assert (aoa_root / "manifests" / "artifact_bundles" / "portable_bundle.bundle.json").exists()
     assert (aoa_root / "sessions" / "AGENTS.md").exists()
     assert (aoa_root / "skills" / "AGENTS.md").exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()

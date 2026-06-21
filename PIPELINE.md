@@ -931,6 +931,12 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --write-report
 ```
 
+That small batch is the hot/timer-safe route. For a large global backlog, the
+agent-facing `maintenance-status` recommendation may use a manual budgeted
+batch of `25` sources. Prefer launching that route through
+`abyss-machine resource launch --class medium --kind indexing` so CPU, memory,
+thermal, and swap pressure are explicit before the writer lock is taken.
+
 Each session and segment is a graph source. Dirty sources are replaced
 transactionally: old node/edge contributions for that source are removed, new
 contributions are inserted, and only touched aggregate nodes/edges are
