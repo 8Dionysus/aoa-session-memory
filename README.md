@@ -226,6 +226,18 @@ agents can ask for a bounded neighborhood, timeline, shortest path,
 cooccurrence packet, or GraphRAG packet for stable anchors such as skills,
 MCPs, hooks, tools, paths, goals, failures, and decisions.
 
+The graph materialization policy does not require every event route signal to
+become an `event -> route` edge. New/rebuilt segment sources always emit
+`segment_has_route_signal` summary edges with counts, while
+`mentions_route_signal` event edges are reserved for concrete operational
+anchors such as skills, MCPs, hooks, tools, APIs, scripts, validators, tests,
+evals, playbooks, techniques, mechanics, graph, memory, goals, agents, and
+Git. Exact event-level route lookup remains in segment indexes and search
+postings; the graph is the bounded topology layer, not the raw authority.
+`graph_sources.graph_event_route_signal_edge_policy` is part of the hot
+freshness contract, so `maintenance-status` can detect policy drift without a
+full session-source scan.
+
 Build it after route indexes/search/atlas are refreshed:
 
 ```bash
@@ -254,7 +266,8 @@ evidence as the recovery surface, avoids writing multi-GB snapshots, and
 removes stale sidecar exports so freshness reports `not_exported` instead of
 trusting old snapshot data.
 
-Normal growth should use incremental maintenance instead of a full rebuild:
+Normal growth, mass policy drift, and empty-store recovery should use
+incremental maintenance instead of a full rebuild:
 
 ```bash
 python3 scripts/aoa_session_memory.py graph-maintenance all \
@@ -300,6 +313,17 @@ demand, so agents still receive raw/segment/session refs without storing the
 same evidence arrays twice in the aggregate tables. Existing live stores remain
 mixed until a controlled `graph-build all --write --store-only --in-place`
 rebuild or enough source maintenance has refreshed the touched aggregates.
+If a killed full rebuild leaves `graph.sqlite3` with empty `nodes` or `edges`,
+the hot route must report `graph_store_nodes_empty` /
+`graph_store_edges_empty` and point to bounded `graph-maintenance --apply`
+recovery. Do not retry an in-place full rebuild by default after memory
+pressure.
+If partial recovery leaves `graph_sources` much smaller than the source-state
+ledger, the hot route must report `graph_source_ledger_store_count_mismatch`
+and keep graph search unavailable until bounded maintenance catches up. A fresh
+`graph-maintenance` report with non-zero `remaining_count` is also a hot-gate
+signal (`latest_graph_maintenance_remaining_sources`), so an exhausted or stale
+ledger cannot make a partial graph store look current.
 
 `graph/nodes.jsonl`, `graph/edges.jsonl`, and `graph/index.json` are optional
 snapshot exports from the graph store, not the live mutable database. On large
@@ -502,6 +526,12 @@ timings, slow SQLite indexes, last successful auto-maintenance profiles, and
 `why_maintenance_long` evidence from diagnostics. If `hot` finds a
 bulk/catchup/deep/manual writer already holding the lease, it defers instead of
 starting a competing rewrite.
+Manual maintenance writers use the same shared lock but must not wait
+silently behind a timer or another manual job. If the lock is held beyond the
+bounded wait, the command returns a
+`session_memory_maintenance_lock_conflict` packet with `mutates=false`, the
+blocking owner, and lock-wait diagnostics so the agent can retry, wait, or
+choose a narrower route.
 When the only dirty-looking state is a live transcript quiet-window defer,
 `maintenance-status` reports a `live_tail` packet. Agents should read
 `live_tail.status`, `ready_count`, `waiting_count`,
@@ -575,7 +605,11 @@ The current safe storage route is:
   `storage-audit` reports old `raw_ref` graph materialization rows, run
   `graph-raw-ref-prune --apply --write-report` first. This route is
   `manual-bulk`, requires disk headroom for WAL growth, and physical file shrink
-  still needs reserved disk for VACUUM or a controlled rebuild. Use
+  still needs reserved disk for VACUUM or a controlled rebuild. Event route
+  signal edge pressure should be handled by the graph event-edge policy:
+  refresh or rebuild generated graph sources so wide route facets collapse to
+  `segment_has_route_signal` summaries instead of per-event high-fanout edges.
+  After generated cardinality is reduced, use
   `graph-sqlite-compact --write-report` as the explicit preflight before any
   physical graph SQLite compaction; its default `vacuum-into` route creates a
   checked copy and does not replace the live store.

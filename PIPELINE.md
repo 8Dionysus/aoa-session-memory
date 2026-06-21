@@ -548,6 +548,12 @@ entrypoint for checking the current owner, last completed job, DB/WAL sizes,
 operations warnings, last successful auto-maintenance profiles, recent problem
 jobs, and `why_maintenance_long` search-index/storage evidence before starting
 a manual catch-up.
+Manual-bulk commands use the same shared lock but must not block indefinitely
+behind an unattended timer. When the lock is still held after the bounded wait,
+they return a `session_memory_maintenance_lock_conflict` packet with
+`mutates=false`, the blocking owner, and lock-wait diagnostics. Treat that as a
+clear retry/defer signal, not as permission to start a second writer or kill the
+owner.
 
 `maintenance-status` also exposes a `live_tail` packet for deferred live
 sources. It separates actionable dirty work from quiet-window deferral, reports
@@ -607,6 +613,17 @@ full `documents`, `document_routes`, or `route_terms` tables just to decide
 whether selected sessions are dirty. Hot live-quiescence is only a freshness
 guard, so it uses source/live transcript mtimes and does not hash projection
 sources before the real search/atlas gates.
+For graph hot state, the generated SQLite store must not be treated as current
+just because the old source-state ledger says most rows are clean. The hot gate
+must compare non-retired ledger sources with stored `graph_sources`; a deficit
+reports `graph_source_ledger_store_count_mismatch` and routes to bounded
+`graph-maintenance --apply`. It must also read the latest fresh
+`graph-maintenance` report: a non-zero `remaining_count` reports
+`latest_graph_maintenance_remaining_sources` so partial recovery cannot turn
+green after the queue or ledger is stale. Empty aggregate `nodes` or `edges`
+after a killed generated-store rebuild are a generated-projection recovery case
+and route to bounded incremental maintenance unless there is a real schema or
+SQLite corruption reason.
 
 Pre-GraphRAG trust has its own loop above the generated graph:
 
@@ -878,6 +895,23 @@ route signals, event relationships, and raw refs that already feed search and
 atlas routes. The live store is `graph/graph.sqlite3`; `nodes.jsonl` and
 `edges.jsonl` are sidecar snapshots exported from that store:
 
+Graph route-signal materialization is intentionally tiered. Segment sources
+emit `segment_has_route_signal` summary edges for every indexed route signal,
+with counts and segment refs. Event-level `mentions_route_signal` edges are
+reserved for concrete operational anchors where graph traversal benefits from
+exact event proximity: skills, MCPs, hooks, tools, APIs, plugins, agents,
+scripts, validators, tests, evals, Git, playbooks, techniques, mechanics,
+graph, memory, and goals. Wide facets such as scope contracts, authority
+surfaces, verification state, operator preference, generic path/entity
+mentions, freshness, confidence, and access-boundary signals stay exact in
+segment/search indexes and appear in graph through segment/session summaries.
+Do not schema-bump the graph solely for this policy; the policy is recorded in
+graph metadata, `graph_sources.graph_event_route_signal_edge_policy`, and the
+graph source fingerprint. Old sources therefore become normal projection drift
+that hot status can see without a full session-source scan. The automatic route
+is bounded `graph-maintenance`; a store-only rebuild is a manual,
+resource-gated repair after explicit host/disk/memory review.
+
 ```bash
 python3 scripts/aoa_session_memory.py graph-build all \
   --workspace-root /path/to/workspace \
@@ -916,7 +950,8 @@ bounded as `matched_source_key_count` plus `matched_source_key_sample`; the full
 `matched_source_keys` list is retained only for explicit `--source-key` runs.
 Graph source state reports include bounded reason counts, normalized reason
 groups, examples, and a maintenance recommendation so an agent can distinguish
-small missing-source repair from mass classifier/fingerprint drift. Use
+small missing-source repair from mass classifier/fingerprint drift without
+defaulting to a full rebuild. Use
 `graph-maintenance --plan-refresh-costs` for a dry exact-cost plan over the
 candidate pool before applying a bounded repair; it parses the candidate
 sources and reports planned aggregate node/edge refresh counts without mutating
@@ -942,15 +977,18 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --write-report
 ```
 
-Full
-`graph-build all --write --force-large-export` remains the fallback
-for schema changes, corruption, excessive dirty backlog, invariant failure, or
-large historical imports.
+Full `graph-build all --write --force-large-export` remains the fallback for
+schema changes, corruption, invariant failure, or large historical imports that
+have already been routed through the heavy/resource-gated lane. Excessive dirty
+or missing-source backlog alone should continue through bounded
+`graph-maintenance --apply` batches unless the operator deliberately chooses an
+offline rebuild.
 
 On a large live archive, treat full graph rebuild as an offline/resource-gated
 repair, not the default continuation route. If a full store-only rebuild is
-killed by memory pressure, reset only the generated `graph/graph.sqlite3` store
-and resume with bounded `graph-maintenance --apply` batches; raw/session/search
+killed by memory pressure and leaves `graph/graph.sqlite3` empty, hot status
+must surface `graph_store_nodes_empty` / `graph_store_edges_empty` and the next
+safe route is bounded `graph-maintenance --apply` recovery. Raw/session/search
 evidence remains the stronger source truth.
 
 When the live archive is large and sidecar snapshots are not needed, prefer a

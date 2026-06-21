@@ -119,6 +119,9 @@ Build the `.aoa` session-memory mechanism end to end:
   cached graph cardinality, top edge types, physical compaction headroom, and
   the next safe route before any deep audit or SQLite compaction;
   `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active;
+  manual-bulk writers return a bounded
+  `session_memory_maintenance_lock_conflict` packet instead of waiting
+  silently behind an active maintenance lease;
   `maintenance-status` exposes a `live_tail` packet over deferred live
   freshness rows with `waiting_for_quiet_window` vs `ready_for_catchup`,
   quiet-window remaining seconds, `next_ready_at`, and the typed catch-up
@@ -137,6 +140,15 @@ Build the `.aoa` session-memory mechanism end to end:
   search/atlas gates; if route-cache work spends the hot budget before graph
   work starts, a bounded graph job is queued as the automatic continuation
   route with a separate profile graph budget
+- Graph hot-state recovery guards: `maintenance-status` detects empty
+  generated graph stores (`graph_store_nodes_empty` / `graph_store_edges_empty`)
+  without a full source scan, routes them to bounded incremental
+  `graph-maintenance`, compares non-retired ledger sources with stored
+  `graph_sources` to catch partial-store recovery
+  (`graph_source_ledger_store_count_mismatch`), and uses the latest fresh
+  `graph-maintenance` report's non-zero `remaining_count` as
+  `latest_graph_maintenance_remaining_sources` so stale ledgers or exhausted
+  queues cannot make graph search look current
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata
@@ -212,7 +224,7 @@ python3 scripts/aoa_session_memory.py audit --workspace-root /path/to/workspace 
 
 Last observed result:
 
-- `.aoa` tests: `85 passed`
+- `.aoa` tests: `211 passed` on 2026-06-21
 - `codex-grounding`: `ok=true`, `codex-cli 0.133.0`, compact ratio `0.8`
 - `codex-hooks-status`: `ok=true`, all required native hooks present,
   matching, and trusted
@@ -718,6 +730,40 @@ Last observed result:
   `status=disabled_for_new_builds_existing_store_mixed`. Do not schema-bump the
   live graph solely for this; reclaim needs a reserved rebuild/prune plus
   SQLite compaction route.
+- 2026-06-21 event route-signal graph materialization policy: new/rebuilt graph
+  sources keep exact `mentions_route_signal` event edges only for concrete
+  operational anchors (skills, MCPs, hooks, tools, APIs, plugins, agents,
+  scripts, validators, tests, evals, Git, playbooks, techniques, mechanics,
+  graph, memory, and goals) and emit `segment_has_route_signal` summaries for
+  every route signal. Wide facets remain exact in segment indexes and search
+  postings, while graph uses segment/session summaries to avoid
+  event-by-route-signal fanout. The policy is tracked as
+  `graph_event_route_signal_edge_policy=anchor_event_edges_segment_summary_v1`
+  in graph metadata and source fingerprints rather than a graph schema bump;
+  old graph sources should therefore refresh as normal source fingerprint drift.
+  Regression proof:
+  `test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level`.
+- 2026-06-21 graph hot-state empty-store guard: a killed in-place generated
+  graph rebuild must not leave `maintenance-status` green. The hot path now
+  reads cheap SQLite state counts, reports `graph_store_nodes_empty` /
+  `graph_store_edges_empty` as structural stale state, and routes recovery to
+  bounded `graph-maintenance --apply` instead of retrying a full in-place
+  rebuild by default. Mass classifier, fingerprint, policy, or missing-source
+  drift likewise recommends budgeted graph maintenance; full store-only rebuild
+  stays a manual heavy/resource-gated route. Regression proof:
+  `test_graph_hot_state_detects_empty_store_without_source_scan`.
+- 2026-06-21 graph partial-store and lock-conflict proof:
+  `maintenance-status --full` now detects a partial generated graph store by
+  comparing non-retired source-state ledger entries with stored
+  `graph_sources`, carries the latest fresh `graph-maintenance.remaining_count`
+  as a hot-gate signal, and emits real-root bounded graph-maintenance commands
+  without `/path/to/workspace` placeholders. Manual maintenance lock conflicts
+  return a bounded `session_memory_maintenance_lock_conflict` packet instead
+  of blocking indefinitely. Regression proof:
+  `test_graph_hot_state_detects_ledger_store_source_count_mismatch`,
+  `test_graph_hot_state_uses_latest_graph_maintenance_remaining_count`,
+  `test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply`,
+  and `test_manual_maintenance_lock_returns_conflict_instead_of_blocking`.
 - 2026-06-21 raw-ref prune route: `graph-raw-ref-prune` is the controlled lane
   for that mixed-store tail. Dry-run is read-only and uses materialized
   `graph_type_counts`; apply runs under the maintenance coordinator, deletes only
