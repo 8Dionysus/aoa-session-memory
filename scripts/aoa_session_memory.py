@@ -15375,6 +15375,35 @@ def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_m
     }
 
 
+def session_projection_activity_state(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    manifest_dict = manifest if isinstance(manifest, dict) else {}
+    display = manifest_dict.get("display") if isinstance(manifest_dict.get("display"), dict) else {}
+    raw = manifest_dict.get("raw") if isinstance(manifest_dict.get("raw"), dict) else {}
+    raw_path = projection_path_from_ref(raw.get("path"), base=session_dir) if raw.get("path") else session_dir / "raw" / "session.raw.jsonl"
+    latest_mtime = 0.0
+    source_paths: list[str] = []
+    for path in index_source_paths_for_record(record, include_rendered_markdown=include_rendered_markdown):
+        if not path.exists() or not path.is_file():
+            continue
+        mtime = path_mtime(path)
+        latest_mtime = max(latest_mtime, mtime)
+        source_paths.append(str(path))
+    if raw_path and raw_path.exists() and raw_path.is_file():
+        latest_mtime = max(latest_mtime, path_mtime(raw_path))
+        source_paths.append(str(raw_path))
+    return {
+        "session_id": str(manifest_dict.get("session_id") or record.get("session_id") or session_dir.name),
+        "session_label": str(display.get("label") or manifest_dict.get("session_label") or record.get("session_label") or session_dir.name),
+        "session_dir": str(session_dir),
+        "latest_source_mtime": latest_mtime,
+        "source_path_count": len(source_paths),
+        "source_paths": source_paths[:12],
+    }
+
+
 def projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [session_projection_fingerprint(record) for record in records]
 
@@ -15388,31 +15417,36 @@ def projection_quiescence_split(
     *,
     quiet_seconds: float,
     now_ts: float | None = None,
+    compute_fingerprints: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     quiet_seconds = max(0.0, float(quiet_seconds))
     now_value = time.time() if now_ts is None else float(now_ts)
     threshold = now_value - quiet_seconds
-    fingerprints = projection_fingerprints_for_records(records)
+    projection_states = (
+        projection_fingerprints_for_records(records)
+        if compute_fingerprints
+        else [session_projection_activity_state(record) for record in records]
+    )
     stable_records: list[dict[str, Any]] = []
     stable_fingerprints: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
-    for record, fingerprint in zip(records, fingerprints):
-        latest = float(fingerprint.get("latest_source_mtime") or 0.0)
+    for record, projection_state in zip(records, projection_states):
+        latest = float(projection_state.get("latest_source_mtime") or 0.0)
         age_seconds = max(0.0, now_value - latest) if latest > 0 else None
-        session_dir_text = str(fingerprint.get("session_dir") or "")
+        session_dir_text = str(projection_state.get("session_dir") or "")
         live_transcript = session_live_transcript_path(Path(session_dir_text)) if session_dir_text else None
         live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
         if quiet_seconds > 0 and (latest > threshold or live_mtime > threshold):
             reasons = ["recent_live_write"] if latest > threshold else ["recent_live_codex_transcript_not_yet_archived"]
             deferred.append(
                 {
-                    "session_id": fingerprint.get("session_id"),
-                    "session_label": fingerprint.get("session_label"),
-                    "session_dir": fingerprint.get("session_dir"),
+                    "session_id": projection_state.get("session_id"),
+                    "session_label": projection_state.get("session_label"),
+                    "session_dir": projection_state.get("session_dir"),
                     "latest_source_mtime": latest,
                     "age_seconds": age_seconds,
                     "quiet_seconds": quiet_seconds,
-                    "source_paths": fingerprint.get("source_paths", [])[:8],
+                    "source_paths": projection_state.get("source_paths", [])[:8],
                     "live_transcript_path": str(live_transcript) if live_transcript else "",
                     "live_transcript_mtime": live_mtime,
                     "reasons": reasons,
@@ -15420,10 +15454,11 @@ def projection_quiescence_split(
             )
             continue
         stable_records.append(record)
-        stable_fingerprints.append(fingerprint)
+        stable_fingerprints.append(projection_state)
     summary = {
         "enabled": True,
         "mode": "stable_quiescent_subset",
+        "projection_state_mode": "fingerprint" if compute_fingerprints else "mtime_only",
         "quiet_seconds": quiet_seconds,
         "now_ts": now_value,
         "threshold_mtime": threshold,
@@ -18772,6 +18807,7 @@ def auto_maintenance(
             stable_records, _stable_fingerprints, deferred_live_records, quiescence = projection_quiescence_split(
                 selected_records_override,
                 quiet_seconds=GRAPH_HOT_LIVE_DEFER_SECONDS,
+                compute_fingerprints=False,
             )
             if deferred_live_records:
                 selection_scope = dict(selection_scope)

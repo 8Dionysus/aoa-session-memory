@@ -4022,6 +4022,65 @@ def test_sqlite_search_index_state_scoped_uses_session_state_without_global_coun
     assert "session_projection_dirty" in dirty["reasons"]
 
 
+def test_projection_quiescence_split_mtime_mode_avoids_full_fingerprints(tmp_path: Path, monkeypatch: Any) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "2026-06-20__001__quiescence-fast-path"
+    (session_dir / "raw").mkdir(parents=True)
+    (session_dir / "segments").mkdir()
+    live_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "20" / "rollout-2026-06-20T00-00-00-quiescence.jsonl"
+    live_transcript.parent.mkdir(parents=True)
+    live_transcript.write_text("{}\n", encoding="utf-8")
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_path.write_text("{}\n", encoding="utf-8")
+    module.write_json(session_dir / "raw" / module.RAW_SOURCE_JSON, {"source_path": str(live_transcript)})
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "quiescence-fast-path",
+            "session_label": session_dir.name,
+            "display": {"label": session_dir.name},
+            "raw": {"path": "raw/session.raw.jsonl", "source_path": str(live_transcript)},
+            "segments": [{"index": "segments/000.index.json", "markdown": "segments/000.md"}],
+        },
+    )
+    module.write_json(session_dir / module.SESSION_INDEX_JSON, {"schema_version": module.SCHEMA_VERSION})
+    module.write_json(session_dir / "segments" / "000.index.json", {"events": []})
+    (session_dir / module.SESSION_INDEX_MARKDOWN).write_text("# Session\n", encoding="utf-8")
+    (session_dir / "segments" / "000.md").write_text("# Segment\n", encoding="utf-8")
+    now = time.time()
+    recent = now - 10.0
+    for path in [
+        live_transcript,
+        raw_path,
+        session_dir / "raw" / module.RAW_SOURCE_JSON,
+        session_dir / "session.manifest.json",
+        session_dir / module.SESSION_INDEX_JSON,
+        session_dir / module.SESSION_INDEX_MARKDOWN,
+        session_dir / "segments" / "000.index.json",
+        session_dir / "segments" / "000.md",
+    ]:
+        os.utime(path, (recent, recent))
+
+    def fail_full_fingerprint(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("hot quiescence mtime mode must not hash full projection sources")
+
+    monkeypatch.setattr(module, "session_projection_fingerprint", fail_full_fingerprint)
+    record = {"session_id": "quiescence-fast-path", "session_label": session_dir.name, "path": str(session_dir)}
+
+    stable_records, stable_states, deferred, summary = module.projection_quiescence_split(
+        [record],
+        quiet_seconds=600.0,
+        now_ts=now,
+        compute_fingerprints=False,
+    )
+
+    assert stable_records == []
+    assert stable_states == []
+    assert summary["projection_state_mode"] == "mtime_only"
+    assert summary["deferred_live_session_count"] == 1
+    assert deferred[0]["session_id"] == "quiescence-fast-path"
+    assert "recent_live_write" in deferred[0]["reasons"]
+
+
 def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)

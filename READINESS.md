@@ -100,10 +100,11 @@ Build the `.aoa` session-memory mechanism end to end:
   fingerprints exclude rendered Markdown companions and can refresh stale
   `session_index_state` without rebuilding SQLite documents; scoped search
   freshness uses `session_index_state` and lightweight table-presence probes
-  instead of counting the full SQLite document and route-posting tables; if
-  route-cache work spends the hot budget before graph work starts, a bounded
-  graph job is queued as the automatic continuation route with a separate
-  profile graph budget
+  instead of counting the full SQLite document and route-posting tables; hot
+  live-quiescence uses mtime-only source/live transcript checks before bounded
+  search/atlas gates; if route-cache work spends the hot budget before graph
+  work starts, a bounded graph job is queued as the automatic continuation
+  route with a separate profile graph budget
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata

@@ -441,7 +441,10 @@ without rebuilding session documents when the SQLite documents are already
 current. Scoped route-cache freshness uses the lightweight
 `session_index_state` projection state and table-existence probes instead of
 counting the full `documents` and route-posting tables; full document counts
-belong to explicit deep/global provider status, not the hot scoped gate.
+belong to explicit deep/global provider status, not the hot scoped gate. The
+hot live-quiescence prefilter is mtime-only; it defers recently written live
+sessions without hashing full projection sources, leaving fingerprint proof to
+the bounded search/atlas freshness gates that follow.
 Maintenance writers also publish a coordinator packet to
 `diagnostics/maintenance-coordinator.json` while holding
 `diagnostics/auto-maintenance.lock`. `maintenance-status --full` reports the

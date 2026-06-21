@@ -486,7 +486,9 @@ documents are already current, `index-maintenance` refreshes
 rows for the session. Scoped search freshness must stay on this projection
 state path: it may check schema and table presence, but it must not count the
 full `documents`, `document_routes`, or `route_terms` tables just to decide
-whether selected sessions are dirty.
+whether selected sessions are dirty. Hot live-quiescence is only a freshness
+guard, so it uses source/live transcript mtimes and does not hash projection
+sources before the real search/atlas gates.
 
 Pre-GraphRAG trust has its own loop above the generated graph:
 
