@@ -7159,6 +7159,7 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
     calls: dict[str, Any] = {}
+    now = time.time()
 
     def fake_search_provider_status(**kwargs: Any) -> dict[str, Any]:
         calls["search"] = kwargs
@@ -7189,6 +7190,9 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
                                 "session_id": "live-1",
                                 "session_label": "2026-06-18__001__live-session",
                                 "reason": "recent_live_projection_updates_deferred",
+                                "deferred_live_reason": "recent_live_codex_transcript_update",
+                                "source_latest_mtime": now - 900,
+                                "live_transcript_mtime": now - 900,
                             }
                         ],
                         "reasons": ["recent_live_projection_updates_deferred"],
@@ -7248,9 +7252,10 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
 
     assert payload["ok"] is True
     assert payload["mutates"] is False
-    assert payload["recommendation"] == "wait_live_catchup"
-    assert payload["agent_route"]["action"] == "use_graph_search_for_stable_archive_wait_for_recent_live"
+    assert payload["recommendation"] == "run_live_catchup"
+    assert payload["agent_route"]["action"] == "run_live_catchup_for_recent_live"
     assert payload["agent_route"]["can_use_graph_search"] is True
+    assert payload["agent_route"]["maintenance_required"] is True
     assert payload["search"]["actionable_dirty_session_count"] == 0
     assert payload["search"]["deferred_live_session_count"] == 2
     assert payload["graph"]["actionable_count"] == 0
@@ -7260,8 +7265,44 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert calls["route"]["target"] == "all"
     assert "auto-maintenance hot all" in payload["exact_next_command"]
     assert compact["agent_route"]["live_catchup_pending"] is True
+    assert payload["live_tail"]["status"] == "ready_for_catchup"
+    assert payload["live_tail"]["ready_count"] == 1
+    assert payload["live_tail"]["waiting_count"] == 0
+    assert payload["live_tail"]["max_quiet_remaining_seconds"] == 0
+    assert payload["agent_route"]["live_tail_status"] == "ready_for_catchup"
+    assert compact["live_tail"]["status"] == "ready_for_catchup"
+    assert compact["live_tail"]["samples"][0]["quiet_remaining_seconds"] == 0
     assert compact["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
-    assert compact["next_actions"][0]["id"] == "wait_live_catchup"
+    assert compact["next_actions"][0]["id"] == "run_live_catchup"
+    assert compact["next_actions"][0]["reason"] == "deferred_live_ready_for_bounded_catchup"
+    assert compact["next_actions"][0]["live_tail_status"] == "ready_for_catchup"
+
+
+def test_live_tail_status_reports_ready_after_quiet_window() -> None:
+    now = 2000.0
+    status = module.session_memory_live_tail_status(
+        search={
+            "deferred_live_session_count": 1,
+            "deferred_live_sessions": [
+                {
+                    "session_id": "ready-live",
+                    "session_label": "2026-06-18__001__ready-live",
+                    "source_latest_mtime": now - 900,
+                    "live_transcript_mtime": now - 900,
+                    "deferred_live_reason": "recent_live_codex_transcript_update",
+                }
+            ],
+        },
+        graph={"deferred_live_source_count": 0},
+        quiet_seconds=600,
+        now_ts=now,
+    )
+
+    assert status["status"] == "ready_for_catchup"
+    assert status["ready_count"] == 1
+    assert status["waiting_count"] == 0
+    assert status["max_quiet_remaining_seconds"] == 0
+    assert status["samples"][0]["ready_for_catchup"] is True
 
 
 def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path) -> None:
@@ -9829,6 +9870,9 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     before = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
     assert before["recommendation"] == "wait_live_catchup"
     assert before["agent_route"]["live_catchup_pending"] is True
+    assert before["live_tail"]["status"] == "waiting_for_quiet_window"
+    assert before["live_tail"]["waiting_count"] == 1
+    assert before["next_actions"][0]["live_tail_status"] == "waiting_for_quiet_window"
 
     quiet_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
     for path in [transcript, *[item for item in Path(record["path"]).rglob("*") if item.is_file()]]:
@@ -9851,6 +9895,7 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert after["recommendation"] == "use_graph_search"
     assert after["agent_route"]["action"] == "use_graph_search"
     assert after["agent_route"]["live_catchup_pending"] is False
+    assert after["live_tail"]["status"] == "none"
 
 
 def test_search_provider_status_cli_can_scope_freshness_to_session(tmp_path: Path, capsys: Any) -> None:

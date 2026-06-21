@@ -502,6 +502,13 @@ timings, slow SQLite indexes, last successful auto-maintenance profiles, and
 `why_maintenance_long` evidence from diagnostics. If `hot` finds a
 bulk/catchup/deep/manual writer already holding the lease, it defers instead of
 starting a competing rewrite.
+When the only dirty-looking state is a live transcript quiet-window defer,
+`maintenance-status` reports a `live_tail` packet. Agents should read
+`live_tail.status`, `ready_count`, `waiting_count`,
+`max_quiet_remaining_seconds`, and `next_ready_at` before starting catch-up.
+`waiting_for_quiet_window` means stable graph/search remains usable for older
+evidence while recent live claims should wait or use raw refs. `ready_for_catchup`
+means the bounded hot catch-up command in the packet is the next route.
 Host timers should run maintenance through `abyss-machine resource launch
 --kind indexing --unattended --success-on-block` so heavier work uses the
 machine resource layer instead of hooks or MCP reads.

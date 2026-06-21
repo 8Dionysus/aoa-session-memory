@@ -40450,6 +40450,88 @@ def session_memory_operations_summary(
     }
 
 
+def session_memory_live_tail_status(
+    *,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    quiet = max(0.0, float(quiet_seconds))
+    deferred_sessions = search.get("deferred_live_sessions") if isinstance(search.get("deferred_live_sessions"), list) else []
+    samples: list[dict[str, Any]] = []
+    ready_count = 0
+    waiting_count = 0
+    unknown_count = 0
+    max_remaining = 0.0
+    next_ready_epoch = 0.0
+    for item in deferred_sessions[:8]:
+        if not isinstance(item, dict):
+            continue
+        source_mtime = float(item.get("source_latest_mtime") or item.get("latest_source_mtime") or 0.0)
+        live_mtime = float(item.get("live_transcript_mtime") or 0.0)
+        latest_activity_mtime = max(source_mtime, live_mtime)
+        if latest_activity_mtime > 0:
+            age_seconds = max(0.0, now_value - latest_activity_mtime)
+            remaining = max(0.0, quiet - age_seconds)
+            ready = remaining <= 0.0
+            if ready:
+                ready_count += 1
+            else:
+                waiting_count += 1
+                max_remaining = max(max_remaining, remaining)
+                ready_epoch = latest_activity_mtime + quiet
+                next_ready_epoch = min(next_ready_epoch, ready_epoch) if next_ready_epoch > 0 else ready_epoch
+        else:
+            age_seconds = None
+            remaining = None
+            ready = False
+            unknown_count += 1
+        samples.append(
+            {
+                "session_id": item.get("session_id"),
+                "session_label": item.get("session_label"),
+                "reason": item.get("deferred_live_reason") or item.get("reason"),
+                "latest_activity_mtime": latest_activity_mtime,
+                "latest_activity_mtime_iso": iso_from_epoch(latest_activity_mtime),
+                "latest_activity_age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+                "quiet_seconds": quiet,
+                "quiet_remaining_seconds": round(remaining, 3) if remaining is not None else None,
+                "ready_for_catchup": ready,
+            }
+        )
+    deferred_search_count = int_value(search.get("deferred_live_session_count"))
+    graph_deferred_count = int_value(graph.get("deferred_live_source_count"))
+    deferred_count = deferred_search_count + graph_deferred_count
+    sampled_count = len(samples)
+    unsampled_count = max(0, deferred_search_count - sampled_count)
+    if deferred_count <= 0:
+        status = "none"
+    elif waiting_count > 0:
+        status = "waiting_for_quiet_window"
+    elif unknown_count > 0 and ready_count <= 0:
+        status = "unknown_quiet_window"
+    else:
+        status = "ready_for_catchup"
+    return {
+        "status": status,
+        "quiet_seconds": quiet,
+        "deferred_count": deferred_count,
+        "search_deferred_session_count": deferred_search_count,
+        "graph_deferred_source_count": graph_deferred_count,
+        "sampled_search_session_count": sampled_count,
+        "unsampled_search_session_count": unsampled_count,
+        "ready_count": ready_count,
+        "waiting_count": waiting_count,
+        "unknown_count": unknown_count,
+        "max_quiet_remaining_seconds": round(max_remaining, 3),
+        "next_ready_at": iso_from_epoch(next_ready_epoch),
+        "samples": samples,
+        "truth_status": "diagnostic_live_tail_projection_from_persisted_freshness_state",
+    }
+
+
 def session_memory_maintenance_next_actions(
     *,
     workspace_root: Path,
@@ -40576,6 +40658,7 @@ def session_memory_agent_route_status(
     search: dict[str, Any],
     graph: dict[str, Any],
     route: dict[str, Any],
+    live_tail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     actionable_search = int_value(search.get("actionable_dirty_session_count"))
     actionable_graph = int_value(graph.get("actionable_count"))
@@ -40589,13 +40672,16 @@ def session_memory_agent_route_status(
             "needs_offline_graph_build",
         )
     )
-    can_use_graph_search = recommendation in {"use_graph_search", "wait_live_catchup"} and not needs_route_repair
+    can_use_graph_search = recommendation in {"use_graph_search", "wait_live_catchup", "run_live_catchup"} and not needs_route_repair
     if recommendation == "run_maintenance":
         action = "run_maintenance_before_graph_search"
         raw_or_deep_route = "Use raw refs for urgent proof only; repair the stale projection first."
     elif recommendation == "install_or_bootstrap_runtime":
         action = "install_or_bootstrap_runtime"
         raw_or_deep_route = "Clean portable bundles have no live archive proof layer until installed or populated."
+    elif recommendation == "run_live_catchup":
+        action = "run_live_catchup_for_recent_live"
+        raw_or_deep_route = "Live quiet window is satisfied; run bounded hot catch-up before claims about recent live transcripts."
     elif recommendation == "wait_live_catchup":
         action = "use_graph_search_for_stable_archive_wait_for_recent_live"
         raw_or_deep_route = "For claims about very recent live transcripts, wait for catch-up or run a deep check."
@@ -40605,12 +40691,17 @@ def session_memory_agent_route_status(
     return {
         "action": action,
         "can_use_graph_search": can_use_graph_search and recommendation != "install_or_bootstrap_runtime",
-        "maintenance_required": recommendation == "run_maintenance",
+        "maintenance_required": recommendation in {"run_maintenance", "run_live_catchup"},
         "bootstrap_required": recommendation == "install_or_bootstrap_runtime",
         "live_catchup_pending": deferred_live > 0,
         "actionable_search_session_count": actionable_search,
         "actionable_graph_source_count": actionable_graph,
         "deferred_live_count": deferred_live,
+        "live_tail_status": (live_tail or {}).get("status"),
+        "live_tail_ready_count": (live_tail or {}).get("ready_count"),
+        "live_tail_waiting_count": (live_tail or {}).get("waiting_count"),
+        "live_tail_max_quiet_remaining_seconds": (live_tail or {}).get("max_quiet_remaining_seconds"),
+        "live_tail_next_ready_at": (live_tail or {}).get("next_ready_at"),
         "raw_or_deep_route": raw_or_deep_route,
     }
 
@@ -40734,6 +40825,7 @@ def session_memory_maintenance_status(
         "diagnostics": route_status.get("diagnostics", []) if isinstance(route_status.get("diagnostics"), list) else [],
     }
     portable_clean_runtime = session_memory_portable_clean_runtime_state(aoa_root)
+    live_tail = session_memory_live_tail_status(search=search, graph=graph)
     if portable_clean_runtime.get("ok"):
         root_args = ["--workspace-root", str(workspace_root), "--source-aoa-root", str(aoa_root), "--force"]
         recommendation = "install_or_bootstrap_runtime"
@@ -40754,11 +40846,44 @@ def session_memory_maintenance_status(
             route_status=route_status,
             entity_registry=entity_registry,
         )
+    if int_value(live_tail.get("deferred_count")) > 0:
+        catchup_command = [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "auto-maintenance",
+            "hot",
+            "all",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--write-report",
+        ]
+        live_tail["catchup_command"] = catchup_command
+        live_tail["exact_catchup_command"] = shlex.join(catchup_command)
+        for action in next_actions:
+            if isinstance(action, dict) and action.get("id") == "wait_live_catchup":
+                action["quiet_seconds"] = live_tail.get("quiet_seconds")
+                action["ready_count"] = live_tail.get("ready_count")
+                action["waiting_count"] = live_tail.get("waiting_count")
+                action["max_quiet_remaining_seconds"] = live_tail.get("max_quiet_remaining_seconds")
+                action["next_ready_at"] = live_tail.get("next_ready_at")
+                action["live_tail_status"] = live_tail.get("status")
+                if live_tail.get("status") == "ready_for_catchup":
+                    action["id"] = "run_live_catchup"
+                    action["reason"] = "deferred_live_ready_for_bounded_catchup"
+                    action["note"] = "Live quiet window is satisfied for sampled deferred sessions; run the bounded hot catch-up or let the timer catch up."
+                elif live_tail.get("next_ready_at"):
+                    action["note"] = "Wait until next_ready_at for the live quiet window, then run the bounded hot catch-up or let the timer catch up."
+        if recommendation == "wait_live_catchup" and live_tail.get("status") == "ready_for_catchup":
+            recommendation = "run_live_catchup"
     agent_route = session_memory_agent_route_status(
         recommendation=recommendation,
         search=search,
         graph=graph,
         route=route,
+        live_tail=live_tail,
     )
     agent_route["entity_registry_status"] = entity_registry.get("status")
     agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
@@ -40784,7 +40909,7 @@ def session_memory_maintenance_status(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
         "generated_at": now,
-        "ok": recommendation in {"use_graph_search", "wait_live_catchup", "install_or_bootstrap_runtime"},
+        "ok": recommendation in {"use_graph_search", "wait_live_catchup", "run_live_catchup", "install_or_bootstrap_runtime"},
         "mutates": False,
         "mode": mode,
         "workspace_root": str(workspace_root),
@@ -40794,6 +40919,7 @@ def session_memory_maintenance_status(
         "search": search,
         "graph": graph,
         "entity_registry": entity_registry,
+        "live_tail": live_tail,
         "route": route,
         "coordinator": coordinator,
         "storage": storage,
@@ -40880,6 +41006,44 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
     if isinstance(search.get("deferred_live_sessions"), list) and search.get("deferred_live_sessions"):
         compact_search["deferred_live_session_samples"] = [
             compact_session_sample(item) for item in search["deferred_live_sessions"][:4]
+        ]
+
+    live_tail = payload.get("live_tail") if isinstance(payload.get("live_tail"), dict) else {}
+    compact_live_tail = {
+        key: live_tail.get(key)
+        for key in (
+            "status",
+            "quiet_seconds",
+            "deferred_count",
+            "search_deferred_session_count",
+            "graph_deferred_source_count",
+            "ready_count",
+            "waiting_count",
+            "unknown_count",
+            "max_quiet_remaining_seconds",
+            "next_ready_at",
+            "exact_catchup_command",
+            "truth_status",
+        )
+        if key in live_tail
+    }
+    if isinstance(live_tail.get("samples"), list) and live_tail.get("samples"):
+        compact_live_tail["samples"] = [
+            {
+                key: item.get(key)
+                for key in (
+                    "session_id",
+                    "session_label",
+                    "reason",
+                    "latest_activity_mtime_iso",
+                    "latest_activity_age_seconds",
+                    "quiet_remaining_seconds",
+                    "ready_for_catchup",
+                )
+                if key in item
+            }
+            for item in live_tail["samples"][:4]
+            if isinstance(item, dict)
         ]
 
     timers = payload.get("timers") if isinstance(payload.get("timers"), dict) else {}
@@ -41033,6 +41197,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "search": compact_search,
         "graph": payload.get("graph"),
         "entity_registry": payload.get("entity_registry"),
+        "live_tail": compact_live_tail,
         "route": payload.get("route"),
         "coordinator": compact_coordinator,
         "storage": compact_storage,
@@ -41041,7 +41206,18 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "next_actions": [
             {
                 key: action.get(key)
-                for key in ("id", "reason", "command", "note")
+                for key in (
+                    "id",
+                    "reason",
+                    "command",
+                    "note",
+                    "live_tail_status",
+                    "quiet_seconds",
+                    "ready_count",
+                    "waiting_count",
+                    "max_quiet_remaining_seconds",
+                    "next_ready_at",
+                )
                 if key in action
             }
             for action in (payload.get("next_actions") or [])[:3]
@@ -41061,6 +41237,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
     graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
     entity_registry = payload.get("entity_registry") if isinstance(payload.get("entity_registry"), dict) else {}
+    live_tail = payload.get("live_tail") if isinstance(payload.get("live_tail"), dict) else {}
     route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
     coordinator = payload.get("coordinator") if isinstance(payload.get("coordinator"), dict) else {}
     owner = coordinator.get("owner") if isinstance(coordinator.get("owner"), dict) else {}
@@ -41078,6 +41255,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- mode: `{payload.get('mode')}`",
         f"- recommendation: `{payload.get('recommendation')}`",
         f"- search: `{search.get('status')}` actionable=`{search.get('actionable_dirty_session_count')}` deferred=`{search.get('deferred_live_session_count')}`",
+        f"- live_tail: `{live_tail.get('status')}` ready=`{live_tail.get('ready_count')}` waiting=`{live_tail.get('waiting_count')}` max_wait_sec=`{live_tail.get('max_quiet_remaining_seconds')}` next_ready_at=`{live_tail.get('next_ready_at')}`",
         f"- graph: `{graph.get('status')}` dirty=`{graph.get('dirty_count')}` missing=`{graph.get('missing_count')}` blocked=`{graph.get('blocked_count')}` retired=`{graph.get('retired_count')}`",
         f"- entity_registry: `{entity_registry.get('status')}` entities=`{entity_registry.get('entity_count')}`",
         f"- route: `{route.get('status')}` index_needed=`{route.get('needs_index_maintenance')}` graph_needed=`{route.get('needs_graph_maintenance')}`",

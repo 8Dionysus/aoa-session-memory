@@ -544,6 +544,14 @@ operations warnings, last successful auto-maintenance profiles, recent problem
 jobs, and `why_maintenance_long` search-index/storage evidence before starting
 a manual catch-up.
 
+`maintenance-status` also exposes a `live_tail` packet for deferred live
+sources. It separates actionable dirty work from quiet-window deferral, reports
+`waiting_for_quiet_window` versus `ready_for_catchup`, includes
+`quiet_remaining_seconds` / `next_ready_at`, and repeats the bounded
+`auto-maintenance hot all --apply --write-report` route. This is the agent
+surface for deciding whether to use stable graph/search now, wait for the live
+quiet window, or run catch-up after the window has elapsed.
+
 Host timers should launch this command through `abyss-machine resource launch`
 with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
 read paths light while allowing the machine resource layer to use available CPU,
