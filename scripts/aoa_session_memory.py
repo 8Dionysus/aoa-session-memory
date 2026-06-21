@@ -18364,6 +18364,7 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- apply: `{payload.get('apply')}`",
         f"- mutates: `{payload.get('mutates')}`",
         f"- reason: `{payload.get('reason')}`",
+        f"- graph_drip_on_block: `{payload.get('graph_drip_on_block')}`",
         f"- resource_class: `{payload.get('resource_class')}`",
         f"- resource_kind: `{payload.get('resource_kind')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
@@ -18388,6 +18389,25 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
     if denied_reasons:
         lines.extend(["", "## Denied Reasons", ""])
         lines.extend(f"- `{item}`" for item in denied_reasons)
+    fallback = payload.get("fallback_graph_drip") if isinstance(payload.get("fallback_graph_drip"), dict) else {}
+    if fallback:
+        lines.extend(
+            [
+                "",
+                "## Fallback Graph Drip",
+                "",
+                f"- ok: `{fallback.get('ok')}`",
+                f"- status: `{fallback.get('status')}`",
+                f"- batch_limit: `{fallback.get('batch_limit')}`",
+                f"- budget_seconds: `{fallback.get('budget_seconds')}`",
+                f"- elapsed_ms: `{fallback.get('elapsed_ms')}`",
+                f"- resource_ok: `{fallback.get('resource_ok')}`",
+                "",
+                "```bash",
+                str(fallback.get("exact_command") or ""),
+                "```",
+            ]
+        )
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
         lines.extend(f"- `{item}`" for item in diagnostics)
@@ -18482,6 +18502,12 @@ def auto_maintenance_resource_launch(
     fail_on_block: bool = False,
     resource_force: bool = False,
     resource_binary: str = "abyss-machine",
+    graph_drip_on_block: bool = False,
+    graph_drip_batch_limit: int = 10,
+    graph_drip_budget_seconds: float = 120.0,
+    graph_drip_refresh_chunk_size: int = 64,
+    graph_drip_max_refresh_nodes: int | None = 20000,
+    graph_drip_max_refresh_edges: int | None = 60000,
     since: str | None = None,
     since_days: int | None = None,
     until: str | None = None,
@@ -18586,18 +18612,144 @@ def auto_maintenance_resource_launch(
     else:
         status = "resource_launcher_no_json"
         diagnostics.append("resource_launcher_no_json")
+    fallback_graph_drip: dict[str, Any] = {}
+    if status == "resource_blocked" and graph_drip_on_block:
+        fallback_command = [
+            resource_binary,
+            "resource",
+            "launch",
+            "--class",
+            "probe",
+            "--kind",
+            str(settings["resource_kind"]),
+            "--unattended",
+            "--timeout",
+            str(max(60, int(float(graph_drip_budget_seconds) + 300))),
+            "--success-on-block",
+            "--json",
+            "--",
+            "python3",
+            str(Path(__file__).resolve()),
+            "graph-maintenance",
+            target,
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--batch-limit",
+            str(max(1, int_value(graph_drip_batch_limit, 10))),
+            "--budget-seconds",
+            str(max(1.0, float(graph_drip_budget_seconds))),
+            "--refresh-chunk-size",
+            str(max(1, int_value(graph_drip_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE))),
+            "--write-report",
+        ]
+        if graph_drip_max_refresh_nodes is not None and int_value(graph_drip_max_refresh_nodes) > 0:
+            fallback_command.extend(["--max-refresh-nodes", str(int_value(graph_drip_max_refresh_nodes))])
+        if graph_drip_max_refresh_edges is not None and int_value(graph_drip_max_refresh_edges) > 0:
+            fallback_command.extend(["--max-refresh-edges", str(int_value(graph_drip_max_refresh_edges))])
+        fallback_started = time.monotonic()
+        fallback_stdout = ""
+        fallback_stderr = ""
+        fallback_returncode: int | None = None
+        fallback_payload: dict[str, Any] = {}
+        fallback_diagnostics: list[str] = []
+        try:
+            fallback_completed = subprocess.run(
+                fallback_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(120, int(float(graph_drip_budget_seconds) + 360)),
+            )
+            fallback_returncode = fallback_completed.returncode
+            fallback_stdout = fallback_completed.stdout or ""
+            fallback_stderr = fallback_completed.stderr or ""
+            fallback_payload = parse_json_object_from_stdout(fallback_stdout)
+        except FileNotFoundError as exc:
+            fallback_diagnostics.append(f"resource_launcher_missing:{exc.filename or resource_binary}")
+        except subprocess.TimeoutExpired as exc:
+            fallback_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            fallback_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            fallback_diagnostics.append("graph_drip_resource_launcher_timeout")
+        fallback_elapsed_ms = int((time.monotonic() - fallback_started) * 1000)
+        fallback_blocked_reasons = fallback_payload.get("blocked_reasons") if isinstance(fallback_payload.get("blocked_reasons"), list) else []
+        fallback_denied_reasons = fallback_payload.get("denied_reasons") if isinstance(fallback_payload.get("denied_reasons"), list) else []
+        fallback_execution = fallback_payload.get("execution") if isinstance(fallback_payload.get("execution"), dict) else {}
+        fallback_execution_ok = fallback_execution.get("ok") if isinstance(fallback_execution, dict) else None
+        fallback_execution_returncode = fallback_execution.get("returncode") if isinstance(fallback_execution, dict) else None
+        if fallback_blocked_reasons:
+            fallback_status = "resource_blocked"
+            fallback_diagnostics.extend(f"resource_blocked:{item}" for item in fallback_blocked_reasons)
+        elif fallback_denied_reasons:
+            fallback_status = "resource_denied"
+            fallback_diagnostics.extend(f"resource_denied:{item}" for item in fallback_denied_reasons)
+        elif "graph_drip_resource_launcher_timeout" in fallback_diagnostics:
+            fallback_status = "resource_launcher_timeout"
+        elif fallback_diagnostics:
+            fallback_status = "resource_launcher_failed"
+        elif fallback_payload.get("ok") is True and (fallback_execution_ok is True or fallback_execution_returncode == 0):
+            fallback_status = "completed"
+        elif fallback_payload.get("ok") is True:
+            fallback_status = "completed_without_execution_summary"
+        elif fallback_payload:
+            fallback_status = "resource_failed"
+            fallback_diagnostics.append("resource_launcher_returned_not_ok")
+        else:
+            fallback_status = "resource_launcher_no_json"
+            fallback_diagnostics.append("resource_launcher_no_json")
+        fallback_ok = fallback_status in {"completed", "completed_without_execution_summary"}
+        fallback_graph_drip = {
+            "enabled": True,
+            "ok": fallback_ok,
+            "status": fallback_status,
+            "resource_class": "probe",
+            "resource_kind": settings.get("resource_kind"),
+            "batch_limit": max(1, int_value(graph_drip_batch_limit, 10)),
+            "budget_seconds": max(1.0, float(graph_drip_budget_seconds)),
+            "refresh_chunk_size": max(1, int_value(graph_drip_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE)),
+            "max_refresh_nodes": graph_drip_max_refresh_nodes,
+            "max_refresh_edges": graph_drip_max_refresh_edges,
+            "returncode": fallback_returncode,
+            "elapsed_ms": fallback_elapsed_ms,
+            "resource_ok": fallback_payload.get("ok"),
+            "blocked_reasons": fallback_blocked_reasons,
+            "denied_reasons": fallback_denied_reasons,
+            "execution": {
+                "ok": fallback_execution_ok,
+                "returncode": fallback_execution_returncode,
+                "stderr_tail": fallback_execution.get("stderr_tail") if isinstance(fallback_execution, dict) else None,
+                "stdout_tail": fallback_execution.get("stdout_tail") if isinstance(fallback_execution, dict) else None,
+                "systemd": fallback_execution.get("systemd") if isinstance(fallback_execution, dict) else None,
+            },
+            "command": fallback_command,
+            "exact_command": shlex.join(fallback_command),
+            "stdout_tail": fallback_stdout[-4000:],
+            "stderr_tail": fallback_stderr[-4000:],
+            "diagnostics": sorted(set(fallback_diagnostics)),
+        }
+        if fallback_ok:
+            status = "resource_blocked_graph_drip_completed"
+            diagnostics.append("graph_drip_fallback_completed")
+        else:
+            status = "resource_blocked_graph_drip_failed"
+            diagnostics.append(f"graph_drip_fallback_{fallback_status}")
     payload_ok = status in {"completed", "completed_without_execution_summary"}
+    fallback_ok = bool(fallback_graph_drip.get("ok")) if fallback_graph_drip else False
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "auto_maintenance_resource_launch",
         "generated_at": generated_at,
         "ok": payload_ok,
         "status": status,
-        "mutates": bool(apply and payload_ok),
+        "mutates": bool(apply and (payload_ok or fallback_ok)),
         "apply": apply,
         "profile": profile,
         "target": target,
         "reason": reason,
+        "graph_drip_on_block": graph_drip_on_block,
+        "fallback_graph_drip": fallback_graph_drip,
         "resource_class": settings.get("resource_class"),
         "resource_kind": settings.get("resource_kind"),
         "timeout_sec": settings.get("timeout_sec"),
@@ -18639,7 +18791,8 @@ def auto_maintenance_resource_launch(
         write_markdown(report_md, auto_maintenance_resource_markdown(payload))
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
-    payload["recommended_exit_code"] = 1 if (fail_on_block and status == "resource_blocked") or (not payload_ok and status != "resource_blocked") else 0
+    blocked_status = str(status).startswith("resource_blocked")
+    payload["recommended_exit_code"] = 1 if (fail_on_block and blocked_status) or (not payload_ok and not blocked_status) else 0
     return payload
 
 
@@ -41146,6 +41299,8 @@ def maintenance_coordinator_brief(job: dict[str, Any]) -> dict[str, Any]:
 def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
     coordinator = maintenance_report_coordinator(report)
     maintenance = report.get("maintenance") if isinstance(report.get("maintenance"), dict) else {}
+    fallback_graph_drip = report.get("fallback_graph_drip") if isinstance(report.get("fallback_graph_drip"), dict) else {}
+    fallback_execution = fallback_graph_drip.get("execution") if isinstance(fallback_graph_drip.get("execution"), dict) else {}
     return {
         "source": diagnostic_report_source(report),
         "ok": report.get("ok"),
@@ -41159,6 +41314,18 @@ def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
         "resource_ok": report.get("resource_ok"),
         "blocked_reasons": report.get("blocked_reasons", []) if isinstance(report.get("blocked_reasons"), list) else [],
         "denied_reasons": report.get("denied_reasons", []) if isinstance(report.get("denied_reasons"), list) else [],
+        "fallback_graph_drip": {
+            "ok": fallback_graph_drip.get("ok"),
+            "status": fallback_graph_drip.get("status"),
+            "batch_limit": fallback_graph_drip.get("batch_limit"),
+            "budget_seconds": fallback_graph_drip.get("budget_seconds"),
+            "elapsed_ms": fallback_graph_drip.get("elapsed_ms"),
+            "resource_ok": fallback_graph_drip.get("resource_ok"),
+            "blocked_reasons": fallback_graph_drip.get("blocked_reasons", []) if isinstance(fallback_graph_drip.get("blocked_reasons"), list) else [],
+            "execution_stderr_tail": fallback_execution.get("stderr_tail"),
+        }
+        if fallback_graph_drip
+        else {},
         "coordinator": maintenance_coordinator_brief(coordinator) if coordinator else {},
         "diagnostics": report.get("diagnostics", []) if isinstance(report.get("diagnostics"), list) else [],
         "hard_diagnostics": report.get("hard_diagnostics", []) if isinstance(report.get("hard_diagnostics"), list) else [],
@@ -42742,6 +42909,12 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "ok": report.get("ok"),
                 "generated_at": (report.get("source") or {}).get("generated_at") if isinstance(report.get("source"), dict) else None,
                 "blocked_reasons": report.get("blocked_reasons", [])[:4] if isinstance(report.get("blocked_reasons"), list) else [],
+                "fallback_graph_drip": {
+                    key: (report.get("fallback_graph_drip") or {}).get(key)
+                    for key in ("ok", "status", "batch_limit", "budget_seconds", "elapsed_ms", "resource_ok")
+                    if isinstance(report.get("fallback_graph_drip"), dict)
+                    and key in (report.get("fallback_graph_drip") or {})
+                },
             }
             for profile, report in (operations.get("last_auto_maintenance_resource_launch") or {}).items()
             if isinstance(report, dict)
@@ -46441,6 +46614,12 @@ def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
         fail_on_block=args.fail_on_block,
         resource_force=args.resource_force,
         resource_binary=args.resource_binary,
+        graph_drip_on_block=args.graph_drip_on_block,
+        graph_drip_batch_limit=args.graph_drip_batch_limit,
+        graph_drip_budget_seconds=args.graph_drip_budget_seconds,
+        graph_drip_refresh_chunk_size=args.graph_drip_refresh_chunk_size,
+        graph_drip_max_refresh_nodes=args.graph_drip_max_refresh_nodes,
+        graph_drip_max_refresh_edges=args.graph_drip_max_refresh_edges,
         since=since,
         since_days=None if args.since is not None else args.since_days,
         until=args.until,
@@ -52063,6 +52242,12 @@ def build_parser() -> argparse.ArgumentParser:
     auto_resource_parser.add_argument("--resource-force", action="store_true", help="Pass --force to abyss-machine resource launch.")
     auto_resource_parser.add_argument("--resource-binary", default="abyss-machine", help="Resource launcher binary.")
     auto_resource_parser.add_argument("--fail-on-block", action="store_true", help="Return a non-zero process exit when the resource gate blocks the child.")
+    auto_resource_parser.add_argument("--graph-drip-on-block", action="store_true", help="When the requested auto-maintenance launch is resource-blocked, try a bounded probe-class graph-maintenance fallback.")
+    auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, default=10, help="Fallback graph-maintenance source batch size.")
+    auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, default=120.0, help="Fallback graph-maintenance wall-clock budget.")
+    auto_resource_parser.add_argument("--graph-drip-refresh-chunk-size", type=int, default=64, help="Fallback graph-maintenance aggregate refresh chunk size.")
+    auto_resource_parser.add_argument("--graph-drip-max-refresh-nodes", type=int, default=20000, help="Fallback graph-maintenance aggregate node refresh cap; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--graph-drip-max-refresh-edges", type=int, default=60000, help="Fallback graph-maintenance aggregate edge refresh cap; <=0 disables the guard.")
     auto_resource_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown resource launch reports under .aoa/diagnostics.")
     auto_resource_parser.add_argument("--full", action="store_true", help="Print complete resource launch payload to stdout.")
     auto_resource_parser.set_defaults(func=command_auto_maintenance_resource)

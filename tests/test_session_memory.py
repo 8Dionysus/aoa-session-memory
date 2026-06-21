@@ -8276,6 +8276,72 @@ def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "generated_at": "2026-06-21T00:00:00-06:00",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "generated_at": "2026-06-21T00:00:10-06:00",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {
+                        "ok": True,
+                        "returncode": 0,
+                        "stderr_tail": "Memory peak: 5.3G (swap: 0B)",
+                        "stdout_tail": "{\"ok\": true}",
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        write_report=True,
+        reason="timer_backlog",
+        graph_drip_on_block=True,
+        graph_drip_batch_limit=10,
+        graph_drip_budget_seconds=120,
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["mutates"] is True
+    assert payload["recommended_exit_code"] == 0
+    assert payload["fallback_graph_drip"]["ok"] is True
+    assert payload["fallback_graph_drip"]["status"] == "completed"
+    assert "graph-maintenance" in calls[1]
+    assert "--batch-limit" in calls[1]
+    assert "graph_drip_fallback_completed" in payload["diagnostics"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
 def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     now = 2000.0
     status = module.session_memory_live_tail_status(

@@ -557,7 +557,10 @@ Last observed result:
   `status=resource_blocked`, `ok=false`, and
   `blocked_reasons=[indexing_unattended_swap_used_pressure]`; `maintenance-status`
   now surfaces that report under `latest_reports.auto_maintenance_resource` and
-  `operations.recent_problem_jobs`.
+  `operations.recent_problem_jobs`. Backlog service now enables
+  `--graph-drip-on-block`, so a blocked medium backlog can still run a capped
+  probe-class graph-maintenance fallback and expose it as
+  `fallback_graph_drip` without marking the full backlog profile as successful.
 - 2026-06-14 search read-availability proof: a live hot maintenance run opened
   a long rollback-journal write window on `search/aoa-search.sqlite3`; during
   that window both `agent-responses` and `search` returned

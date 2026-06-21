@@ -578,6 +578,11 @@ hooks and MCP read paths light while allowing the machine resource layer to use
 available CPU, memory, IO, and thermal headroom without hiding resource-pressure
 deferrals. `aoa_session_memory` MCP remains read-only and plan-only; it may
 report freshness and the maintenance route, but it must not run maintenance.
+For backlog timers, `--graph-drip-on-block` is the safe fallback route: if the
+medium auto-maintenance launch is blocked by host pressure, the wrapper may run
+a capped probe-class `graph-maintenance` batch, record `fallback_graph_drip`,
+and still keep the outer report `ok=false` so agents do not mistake partial
+graph progress for a completed backlog profile.
 
 Use `auto-maintenance catchup --apply` or
 `index-maintenance --repair-limit <n> --skip-graph-repair --apply` when a live
