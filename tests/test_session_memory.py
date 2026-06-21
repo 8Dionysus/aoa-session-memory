@@ -7714,6 +7714,112 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert scoped["shards"][0]["shard"] == "month/2026-05"
 
 
+def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    may_transcript = tmp_path / "rollout-2026-05-12T00-00-00-agent-answer-shard.jsonl"
+    write_jsonl(
+        may_transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-answer-shard", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Need a shard-routed answer"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Here is the shard-routed answer."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-answer-shard",
+            "transcript_path": str(may_transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    june_transcript = tmp_path / "rollout-2026-06-13T00-00-00-agent-progress-shard.jsonl"
+    stream_rows = [
+        {
+            "timestamp": f"2026-06-13T00:00:{second:02d}Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Сейчас проверяю shard route."},
+        }
+        for second in range(4, 18)
+    ]
+    write_jsonl(
+        june_transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-progress-shard", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Show progress"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю shard route."}]}},
+            {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Почти готово, проверка shard route заканчивается."}]}},
+            *stream_rows,
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-progress-shard",
+            "transcript_path": str(june_transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert indexed["ok"] is True
+    shards = module.materialize_search_shards(aoa_root=aoa_root, target="all")
+    assert shards["ok"] is True
+    assert shards["shard_count"] == 2
+
+    answers = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_answer"],
+        limit=5,
+        use_shards=True,
+        explain=True,
+    )
+    assert answers["ok"] is True
+    assert answers["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert answers["cost_profile"]["uses_shards"] is True
+    assert answers["cost_profile"]["uses_fts"] is False
+    assert answers["cost_profile"]["hydrates_body"] is False
+    assert answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+
+    progress = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_progress_update"],
+        limit=2,
+        use_shards=True,
+        explain=True,
+    )
+    assert progress["ok"] is True
+    assert progress["result_count"] == 2
+    assert progress["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert progress["search_projection"]["queried_shard_count"] == 2
+    assert progress["cost_profile"]["lightweight_route"] is True
+    assert progress["cost_profile"]["uses_shards"] is True
+    assert progress["cost_profile"]["uses_fts"] is False
+    assert progress["cost_profile"]["semantic_preview"] is False
+    assert all(item["agent_event_source"] != "event_msg_stream" for item in progress["results"])
+    assert {item["event_id"] for item in progress["results"]} == {"000003", "000004"}
+
+    truncated = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_progress_update"],
+        limit=1,
+        use_shards=True,
+        max_shards=1,
+    )
+    assert truncated["search_projection"]["truncated"] is True
+    assert "agent-responses" in truncated["search_projection"]["next_expansion_command"]
+    assert "--agent-event assistant_progress_update" in truncated["search_projection"]["next_expansion_command"]
+
+
 def test_search_index_default_raw_lexical_policy_is_bounded_but_explicit_unbounded_keeps_text(
     tmp_path: Path,
     monkeypatch: Any,

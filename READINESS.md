@@ -37,7 +37,8 @@ Build the `.aoa` session-memory mechanism end to end:
   filters, and CLI routes `agent-responses`, `agent-closeouts`,
   `agent-progress-updates`, `agent-reasoning-windows`, `task-episodes`, and
   `answer-neighborhood`; structured list routes without text query expose
-  `cost_profile` and skip raw preview/body hydration/FTS
+  `cost_profile` and skip raw preview/body hydration/FTS; agent-event routes
+  can use the monthly shard catalog with `--use-shards`
 - Agent event classification audit: `agent-event-audit` over real sessions,
   including longest-session selection, route probes, bounded raw event-shape
   samples, weak spots, and diagnostics without promoting generated classes to
@@ -553,7 +554,13 @@ Last observed result:
   missed the existing date index. The no-query route now avoids that computed
   order, uses the lightweight profile (`uses_fts=false`,
   `hydrates_body=false`, `semantic_preview=false`), and the same live route
-  returned `10` results in `0.41s`.
+  returned `10` results in `0.41s`. After shard fan-out integration,
+  `agent-responses --use-shards --agent-event assistant_answer --limit 10
+  --explain` returned `10` results in `0.46s` with
+  `search_projection.mode=materialized_shard_fanout`, `queried_shard_count=3`,
+  `uses_shards=true`, and raw/segment/session refs; MCP CLI
+  `agent-responses --session latest --limit 5` returned in `0.13s` through the
+  local SQLite fast path and exposes an archive shard expansion command.
 - 2026-06-21 search raw-lexical policy proof: live `search-provider-status`,
   `maintenance-status --full`, and `storage-audit` showed the current search
   store has no recorded bounded raw-lexical metadata and is classified as

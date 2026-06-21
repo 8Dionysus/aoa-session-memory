@@ -75,6 +75,19 @@ python3 scripts/aoa_session_memory.py search \
   --explain
 ```
 
+When the question is specifically about assistant answers, closeouts, progress
+updates, or reasoning windows on a materialized archive, prefer the dedicated
+agent-event route with shards:
+
+```bash
+python3 scripts/aoa_session_memory.py agent-responses \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --agent-event assistant_answer \
+  --use-shards \
+  --explain
+```
+
 Check optional provider status before using host overlays:
 
 ```bash

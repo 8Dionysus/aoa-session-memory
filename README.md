@@ -158,6 +158,10 @@ python3 scripts/aoa_session_memory.py task-episodes latest --limit 20 --order re
 python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --limit 10
 ```
 
+For archive-wide agent-event routes on a materialized archive, add
+`--use-shards`; the packet will expose `search_projection`, `cost_profile`, and
+the shard refs used for the result set.
+
 `agent-responses` is for assistant answers and reports. `agent-closeouts` is
 for final task handoff/completion packets. `agent-progress-updates` keeps
 in-flight status separate from real answers. `agent-reasoning-windows` locates
@@ -836,9 +840,10 @@ python3 scripts/aoa_session_memory.py search-catalog \
 Materialize monthly shard DBs from the same session indexes when the archive is
 large enough for bounded fan-out to be useful. Shards are generated projections:
 they are rebuilt with `search-shards`, checked against live session-index
-fingerprints by the catalog, and queried explicitly with `search --use-shards`.
-The monolith remains the fallback projection and is tracked separately from the
-live session-index basis.
+fingerprints by the catalog, and queried explicitly with `search --use-shards`
+or agent-event routes such as `agent-responses --use-shards`. The monolith
+remains the fallback projection and is tracked separately from the live
+session-index basis.
 
 ```bash
 python3 scripts/aoa_session_memory.py search-shards all \
@@ -857,6 +862,8 @@ For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. Broad FTS
 queries remain available for raw-text discovery, but on large archives they are
 a diagnostic route until the heavier FTS/raw-text slimming work is complete.
+Agent-event shard routes filter stream-copy duplicates before limiting, so
+canonical response items are not crowded out by progress stream noise.
 
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index

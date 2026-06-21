@@ -234,6 +234,10 @@ avoid raw semantic preview, compressed body hydration, and full-text search,
 then return bounded `search_body` previews plus raw/segment refs. Use
 `answer-neighborhood`, `agent-reasoning-windows`, or the returned refs when the
 task needs exact before/after evidence.
+When monthly shards are materialized, these agent-event routes accept
+`--use-shards` and return their `search_projection`; this is the preferred
+archive-wide route for MCP/agent answer, closeout, progress, and reasoning
+queries that do not need broad raw-text FTS.
 
 `agent-event-audit --order longest` is the Stage-1 classification route for
 real long sessions. It records selected sessions, generated shape counts,
@@ -268,6 +272,9 @@ The monolith remains a fallback projection and is tracked separately.
 shards and returns shard refs; when shards are missing, stale, or incompatible
 with host overlays, the route falls back to the monolith with an explicit
 diagnostic.
+Agent-event routes share the same shard fan-out through `--use-shards`, while
+preserving pre-limit stream-copy filtering so progress stream duplicates do not
+hide canonical `response_item` answers or reports.
 
 ### PostCompact
 

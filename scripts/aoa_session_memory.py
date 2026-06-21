@@ -27334,6 +27334,7 @@ def search_shard_fanout_unavailable_payload(
     explain: bool,
     semantic_preview: bool,
     hydrate_body: bool,
+    exclude_agent_event_stream_copies: bool = False,
 ) -> dict[str, Any]:
     payload = search_sessions(
         aoa_root=aoa_root,
@@ -27364,6 +27365,7 @@ def search_shard_fanout_unavailable_payload(
         explain=explain,
         semantic_preview=semantic_preview,
         hydrate_body=hydrate_body,
+        exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
         use_shards=False,
     )
     payload["search_projection"] = {
@@ -27406,6 +27408,7 @@ def search_sessions_shard_fanout(
     explain: bool = False,
     semantic_preview: bool = True,
     hydrate_body: bool = True,
+    exclude_agent_event_stream_copies: bool = False,
     max_shards: int = 24,
 ) -> dict[str, Any]:
     if provider != "portable_sqlite" or include_host_context or include_semantic_context or rerank_local:
@@ -27439,6 +27442,7 @@ def search_sessions_shard_fanout(
             explain=explain,
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
+            exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
         )
     catalog = read_search_catalog(aoa_root)
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
@@ -27488,8 +27492,16 @@ def search_sessions_shard_fanout(
             explain=explain,
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
+            exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
         )
     effective_limit = max(1, int_value(limit, 20))
+    structured_route_filter = bool(
+        any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
+    )
+    uses_fts = bool(fts_query_from_user(query))
+    lightweight_route = bool(structured_route_filter and not uses_fts)
+    effective_hydrate_body = bool(hydrate_body and not lightweight_route)
+    effective_semantic_preview = bool(semantic_preview and not lightweight_route)
     shard_payloads: list[dict[str, Any]] = []
     merged: dict[str, dict[str, Any]] = {}
     diagnostics: list[str] = []
@@ -27525,6 +27537,7 @@ def search_sessions_shard_fanout(
             explain=explain,
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
+            exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             use_shards=False,
             db_path_override=shard_path,
             projection_mode=SEARCH_ACTIVE_PROJECTION_SHARD,
@@ -27585,16 +27598,11 @@ def search_sessions_shard_fanout(
             ),
         },
         "cost_profile": {
-            "lightweight_route": bool(
-                any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
-                and not fts_query_from_user(query)
-            ),
-            "structured_route_filter": bool(
-                any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
-            ),
-            "uses_fts": bool(fts_query_from_user(query)),
-            "hydrates_body": hydrate_body,
-            "semantic_preview": semantic_preview,
+            "lightweight_route": lightweight_route,
+            "structured_route_filter": structured_route_filter,
+            "uses_fts": uses_fts,
+            "hydrates_body": effective_hydrate_body,
+            "semantic_preview": effective_semantic_preview,
             "uses_shards": True,
             "shard_query_limit": effective_limit,
         },
@@ -27645,6 +27653,7 @@ def search_sessions(
     explain: bool = False,
     semantic_preview: bool = True,
     hydrate_body: bool = True,
+    exclude_agent_event_stream_copies: bool = False,
     use_shards: bool = False,
     max_shards: int = 24,
     db_path_override: Path | None = None,
@@ -27696,6 +27705,7 @@ def search_sessions(
             explain=explain,
             semantic_preview=semantic_preview,
             hydrate_body=hydrate_body,
+            exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             max_shards=max_shards,
         )
     db_path = db_path_override or search_db_path(aoa_root)
@@ -27744,6 +27754,9 @@ def search_sessions(
         if value:
             filters.append(f"{column} = ?")
             params.append(value)
+    if exclude_agent_event_stream_copies:
+        filters.append("COALESCE(documents.tags, '') NOT LIKE ?")
+        params.append("%agent_event_source:event_msg_stream%")
     if route_layer:
         route_filters.append("route_terms.layer = ?")
         route_params.append(route_key_slug(route_layer, fallback=str(route_layer)))
@@ -28046,6 +28059,195 @@ def merge_search_results_by_doc_id(payloads: list[dict[str, Any]], *, limit: int
     return list(merged.values())[: max(1, limit)], diagnostics
 
 
+def agent_event_shard_next_expansion_command(
+    *,
+    query: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    include_stream_copies: bool,
+    max_shards: int,
+) -> str:
+    args = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "agent-responses",
+        "--use-shards",
+        "--max-shards",
+        str(max_shards),
+    ]
+    if query:
+        args.extend(["--query", query])
+    if session:
+        args.extend(["--session", session])
+    if task_episode_id:
+        args.extend(["--task-episode-id", task_episode_id])
+    for agent_event in classes:
+        args.extend(["--agent-event", agent_event])
+    if include_stream_copies:
+        args.append("--include-stream-copies")
+    return shlex.join(args)
+
+
+def agent_event_search_projection_summary(
+    payloads: list[dict[str, Any]],
+    *,
+    query: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    include_stream_copies: bool,
+    max_shards: int,
+) -> dict[str, Any]:
+    projections = [
+        payload.get("search_projection")
+        for payload in payloads
+        if isinstance(payload.get("search_projection"), dict)
+    ]
+    modes = [str(item.get("mode") or "") for item in projections if item.get("mode")]
+    shard_payloads = [
+        item
+        for projection in projections
+        for item in (projection.get("queried_shards") if isinstance(projection.get("queried_shards"), list) else [])
+        if isinstance(item, dict)
+    ]
+    unique_shards = sorted({str(item.get("shard") or "") for item in shard_payloads if item.get("shard")})
+    truncated = any(bool(item.get("truncated")) for item in projections)
+    candidate_shard_count = max((int_value(item.get("candidate_shard_count"), 0) for item in projections), default=0)
+    mode = SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT if SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT in modes else (modes[0] if modes else "")
+    return {
+        "mode": mode,
+        "agent_event_class_count": len(classes),
+        "agent_event_classes": classes,
+        "class_projection_modes": sorted(set(modes)),
+        "candidate_shard_count": candidate_shard_count,
+        "queried_shard_count": len(unique_shards),
+        "queried_shards": unique_shards,
+        "max_shards": max_shards,
+        "truncated": truncated,
+        "fallback_db_path": str(search_db_path(Path(str(payloads[0].get("aoa_root") or "")))) if payloads and payloads[0].get("aoa_root") else "",
+        "next_expansion_command": (
+            agent_event_shard_next_expansion_command(
+                query=query,
+                session=session,
+                task_episode_id=task_episode_id,
+                classes=classes,
+                include_stream_copies=include_stream_copies,
+                max_shards=max(candidate_shard_count, max_shards),
+            )
+            if truncated
+            else ""
+        ),
+    }
+
+
+def agent_event_cost_profile_summary(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    profiles = [
+        payload.get("cost_profile")
+        for payload in payloads
+        if isinstance(payload.get("cost_profile"), dict)
+    ]
+    if not profiles:
+        return {
+            "lightweight_route": False,
+            "structured_route_filter": True,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "semantic_preview": False,
+            "uses_shards": False,
+        }
+    return {
+        "lightweight_route": all(bool(profile.get("lightweight_route")) for profile in profiles),
+        "structured_route_filter": True,
+        "uses_fts": any(bool(profile.get("uses_fts")) for profile in profiles),
+        "hydrates_body": any(bool(profile.get("hydrates_body")) for profile in profiles),
+        "semantic_preview": any(bool(profile.get("semantic_preview")) for profile in profiles),
+        "uses_shards": any(bool(profile.get("uses_shards")) for profile in profiles),
+        "class_query_count": len(profiles),
+    }
+
+
+def search_agent_event_documents_with_shards(
+    *,
+    aoa_root: Path,
+    query: str,
+    limit: int,
+    provider: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    explain: bool,
+    include_stream_copies: bool,
+    max_shards: int,
+) -> dict[str, Any]:
+    now = utc_now()
+    effective_limit = max(1, limit)
+    payloads: list[dict[str, Any]] = []
+    for agent_event in classes:
+        payloads.append(
+            search_sessions(
+                aoa_root=aoa_root,
+                query=query,
+                limit=effective_limit,
+                provider=provider,
+                session=session,
+                doc_type="event",
+                agent_event=agent_event,
+                task_episode_id=task_episode_id,
+                explain=explain,
+                semantic_preview=True,
+                hydrate_body=True,
+                exclude_agent_event_stream_copies=not include_stream_copies,
+                use_shards=True,
+                max_shards=max_shards,
+            )
+        )
+    ok = all(bool(payload.get("ok")) for payload in payloads) if payloads else False
+    diagnostics: list[str] = []
+    merged: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        diagnostics.extend(str(item) for item in payload.get("diagnostics", []) if item)
+        for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+            doc_id = str(result.get("doc_id") or "")
+            if not doc_id or doc_id in merged:
+                continue
+            merged[doc_id] = result
+    results = sorted(merged.values(), key=lambda item: search_result_order_key(item, query=query))[:effective_limit]
+    provider_payload = (
+        payloads[0].get("provider")
+        if payloads and isinstance(payloads[0].get("provider"), dict)
+        else {"selected": provider, "status": "unavailable"}
+    )
+    projection = agent_event_search_projection_summary(
+        payloads,
+        query=query,
+        session=session,
+        task_episode_id=task_episode_id,
+        classes=classes,
+        include_stream_copies=include_stream_copies,
+        max_shards=max_shards,
+    )
+    cost_profile = agent_event_cost_profile_summary(payloads)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": ok,
+        "query": query,
+        "normalized_query": fts_query_from_user(query),
+        "db_path": str(search_db_path(aoa_root)),
+        "index_generated_at": next((payload.get("index_generated_at") for payload in payloads if payload.get("index_generated_at")), None),
+        "aoa_root": str(aoa_root),
+        "search_projection": projection,
+        "cost_profile": cost_profile,
+        "provider": provider_payload,
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+    }
+
+
 def search_agent_event_documents(
     *,
     aoa_root: Path,
@@ -28057,12 +28259,27 @@ def search_agent_event_documents(
     agent_events: list[str] | None = None,
     explain: bool = False,
     include_stream_copies: bool = False,
+    use_shards: bool = False,
+    max_shards: int = 24,
 ) -> dict[str, Any]:
     now = utc_now()
     classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
     if not classes:
         classes = AGENT_RESPONSE_ROUTE_CLASSES
     effective_limit = max(1, limit)
+    if use_shards:
+        return search_agent_event_documents_with_shards(
+            aoa_root=aoa_root,
+            query=query,
+            limit=effective_limit,
+            provider=provider,
+            session=session,
+            task_episode_id=task_episode_id,
+            classes=classes,
+            explain=explain,
+            include_stream_copies=include_stream_copies,
+            max_shards=max_shards,
+        )
     provider_config = search_provider_config(aoa_root)
     configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
     if provider not in configured_providers:
@@ -28248,6 +28465,8 @@ def agent_event_route_search(
     provider: str = "portable_sqlite",
     explain: bool = True,
     include_stream_copies: bool = False,
+    use_shards: bool = False,
+    max_shards: int = 24,
 ) -> dict[str, Any]:
     now = utc_now()
     classes = [item for item in (agent_events or []) if item]
@@ -28263,6 +28482,8 @@ def agent_event_route_search(
         agent_events=classes,
         explain=explain,
         include_stream_copies=include_stream_copies,
+        use_shards=use_shards,
+        max_shards=max_shards,
     )
     results = route_payload.get("results") if isinstance(route_payload.get("results"), list) else []
     return {
@@ -28277,6 +28498,7 @@ def agent_event_route_search(
         "task_episode_id": task_episode_id or "",
         "agent_events": classes,
         "include_stream_copies": include_stream_copies,
+        "search_projection": route_payload.get("search_projection") if isinstance(route_payload.get("search_projection"), dict) else {},
         "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
         "cost_profile": route_payload.get("cost_profile") if isinstance(route_payload.get("cost_profile"), dict) else {},
         "result_count": len(results),
@@ -28373,6 +28595,8 @@ def agent_event_windows(
     after: int = 6,
     provider: str = "portable_sqlite",
     include_stream_copies: bool = False,
+    use_shards: bool = False,
+    max_shards: int = 24,
 ) -> dict[str, Any]:
     classes = [item for item in (agent_events or []) if item]
     payload = agent_event_route_search(
@@ -28385,6 +28609,8 @@ def agent_event_windows(
         provider=provider,
         explain=True,
         include_stream_copies=include_stream_copies,
+        use_shards=use_shards,
+        max_shards=max_shards,
     )
     windows = [
         event_window_for_search_result(hit, before=before, after=after)
@@ -28411,6 +28637,8 @@ def agent_event_windows(
             provider=provider,
             explain=True,
             include_stream_copies=include_stream_copies,
+            use_shards=use_shards,
+            max_shards=max_shards,
         )
         bridge_results = [
             hit for hit in bridge_payload.get("results", [])
@@ -42635,6 +42863,8 @@ def command_agent_responses(args: argparse.Namespace) -> int:
         provider=args.provider,
         explain=args.explain,
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
+        use_shards=bool(getattr(args, "use_shards", False)),
+        max_shards=int_value(getattr(args, "max_shards", 24), 24),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -42655,6 +42885,8 @@ def command_agent_event_windows(args: argparse.Namespace) -> int:
         after=args.after,
         provider=args.provider,
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
+        use_shards=bool(getattr(args, "use_shards", False)),
+        max_shards=int_value(getattr(args, "max_shards", 24), 24),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -47160,6 +47392,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent_responses.add_argument("--verification-state", choices=["any", "verified"], default="any")
     agent_responses.add_argument("--failure-state", choices=["any", "failed", "blocked"], default="any")
     agent_responses.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
+    agent_responses.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    agent_responses.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     agent_responses.add_argument("--explain", action="store_true")
     agent_responses.set_defaults(func=command_agent_responses)
 
@@ -47173,6 +47407,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent_closeouts.add_argument("--session", dest="session_filter")
     agent_closeouts.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     agent_closeouts.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
+    agent_closeouts.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    agent_closeouts.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     agent_closeouts.add_argument("--explain", action="store_true")
     agent_closeouts.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_final_closeout"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -47186,6 +47422,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent_progress.add_argument("--session", dest="session_filter")
     agent_progress.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     agent_progress.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
+    agent_progress.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    agent_progress.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     agent_progress.add_argument("--explain", action="store_true")
     agent_progress.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_progress_update"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
 
@@ -47201,6 +47439,8 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning_windows.add_argument("--before", type=int, default=3)
     reasoning_windows.add_argument("--after", type=int, default=6)
     reasoning_windows.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
+    reasoning_windows.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    reasoning_windows.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
 
     answer_neighborhood = sub.add_parser("answer-neighborhood", help="Find assistant answer-like events and return bounded neighboring events.")
@@ -47216,6 +47456,8 @@ def build_parser() -> argparse.ArgumentParser:
     answer_neighborhood.add_argument("--before", type=int, default=3)
     answer_neighborhood.add_argument("--after", type=int, default=6)
     answer_neighborhood.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
+    answer_neighborhood.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
+    answer_neighborhood.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
     answer_neighborhood.set_defaults(func=command_agent_event_windows)
 
     task_episodes_parser = sub.add_parser("task-episodes", help="List generated task episodes with status, verification/failure filters, and refs.")
