@@ -866,6 +866,12 @@ Search results are route hints. They include session, segment, raw, raw-block,
 and freshness fields so the next agent can open the stronger evidence instead
 of treating a retrieval hit as reviewed truth.
 
+Structured filters with no text query, such as `--session-act`,
+`--agent-event`, `--task-episode-id`, or route-signal filters, use a lightweight
+route profile. Their payload exposes `cost_profile` and avoids raw semantic
+preview, compressed full-body hydration, and full-text search until a proof
+window or explicit text query asks for that heavier layer.
+
 Audit the full operational route surface after classifier, atlas, or search
 changes:
 

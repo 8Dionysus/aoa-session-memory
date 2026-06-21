@@ -229,6 +229,12 @@ python3 scripts/aoa_session_memory.py agent-event-audit all \
 of a long session first. Use `--order chronological` when replaying a session
 from the beginning.
 
+Structured list routes without a text query are lightweight by default. They
+avoid raw semantic preview, compressed body hydration, and full-text search,
+then return bounded `search_body` previews plus raw/segment refs. Use
+`answer-neighborhood`, `agent-reasoning-windows`, or the returned refs when the
+task needs exact before/after evidence.
+
 `agent-event-audit --order longest` is the Stage-1 classification route for
 real long sessions. It records selected sessions, generated shape counts,
 bounded raw event-shape samples, weak spots, route probes, and refs without

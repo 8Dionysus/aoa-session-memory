@@ -339,12 +339,19 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert closeouts["results"][0]["agent_event"] == "assistant_final_closeout"
     assert closeouts["results"][0]["task_episode_id"] == "task-0001"
     assert closeouts["results"][0]["freshness"]["basis"] == "indexed_snapshot"
+    assert closeouts["cost_profile"]["lightweight_route"] is True
+    assert closeouts["cost_profile"]["uses_fts"] is False
+    assert closeouts["cost_profile"]["hydrates_body"] is False
+    assert closeouts["cost_profile"]["semantic_preview"] is False
     default_response_route = module.agent_event_route_search(
         aoa_root=aoa_root,
         session=session_dir.name,
         limit=20,
     )
     assert default_response_route["result_count"] >= 1
+    assert default_response_route["cost_profile"]["lightweight_route"] is True
+    assert default_response_route["cost_profile"]["hydrates_body"] is False
+    assert default_response_route["cost_profile"]["semantic_preview"] is False
     assert all(item["agent_event"] != "assistant_open_thread" for item in default_response_route["results"])
     open_thread_route = module.agent_event_route_search(
         aoa_root=aoa_root,
@@ -371,7 +378,7 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert progress_hit["segment_index"] == progress_hit["refs"]["segment_index"]
     assert progress_hit["session_ref"] == progress_hit["refs"]["session"]
     assert progress_hit["preview"] == progress_hit["bounded_preview"]
-    assert progress_hit["preview_source"] == "raw_semantic_text"
+    assert progress_hit["preview_source"] == "search_body"
     assert "route_signal" not in progress_hit["bounded_preview"]
     assert progress_hit["bounded_preview"]
     assert any(text in progress_hit["bounded_preview"] for text in ["Сейчас проверяю", "Почти готово"])
@@ -7261,7 +7268,7 @@ def test_search_index_raw_text_uses_segment_line_limits_without_reclassifying(tm
     assert results["results"][0]["refs"]["raw"] == "raw:line:2"
 
 
-def test_search_sessions_lightweight_route_skips_compressed_body_hydration(tmp_path: Path, monkeypatch: Any) -> None:
+def test_search_sessions_structured_route_skips_heavy_hydration_by_default(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-search-lightweight-route.jsonl"
@@ -7297,20 +7304,84 @@ def test_search_sessions_lightweight_route_skips_compressed_body_hydration(tmp_p
     def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
         raise AssertionError("lightweight structured route must not read document_bodies")
 
+    def fail_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("lightweight structured route must not open raw semantic preview")
+
     monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
+    monkeypatch.setattr(module, "route_raw_semantic_preview", fail_raw_preview)
     results = module.search_sessions(
         aoa_root=aoa_root,
         doc_type="event",
         limit=1,
         explain=True,
-        semantic_preview=False,
-        hydrate_body=False,
     )
 
     assert results["ok"] is True
     assert results["result_count"] == 1
+    assert results["cost_profile"]["lightweight_route"] is True
+    assert results["cost_profile"]["uses_fts"] is False
+    assert results["cost_profile"]["hydrates_body"] is False
+    assert results["cost_profile"]["semantic_preview"] is False
     assert results["results"][0]["preview_source"] == "search_body"
     assert results["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
+
+
+def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-agent-event-lightweight-route.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-event-lightweight-route", "cwd": str(workspace)}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Agent response route stays lightweight."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-event-lightweight-route",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    assert indexed["ok"] is True
+
+    def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
+        raise AssertionError("agent event structured route must not read document_bodies")
+
+    def fail_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("agent event structured route must not open raw semantic preview")
+
+    monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
+    monkeypatch.setattr(module, "route_raw_semantic_preview", fail_raw_preview)
+    route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_answer"],
+        limit=1,
+        explain=True,
+    )
+
+    assert route["ok"] is True
+    assert route["result_count"] == 1
+    assert route["cost_profile"]["lightweight_route"] is True
+    assert route["cost_profile"]["uses_fts"] is False
+    assert route["cost_profile"]["hydrates_body"] is False
+    assert route["cost_profile"]["semantic_preview"] is False
+    assert route["results"][0]["preview_source"] == "search_body"
+    assert route["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
 
 
 def test_freshness_filter_preserves_search_order_before_stored_hits(tmp_path: Path) -> None:

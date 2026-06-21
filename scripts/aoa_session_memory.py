@@ -25958,6 +25958,25 @@ def exact_session_filter_for_search(aoa_root: Path, session: str | None) -> tupl
     return None, None
 
 
+LIGHTWEIGHT_SEARCH_PREVIEW_TOKEN_PREFIXES = (
+    "route_signal:",
+    "route_layer:",
+)
+
+
+def lightweight_search_body_preview(text: Any, *, max_chars: int = 420) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return ""
+    tokens = [
+        token
+        for token in raw.split()
+        if not any(token.startswith(prefix) for prefix in LIGHTWEIGHT_SEARCH_PREVIEW_TOKEN_PREFIXES)
+    ]
+    cleaned = " ".join(tokens).strip()
+    return short_text(cleaned or raw, max_chars=max_chars)
+
+
 def compact_search_result(
     row: sqlite3.Row,
     *,
@@ -25968,7 +25987,12 @@ def compact_search_result(
 ) -> dict[str, Any]:
     refs, ref_resolution = resolve_search_result_refs(row)
     freshness = search_result_freshness(row, resolved_refs=refs, ref_resolution=ref_resolution)
-    snippet = short_text(full_body if full_body is not None else row["body"], max_chars=420)
+    body_source = full_body if full_body is not None else row["body"]
+    snippet = (
+        short_text(body_source, max_chars=420)
+        if semantic_preview
+        else lightweight_search_body_preview(body_source, max_chars=420)
+    )
     raw_semantic_preview = route_raw_semantic_preview(row, refs, max_chars=420) if semantic_preview else {"status": "skipped", "text": ""}
     preview = raw_semantic_preview.get("text") or snippet
     preview_source = raw_semantic_preview.get("status") if raw_semantic_preview.get("text") else "search_body"
@@ -26227,6 +26251,24 @@ def search_sessions(
     route_join = ""
     route_where = " AND ".join(route_filters)
     fts_query = fts_query_from_user(query)
+    structured_route_filter = any(
+        bool(value)
+        for value in [
+            doc_type,
+            event_type,
+            family,
+            outcome,
+            conversation_act,
+            session_act,
+            agent_event,
+            task_episode_id,
+            route_layer,
+            route_signal,
+        ]
+    )
+    lightweight_route = bool(structured_route_filter and not fts_query and not include_host_context and not include_semantic_context and not rerank_local)
+    effective_semantic_preview = bool(semantic_preview and not lightweight_route)
+    effective_hydrate_body = bool(hydrate_body and not lightweight_route)
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path)
@@ -26289,7 +26331,7 @@ def search_sessions(
 
             def append_live_freshness_matches(candidate_rows: list[sqlite3.Row]) -> bool:
                 nonlocal scanned_candidate_count
-                candidate_body_overrides = search_document_bodies_for_rows(conn, candidate_rows) if hydrate_body else {}
+                candidate_body_overrides = search_document_bodies_for_rows(conn, candidate_rows) if effective_hydrate_body else {}
                 for row in candidate_rows:
                     rowid = int_value(row["rowid"])
                     if rowid in seen_rowids:
@@ -26301,7 +26343,7 @@ def search_sessions(
                         explain=explain,
                         query=query,
                         full_body=candidate_body_overrides.get(rowid),
-                        semantic_preview=semantic_preview,
+                        semantic_preview=effective_semantic_preview,
                     )
                     freshness = result.get("freshness") if isinstance(result.get("freshness"), dict) else {}
                     if str(freshness.get("status") or "") == requested_freshness_status:
@@ -26324,14 +26366,14 @@ def search_sessions(
             freshness_filter_diagnostics.append(f"freshness_status_filter_applied_after_live_check:{requested_freshness_status}")
             freshness_filter_diagnostics.append(f"freshness_status_candidate_count:{scanned_candidate_count}")
         else:
-            body_overrides = search_document_bodies_for_rows(conn, rows) if hydrate_body else {}
+            body_overrides = search_document_bodies_for_rows(conn, rows) if effective_hydrate_body else {}
             results = [
                 compact_search_result(
                     row,
                     explain=explain,
                     query=query,
                     full_body=body_overrides.get(int_value(row["rowid"])),
-                    semantic_preview=semantic_preview,
+                    semantic_preview=effective_semantic_preview,
                 )
                 for row in rows
             ]
@@ -26440,6 +26482,13 @@ def search_sessions(
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
         "aoa_root": str(aoa_root),
+        "cost_profile": {
+            "lightweight_route": lightweight_route,
+            "structured_route_filter": structured_route_filter,
+            "uses_fts": bool(fts_query),
+            "hydrates_body": effective_hydrate_body,
+            "semantic_preview": effective_semantic_preview,
+        },
         "provider": {
             "selected": provider,
             "authoritative_result_provider": "portable_sqlite",
@@ -26552,30 +26601,53 @@ def search_agent_event_documents(
         params.append("%agent_event_source:event_msg_stream%")
     where = " AND ".join(filters)
     fts_query = fts_query_from_user(query)
+    lightweight_route = not bool(fts_query)
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path)
         if fts_query:
+            source_rank_select = (
+                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank"
+                if include_stream_copies
+                else "0 AS source_rank"
+            )
+            order_clause = (
+                " ORDER BY rank, source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                if include_stream_copies
+                else " ORDER BY rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            )
             sql = (
                 "SELECT documents.*, bm25(documents_fts) AS rank, "
-                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank "
+                + source_rank_select
+                + " "
                 "FROM documents_fts JOIN documents ON documents_fts.rowid = documents.rowid "
                 "WHERE documents_fts MATCH ? AND "
                 + where
-                + " ORDER BY rank, source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                + order_clause
             )
             rows = conn.execute(sql, [fts_query, *params, effective_limit]).fetchall()
         else:
+            source_rank_select = (
+                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank"
+                if include_stream_copies
+                else "0 AS source_rank"
+            )
+            order_clause = (
+                " ORDER BY source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                if include_stream_copies
+                else " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?"
+            )
             sql = (
                 "SELECT documents.*, 0.0 AS rank, "
-                "CASE WHEN COALESCE(documents.tags, '') LIKE '%agent_event_source:event_msg_stream%' THEN 1 ELSE 0 END AS source_rank "
+                + source_rank_select
+                + " "
                 "FROM documents WHERE "
                 + where
-                + " ORDER BY source_rank, documents.session_date DESC, documents.rowid DESC LIMIT ?"
+                + order_clause
             )
             rows = conn.execute(sql, [*params, effective_limit]).fetchall()
         metadata = search_index_metadata(conn)
-        body_overrides = search_document_bodies_for_rows(conn, rows)
+        body_overrides = search_document_bodies_for_rows(conn, rows) if not lightweight_route else {}
     except sqlite3.Error as exc:
         if conn is not None:
             conn.close()
@@ -26604,7 +26676,13 @@ def search_agent_event_documents(
         else search_provider_status(aoa_root=aoa_root, provider_name=provider, include_host=True)
     )
     results = [
-        compact_search_result(row, explain=explain, query=query, full_body=body_overrides.get(int_value(row["rowid"])))
+        compact_search_result(
+            row,
+            explain=explain,
+            query=query,
+            full_body=body_overrides.get(int_value(row["rowid"])),
+            semantic_preview=not lightweight_route,
+        )
         for row in rows
     ]
     return {
@@ -26618,6 +26696,13 @@ def search_agent_event_documents(
         "db_path": str(db_path),
         "index_generated_at": metadata.get("generated_at"),
         "aoa_root": str(aoa_root),
+        "cost_profile": {
+            "lightweight_route": lightweight_route,
+            "structured_route_filter": True,
+            "uses_fts": bool(fts_query),
+            "hydrates_body": not lightweight_route,
+            "semantic_preview": not lightweight_route,
+        },
         "provider": {
             "selected": provider,
             "authoritative_result_provider": "portable_sqlite",
@@ -26676,6 +26761,7 @@ def agent_event_route_search(
         "agent_events": classes,
         "include_stream_copies": include_stream_copies,
         "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
+        "cost_profile": route_payload.get("cost_profile") if isinstance(route_payload.get("cost_profile"), dict) else {},
         "result_count": len(results),
         "results": results,
         "diagnostics": route_payload.get("diagnostics", []),

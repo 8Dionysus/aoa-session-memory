@@ -36,7 +36,8 @@ Build the `.aoa` session-memory mechanism end to end:
   generated `task_episodes`, SQLite `agent_event` / `task_episode_id`
   filters, and CLI routes `agent-responses`, `agent-closeouts`,
   `agent-progress-updates`, `agent-reasoning-windows`, `task-episodes`, and
-  `answer-neighborhood`
+  `answer-neighborhood`; structured list routes without text query expose
+  `cost_profile` and skip raw preview/body hydration/FTS
 - Agent event classification audit: `agent-event-audit` over real sessions,
   including longest-session selection, route probes, bounded raw event-shape
   samples, weak spots, and diagnostics without promoting generated classes to
@@ -531,6 +532,13 @@ Last observed result:
   MCP, hook health, tool, goal, and API samples returned `6/6` passed with raw
   previews available for proof windows in
   `diagnostics/20260621T015349Z__entity-usage-scenario-audit__codex_goal_fastpath_20260621.json`.
+- 2026-06-21 structured agent-route proof: broad
+  `agent-responses --limit 10 --explain` initially exceeded `90s` and had to be
+  killed because the default SQL ordered by a computed stream-copy rank and
+  missed the existing date index. The no-query route now avoids that computed
+  order, uses the lightweight profile (`uses_fts=false`,
+  `hydrates_body=false`, `semantic_preview=false`), and the same live route
+  returned `10` results in `0.41s`.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite
