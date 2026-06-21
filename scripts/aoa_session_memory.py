@@ -47,6 +47,8 @@ class SearchSqliteConnection(sqlite3.Connection):
 
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
+MAINTENANCE_COORDINATOR_STATE_JSON = "maintenance-coordinator.json"
+MAINTENANCE_BULK_MODES = {"catchup", "backlog", "deep", "manual-bulk"}
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
@@ -17856,6 +17858,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
     before = payload.get("freshness_before") if isinstance(payload.get("freshness_before"), dict) else {}
     after = payload.get("freshness_after") if isinstance(payload.get("freshness_after"), dict) else {}
     maintenance = payload.get("maintenance") if isinstance(payload.get("maintenance"), dict) else {}
+    coordinator = payload.get("maintenance_coordinator") if isinstance(payload.get("maintenance_coordinator"), dict) else {}
     lines = [
         "# Auto Maintenance",
         "",
@@ -17874,6 +17877,11 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- resource_kind: `{payload.get('resource_kind')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- coordinator_mode: `{coordinator.get('mode') or coordinator.get('requested_mode')}`",
+        f"- coordinator_owner_job: `{coordinator.get('owner_job') or coordinator.get('requested_owner_job')}`",
+        f"- coordinator_status: `{coordinator.get('status')}`",
+        f"- lock_wait_ms: `{coordinator.get('lock_wait_ms')}`",
+        f"- touched_surfaces: `{','.join(str(item) for item in coordinator.get('touched_surfaces', []) if item)}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
         f"- repair_graph: `{payload.get('repair_graph')}`",
         f"- allow_deferred_graph: `{payload.get('allow_deferred_graph')}`",
@@ -18006,6 +18014,54 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
     compact["deferred_graph_job"] = compact.get("deferred_graph_job")
     compact["deferred_graph_next"] = compact.get("deferred_graph_next")
     compact["deferred_graph_job_budget_seconds"] = compact.get("deferred_graph_job_budget_seconds")
+    coordinator = compact.get("maintenance_coordinator") if isinstance(compact.get("maintenance_coordinator"), dict) else {}
+    if coordinator:
+        compact["maintenance_coordinator"] = {
+            key: coordinator.get(key)
+            for key in (
+                "job_id",
+                "status",
+                "owner_job",
+                "mode",
+                "profile",
+                "pid",
+                "started_at",
+                "deadline_at",
+                "finished_at",
+                "elapsed_ms",
+                "lock_wait_ms",
+                "target",
+                "reason",
+                "touched_surfaces",
+                "deferred_reason",
+                "skipped_reason",
+                "requested_mode",
+                "requested_owner_job",
+                "lock_path",
+                "state_path",
+            )
+            if key in coordinator
+        }
+        blocking_owner = coordinator.get("blocking_owner") if isinstance(coordinator.get("blocking_owner"), dict) else {}
+        if blocking_owner:
+            compact["maintenance_coordinator"]["blocking_owner"] = {
+                key: blocking_owner.get(key)
+                for key in (
+                    "job_id",
+                    "status",
+                    "owner_job",
+                    "mode",
+                    "profile",
+                    "pid",
+                    "started_at",
+                    "deadline_at",
+                    "lock_wait_ms",
+                    "target",
+                    "reason",
+                    "touched_surfaces",
+                )
+                if key in blocking_owner
+            }
     return compact
 
 
@@ -18013,13 +18069,331 @@ def maintenance_lock_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / "auto-maintenance.lock"
 
 
-def run_with_maintenance_lock(aoa_root: Path, callback: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+def maintenance_coordinator_state_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / MAINTENANCE_COORDINATOR_STATE_JSON
+
+
+def iso_from_epoch(epoch: float | None) -> str:
+    if epoch is None or epoch <= 0:
+        return ""
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compact_argv(argv: list[str], *, max_chars: int = 2000) -> str:
+    try:
+        text = shlex.join(str(item) for item in argv)
+    except Exception:
+        text = " ".join(str(item) for item in argv)
+    return text if len(text) <= max_chars else text[: max_chars - 32] + "...[truncated]"
+
+
+def maintenance_surfaces(
+    *,
+    repair_indexes: bool = True,
+    repair_graph: bool = True,
+    search: bool = False,
+    atlas: bool = False,
+    graph: bool = False,
+    entity_registry: bool = False,
+    token_accounting: bool = False,
+    route_indexes: bool = False,
+) -> list[str]:
+    surfaces: set[str] = set()
+    if repair_indexes:
+        surfaces.update({"search", "atlas", "entity_registry", "route_indexes", "token_accounting"})
+    if repair_graph:
+        surfaces.add("graph")
+    if search:
+        surfaces.add("search")
+    if atlas:
+        surfaces.add("atlas")
+    if graph:
+        surfaces.add("graph")
+    if entity_registry:
+        surfaces.add("entity_registry")
+    if token_accounting:
+        surfaces.add("token_accounting")
+    if route_indexes:
+        surfaces.add("route_indexes")
+    return sorted(surfaces)
+
+
+def maintenance_owner_packet(
+    *,
+    aoa_root: Path,
+    owner_job: str,
+    mode: str,
+    target: str = "all",
+    reason: str = "operator_requested",
+    profile: str | None = None,
+    touched_surfaces: list[str] | None = None,
+    budget_seconds: float | None = None,
+    lock_wait_ms: int = 0,
+) -> dict[str, Any]:
+    started_epoch = time.time()
+    budget_value = float(budget_seconds) if budget_seconds is not None and float(budget_seconds) > 0 else None
+    deadline_epoch = started_epoch + budget_value if budget_value is not None else None
+    job_id = "__".join(
+        [
+            compact_stamp(),
+            str(os.getpid()),
+            safe_slug(mode, fallback="mode")[:40],
+            safe_slug(owner_job, fallback="job")[:64],
+        ]
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_coordinator_job",
+        "job_id": job_id,
+        "status": "active",
+        "owner_job": owner_job,
+        "mode": mode,
+        "profile": profile or "",
+        "pid": os.getpid(),
+        "started_at": iso_from_epoch(started_epoch),
+        "started_epoch": started_epoch,
+        "deadline_at": iso_from_epoch(deadline_epoch),
+        "deadline_epoch": deadline_epoch,
+        "budget_seconds": budget_value,
+        "lock_wait_ms": max(0, int_value(lock_wait_ms)),
+        "target": target,
+        "reason": reason,
+        "touched_surfaces": sorted(str(item) for item in (touched_surfaces or []) if item),
+        "command": compact_argv(sys.argv),
+        "lock_path": str(maintenance_lock_path(aoa_root)),
+        "state_path": str(maintenance_coordinator_state_path(aoa_root)),
+    }
+
+
+def read_maintenance_lock_owner(lock_handle: Any) -> dict[str, Any]:
+    try:
+        lock_handle.seek(0)
+        text = lock_handle.read()
+        payload = json.loads(text) if text.strip() else {}
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_maintenance_lock_owner(lock_handle: Any, owner: dict[str, Any]) -> None:
+    lock_handle.seek(0)
+    lock_handle.truncate()
+    lock_handle.write(json.dumps(owner, ensure_ascii=False, indent=2) + "\n")
+    lock_handle.flush()
+    try:
+        os.fsync(lock_handle.fileno())
+    except OSError:
+        pass
+
+
+def maintenance_result_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    summary_keys = (
+        "ok",
+        "status",
+        "mutates",
+        "apply",
+        "target",
+        "selected_count",
+        "processed_count",
+        "remaining_count",
+        "budget_seconds",
+        "budget_exhausted",
+        "elapsed_ms",
+        "action_counts",
+        "diagnostics",
+        "report_json",
+        "report_markdown",
+    )
+    summary = {key: payload.get(key) for key in summary_keys if key in payload}
+    maintenance = payload.get("maintenance") if isinstance(payload.get("maintenance"), dict) else {}
+    if maintenance:
+        summary["maintenance"] = {
+            key: maintenance.get(key)
+            for key in (
+                "ok",
+                "status",
+                "mutates",
+                "selected_count",
+                "budget_seconds",
+                "budget_exhausted",
+                "action_counts",
+                "diagnostics",
+            )
+            if key in maintenance
+        }
+    return summary
+
+
+def read_maintenance_coordinator_state(aoa_root: Path) -> dict[str, Any]:
+    payload = read_json(maintenance_coordinator_state_path(aoa_root), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_maintenance_coordinator_active(aoa_root: Path, owner: dict[str, Any]) -> dict[str, Any]:
+    state_path = maintenance_coordinator_state_path(aoa_root)
+    state = read_maintenance_coordinator_state(aoa_root)
+    state.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_coordinator_state",
+            "generated_at": utc_now(),
+            "lock_path": str(maintenance_lock_path(aoa_root)),
+            "active_job": owner,
+            "last_event": {
+                "status": "active",
+                "job_id": owner.get("job_id"),
+                "mode": owner.get("mode"),
+                "owner_job": owner.get("owner_job"),
+                "touched_surfaces": owner.get("touched_surfaces", []),
+                "at": utc_now(),
+            },
+        }
+    )
+    write_json(state_path, state)
+    return state
+
+
+def finish_maintenance_coordinator_job(
+    aoa_root: Path,
+    owner: dict[str, Any],
+    *,
+    result: dict[str, Any],
+    status: str | None = None,
+) -> dict[str, Any]:
+    finished_at = utc_now()
+    started_epoch = float(owner.get("started_epoch") or 0.0)
+    elapsed_ms = int(max(0.0, time.time() - started_epoch) * 1000) if started_epoch else 0
+    final_status = status or ("completed" if result.get("ok") else "failed")
+    completed = {
+        **owner,
+        "status": final_status,
+        "finished_at": finished_at,
+        "elapsed_ms": elapsed_ms,
+        "result_summary": maintenance_result_summary(result),
+    }
+    state_path = maintenance_coordinator_state_path(aoa_root)
+    state = read_maintenance_coordinator_state(aoa_root)
+    active = state.get("active_job") if isinstance(state.get("active_job"), dict) else {}
+    if not active or active.get("job_id") == owner.get("job_id"):
+        state["active_job"] = {}
+    state.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_coordinator_state",
+            "generated_at": finished_at,
+            "lock_path": str(maintenance_lock_path(aoa_root)),
+            "last_job": completed,
+            "last_event": {
+                "status": final_status,
+                "job_id": owner.get("job_id"),
+                "mode": owner.get("mode"),
+                "owner_job": owner.get("owner_job"),
+                "touched_surfaces": owner.get("touched_surfaces", []),
+                "at": finished_at,
+            },
+        }
+    )
+    write_json(state_path, state)
+    return completed
+
+
+def maintenance_lock_snapshot(aoa_root: Path) -> dict[str, Any]:
+    lock_path = maintenance_lock_path(aoa_root)
+    state_path = maintenance_coordinator_state_path(aoa_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    state = read_maintenance_coordinator_state(aoa_root)
+    owner: dict[str, Any] = {}
+    active = False
+    lock_readable = True
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        try:
+            owner = read_maintenance_lock_owner(lock_handle)
+        except Exception:
+            owner = {}
+            lock_readable = False
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_handle, fcntl.LOCK_UN)
+        except BlockingIOError:
+            active = True
+    active_job = state.get("active_job") if isinstance(state.get("active_job"), dict) else {}
+    stale_active_job = bool(active_job) and not active
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_lock_snapshot",
+        "generated_at": utc_now(),
+        "active": active,
+        "lock_path": str(lock_path),
+        "state_path": str(state_path),
+        "lock_readable": lock_readable,
+        "owner": owner if active else {},
+        "active_job": active_job if active or stale_active_job else {},
+        "stale_active_job": stale_active_job,
+        "last_job": state.get("last_job") if isinstance(state.get("last_job"), dict) else {},
+        "last_event": state.get("last_event") if isinstance(state.get("last_event"), dict) else {},
+        "diagnostics": ["stale_active_job_without_lock"] if stale_active_job else [],
+    }
+
+
+def maintenance_lock_conflict_kind(*, requested_mode: str, blocking_owner: dict[str, Any]) -> str:
+    blocking_mode = str(blocking_owner.get("mode") or "")
+    if requested_mode == "hot" and blocking_mode in MAINTENANCE_BULK_MODES:
+        return "hot_deferred_for_bulk_lease"
+    return "lock_held"
+
+
+def run_with_maintenance_lock(
+    aoa_root: Path,
+    callback: Callable[[], dict[str, Any]],
+    *,
+    owner_job: str = "manual-maintenance",
+    mode: str = "manual-bulk",
+    target: str = "all",
+    reason: str = "operator_requested",
+    touched_surfaces: list[str] | None = None,
+    budget_seconds: float | None = None,
+) -> dict[str, Any]:
     lock_path = maintenance_lock_path(aoa_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_handle:
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        wait_started = time.monotonic()
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        payload = callback()
+        lock_wait_ms = int((time.monotonic() - wait_started) * 1000)
+        owner = maintenance_owner_packet(
+            aoa_root=aoa_root,
+            owner_job=owner_job,
+            mode=mode,
+            target=target,
+            reason=reason,
+            touched_surfaces=touched_surfaces or [],
+            budget_seconds=budget_seconds,
+            lock_wait_ms=lock_wait_ms,
+        )
+        write_maintenance_lock_owner(lock_handle, owner)
+        write_maintenance_coordinator_active(aoa_root, owner)
+        finished: dict[str, Any] | None = None
+        try:
+            payload = callback()
+            finished = finish_maintenance_coordinator_job(aoa_root, owner, result=payload)
+        except Exception as exc:
+            failure_payload = {
+                "ok": False,
+                "status": "failed_exception",
+                "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+            }
+            finished = finish_maintenance_coordinator_job(aoa_root, owner, result=failure_payload, status="failed_exception")
+            raise
+        finally:
+            if finished is None:
+                finished = finish_maintenance_coordinator_job(
+                    aoa_root,
+                    owner,
+                    result={"ok": False, "status": "aborted_without_payload", "diagnostics": ["maintenance_callback_aborted"]},
+                    status="aborted",
+                )
+            write_maintenance_lock_owner(lock_handle, {**finished, "lock_released_at": utc_now()})
         payload["maintenance_lock_path"] = str(lock_path)
+        payload["maintenance_coordinator"] = finished
         return payload
 
 
@@ -18202,20 +18576,35 @@ def auto_maintenance(
         apply=apply,
         write_report=write_report,
     )
-    with lock_path.open("w", encoding="utf-8") as lock_handle:
-        deadline = time.monotonic() + max(0.0, lock_timeout_sec)
+    auto_touched_surfaces = maintenance_surfaces(
+        repair_indexes=effective_repair_indexes,
+        repair_graph=effective_repair_graph,
+    )
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        lock_wait_started = time.monotonic()
+        deadline = lock_wait_started + max(0.0, lock_timeout_sec)
+        blocking_owner: dict[str, Any] = {}
         while True:
             try:
                 fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                blocking_owner = read_maintenance_lock_owner(lock_handle)
+                conflict_kind = maintenance_lock_conflict_kind(requested_mode=profile, blocking_owner=blocking_owner)
                 if lock_timeout_sec <= 0 or time.monotonic() >= deadline:
+                    lock_wait_ms = int((time.monotonic() - lock_wait_started) * 1000)
+                    skipped_status = "deferred_conflicting_lease" if conflict_kind == "hot_deferred_for_bulk_lease" else "skipped_lock_held"
+                    skipped_reason = (
+                        "hot maintenance deferred because a bulk/catchup/backlog/deep/manual-bulk writer owns the lease"
+                        if skipped_status == "deferred_conflicting_lease"
+                        else "maintenance lock is already held"
+                    )
                     return {
                         "schema_version": SCHEMA_VERSION,
                         "artifact_type": "session_memory_auto_maintenance",
                         "generated_at": now,
                         "ok": True,
-                        "status": "skipped_lock_held",
+                        "status": skipped_status,
                         "mutates": False,
                         "apply": apply,
                         "profile": profile,
@@ -18238,12 +18627,49 @@ def auto_maintenance(
                         "deferred_graph_job_budget_seconds": deferred_graph_job_budget_seconds,
                         "ref_sample_limit": effective_ref_sample_limit,
                         "lock_path": str(lock_path),
+                        "lock_wait_ms": lock_wait_ms,
                         "resource_launcher": resource_launcher,
-                        "diagnostics": [],
+                        "maintenance_coordinator": {
+                            "status": skipped_status,
+                            "deferred_reason": conflict_kind,
+                            "skipped_reason": skipped_reason,
+                            "blocking_owner": blocking_owner,
+                            "lock_wait_ms": lock_wait_ms,
+                            "requested_mode": profile,
+                            "requested_owner_job": f"auto-maintenance:{profile}",
+                            "touched_surfaces": auto_touched_surfaces,
+                            "lock_path": str(lock_path),
+                            "state_path": str(maintenance_coordinator_state_path(aoa_root)),
+                        },
+                        "diagnostics": [conflict_kind],
                         "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
                         "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
                     }
                 time.sleep(0.25)
+        lock_wait_ms = int((time.monotonic() - lock_wait_started) * 1000)
+        coordinator_owner = maintenance_owner_packet(
+            aoa_root=aoa_root,
+            owner_job=f"auto-maintenance:{profile}",
+            mode=profile,
+            profile=profile,
+            target=target,
+            reason=reason,
+            touched_surfaces=auto_touched_surfaces,
+            budget_seconds=effective_budget_seconds,
+            lock_wait_ms=lock_wait_ms,
+        )
+        write_maintenance_lock_owner(lock_handle, coordinator_owner)
+        write_maintenance_coordinator_active(aoa_root, coordinator_owner)
+        coordinator_finished: dict[str, Any] | None = None
+
+        def finalize_auto_payload(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal coordinator_finished
+            coordinator_finished = finish_maintenance_coordinator_job(aoa_root, coordinator_owner, result=payload)
+            write_maintenance_lock_owner(lock_handle, {**coordinator_finished, "lock_released_at": utc_now()})
+            payload["maintenance_lock_path"] = str(lock_path)
+            payload["maintenance_coordinator"] = coordinator_finished
+            return payload
+
         if profile == "hot" and target == "all" and since is None and until is None:
             selected_records_override, selection_scope = hot_source_session_scope(
                 aoa_root,
@@ -18396,6 +18822,7 @@ def auto_maintenance(
                 "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
                 "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
             }
+            payload = finalize_auto_payload(payload)
             if write_report:
                 diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
                 diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -18537,6 +18964,7 @@ def auto_maintenance(
             "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
             "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; maintenance runs outside MCP.",
         }
+        payload = finalize_auto_payload(payload)
         if write_report:
             diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
             diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -35331,6 +35759,50 @@ def search_maintenance_status_from_provider(provider_status: dict[str, Any]) -> 
     }
 
 
+def maintenance_light_sqlite_size(db_path: Path) -> dict[str, Any]:
+    entry = storage_size_entry(db_path, label=db_path.name)
+    wal_path = Path(str(db_path) + "-wal")
+    shm_path = Path(str(db_path) + "-shm")
+    wal_size = path_total_size(wal_path)
+    shm_size = path_total_size(shm_path)
+    entry.update(
+        {
+            "kind": "sqlite",
+            "wal": {
+                "path": str(wal_path),
+                "exists": wal_path.exists(),
+                "size_bytes": wal_size,
+                "size_human": human_size(wal_size),
+            },
+            "shm": {
+                "path": str(shm_path),
+                "exists": shm_path.exists(),
+                "size_bytes": shm_size,
+                "size_human": human_size(shm_size),
+            },
+            "total_with_wal_bytes": int_value(entry.get("size_bytes")) + wal_size + shm_size,
+            "total_with_wal_human": human_size(int_value(entry.get("size_bytes")) + wal_size + shm_size),
+        }
+    )
+    return entry
+
+
+def maintenance_storage_status(aoa_root: Path) -> dict[str, Any]:
+    search_db = search_db_path(aoa_root)
+    graph_db = graph_paths(aoa_root)["store"]
+    search_root = aoa_root / SEARCH_ROOT
+    graph_root = aoa_root / GRAPH_ROOT
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_storage_status",
+        "generated_at": utc_now(),
+        "search_db": maintenance_light_sqlite_size(search_db),
+        "graph_db": maintenance_light_sqlite_size(graph_db),
+        "search_root": storage_size_entry(search_root, label="search"),
+        "graph_root": storage_size_entry(graph_root, label="graph"),
+    }
+
+
 def session_memory_maintenance_next_actions(
     *,
     workspace_root: Path,
@@ -35641,6 +36113,8 @@ def session_memory_maintenance_status(
         "route_cache_freshness": latest_diagnostic_summary(aoa_root, "*__route-cache-freshness-gates.json"),
         "storage_audit": latest_diagnostic_summary(aoa_root, "*__storage-audit.json"),
     }
+    coordinator = maintenance_lock_snapshot(aoa_root)
+    storage = maintenance_storage_status(aoa_root)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
@@ -35656,6 +36130,8 @@ def session_memory_maintenance_status(
         "graph": graph,
         "entity_registry": entity_registry,
         "route": route,
+        "coordinator": coordinator,
+        "storage": storage,
         "portable_clean_runtime": portable_clean_runtime,
         "next_actions": next_actions,
         "exact_next_command": shlex.join(next_actions[0]["command"]) if next_actions and isinstance(next_actions[0].get("command"), list) else "",
@@ -35671,6 +36147,7 @@ def session_memory_maintenance_status(
                     *graph.get("diagnostics", []),
                     *route.get("diagnostics", []),
                     *entity_registry.get("diagnostics", []),
+                    *coordinator.get("diagnostics", []),
                 ]
             )
         ),
@@ -35759,6 +36236,63 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         for name, report in latest_reports.items()
         if isinstance(report, dict)
     }
+    coordinator = payload.get("coordinator") if isinstance(payload.get("coordinator"), dict) else {}
+    owner = coordinator.get("owner") if isinstance(coordinator.get("owner"), dict) else {}
+    last_job = coordinator.get("last_job") if isinstance(coordinator.get("last_job"), dict) else {}
+    compact_coordinator = {
+        "active": coordinator.get("active"),
+        "lock_path": coordinator.get("lock_path"),
+        "state_path": coordinator.get("state_path"),
+        "stale_active_job": coordinator.get("stale_active_job"),
+        "owner": {
+            key: owner.get(key)
+            for key in (
+                "job_id",
+                "owner_job",
+                "mode",
+                "profile",
+                "pid",
+                "started_at",
+                "deadline_at",
+                "lock_wait_ms",
+                "target",
+                "reason",
+                "touched_surfaces",
+            )
+            if key in owner
+        },
+        "last_job": {
+            key: last_job.get(key)
+            for key in (
+                "job_id",
+                "owner_job",
+                "mode",
+                "profile",
+                "status",
+                "started_at",
+                "finished_at",
+                "elapsed_ms",
+                "target",
+                "reason",
+                "touched_surfaces",
+            )
+            if key in last_job
+        },
+        "diagnostics": coordinator.get("diagnostics", []),
+    }
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    compact_storage: dict[str, Any] = {}
+    for key in ("search_db", "graph_db", "search_root", "graph_root"):
+        item = storage.get(key) if isinstance(storage.get(key), dict) else {}
+        compact_storage[key] = {
+            subkey: item.get(subkey)
+            for subkey in ("path", "exists", "size_bytes", "size_human", "total_with_wal_bytes", "total_with_wal_human")
+            if subkey in item
+        }
+        wal = item.get("wal") if isinstance(item.get("wal"), dict) else {}
+        if wal:
+            compact_storage[key]["wal_size_bytes"] = wal.get("size_bytes")
+            compact_storage[key]["wal_size_human"] = wal.get("size_human")
 
     return {
         "schema_version": payload.get("schema_version"),
@@ -35773,6 +36307,8 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "graph": payload.get("graph"),
         "entity_registry": payload.get("entity_registry"),
         "route": payload.get("route"),
+        "coordinator": compact_coordinator,
+        "storage": compact_storage,
         "portable_clean_runtime": payload.get("portable_clean_runtime"),
         "next_actions": [
             {
@@ -35798,6 +36334,12 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
     entity_registry = payload.get("entity_registry") if isinstance(payload.get("entity_registry"), dict) else {}
     route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
+    coordinator = payload.get("coordinator") if isinstance(payload.get("coordinator"), dict) else {}
+    owner = coordinator.get("owner") if isinstance(coordinator.get("owner"), dict) else {}
+    last_job = coordinator.get("last_job") if isinstance(coordinator.get("last_job"), dict) else {}
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    search_db = storage.get("search_db") if isinstance(storage.get("search_db"), dict) else {}
+    graph_db = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
     lines = [
         "# Session Memory Maintenance Status",
         "",
@@ -35809,6 +36351,10 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- graph: `{graph.get('status')}` dirty=`{graph.get('dirty_count')}` missing=`{graph.get('missing_count')}` blocked=`{graph.get('blocked_count')}` retired=`{graph.get('retired_count')}`",
         f"- entity_registry: `{entity_registry.get('status')}` entities=`{entity_registry.get('entity_count')}`",
         f"- route: `{route.get('status')}` index_needed=`{route.get('needs_index_maintenance')}` graph_needed=`{route.get('needs_graph_maintenance')}`",
+        f"- coordinator_active: `{coordinator.get('active')}` owner=`{owner.get('owner_job', '')}` mode=`{owner.get('mode', '')}` surfaces=`{','.join(str(item) for item in owner.get('touched_surfaces', []) if item)}`",
+        f"- last_maintenance: `{last_job.get('owner_job', '')}` status=`{last_job.get('status', '')}` finished_at=`{last_job.get('finished_at', '')}` elapsed_ms=`{last_job.get('elapsed_ms', '')}`",
+        f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
+        f"- graph_db: `{graph_db.get('size_human')}` wal=`{(graph_db.get('wal') or {}).get('size_human') if isinstance(graph_db.get('wal'), dict) else ''}` total=`{graph_db.get('total_with_wal_human')}`",
         f"- exact_next_command: `{payload.get('exact_next_command')}`",
         "",
         "## Boundary",
@@ -38926,7 +39472,23 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             progress_every=args.progress_every,
         )
 
-    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply else run_maintenance()
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_maintenance,
+            owner_job="index-maintenance",
+            mode="manual-bulk",
+            target=args.session,
+            reason=args.reason,
+            touched_surfaces=maintenance_surfaces(
+                repair_indexes=not args.skip_index_repair,
+                repair_graph=not args.skip_graph_repair,
+            ),
+            budget_seconds=args.budget_seconds,
+        )
+        if args.apply
+        else run_maintenance()
+    )
     print(json.dumps(index_maintenance_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -39050,7 +39612,16 @@ def command_search_index(args: argparse.Namespace) -> int:
             progress_every=args.progress_every,
         )
 
-    payload = run_with_maintenance_lock(root, run_search_index)
+    payload = run_with_maintenance_lock(
+        root,
+        run_search_index,
+        owner_job="search-index",
+        mode="manual-bulk",
+        target=args.session,
+        reason="operator_requested",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=True),
+        budget_seconds=args.budget_seconds,
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -39319,7 +39890,19 @@ def command_graph_build(args: argparse.Namespace) -> int:
             progress_every=args.progress_every,
         )
 
-    payload = run_with_maintenance_lock(root, run_build) if args.write else run_build()
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_build,
+            owner_job="graph-build",
+            mode="manual-bulk",
+            target=args.session,
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+        )
+        if args.write
+        else run_build()
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -39352,7 +39935,20 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             reason="operator_requested",
         )
 
-    payload = run_with_maintenance_lock(root, run_maintenance) if args.apply or args.export_sidecar or args.write_queue or args.write_ledger else run_maintenance()
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_maintenance,
+            owner_job="graph-maintenance",
+            mode="manual-bulk",
+            target=args.session,
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+            budget_seconds=getattr(args, "budget_seconds", None),
+        )
+        if args.apply or args.export_sidecar or args.write_queue or args.write_ledger
+        else run_maintenance()
+    )
     stdout_payload = payload if getattr(args, "full", False) else compact_graph_maintenance_stdout_payload(payload)
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -41571,7 +42167,15 @@ def command_atlas_build(args: argparse.Namespace) -> int:
             write_report=args.write_report,
         )
 
-    payload = run_with_maintenance_lock(root, run_build)
+    payload = run_with_maintenance_lock(
+        root,
+        run_build,
+        owner_job="atlas-build",
+        mode="manual-bulk",
+        target=args.session,
+        reason="operator_requested",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, atlas=True),
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 

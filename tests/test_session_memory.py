@@ -6540,6 +6540,138 @@ def test_auto_maintenance_skips_when_lock_is_held(tmp_path: Path, monkeypatch: A
     assert payload["lock_path"] == str(lock_path)
 
 
+def test_hot_auto_maintenance_defers_when_bulk_lease_is_active(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    lock_path = module.maintenance_lock_path(aoa_root)
+    lock_path.parent.mkdir(parents=True)
+
+    def fail_if_called(**_: Any) -> dict[str, Any]:
+        raise AssertionError("hot maintenance must not probe or mutate while a bulk lease is active")
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fail_if_called)
+    monkeypatch.setattr(module, "graph_freshness_gates", fail_if_called)
+    monkeypatch.setattr(module, "maintain_indexes", fail_if_called)
+
+    owner = module.maintenance_owner_packet(
+        aoa_root=aoa_root,
+        owner_job="index-maintenance",
+        mode="manual-bulk",
+        target="all",
+        reason="operator_requested",
+        touched_surfaces=["search", "atlas", "graph"],
+        budget_seconds=1800,
+        lock_wait_ms=42,
+    )
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(lock_handle, owner)
+        module.write_maintenance_coordinator_active(aoa_root, owner)
+
+        payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+
+    coordinator = payload["maintenance_coordinator"]
+    assert payload["ok"] is True
+    assert payload["status"] == "deferred_conflicting_lease"
+    assert payload["mutates"] is False
+    assert "hot_deferred_for_bulk_lease" in payload["diagnostics"]
+    assert coordinator["deferred_reason"] == "hot_deferred_for_bulk_lease"
+    assert coordinator["blocking_owner"]["owner_job"] == "index-maintenance"
+    assert coordinator["blocking_owner"]["mode"] == "manual-bulk"
+    assert coordinator["blocking_owner"]["touched_surfaces"] == ["atlas", "graph", "search"]
+
+
+def test_maintenance_status_reports_active_coordinator_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    lock_path = module.maintenance_lock_path(aoa_root)
+    lock_path.parent.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {
+            "ok": True,
+            "providers": {
+                "portable_sqlite": {
+                    "status": "ready",
+                    "freshness": {
+                        "status": "current",
+                        "actionable_dirty_session_count": 0,
+                        "deferred_live_session_count": 0,
+                        "dirty_session_count": 0,
+                        "diagnostics": [],
+                    },
+                    "diagnostics": [],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "graph_store": {
+                "status": "current",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "source_count": 0,
+                "source_state": {"dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+                "ledger": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "queue": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "diagnostics": [],
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "session_memory_portable_clean_runtime_state", lambda _aoa_root: {"ok": False, "diagnostics": []})
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 0, "timers": [], "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+
+    owner = module.maintenance_owner_packet(
+        aoa_root=aoa_root,
+        owner_job="auto-maintenance:catchup",
+        mode="catchup",
+        profile="catchup",
+        target="all",
+        reason="timer",
+        touched_surfaces=["search", "atlas", "entity_registry", "route_indexes", "token_accounting"],
+        budget_seconds=1800,
+    )
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(lock_handle, owner)
+        module.write_maintenance_coordinator_active(aoa_root, owner)
+
+        payload = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root)
+
+    compact = module.compact_maintenance_status_payload(payload)
+    assert payload["coordinator"]["active"] is True
+    assert payload["coordinator"]["owner"]["owner_job"] == "auto-maintenance:catchup"
+    assert payload["coordinator"]["owner"]["mode"] == "catchup"
+    assert payload["coordinator"]["owner"]["deadline_at"]
+    assert "search_db" in payload["storage"]
+    assert "wal" in payload["storage"]["search_db"]
+    assert compact["coordinator"]["active"] is True
+    assert compact["coordinator"]["owner"]["touched_surfaces"]
+
+
 def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
