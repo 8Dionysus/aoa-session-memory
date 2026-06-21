@@ -9404,6 +9404,28 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert may_hit["search_catalog"]["shard_db_path"]
     assert may_hit["refs"]["raw"]
 
+    stale_structured_catalog = dict(catalog)
+    stale_structured_catalog["shards"] = [dict(item) for item in catalog["shards"]]
+    may_stale_shard = next(item for item in stale_structured_catalog["shards"] if item["shard"] == "month/2026-05")
+    may_stale_shard["materialized"] = False
+    may_stale_shard["status"] = "stale"
+    may_stale_shard["current_session_count"] = 0
+    may_stale_shard["stale_session_count"] = may_stale_shard["session_count"]
+    module.write_json(module.search_catalog_path(aoa_root), stale_structured_catalog)
+    structured_stale_fanout = module.search_sessions(
+        aoa_root=aoa_root,
+        doc_type="event",
+        date_from="2026-05-01",
+        date_to="2026-05-31",
+        use_shards=True,
+        explain=True,
+    )
+    assert structured_stale_fanout["ok"] is True
+    assert structured_stale_fanout["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert structured_stale_fanout["search_projection"]["queried_shard_count"] == 1
+    assert structured_stale_fanout["search_projection"]["structured_nonmaterialized_shards_used"] == ["month/2026-05"]
+    assert "search_shard_fanout_using_structured_nonmaterialized_shards:1" in structured_stale_fanout["diagnostics"]
+
     raw_text_fallback = module.search_sessions(
         aoa_root=aoa_root,
         query="may-shard-anchor",
@@ -10278,6 +10300,12 @@ def test_trace_route_resolves_operational_anchors_to_evidence(tmp_path: Path) ->
     assert "mcp:aoa_memo_mcp" in matched_tokens(mcp_trace)
     assert Path(mcp_trace["report_json"]).exists()
     assert Path(mcp_trace["report_markdown"]).exists()
+
+    mcp_fast_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-memo-mcp", kind="mcp", limit=1, per_route_limit=5)
+    assert mcp_fast_trace["ok"] is True
+    assert mcp_fast_trace["text_search_skipped"] is True
+    assert mcp_fast_trace["text_result_count"] == 0
+    assert mcp_fast_trace["route_hit_count_before_text_fallback"] >= 1
 
     hook_trace = module.trace_route(aoa_root=aoa_root, anchor="PreCompact", kind="hook", limit=20, per_route_limit=5)
     assert hook_trace["ok"] is True

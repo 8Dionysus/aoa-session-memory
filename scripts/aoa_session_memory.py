@@ -28216,28 +28216,37 @@ def search_sessions_shard_fanout(
             date_from=date_from,
             date_to=date_to,
             explain=explain,
-            semantic_preview=semantic_preview,
-            hydrate_body=hydrate_body,
+            semantic_preview=effective_semantic_preview,
+            hydrate_body=effective_hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             query_timeout_ms=query_timeout_ms,
         )
     catalog = read_search_catalog(aoa_root)
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
     candidate_shards: list[dict[str, Any]] = []
+    uses_fts = bool(fts_query_from_user(query))
     for item in shards:
-        if not isinstance(item, dict) or not item.get("materialized"):
+        if not isinstance(item, dict):
             continue
         shard_key = str(item.get("shard") or "")
         shard_path = Path(str(item.get("shard_db_path") or ""))
         if not shard_key or not shard_path.exists():
             continue
+        shard_materialized = bool(item.get("materialized"))
         if not search_shard_overlaps_date_filter(shard_key, date_from, date_to):
+            continue
+        if not shard_materialized and uses_fts:
             continue
         candidate_shards.append(item)
     candidate_shards.sort(key=lambda item: str(item.get("shard") or ""), reverse=True)
     effective_max_shards = max(1, int_value(max_shards, 24))
     truncated = len(candidate_shards) > effective_max_shards
     queried_shards = candidate_shards[:effective_max_shards]
+    queried_structured_nonmaterialized_shards = [
+        str(item.get("shard") or "")
+        for item in queried_shards
+        if isinstance(item, dict) and not item.get("materialized") and str(item.get("shard") or "")
+    ]
     if not queried_shards:
         return search_shard_fanout_unavailable_payload(
             reason="search_shard_fanout_no_materialized_shards_fallback_monolith",
@@ -28273,7 +28282,6 @@ def search_sessions_shard_fanout(
             query_timeout_ms=query_timeout_ms,
         )
     effective_limit = max(1, int_value(limit, 20))
-    uses_fts = bool(fts_query_from_user(query))
     if uses_fts:
         unsupported_raw_text_shards: list[str] = []
         for shard_item in queried_shards:
@@ -28396,6 +28404,8 @@ def search_sessions_shard_fanout(
     results = sorted(merged.values(), key=lambda item: search_result_order_key(item, query=query))[:effective_limit]
     if truncated:
         diagnostics.append(f"search_shard_fanout_truncated:{len(candidate_shards)}:{effective_max_shards}")
+    if queried_structured_nonmaterialized_shards and not uses_fts:
+        diagnostics.append(f"search_shard_fanout_using_structured_nonmaterialized_shards:{len(queried_structured_nonmaterialized_shards)}")
     provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -28418,6 +28428,7 @@ def search_sessions_shard_fanout(
             "truncated": truncated,
             "fallback_db_path": str(search_db_path(aoa_root)),
             "queried_shards": shard_payloads,
+            "structured_nonmaterialized_shards_used": queried_structured_nonmaterialized_shards,
             "next_expansion_command": (
                 "python3 scripts/aoa_session_memory.py search --use-shards --max-shards "
                 f"{len(candidate_shards)} --query {shlex.quote(query)}"
@@ -30465,9 +30476,27 @@ def trace_route(
             continue
         merge_results(payload.get("results", []) if isinstance(payload.get("results"), list) else [], matched_route)
 
+    route_hit_count = len(merged)
+    text_search_skipped = False
     skip_text_search = bool(diagnostics) and not lookup_candidates
+    if (
+        not skip_text_search
+        and lookup_candidates
+        and route_hit_count >= max(1, min(limit, per_route_limit))
+        and normalized_kind not in {"auto", "entity", "path"}
+    ):
+        skip_text_search = True
+        text_search_skipped = True
     if skip_text_search:
-        text_payload = {"ok": False, "result_count": 0, "diagnostics": ["text_search_skipped_for_unknown_typed_identity"]}
+        text_payload = {
+            "ok": False,
+            "result_count": 0,
+            "diagnostics": [
+                "text_search_skipped_for_typed_route_hits"
+                if text_search_skipped
+                else "text_search_skipped_for_unknown_typed_identity"
+            ],
+        }
     else:
         text_payload = search_sessions(
             aoa_root=aoa_root,
@@ -30498,6 +30527,8 @@ def trace_route(
         "route_candidates": lookup_candidates,
         "candidate_diagnostics": diagnostics,
         "route_result_summaries": route_results,
+        "route_hit_count_before_text_fallback": route_hit_count,
+        "text_search_skipped": text_search_skipped,
         "text_result_count": text_payload.get("result_count"),
         "result_count": len(results),
         "results": results,

@@ -58,7 +58,13 @@ Build the `.aoa` session-memory mechanism end to end:
   coordinator elapsed `1287190ms`, search monolith `9.5G`, monthly shards
   `9.4G`; structured shard fan-out for `assistant_answer` returned in `0.13s`,
   while broad FTS `hook timed out` remains slow: shard fan-out `79.57s`,
-  monolith `127.63s`)
+  monolith `127.63s`; later live catalog proof showed existing structured
+  shard DBs can be used for structured agent-event routes even when the catalog
+  cannot mark them fully materialized for raw FTS: `agent-responses
+  --agent-event assistant_open_thread --use-shards --limit 3` returned through
+  `materialized_shard_fanout` in `1.48s`, with `uses_fts=false`,
+  `hydrates_body=false`, `uses_shards=true`, and diagnostic
+  `search_shard_fanout_using_structured_nonmaterialized_shards:3`)
 - Generated entity registry: `entity-registry`,
   `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
@@ -70,7 +76,10 @@ Build the `.aoa` session-memory mechanism end to end:
   enough, and only falls back to broad text search when structured route hits do
   not include direct usage evidence
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
-  hook, tool, Git/GitHub, entity, and path anchors
+  hook, tool, Git/GitHub, entity, and path anchors; typed route hits now skip
+  the broad text fallback once the requested evidence limit is satisfied, so
+  MCP/skill/tool fast paths do not inherit raw FTS timeout diagnostics when the
+  route index already answered the question
 - Incremental graph store, sidecar snapshots, and GraphRAG packets:
   `graph-build`, `graph-maintenance`, `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`,
@@ -335,7 +344,13 @@ Last observed result:
   `diagnostics/20260526T043629Z__route-trace__aoa-memo-mcp.json`,
   `diagnostics/20260526T043628Z__route-trace__precompact.json`,
   `diagnostics/20260526T043631Z__route-trace__exec-command.json`, and
-  `diagnostics/20260526T043629Z__route-trace__github.json`.
+  `diagnostics/20260526T043629Z__route-trace__github.json`. Live proof on
+  2026-06-21: `trace-route aoa-session-memory-mcp --kind mcp --limit 5
+  --per-route-limit 10` returned in `0.87s` with `ok=true`,
+  `result_count=5`, `route_hit_count_before_text_fallback=13`,
+  `text_search_skipped=true`, and no diagnostics; the same route previously
+  spent about `9.3s` in raw text fallback and returned timeout diagnostics
+  despite valid typed route hits.
 - Graph quality proof: `graph-quality-audit --limit 3 --sample-ref-limit 1
   --write-report` sampled `9` stable operational anchors across MCPs, skills,
   hooks, tools, and path routes. It returned `ok=true`,
