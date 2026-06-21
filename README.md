@@ -559,9 +559,14 @@ sessions this command is a targeted `index-maintenance <session>
 --skip-graph-repair --apply --write-report` pass so search/atlas catch up
 without paying graph repair cost on the interactive path; the same packet keeps
 the explicit graph follow-up route visible.
-Host timers should run maintenance through `abyss-machine resource launch
---kind indexing --unattended --success-on-block` so heavier work uses the
-machine resource layer instead of hooks or MCP reads.
+Host timers should run maintenance through `auto-maintenance-resource <profile>
+--apply --write-report`, not by calling `abyss-machine resource launch`
+directly. The wrapper still uses `abyss-machine resource launch --kind indexing
+--unattended --success-on-block`, but it also writes
+`diagnostics/*__auto-maintenance-resource-<profile>.json` when the host resource
+gate blocks or denies the child before `auto-maintenance` starts. This keeps
+heavier work outside hooks and MCP reads without hiding resource-pressure
+deferrals from agents.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
 `maintenance-status` also reports `operations.graph_pressure` when graph

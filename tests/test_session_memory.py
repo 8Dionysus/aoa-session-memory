@@ -8230,6 +8230,52 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
 
 
+def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls["command"] = command
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_plan_v1",
+                "generated_at": "2026-06-21T00:00:00-06:00",
+                "ok": False,
+                "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {"ok": None, "returncode": None},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        write_report=True,
+        reason="timer_backlog",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_blocked"
+    assert payload["mutates"] is False
+    assert payload["recommended_exit_code"] == 0
+    assert payload["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
+    assert "resource_blocked:indexing_unattended_swap_used_pressure" in payload["diagnostics"]
+    assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
+    assert "--success-on-block" in calls["command"]
+    assert "--reason" in calls["command"]
+    assert "timer_backlog" in calls["command"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
 def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     now = 2000.0
     status = module.session_memory_live_tail_status(
@@ -8395,6 +8441,24 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     )
     os.utime(failed_report, (base_mtime + 4, base_mtime + 4))
 
+    blocked_resource_report = diagnostics / "20260621T000040Z__auto-maintenance-resource-backlog.json"
+    module.write_json(
+        blocked_resource_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-06-21T00:00:40Z",
+            "ok": False,
+            "status": "resource_blocked",
+            "profile": "backlog",
+            "target": "all",
+            "resource_ok": False,
+            "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+            "diagnostics": ["resource_blocked:indexing_unattended_swap_used_pressure"],
+        },
+    )
+    os.utime(blocked_resource_report, (base_mtime + 5, base_mtime + 5))
+
     storage = {
         "search_db": {
             "size_bytes": 13 * 1024 * 1024 * 1024,
@@ -8425,7 +8489,10 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["latest_search_index"]["slow_indexes"][0]["index"] == "idx_document_routes_route"
     assert ops["last_successful_auto_maintenance"]["hot"]["coordinator"]["elapsed_ms"] == 2300
     assert ops["last_successful_auto_maintenance"]["catchup"]["status"] == "nothing_to_do"
-    assert ops["recent_problem_jobs"][0]["status"] == "failed"
+    assert ops["last_auto_maintenance_resource_launch"]["backlog"]["status"] == "resource_blocked"
+    assert ops["last_auto_maintenance_resource_launch"]["backlog"]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
+    assert ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
+    assert ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
     warning_codes = {item["code"] for item in ops["warnings"]}
     assert {"search_db_large", "graph_db_large", "search_wal_large", "search_actionable_dirty_sessions", "recent_problem_jobs"} <= warning_codes
     reason_kinds = {item["reason"] for item in ops["why_maintenance_long"]}

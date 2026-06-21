@@ -569,12 +569,15 @@ surface for deciding whether to use stable graph/search now, wait for the live
 quiet window, or run catch-up after the window has elapsed without dragging the
 full hot profile onto the interactive path.
 
-Host timers should launch this command through `abyss-machine resource launch`
-with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
-read paths light while allowing the machine resource layer to use available CPU,
-memory, IO, and thermal headroom. `aoa_session_memory` MCP remains read-only and
-plan-only; it may report freshness and the maintenance route, but it must not
-run maintenance.
+Host timers should launch this command through
+`auto-maintenance-resource <profile> --apply --write-report`. That wrapper uses
+`abyss-machine resource launch --kind indexing --unattended --success-on-block`
+under the hood, but records a session-memory diagnostic when the host resource
+gate blocks or denies the child before `auto-maintenance` starts. This keeps
+hooks and MCP read paths light while allowing the machine resource layer to use
+available CPU, memory, IO, and thermal headroom without hiding resource-pressure
+deferrals. `aoa_session_memory` MCP remains read-only and plan-only; it may
+report freshness and the maintenance route, but it must not run maintenance.
 
 Use `auto-maintenance catchup --apply` or
 `index-maintenance --repair-limit <n> --skip-graph-repair --apply` when a live

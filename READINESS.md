@@ -548,6 +548,16 @@ Last observed result:
   repair `3` selected / `255` remaining. `search-provider-status` still reports
   `portable_sqlite:stale` with `dirty_session_count=203`, so the timer is
   working as a bounded queue rather than pretending the archive is complete.
+- 2026-06-21 resource-gate visibility proof: `auto-maintenance-resource` now
+  wraps timer maintenance launches and records
+  `diagnostics/*__auto-maintenance-resource-<profile>.json` when
+  `abyss-machine resource launch --success-on-block` blocks before the inner
+  `auto-maintenance` child starts. A live backlog smoke with `--limit 0` wrote
+  `20260621T233243Z__auto-maintenance-resource-backlog.json` with
+  `status=resource_blocked`, `ok=false`, and
+  `blocked_reasons=[indexing_unattended_swap_used_pressure]`; `maintenance-status`
+  now surfaces that report under `latest_reports.auto_maintenance_resource` and
+  `operations.recent_problem_jobs`.
 - 2026-06-14 search read-availability proof: a live hot maintenance run opened
   a long rollback-journal write window on `search/aoa-search.sqlite3`; during
   that window both `agent-responses` and `search` returned

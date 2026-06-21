@@ -18092,10 +18092,14 @@ def auto_maintenance_resource_launcher(
     aoa_root: Path,
     apply: bool,
     write_report: bool,
+    reason: str | None = None,
+    extra_auto_args: Iterable[str] | None = None,
+    resource_force: bool = False,
+    resource_binary: str = "abyss-machine",
 ) -> list[str]:
     settings = auto_maintenance_profile(profile)
     command = [
-        "abyss-machine",
+        resource_binary,
         "resource",
         "launch",
         "--class",
@@ -18103,6 +18107,11 @@ def auto_maintenance_resource_launcher(
         "--kind",
         str(settings["resource_kind"]),
         "--unattended",
+    ]
+    if resource_force:
+        command.append("--force")
+    command.extend(
+        [
         "--timeout",
         str(settings["timeout_sec"]),
         "--success-on-block",
@@ -18117,11 +18126,16 @@ def auto_maintenance_resource_launcher(
         str(workspace_root),
         "--aoa-root",
         str(aoa_root),
-    ]
+        ]
+    )
     if apply:
         command.append("--apply")
     if write_report:
         command.append("--write-report")
+    if reason:
+        command.extend(["--reason", reason])
+    if extra_auto_args:
+        command.extend(str(item) for item in extra_auto_args)
     return command
 
 
@@ -18335,6 +18349,298 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
                 if key in blocking_owner
             }
     return compact
+
+
+def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
+    execution = payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
+    lines = [
+        "# Auto Maintenance Resource Launch",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- profile: `{payload.get('profile')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- reason: `{payload.get('reason')}`",
+        f"- resource_class: `{payload.get('resource_class')}`",
+        f"- resource_kind: `{payload.get('resource_kind')}`",
+        f"- timeout_sec: `{payload.get('timeout_sec')}`",
+        f"- returncode: `{payload.get('returncode')}`",
+        f"- resource_ok: `{payload.get('resource_ok')}`",
+        f"- execution_ok: `{execution.get('ok')}`",
+        f"- execution_returncode: `{execution.get('returncode')}`",
+        f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
+        "",
+        "## Resource Command",
+        "",
+        "```bash",
+        str(payload.get("exact_command") or ""),
+        "```",
+    ]
+    blocked_reasons = payload.get("blocked_reasons") if isinstance(payload.get("blocked_reasons"), list) else []
+    denied_reasons = payload.get("denied_reasons") if isinstance(payload.get("denied_reasons"), list) else []
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if blocked_reasons:
+        lines.extend(["", "## Blocked Reasons", ""])
+        lines.extend(f"- `{item}`" for item in blocked_reasons)
+    if denied_reasons:
+        lines.extend(["", "## Denied Reasons", ""])
+        lines.extend(f"- `{item}`" for item in denied_reasons)
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def parse_json_object_from_stdout(text: str) -> dict[str, Any]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return {}
+    try:
+        parsed = json.loads(stripped)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(stripped[start : end + 1])
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def auto_maintenance_cli_extra_args(
+    *,
+    since: str | None = None,
+    since_days: int | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    repair_limit: int | None = None,
+    max_raw_mb: float | None = None,
+    token_max_raw_mb: float | None = None,
+    graph_batch_limit: int | None = None,
+    graph_refresh_chunk_size: int | None = None,
+    graph_max_refresh_nodes: int | None = None,
+    graph_max_refresh_edges: int | None = None,
+    ref_sample_limit: int | None = None,
+    sample_audit: bool | None = None,
+    repair_indexes: bool | None = None,
+    repair_graph: bool | None = None,
+    lock_timeout_sec: float | None = None,
+    budget_seconds: float | None = None,
+    progress_every: int | None = None,
+) -> list[str]:
+    args: list[str] = []
+    optional_pairs: list[tuple[str, Any]] = [
+        ("--since", since),
+        ("--since-days", since_days),
+        ("--until", until),
+        ("--limit", limit),
+        ("--repair-limit", repair_limit),
+        ("--max-raw-mb", max_raw_mb),
+        ("--token-max-raw-mb", token_max_raw_mb),
+        ("--graph-batch-limit", graph_batch_limit),
+        ("--graph-refresh-chunk-size", graph_refresh_chunk_size),
+        ("--graph-max-refresh-nodes", graph_max_refresh_nodes),
+        ("--graph-max-refresh-edges", graph_max_refresh_edges),
+        ("--ref-sample-limit", ref_sample_limit),
+        ("--lock-timeout-sec", lock_timeout_sec),
+        ("--budget-seconds", budget_seconds),
+        ("--progress-every", progress_every),
+    ]
+    for flag, value in optional_pairs:
+        if value is not None:
+            args.extend([flag, str(value)])
+    if sample_audit is True:
+        args.append("--sample-audit")
+    elif sample_audit is False:
+        args.append("--no-sample-audit")
+    if repair_indexes is True:
+        args.append("--repair-indexes")
+    elif repair_indexes is False:
+        args.append("--skip-index-repair")
+    if repair_graph is True:
+        args.append("--repair-graph")
+    elif repair_graph is False:
+        args.append("--skip-graph-repair")
+    return args
+
+
+def auto_maintenance_resource_launch(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    profile: str,
+    target: str = "all",
+    apply: bool = False,
+    write_report: bool = False,
+    reason: str = "operator_requested",
+    fail_on_block: bool = False,
+    resource_force: bool = False,
+    resource_binary: str = "abyss-machine",
+    since: str | None = None,
+    since_days: int | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    repair_limit: int | None = None,
+    max_raw_mb: float | None = None,
+    token_max_raw_mb: float | None = None,
+    graph_batch_limit: int | None = None,
+    graph_refresh_chunk_size: int | None = None,
+    graph_max_refresh_nodes: int | None = None,
+    graph_max_refresh_edges: int | None = None,
+    ref_sample_limit: int | None = None,
+    sample_audit: bool | None = None,
+    repair_indexes: bool | None = None,
+    repair_graph: bool | None = None,
+    lock_timeout_sec: float | None = None,
+    budget_seconds: float | None = None,
+    progress_every: int | None = None,
+) -> dict[str, Any]:
+    settings = auto_maintenance_profile(profile)
+    extra_args = auto_maintenance_cli_extra_args(
+        since=since,
+        since_days=since_days,
+        until=until,
+        limit=limit,
+        repair_limit=repair_limit,
+        max_raw_mb=max_raw_mb,
+        token_max_raw_mb=token_max_raw_mb,
+        graph_batch_limit=graph_batch_limit,
+        graph_refresh_chunk_size=graph_refresh_chunk_size,
+        graph_max_refresh_nodes=graph_max_refresh_nodes,
+        graph_max_refresh_edges=graph_max_refresh_edges,
+        ref_sample_limit=ref_sample_limit,
+        sample_audit=sample_audit,
+        repair_indexes=repair_indexes,
+        repair_graph=repair_graph,
+        lock_timeout_sec=lock_timeout_sec,
+        budget_seconds=budget_seconds,
+        progress_every=progress_every,
+    )
+    command = auto_maintenance_resource_launcher(
+        profile=profile,
+        target=target,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        apply=apply,
+        write_report=write_report,
+        reason=reason,
+        extra_auto_args=extra_args,
+        resource_force=resource_force,
+        resource_binary=resource_binary,
+    )
+    started = time.monotonic()
+    generated_at = utc_now()
+    diagnostics: list[str] = []
+    resource_payload: dict[str, Any] = {}
+    returncode: int | None = None
+    stdout = ""
+    stderr = ""
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=int_value(settings.get("timeout_sec"), 0) + 120,
+        )
+        returncode = completed.returncode
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        resource_payload = parse_json_object_from_stdout(stdout)
+    except FileNotFoundError as exc:
+        diagnostics.append(f"resource_launcher_missing:{exc.filename or resource_binary}")
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        diagnostics.append("resource_launcher_timeout")
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    blocked_reasons = resource_payload.get("blocked_reasons") if isinstance(resource_payload.get("blocked_reasons"), list) else []
+    denied_reasons = resource_payload.get("denied_reasons") if isinstance(resource_payload.get("denied_reasons"), list) else []
+    execution = resource_payload.get("execution") if isinstance(resource_payload.get("execution"), dict) else {}
+    resource_ok = resource_payload.get("ok")
+    execution_ok = execution.get("ok") if isinstance(execution, dict) else None
+    execution_returncode = execution.get("returncode") if isinstance(execution, dict) else None
+    if blocked_reasons:
+        status = "resource_blocked"
+        diagnostics.extend(f"resource_blocked:{item}" for item in blocked_reasons)
+    elif denied_reasons:
+        status = "resource_denied"
+        diagnostics.extend(f"resource_denied:{item}" for item in denied_reasons)
+    elif "resource_launcher_timeout" in diagnostics:
+        status = "resource_launcher_timeout"
+    elif diagnostics:
+        status = "resource_launcher_failed"
+    elif resource_ok is True and (execution_ok is True or execution_returncode == 0):
+        status = "completed"
+    elif resource_ok is True:
+        status = "completed_without_execution_summary"
+    elif resource_payload:
+        status = "resource_failed"
+        diagnostics.append("resource_launcher_returned_not_ok")
+    else:
+        status = "resource_launcher_no_json"
+        diagnostics.append("resource_launcher_no_json")
+    payload_ok = status in {"completed", "completed_without_execution_summary"}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "auto_maintenance_resource_launch",
+        "generated_at": generated_at,
+        "ok": payload_ok,
+        "status": status,
+        "mutates": bool(apply and payload_ok),
+        "apply": apply,
+        "profile": profile,
+        "target": target,
+        "reason": reason,
+        "resource_class": settings.get("resource_class"),
+        "resource_kind": settings.get("resource_kind"),
+        "timeout_sec": settings.get("timeout_sec"),
+        "resource_force": resource_force,
+        "resource_binary": resource_binary,
+        "returncode": returncode,
+        "elapsed_ms": elapsed_ms,
+        "command": command,
+        "exact_command": shlex.join(command),
+        "resource_ok": resource_ok,
+        "blocked_reasons": blocked_reasons,
+        "denied_reasons": denied_reasons,
+        "execution": {
+            "ok": execution_ok,
+            "returncode": execution_returncode,
+            "stderr_tail": execution.get("stderr_tail") if isinstance(execution, dict) else None,
+            "stdout_tail": execution.get("stdout_tail") if isinstance(execution, dict) else None,
+            "systemd": execution.get("systemd") if isinstance(execution, dict) else None,
+        },
+        "stdout_tail": stdout[-4000:],
+        "stderr_tail": stderr[-4000:],
+        "resource_result": {
+            key: resource_payload.get(key)
+            for key in ("schema", "version", "generated_at", "ok", "decision", "forced", "request", "warnings")
+            if key in resource_payload
+        },
+        "diagnostics": sorted(set(diagnostics)),
+        "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
+        "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; resource-gated maintenance runs outside MCP.",
+        "exit_status_policy": "resource_blocked returns process success unless --fail-on-block is used; diagnostics carry the failure for agents/operators.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__auto-maintenance-resource-{profile}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, auto_maintenance_resource_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    payload["recommended_exit_code"] = 1 if (fail_on_block and status == "resource_blocked") or (not payload_ok and status != "resource_blocked") else 0
+    return payload
 
 
 def maintenance_lock_path(aoa_root: Path) -> Path:
@@ -40542,10 +40848,17 @@ def route_cache_freshness_gates(
     return payload
 
 
-def latest_diagnostic_summary(aoa_root: Path, glob_pattern: str) -> dict[str, Any]:
+def latest_diagnostic_summary(aoa_root: Path, glob_pattern: str, *, exclude_markers: Iterable[str] = ()) -> dict[str, Any]:
     diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+    excluded = tuple(str(marker) for marker in exclude_markers if str(marker))
     candidates = sorted(
-        (path for path in diagnostics_dir.glob(glob_pattern) if path.is_file() and path.suffix == ".json"),
+        (
+            path
+            for path in diagnostics_dir.glob(glob_pattern)
+            if path.is_file()
+            and path.suffix == ".json"
+            and not any(marker in str(path) for marker in excluded)
+        ),
         key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
         reverse=True,
     )
@@ -40843,6 +41156,9 @@ def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
         "budget_exhausted": report.get("budget_exhausted", maintenance.get("budget_exhausted")),
         "maintenance_status": maintenance.get("status"),
         "maintenance_budget_exhausted": maintenance.get("budget_exhausted"),
+        "resource_ok": report.get("resource_ok"),
+        "blocked_reasons": report.get("blocked_reasons", []) if isinstance(report.get("blocked_reasons"), list) else [],
+        "denied_reasons": report.get("denied_reasons", []) if isinstance(report.get("denied_reasons"), list) else [],
         "coordinator": maintenance_coordinator_brief(coordinator) if coordinator else {},
         "diagnostics": report.get("diagnostics", []) if isinstance(report.get("diagnostics"), list) else [],
         "hard_diagnostics": report.get("hard_diagnostics", []) if isinstance(report.get("hard_diagnostics"), list) else [],
@@ -40933,11 +41249,24 @@ def search_index_ops_summary(report: dict[str, Any] | None) -> dict[str, Any]:
 def latest_successful_auto_maintenance_reports(aoa_root: Path) -> dict[str, Any]:
     profiles: dict[str, Any] = {}
     for report in diagnostic_json_payloads(aoa_root, "*__auto-maintenance-*.json"):
+        if str(report.get("artifact_type") or "") == "auto_maintenance_resource_launch" or "__auto-maintenance-resource-" in str(report.get("_diagnostic_path") or ""):
+            continue
         if report.get("ok") is not True:
             continue
         profile = str(report.get("profile") or "").strip()
         if not profile:
             profile = safe_slug(Path(str(report.get("_diagnostic_path") or "")).stem.rsplit("__auto-maintenance-", 1)[-1], fallback="unknown")
+        if profile not in profiles:
+            profiles[profile] = maintenance_report_brief(report)
+    return profiles
+
+
+def latest_auto_maintenance_resource_reports(aoa_root: Path) -> dict[str, Any]:
+    profiles: dict[str, Any] = {}
+    for report in diagnostic_json_payloads(aoa_root, "*__auto-maintenance-resource-*.json"):
+        profile = str(report.get("profile") or "").strip()
+        if not profile:
+            profile = safe_slug(Path(str(report.get("_diagnostic_path") or "")).stem.rsplit("__auto-maintenance-resource-", 1)[-1], fallback="unknown")
         if profile not in profiles:
             profiles[profile] = maintenance_report_brief(report)
     return profiles
@@ -40982,8 +41311,10 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
                 "graph_maintenance",
                 "agent_atlas_index",
                 "performance_baseline",
+                "auto_maintenance_resource_launch",
             }
             or "__auto-maintenance-" in path
+            or "__auto-maintenance-resource-" in path
             or "__index-maintenance" in path
             or "__search-index" in path
             or "__graph-maintenance" in path
@@ -41318,6 +41649,7 @@ def session_memory_operations_summary(
     latest_search_index = search_index_ops_summary(latest_search_reports[0] if latest_search_reports else None)
     writer = session_memory_ops_writer_summary(coordinator)
     last_successful_auto_maintenance = latest_successful_auto_maintenance_reports(aoa_root)
+    last_auto_maintenance_resource_launch = latest_auto_maintenance_resource_reports(aoa_root)
     recent_problem_jobs = recent_problem_maintenance_reports(aoa_root)
     graph_pressure = session_memory_graph_pressure_summary(aoa_root=aoa_root, storage=storage)
     warnings = session_memory_ops_warnings(
@@ -41355,6 +41687,7 @@ def session_memory_operations_summary(
         "latest_search_index": latest_search_index,
         "graph_pressure": graph_pressure,
         "last_successful_auto_maintenance": last_successful_auto_maintenance,
+        "last_auto_maintenance_resource_launch": last_auto_maintenance_resource_launch,
         "recent_problem_jobs": recent_problem_jobs,
         "warning_count": len(warnings),
         "warnings": warnings,
@@ -42020,7 +42353,8 @@ def session_memory_maintenance_status(
     agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
     agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, script, validator, test, eval, graph, or memory entity."
     latest_reports = {
-        "auto_maintenance": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-*.json"),
+        "auto_maintenance": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-*.json", exclude_markers=("__auto-maintenance-resource-",)),
+        "auto_maintenance_resource": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-resource-*.json"),
         "graph_maintenance": latest_diagnostic_summary(aoa_root, "*__graph-maintenance.json"),
         "search_provider_status": latest_diagnostic_summary(aoa_root, "*__search-provider-status.json"),
         "route_cache_freshness": latest_diagnostic_summary(aoa_root, "*__route-cache-freshness-gates.json"),
@@ -42401,6 +42735,18 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             if isinstance(report, dict)
         }
         if isinstance(operations.get("last_successful_auto_maintenance"), dict)
+        else {},
+        "last_auto_maintenance_resource_launch": {
+            profile: {
+                "status": report.get("status"),
+                "ok": report.get("ok"),
+                "generated_at": (report.get("source") or {}).get("generated_at") if isinstance(report.get("source"), dict) else None,
+                "blocked_reasons": report.get("blocked_reasons", [])[:4] if isinstance(report.get("blocked_reasons"), list) else [],
+            }
+            for profile, report in (operations.get("last_auto_maintenance_resource_launch") or {}).items()
+            if isinstance(report, dict)
+        }
+        if isinstance(operations.get("last_auto_maintenance_resource_launch"), dict)
         else {},
         "recent_problem_job_count": len(operations.get("recent_problem_jobs", [])) if isinstance(operations.get("recent_problem_jobs"), list) else 0,
         "why_maintenance_long": operations.get("why_maintenance_long", [])[:8] if isinstance(operations.get("why_maintenance_long"), list) else [],
@@ -46077,6 +46423,50 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
     )
     print(json.dumps(auto_maintenance_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
+
+
+def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=root,
+        profile=args.profile,
+        target=args.session,
+        apply=args.apply,
+        write_report=args.write_report,
+        reason=args.reason,
+        fail_on_block=args.fail_on_block,
+        resource_force=args.resource_force,
+        resource_binary=args.resource_binary,
+        since=since,
+        since_days=None if args.since is not None else args.since_days,
+        until=args.until,
+        limit=args.limit,
+        repair_limit=args.repair_limit,
+        max_raw_mb=args.max_raw_mb,
+        token_max_raw_mb=args.token_max_raw_mb,
+        graph_batch_limit=args.graph_batch_limit,
+        graph_refresh_chunk_size=args.graph_refresh_chunk_size,
+        graph_max_refresh_nodes=args.graph_max_refresh_nodes,
+        graph_max_refresh_edges=args.graph_max_refresh_edges,
+        ref_sample_limit=args.ref_sample_limit,
+        sample_audit=False if args.no_sample_audit else (True if args.sample_audit else None),
+        repair_indexes=args.repair_indexes,
+        repair_graph=args.repair_graph,
+        lock_timeout_sec=args.lock_timeout_sec,
+        budget_seconds=args.budget_seconds,
+        progress_every=args.progress_every,
+    )
+    stdout_payload = payload if args.full else {
+        key: value
+        for key, value in payload.items()
+        if key not in {"stdout_tail", "stderr_tail", "resource_result"}
+    }
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return int_value(payload.get("recommended_exit_code"), 0)
 
 
 def command_conversation_act_audit(args: argparse.Namespace) -> int:
@@ -51634,6 +52024,48 @@ def build_parser() -> argparse.ArgumentParser:
     auto_maintenance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown auto-maintenance reports under .aoa/diagnostics.")
     auto_maintenance_parser.add_argument("--full", action="store_true", help="Print complete auto-maintenance payload to stdout.")
     auto_maintenance_parser.set_defaults(func=command_auto_maintenance)
+
+    auto_resource_parser = sub.add_parser(
+        "auto-maintenance-resource",
+        aliases=["maintain-auto-resource"],
+        help="Run auto-maintenance through abyss-machine resource launch and always record resource-gate diagnostics.",
+    )
+    auto_resource_parser.add_argument("profile", nargs="?", choices=sorted(AUTO_MAINTENANCE_PROFILES), default="hot")
+    auto_resource_parser.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    auto_resource_parser.add_argument("--workspace-root")
+    auto_resource_parser.add_argument("--aoa-root")
+    auto_resource_parser.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    auto_resource_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all; defaults to profile.")
+    auto_resource_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    auto_resource_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    auto_resource_parser.add_argument("--repair-limit", type=int, help="Override the profile dirty session repair batch size after full freshness detection.")
+    auto_resource_parser.add_argument("--apply", action="store_true", help="Apply maintenance actions inside the resource-gated child.")
+    auto_resource_parser.add_argument("--max-raw-mb", type=float, help="Override profile raw-text extraction limit for search/route reindexing.")
+    auto_resource_parser.add_argument("--token-max-raw-mb", type=float, help="Override profile raw limit for token-ledger backfill.")
+    auto_resource_parser.add_argument("--graph-batch-limit", type=int, help="Override profile dirty graph source batch size.")
+    auto_resource_parser.add_argument("--graph-refresh-chunk-size", type=int, help="Override profile aggregate refresh chunk size for graph maintenance.")
+    auto_resource_parser.add_argument("--graph-max-refresh-nodes", type=int, help="Override profile graph aggregate node refresh guard; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--graph-max-refresh-edges", type=int, help="Override profile graph aggregate edge refresh guard; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--ref-sample-limit", type=int, help="Override profile freshness ref sample limit.")
+    auto_resource_repair_group = auto_resource_parser.add_mutually_exclusive_group()
+    auto_resource_repair_group.add_argument("--repair-indexes", dest="repair_indexes", action="store_true", default=None, help="Override profile and allow search/atlas/route-index repair.")
+    auto_resource_repair_group.add_argument("--skip-index-repair", dest="repair_indexes", action="store_false", help="Override profile and defer search/atlas/route-index repair.")
+    auto_resource_graph_group = auto_resource_parser.add_mutually_exclusive_group()
+    auto_resource_graph_group.add_argument("--repair-graph", dest="repair_graph", action="store_true", default=None, help="Override profile and allow graph maintenance.")
+    auto_resource_graph_group.add_argument("--skip-graph-repair", dest="repair_graph", action="store_false", help="Override profile and defer graph maintenance.")
+    auto_resource_audit_group = auto_resource_parser.add_mutually_exclusive_group()
+    auto_resource_audit_group.add_argument("--sample-audit", action="store_true", help="Force route-sample-audit when route indexes are refreshed.")
+    auto_resource_audit_group.add_argument("--no-sample-audit", action="store_true", help="Disable profile route-sample-audit.")
+    auto_resource_parser.add_argument("--lock-timeout-sec", type=float, help="Wait for an existing auto-maintenance lock before skipping.")
+    auto_resource_parser.add_argument("--budget-seconds", type=float, help="Override the profile wall-clock maintenance budget.")
+    auto_resource_parser.add_argument("--progress-every", type=int, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
+    auto_resource_parser.add_argument("--reason", default="operator_requested")
+    auto_resource_parser.add_argument("--resource-force", action="store_true", help="Pass --force to abyss-machine resource launch.")
+    auto_resource_parser.add_argument("--resource-binary", default="abyss-machine", help="Resource launcher binary.")
+    auto_resource_parser.add_argument("--fail-on-block", action="store_true", help="Return a non-zero process exit when the resource gate blocks the child.")
+    auto_resource_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown resource launch reports under .aoa/diagnostics.")
+    auto_resource_parser.add_argument("--full", action="store_true", help="Print complete resource launch payload to stdout.")
+    auto_resource_parser.set_defaults(func=command_auto_maintenance_resource)
 
     conversation_audit = sub.add_parser("conversation-act-audit", help="Audit conversation-act classifier coverage from generated segment indexes.")
     conversation_audit.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
