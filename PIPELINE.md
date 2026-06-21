@@ -433,6 +433,15 @@ route/search/atlas/graph work to `index-maintenance`. Its profiles are:
 - `deep`: full archive, heavy resource route, full repair and
   calibration-capable batch with larger aggregate refresh chunks.
 
+The lock is the writer guard; `diagnostics/maintenance-coordinator.json` is the
+operator/agent explanation layer. Every writer that uses the shared maintenance
+lock should publish owner job, mode, touched projection surfaces, lock wait,
+start time, deadline, and last result. `hot` treats an active
+`catchup`/`backlog`/`deep`/`manual-bulk` lease as a defer signal and must not
+start a parallel heavy rewrite. `maintenance-status --full` is the read-only
+entrypoint for checking the current owner, last completed job, and DB/WAL
+sizes before starting a manual catch-up.
+
 Host timers should launch this command through `abyss-machine resource launch`
 with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
 read paths light while allowing the machine resource layer to use available CPU,

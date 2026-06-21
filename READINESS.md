@@ -88,6 +88,12 @@ Build the `.aoa` session-memory mechanism end to end:
   `backlog` (`medium`, recent index+graph repair), `catchup` (`medium`,
   full-scope bounded search/atlas catch-up without graph repair), and `deep`
   (`heavy`, full repair); MCP remains read-only and plan-only
+- Maintenance coordinator state:
+  `diagnostics/maintenance-coordinator.json` plus the shared
+  `diagnostics/auto-maintenance.lock` expose active owner job, mode,
+  deadline, lock wait, touched search/atlas/graph/entity projection surfaces,
+  last result, and DB/WAL size status through `maintenance-status --full`;
+  `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active
 - Hot route-cache maintenance avoids graph scans on the gate path:
   `route-cache-freshness-gates` checks route/search/atlas state while the
   maintenance pass advances graph state in small batches; search projection

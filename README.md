@@ -439,6 +439,14 @@ budget instead of requiring a manual follow-up. Search fingerprints ignore
 rendered Markdown companions and can refresh stale `session_index_state`
 without rebuilding session documents when the SQLite documents are already
 current.
+Maintenance writers also publish a coordinator packet to
+`diagnostics/maintenance-coordinator.json` while holding
+`diagnostics/auto-maintenance.lock`. `maintenance-status --full` reports the
+active owner job, mode (`hot`, `catchup`, `backlog`, `deep`, or
+`manual-bulk`), touched projection surfaces, lock wait, deadline, last job, and
+search/graph DB plus WAL sizes. If `hot` finds a bulk/catchup/deep/manual
+writer already holding the lease, it defers instead of starting a competing
+rewrite.
 Host timers should run maintenance through `abyss-machine resource launch
 --kind indexing --unattended --success-on-block` so heavier work uses the
 machine resource layer instead of hooks or MCP reads.
