@@ -40508,6 +40508,8 @@ def session_memory_live_tail_status(
     unsampled_count = max(0, deferred_search_count - sampled_count)
     if deferred_count <= 0:
         status = "none"
+    elif ready_count > 0:
+        status = "ready_for_catchup"
     elif waiting_count > 0:
         status = "waiting_for_quiet_window"
     elif unknown_count > 0 and ready_count <= 0:
@@ -40529,6 +40531,105 @@ def session_memory_live_tail_status(
         "next_ready_at": iso_from_epoch(next_ready_epoch),
         "samples": samples,
         "truth_status": "diagnostic_live_tail_projection_from_persisted_freshness_state",
+    }
+
+
+def session_memory_live_tail_catchup_route(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    live_tail: dict[str, Any],
+) -> dict[str, Any]:
+    root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    raw_samples = live_tail.get("samples") if isinstance(live_tail.get("samples"), list) else []
+    samples = [item for item in raw_samples if isinstance(item, dict)]
+    ready_samples = [item for item in samples if item.get("ready_for_catchup")]
+    selected_sample = ready_samples[0] if ready_samples else (samples[0] if samples else {})
+    search_deferred_count = int_value(live_tail.get("search_deferred_session_count"))
+    graph_deferred_count = int_value(live_tail.get("graph_deferred_source_count"))
+    selected_target = str(selected_sample.get("session_label") or selected_sample.get("session_id") or "") if selected_sample else ""
+    if search_deferred_count > 0 and selected_target:
+        command = [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "index-maintenance",
+            selected_target,
+            *root_args,
+            "--apply",
+            "--skip-graph-repair",
+            "--write-report",
+        ]
+        return {
+            "command": command,
+            "command_kind": "targeted_index_maintenance_without_graph",
+            "scope": "single_search_deferred_session",
+            "target": selected_target,
+            "target_session_id": selected_sample.get("session_id"),
+            "target_session_label": selected_sample.get("session_label"),
+            "ready_to_run": bool(selected_sample.get("ready_for_catchup")) and live_tail.get("status") == "ready_for_catchup",
+            "graph_followup": "graph repair is intentionally deferred; use graph-maintenance or auto-maintenance backlog/deep when graph freshness is required",
+            "note": "Run targeted search/atlas catch-up first; graph repair remains a separate follow-up.",
+        }
+    if search_deferred_count > 0:
+        command = [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "index-maintenance",
+            "all",
+            *root_args,
+            "--repair-limit",
+            "1",
+            "--apply",
+            "--skip-graph-repair",
+            "--write-report",
+        ]
+        return {
+            "command": command,
+            "command_kind": "bounded_index_maintenance_without_graph",
+            "scope": "one_search_deferred_session_from_all",
+            "target": "all",
+            "ready_to_run": live_tail.get("status") == "ready_for_catchup",
+            "graph_followup": "graph repair is intentionally deferred; use graph-maintenance or auto-maintenance backlog/deep when graph freshness is required",
+            "note": "Run one bounded search/atlas catch-up batch; graph repair remains a separate follow-up.",
+        }
+    if graph_deferred_count > 0:
+        command = [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "graph-maintenance",
+            "all",
+            *root_args,
+            "--use-queue",
+            "--apply",
+            "--write-report",
+        ]
+        return {
+            "command": command,
+            "command_kind": "graph_queue_maintenance",
+            "scope": "graph_deferred_live_sources",
+            "target": "all",
+            "ready_to_run": live_tail.get("status") == "ready_for_catchup",
+            "graph_followup": "none; this route is the graph follow-up",
+            "note": "Run graph queue maintenance after the live quiet window.",
+        }
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "auto-maintenance",
+        "hot",
+        "all",
+        *root_args,
+        "--apply",
+        "--write-report",
+    ]
+    return {
+        "command": command,
+        "command_kind": "hot_fallback",
+        "scope": "fallback",
+        "target": "all",
+        "ready_to_run": live_tail.get("status") == "ready_for_catchup",
+        "graph_followup": "covered by hot profile if needed",
+        "note": "Fallback route when deferred live state has no typed target.",
     }
 
 
@@ -40681,7 +40782,7 @@ def session_memory_agent_route_status(
         raw_or_deep_route = "Clean portable bundles have no live archive proof layer until installed or populated."
     elif recommendation == "run_live_catchup":
         action = "run_live_catchup_for_recent_live"
-        raw_or_deep_route = "Live quiet window is satisfied; run bounded hot catch-up before claims about recent live transcripts."
+        raw_or_deep_route = "Live quiet window is satisfied; run targeted search/atlas catch-up before claims about recent live transcripts; graph repair remains an explicit follow-up."
     elif recommendation == "wait_live_catchup":
         action = "use_graph_search_for_stable_archive_wait_for_recent_live"
         raw_or_deep_route = "For claims about very recent live transcripts, wait for catch-up or run a deep check."
@@ -40847,23 +40948,30 @@ def session_memory_maintenance_status(
             entity_registry=entity_registry,
         )
     if int_value(live_tail.get("deferred_count")) > 0:
-        catchup_command = [
-            "python3",
-            "scripts/aoa_session_memory.py",
-            "auto-maintenance",
-            "hot",
-            "all",
-            "--workspace-root",
-            str(workspace_root),
-            "--aoa-root",
-            str(aoa_root),
-            "--apply",
-            "--write-report",
-        ]
+        catchup_route = session_memory_live_tail_catchup_route(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            live_tail=live_tail,
+        )
+        catchup_command = catchup_route["command"]
         live_tail["catchup_command"] = catchup_command
         live_tail["exact_catchup_command"] = shlex.join(catchup_command)
+        live_tail["catchup_command_kind"] = catchup_route.get("command_kind")
+        live_tail["catchup_scope"] = catchup_route.get("scope")
+        live_tail["catchup_target"] = catchup_route.get("target")
+        if catchup_route.get("target_session_id"):
+            live_tail["catchup_target_session_id"] = catchup_route.get("target_session_id")
+        if catchup_route.get("target_session_label"):
+            live_tail["catchup_target_session_label"] = catchup_route.get("target_session_label")
+        live_tail["catchup_ready_to_run"] = bool(catchup_route.get("ready_to_run"))
+        live_tail["graph_followup"] = catchup_route.get("graph_followup")
         for action in next_actions:
             if isinstance(action, dict) and action.get("id") == "wait_live_catchup":
+                action["command"] = catchup_command
+                action["catchup_command_kind"] = catchup_route.get("command_kind")
+                action["catchup_scope"] = catchup_route.get("scope")
+                action["catchup_target"] = catchup_route.get("target")
+                action["graph_followup"] = catchup_route.get("graph_followup")
                 action["quiet_seconds"] = live_tail.get("quiet_seconds")
                 action["ready_count"] = live_tail.get("ready_count")
                 action["waiting_count"] = live_tail.get("waiting_count")
@@ -40873,9 +40981,9 @@ def session_memory_maintenance_status(
                 if live_tail.get("status") == "ready_for_catchup":
                     action["id"] = "run_live_catchup"
                     action["reason"] = "deferred_live_ready_for_bounded_catchup"
-                    action["note"] = "Live quiet window is satisfied for sampled deferred sessions; run the bounded hot catch-up or let the timer catch up."
+                    action["note"] = "Live quiet window is satisfied; run the targeted search/atlas catch-up first or let the timer catch up. Graph repair remains an explicit follow-up."
                 elif live_tail.get("next_ready_at"):
-                    action["note"] = "Wait until next_ready_at for the live quiet window, then run the bounded hot catch-up or let the timer catch up."
+                    action["note"] = "Wait until next_ready_at for the live quiet window, then run the targeted search/atlas catch-up command or let the timer catch up. Graph repair remains separate."
         if recommendation == "wait_live_catchup" and live_tail.get("status") == "ready_for_catchup":
             recommendation = "run_live_catchup"
     agent_route = session_memory_agent_route_status(
@@ -41023,6 +41131,13 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             "max_quiet_remaining_seconds",
             "next_ready_at",
             "exact_catchup_command",
+            "catchup_command_kind",
+            "catchup_scope",
+            "catchup_target",
+            "catchup_target_session_id",
+            "catchup_target_session_label",
+            "catchup_ready_to_run",
+            "graph_followup",
             "truth_status",
         )
         if key in live_tail
@@ -41217,6 +41332,10 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "waiting_count",
                     "max_quiet_remaining_seconds",
                     "next_ready_at",
+                    "catchup_command_kind",
+                    "catchup_scope",
+                    "catchup_target",
+                    "graph_followup",
                 )
                 if key in action
             }
@@ -41256,6 +41375,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- recommendation: `{payload.get('recommendation')}`",
         f"- search: `{search.get('status')}` actionable=`{search.get('actionable_dirty_session_count')}` deferred=`{search.get('deferred_live_session_count')}`",
         f"- live_tail: `{live_tail.get('status')}` ready=`{live_tail.get('ready_count')}` waiting=`{live_tail.get('waiting_count')}` max_wait_sec=`{live_tail.get('max_quiet_remaining_seconds')}` next_ready_at=`{live_tail.get('next_ready_at')}`",
+        f"- live_tail_catchup: kind=`{live_tail.get('catchup_command_kind')}` scope=`{live_tail.get('catchup_scope')}` target=`{live_tail.get('catchup_target')}` graph_followup=`{live_tail.get('graph_followup')}`",
         f"- graph: `{graph.get('status')}` dirty=`{graph.get('dirty_count')}` missing=`{graph.get('missing_count')}` blocked=`{graph.get('blocked_count')}` retired=`{graph.get('retired_count')}`",
         f"- entity_registry: `{entity_registry.get('status')}` entities=`{entity_registry.get('entity_count')}`",
         f"- route: `{route.get('status')}` index_needed=`{route.get('needs_index_maintenance')}` graph_needed=`{route.get('needs_graph_maintenance')}`",

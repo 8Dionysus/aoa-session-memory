@@ -508,7 +508,11 @@ When the only dirty-looking state is a live transcript quiet-window defer,
 `max_quiet_remaining_seconds`, and `next_ready_at` before starting catch-up.
 `waiting_for_quiet_window` means stable graph/search remains usable for older
 evidence while recent live claims should wait or use raw refs. `ready_for_catchup`
-means the bounded hot catch-up command in the packet is the next route.
+means the catch-up command in the packet is the next route. For deferred search
+sessions this command is a targeted `index-maintenance <session>
+--skip-graph-repair --apply --write-report` pass so search/atlas catch up
+without paying graph repair cost on the interactive path; the same packet keeps
+the explicit graph follow-up route visible.
 Host timers should run maintenance through `abyss-machine resource launch
 --kind indexing --unattended --success-on-block` so heavier work uses the
 machine resource layer instead of hooks or MCP reads.

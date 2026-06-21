@@ -118,8 +118,11 @@ Build the `.aoa` session-memory mechanism end to end:
   `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active;
   `maintenance-status` exposes a `live_tail` packet over deferred live
   freshness rows with `waiting_for_quiet_window` vs `ready_for_catchup`,
-  quiet-window remaining seconds, `next_ready_at`, and the bounded catch-up
-  command so agents do not confuse non-actionable live tail with broken search
+  quiet-window remaining seconds, `next_ready_at`, and the typed catch-up
+  command so agents do not confuse non-actionable live tail with broken search;
+  search-deferred live sessions route through targeted
+  `index-maintenance <session> --skip-graph-repair`, with graph repair kept as
+  an explicit follow-up
 - Hot route-cache maintenance avoids graph scans on the gate path:
   `route-cache-freshness-gates` checks route/search/atlas state while the
   maintenance pass advances graph state in small batches; search projection

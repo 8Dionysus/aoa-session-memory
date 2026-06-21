@@ -7263,7 +7263,13 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert payload["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
     assert calls["search"]["freshness_mode"] == "hot"
     assert calls["route"]["target"] == "all"
-    assert "auto-maintenance hot all" in payload["exact_next_command"]
+    assert "index-maintenance 2026-06-18__001__live-session" in payload["exact_next_command"]
+    assert "--skip-graph-repair" in payload["exact_next_command"]
+    assert payload["live_tail"]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
+    assert payload["live_tail"]["catchup_scope"] == "single_search_deferred_session"
+    assert payload["live_tail"]["catchup_target"] == "2026-06-18__001__live-session"
+    assert payload["live_tail"]["catchup_ready_to_run"] is True
+    assert "graph repair is intentionally deferred" in payload["live_tail"]["graph_followup"]
     assert compact["agent_route"]["live_catchup_pending"] is True
     assert payload["live_tail"]["status"] == "ready_for_catchup"
     assert payload["live_tail"]["ready_count"] == 1
@@ -7271,11 +7277,15 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert payload["live_tail"]["max_quiet_remaining_seconds"] == 0
     assert payload["agent_route"]["live_tail_status"] == "ready_for_catchup"
     assert compact["live_tail"]["status"] == "ready_for_catchup"
+    assert compact["live_tail"]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
+    assert compact["live_tail"]["catchup_target"] == "2026-06-18__001__live-session"
     assert compact["live_tail"]["samples"][0]["quiet_remaining_seconds"] == 0
     assert compact["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
     assert compact["next_actions"][0]["id"] == "run_live_catchup"
     assert compact["next_actions"][0]["reason"] == "deferred_live_ready_for_bounded_catchup"
     assert compact["next_actions"][0]["live_tail_status"] == "ready_for_catchup"
+    assert compact["next_actions"][0]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
+    assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
 
 
 def test_live_tail_status_reports_ready_after_quiet_window() -> None:
@@ -7303,6 +7313,41 @@ def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     assert status["waiting_count"] == 0
     assert status["max_quiet_remaining_seconds"] == 0
     assert status["samples"][0]["ready_for_catchup"] is True
+
+
+def test_live_tail_status_runs_catchup_when_any_session_is_ready() -> None:
+    now = 2000.0
+    status = module.session_memory_live_tail_status(
+        search={
+            "deferred_live_session_count": 2,
+            "deferred_live_sessions": [
+                {
+                    "session_id": "waiting-live",
+                    "session_label": "2026-06-18__001__waiting-live",
+                    "source_latest_mtime": now - 60,
+                    "live_transcript_mtime": now - 60,
+                    "deferred_live_reason": "recent_live_codex_transcript_update",
+                },
+                {
+                    "session_id": "ready-live",
+                    "session_label": "2026-06-18__002__ready-live",
+                    "source_latest_mtime": now - 900,
+                    "live_transcript_mtime": now - 900,
+                    "deferred_live_reason": "recent_live_codex_transcript_update",
+                },
+            ],
+        },
+        graph={"deferred_live_source_count": 0},
+        quiet_seconds=600,
+        now_ts=now,
+    )
+
+    assert status["status"] == "ready_for_catchup"
+    assert status["ready_count"] == 1
+    assert status["waiting_count"] == 1
+    assert status["max_quiet_remaining_seconds"] == 540
+    assert status["samples"][0]["ready_for_catchup"] is False
+    assert status["samples"][1]["ready_for_catchup"] is True
 
 
 def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path) -> None:
@@ -9873,6 +9918,11 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert before["live_tail"]["status"] == "waiting_for_quiet_window"
     assert before["live_tail"]["waiting_count"] == 1
     assert before["next_actions"][0]["live_tail_status"] == "waiting_for_quiet_window"
+    assert before["next_actions"][0]["id"] == "wait_live_catchup"
+    assert before["next_actions"][0]["command"][2] == "index-maintenance"
+    assert "--skip-graph-repair" in before["next_actions"][0]["command"]
+    assert before["live_tail"]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
+    assert before["live_tail"]["catchup_ready_to_run"] is False
 
     quiet_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60
     for path in [transcript, *[item for item in Path(record["path"]).rglob("*") if item.is_file()]]:

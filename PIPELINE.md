@@ -547,10 +547,13 @@ a manual catch-up.
 `maintenance-status` also exposes a `live_tail` packet for deferred live
 sources. It separates actionable dirty work from quiet-window deferral, reports
 `waiting_for_quiet_window` versus `ready_for_catchup`, includes
-`quiet_remaining_seconds` / `next_ready_at`, and repeats the bounded
-`auto-maintenance hot all --apply --write-report` route. This is the agent
+`quiet_remaining_seconds` / `next_ready_at`, and exposes the narrowest typed
+catch-up route. Search-deferred live sessions use targeted
+`index-maintenance <session> --skip-graph-repair --apply --write-report` first;
+graph-deferred live sources use graph queue maintenance. This is the agent
 surface for deciding whether to use stable graph/search now, wait for the live
-quiet window, or run catch-up after the window has elapsed.
+quiet window, or run catch-up after the window has elapsed without dragging the
+full hot profile onto the interactive path.
 
 Host timers should launch this command through `abyss-machine resource launch`
 with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
