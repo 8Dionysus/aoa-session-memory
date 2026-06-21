@@ -159,7 +159,7 @@ GRAPH_MAINTENANCE_QUEUE_SCHEMA_VERSION = 1
 GRAPH_HOT_LIVE_DEFER_SECONDS = 600.0
 GRAPH_STORE_SCHEMA_VERSION = 2
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
-GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
+GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_column_evidence_refs_v3"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_segment_summary_v1"
@@ -30945,12 +30945,19 @@ def graph_contribution_evidence_limit(kind: str) -> int:
 
 
 def graph_compact_contribution_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    canonical_kind = "edge" if kind in {"edge", "edges", "edge_contribs"} else "node"
     compact = dict(payload)
     fallback_refs = compact.get("refs")
     compact.pop("refs", None)
     if isinstance(compact.get("route_signals"), list):
         compact["route_signal_count"] = len(compact["route_signals"])
         compact.pop("route_signals", None)
+    if canonical_kind == "edge":
+        for key in ("id", "source", "target", "type"):
+            compact.pop(key, None)
+    else:
+        for key in ("id", "type"):
+            compact.pop(key, None)
     refs = compact.get("evidence_refs")
     if not isinstance(refs, list) and isinstance(fallback_refs, dict) and fallback_refs:
         refs = [{"refs": fallback_refs}]
@@ -31264,6 +31271,7 @@ def graph_source_metadata(
     identity_payload = {
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+        "graph_store_contrib_payload_mode": GRAPH_STORE_CONTRIB_PAYLOAD_MODE,
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "source_type": source_type,
@@ -32066,21 +32074,26 @@ class GraphSqliteStore:
         for node in contribution.get("nodes", []) if isinstance(contribution.get("nodes"), list) else []:
             if not isinstance(node, dict) or not node.get("id"):
                 continue
-            payload = graph_compact_contribution_payload(dict(node), kind="node")
+            original = dict(node)
+            node_id = str(original.get("id") or "")
+            node_type = str(original.get("type") or "unknown")
+            payload = graph_compact_contribution_payload(original, kind="node")
             payload["count"] = int_value(payload.get("count"), 1)
-            node_id = str(payload["id"])
             node_ids.add(node_id)
             self.conn.execute(
                 "INSERT OR REPLACE INTO node_contribs(source_key, node_id, node_type, payload_json, count) VALUES (?, ?, ?, ?, ?)",
-                (source_key, node_id, str(payload.get("type") or "unknown"), graph_json(payload), int_value(payload.get("count"), 1)),
+                (source_key, node_id, node_type, graph_json(payload), int_value(payload.get("count"), 1)),
             )
         for edge in contribution.get("edges", []) if isinstance(contribution.get("edges"), list) else []:
             if not isinstance(edge, dict) or not edge.get("source") or not edge.get("target"):
                 continue
-            payload = graph_compact_contribution_payload(dict(edge), kind="edge")
-            payload["id"] = str(payload.get("id") or graph_edge_id(str(payload.get("source")), str(payload.get("target")), str(payload.get("type") or "")))
+            original = dict(edge)
+            source_node = str(original.get("source") or "")
+            target_node = str(original.get("target") or "")
+            edge_type = str(original.get("type") or "")
+            edge_id = str(original.get("id") or graph_edge_id(source_node, target_node, edge_type))
+            payload = graph_compact_contribution_payload(original, kind="edge")
             payload["count"] = int_value(payload.get("count"), 1)
-            edge_id = str(payload["id"])
             edge_ids.add(edge_id)
             self.conn.execute(
                 """
@@ -32090,9 +32103,9 @@ class GraphSqliteStore:
                 (
                     source_key,
                     edge_id,
-                    str(payload.get("type") or "unknown"),
-                    str(payload.get("source") or ""),
-                    str(payload.get("target") or ""),
+                    edge_type or "unknown",
+                    source_node,
+                    target_node,
                     graph_json(payload),
                     int_value(payload.get("count"), 1),
                 ),
@@ -32138,7 +32151,7 @@ class GraphSqliteStore:
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
             cursor = self.conn.execute(
-                f"SELECT node_id, payload_json, count FROM node_contribs WHERE node_id IN ({placeholders}) ORDER BY node_id",
+                f"SELECT node_id, node_type, payload_json, count FROM node_contribs WHERE node_id IN ({placeholders}) ORDER BY node_id",
                 chunk,
             )
             remaining = set(chunk)
@@ -32178,6 +32191,9 @@ class GraphSqliteStore:
                     merged = {}
                 payload = json.loads(str(row["payload_json"]))
                 if isinstance(payload, dict):
+                    payload["id"] = row_node_id
+                    if not payload.get("type"):
+                        payload["type"] = str(row["node_type"] or "unknown")
                     payload["count"] = int_value(row["count"], int_value(payload.get("count"), 1))
                     graph_add_node(merged, payload)
             flush_current()
@@ -32193,7 +32209,7 @@ class GraphSqliteStore:
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
             cursor = self.conn.execute(
-                f"SELECT edge_id, payload_json, count FROM edge_contribs WHERE edge_id IN ({placeholders}) ORDER BY edge_id",
+                f"SELECT edge_id, edge_type, source_node, target_node, payload_json, count FROM edge_contribs WHERE edge_id IN ({placeholders}) ORDER BY edge_id",
                 chunk,
             )
             remaining = set(chunk)
@@ -32235,6 +32251,14 @@ class GraphSqliteStore:
                     merged = {}
                 payload = json.loads(str(row["payload_json"]))
                 if isinstance(payload, dict):
+                    payload["id"] = row_edge_id
+                    if not payload.get("source"):
+                        payload["source"] = str(row["source_node"] or "")
+                    if not payload.get("target"):
+                        payload["target"] = str(row["target_node"] or "")
+                    row_edge_type = str(row["edge_type"] or "")
+                    if not payload.get("type") and row_edge_type != "unknown":
+                        payload["type"] = row_edge_type
                     payload["count"] = int_value(row["count"], int_value(payload.get("count"), 1))
                     graph_add_edge(merged, payload)
             flush_current()

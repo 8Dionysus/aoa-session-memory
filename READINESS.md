@@ -1078,11 +1078,29 @@ Maintenance gates:
   contribution payload tables: `edge_contribs=220.8 MiB`,
   `node_contribs=115.1 MiB`, plus aggregate `edges=97.6 MiB` and
   `nodes=41.1 MiB`.
-- Graph store schema `2` now writes `compact_evidence_refs_v2` contribution
-  payloads: repeated absolute refs, route-signal copies inside event-node
-  payloads, repeated session refs, and repeated raw-block refs are removed or
-  bounded while `session_id`, `segment_id`, `event_id`, `raw`, segment refs,
-  and enough session refs remain for hydration and quality gates.
+- Graph store schema `2` now writes `compact_column_evidence_refs_v3`
+  contribution payloads: repeated absolute refs, route-signal copies inside
+  event-node payloads, repeated session refs, repeated raw-block refs, and
+  fields already stored as contrib table columns (`id`, `type`, `source`,
+  `target`) are removed or bounded while `session_id`, `segment_id`,
+  `event_id`, `raw`, segment refs, and enough session refs remain for hydration
+  and quality gates.
+- The contribution payload mode is part of graph source fingerprints. Payload
+  layout changes therefore become normal graph-maintenance drift instead of a
+  hidden manual rebuild requirement.
+- Live dry proof after the v3 change:
+  `graph-maintenance all --plan-refresh-costs --batch-limit 5
+  --budget-seconds 180 --refresh-chunk-size 64 --write-report` selected `5`
+  sources from a bounded candidate pool of `50`, saw `4725` actionable graph
+  sources, and planned `7593` aggregate-node plus `31285` aggregate-edge
+  refreshes without mutating `graph.sqlite3`.
+- Live size proof on those same `5` selected sources built a temporary graph
+  store outside the live projection: `9641` node-contrib rows and `31603`
+  edge-contrib rows kept hydrated node/edge evidence while removing redundant
+  column fields. Simulated compact-v2 contribution payloads were `34.2 MiB`;
+  compact-v3 actual stored contribution payloads were `26.6 MiB`, a `22.15%`
+  reduction (`25.88%` for edge contrib payloads, `11.96%` for node contrib
+  payloads).
 - A bounded live `graph-maintenance all --apply --batch-limit 25
   --refresh-chunk-size 64 --max-refresh-nodes 50000 --max-refresh-edges
   150000 --budget-seconds 300 --write-report` rebuilt the same scale of graph

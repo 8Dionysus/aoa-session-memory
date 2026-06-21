@@ -957,8 +957,12 @@ bounded as `matched_source_key_count` plus `matched_source_key_sample`; the full
 Graph source state reports include bounded reason counts, normalized reason
 groups, examples, and a maintenance recommendation so an agent can distinguish
 small missing-source repair from mass classifier/fingerprint drift without
-defaulting to a full rebuild. Use
-`graph-maintenance --plan-refresh-costs` for a dry exact-cost plan over the
+defaulting to a full rebuild.
+Graph source fingerprints include schema, classifier/policy versions, and the
+contribution payload mode. A graph storage-layout change is therefore repaired
+through the same dirty-source maintenance route as classifier or source-index
+drift.
+Use `graph-maintenance --plan-refresh-costs` for a dry exact-cost plan over the
 candidate pool before applying a bounded repair; it parses the candidate
 sources and reports planned aggregate node/edge refresh counts without mutating
 `graph.sqlite3`. Dry exact-cost planning is intentionally capped by

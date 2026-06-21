@@ -2846,6 +2846,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         assert "segment_index" not in compact_refs
         assert compact_refs["session"].startswith("sessions/")
         assert compact_refs.get("raw") or compact_refs.get("segment")
+    assert "id" not in node_contrib
+    assert "type" not in node_contrib
+    for key in ("id", "source", "target", "type"):
+        assert key not in edge_contrib
 
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=2)
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
@@ -3216,8 +3220,14 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
         )
         node_row = store.conn.execute("SELECT payload_json, count FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()
         edge_row = store.conn.execute("SELECT payload_json, count FROM edges WHERE id = ?", (shared_edge_id,)).fetchone()
-        node_contrib_row = store.conn.execute("SELECT payload_json FROM node_contribs WHERE node_id = ? LIMIT 1", (shared_node_id,)).fetchone()
-        edge_contrib_row = store.conn.execute("SELECT payload_json FROM edge_contribs WHERE edge_id = ? LIMIT 1", (shared_edge_id,)).fetchone()
+        node_contrib_row = store.conn.execute(
+            "SELECT node_id, node_type, payload_json FROM node_contribs WHERE node_id = ? LIMIT 1",
+            (shared_node_id,),
+        ).fetchone()
+        edge_contrib_row = store.conn.execute(
+            "SELECT edge_id, edge_type, source_node, target_node, payload_json FROM edge_contribs WHERE edge_id = ? LIMIT 1",
+            (shared_edge_id,),
+        ).fetchone()
         assert node_row is not None
         assert edge_row is not None
         assert node_contrib_row is not None
@@ -3242,12 +3252,51 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert stored_edge["evidence_ref_count"] == 2
     assert node_contrib["contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
     assert edge_contrib["contrib_payload_mode"] == module.GRAPH_STORE_CONTRIB_PAYLOAD_MODE
+    assert node_contrib_row["node_id"] == shared_node_id
+    assert node_contrib_row["node_type"] == "route_entity"
+    assert "id" not in node_contrib
+    assert "type" not in node_contrib
+    assert edge_contrib_row["edge_id"] == shared_edge_id
+    assert edge_contrib_row["edge_type"] == "mentions_route_signal"
+    assert edge_contrib_row["source_node"] == "session:first"
+    assert edge_contrib_row["target_node"] == shared_node_id
+    for key in ("id", "source", "target", "type"):
+        assert key not in edge_contrib
+    assert stored_node["id"] == shared_node_id
+    assert stored_node["type"] == "route_entity"
+    assert stored_edge["id"] == shared_edge_id
+    assert stored_edge["source"] == "session:first"
+    assert stored_edge["target"] == shared_node_id
+    assert stored_edge["type"] == "mentions_route_signal"
     assert node_contrib["evidence_refs"][0]["refs"]["raw"] == "raw:line:1"
     assert edge_contrib["evidence_refs"][0]["refs"]["raw"] == "raw:line:1"
     assert "session_index" not in node_contrib["evidence_refs"][0]["refs"]
     assert "segment_index" not in edge_contrib["evidence_refs"][0]["refs"]
     assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
+
+
+def test_graph_source_fingerprint_tracks_contrib_payload_mode(tmp_path: Path, monkeypatch: Any) -> None:
+    source_path = tmp_path / "000.index.json"
+    source_path.write_text("{}\n", encoding="utf-8")
+
+    first = module.graph_source_metadata(
+        source_type="segment",
+        session_id="fingerprint-mode",
+        session_label="fingerprint-mode",
+        segment_id="000",
+        source_paths=[source_path],
+    )
+    monkeypatch.setattr(module, "GRAPH_STORE_CONTRIB_PAYLOAD_MODE", "fixture_other_payload_mode")
+    second = module.graph_source_metadata(
+        source_type="segment",
+        session_id="fingerprint-mode",
+        session_label="fingerprint-mode",
+        segment_id="000",
+        source_paths=[source_path],
+    )
+
+    assert first["source_sha"] != second["source_sha"]
 
 
 def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(tmp_path: Path) -> None:
