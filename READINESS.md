@@ -558,6 +558,15 @@ Last observed result:
   and removed from full rebuilds; reports now expose phase timings so future
   long rebuilds show whether they are in bulk indexing, SQLite index build, or
   entity-registry refresh.
+- 2026-06-21 route-index slimming proof: read-only `dbstat` on the bounded
+  search store showed `idx_document_routes_doc` duplicated the SQLite UNIQUE
+  autoindex over `(doc_rowid, route_id)` while route lookup is served by
+  `idx_document_routes_route`. Removing the duplicate index and tightening hot
+  route preview budgets rebuilt the store to `13.3 GiB` (`14G` displayed);
+  `maintenance-status --full` stayed `ok=true`, `agent_route=use_graph_search`,
+  and `storage_policy_status=bounded_policy_recorded`. The remaining search
+  weight is now dominated by `documents` (`5.76 GiB`) and route postings plus
+  the required UNIQUE/route index (`4.82 GiB`), not raw lexical FTS.
 - 2026-06-11 storage weight proof: read-only `storage-audit --deep-dbstat
   --row-counts --write-report` measured `.aoa` at `119.7 GiB`; top weights
   are graph `78.7 GiB`, sessions `28.9 GiB`, and search `11.6 GiB`. SQLite

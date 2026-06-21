@@ -108,8 +108,8 @@ SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
 SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY = 0
 SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY = 50
-SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 1200
-SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 4000
+SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 512
+SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
 GRAPH_SCHEMA_VERSION = 1
 ATLAS_ROOT = Path("maps")
 ENTITY_REGISTRY_PATH = ATLAS_ROOT / "entity-registry.json"
@@ -24125,7 +24125,6 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)",
     "CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)",
     "CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)",
-    "CREATE INDEX IF NOT EXISTS idx_document_routes_doc ON document_routes(doc_rowid, route_id)",
     "CREATE INDEX IF NOT EXISTS idx_session_index_state_label ON session_index_state(session_label)",
     "CREATE INDEX IF NOT EXISTS idx_search_freshness_state_status ON search_freshness_state(status, session_label)",
 ]
