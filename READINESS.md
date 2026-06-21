@@ -98,7 +98,9 @@ Build the `.aoa` session-memory mechanism end to end:
   `diagnostics/maintenance-coordinator.json` plus the shared
   `diagnostics/auto-maintenance.lock` expose active owner job, mode,
   deadline, lock wait, touched search/atlas/graph/entity projection surfaces,
-  last result, and DB/WAL size status through `maintenance-status --full`;
+  last result, DB/WAL size status, operations warnings, last successful
+  auto-maintenance profiles, recent problem jobs, and `why_maintenance_long`
+  search-index/storage evidence through `maintenance-status --full`;
   `hot` defers when a bulk/catchup/backlog/deep/manual-bulk lease is active
 - Hot route-cache maintenance avoids graph scans on the gate path:
   `route-cache-freshness-gates` checks route/search/atlas state while the

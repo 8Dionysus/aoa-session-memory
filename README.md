@@ -450,9 +450,12 @@ Maintenance writers also publish a coordinator packet to
 `diagnostics/auto-maintenance.lock`. `maintenance-status --full` reports the
 active owner job, mode (`hot`, `catchup`, `backlog`, `deep`, or
 `manual-bulk`), touched projection surfaces, lock wait, deadline, last job, and
-search/graph DB plus WAL sizes. If `hot` finds a bulk/catchup/deep/manual
-writer already holding the lease, it defers instead of starting a competing
-rewrite.
+search/graph DB plus WAL sizes. Its read-only operations summary also reports
+size/lock/writer warnings, recent problem jobs, the latest search-index phase
+timings, slow SQLite indexes, last successful auto-maintenance profiles, and
+`why_maintenance_long` evidence from diagnostics. If `hot` finds a
+bulk/catchup/deep/manual writer already holding the lease, it defers instead of
+starting a competing rewrite.
 Host timers should run maintenance through `abyss-machine resource launch
 --kind indexing --unattended --success-on-block` so heavier work uses the
 machine resource layer instead of hooks or MCP reads.

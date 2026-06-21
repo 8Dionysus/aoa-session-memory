@@ -459,8 +459,10 @@ lock should publish owner job, mode, touched projection surfaces, lock wait,
 start time, deadline, and last result. `hot` treats an active
 `catchup`/`backlog`/`deep`/`manual-bulk` lease as a defer signal and must not
 start a parallel heavy rewrite. `maintenance-status --full` is the read-only
-entrypoint for checking the current owner, last completed job, and DB/WAL
-sizes before starting a manual catch-up.
+entrypoint for checking the current owner, last completed job, DB/WAL sizes,
+operations warnings, last successful auto-maintenance profiles, recent problem
+jobs, and `why_maintenance_long` search-index/storage evidence before starting
+a manual catch-up.
 
 Host timers should launch this command through `abyss-machine resource launch`
 with `--kind indexing --unattended --success-on-block`. This keeps hooks and MCP
