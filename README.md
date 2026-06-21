@@ -893,6 +893,13 @@ When the registry must stay synchronized with SQLite search, use
 `search-index --no-rebuild` or `index-maintenance`; those routes refresh the
 snapshot and `doc_type=entity_registry` documents together. A bare
 `entity-registry --write` is only a generated snapshot refresh.
+The SQLite sync is delta-based: unchanged registry docs are left in place, new
+docs are inserted, changed docs are replaced by rowid, and missing docs are
+removed. Reports expose `inserted_entity_registry_document_count`,
+`updated_entity_registry_document_count`,
+`unchanged_entity_registry_document_count`, and
+`removed_entity_registry_document_count` so refresh latency does not hide a
+full registry rewrite.
 
 Ask how an entity was actually used, with consequences and evidence refs:
 

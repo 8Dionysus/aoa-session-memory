@@ -3520,6 +3520,7 @@ def entity_registry_entries_from_route_terms(
                 JOIN document_routes ON document_routes.route_id = route_terms.id
                 JOIN documents ON documents.rowid = document_routes.doc_rowid
                 WHERE route_terms.layer = ?
+                  AND documents.doc_type <> 'entity_registry'
                 GROUP BY route_terms.key, route_terms.route_signal
                 ORDER BY signal_count DESC, session_count DESC, key ASC
                 LIMIT ?
@@ -3648,7 +3649,6 @@ def entity_registry_retired_entries_from_previous_snapshot(
         if not retired_refs:
             continue
         retired_status = "removed" if "removed" in statuses else "stale"
-        previous_freshness = previous_entry.get("freshness") if isinstance(previous_entry.get("freshness"), dict) else {}
         entry = entity_registry_make_entry(
             kind=kind,
             key=str(previous_entry.get("canonical_key") or ""),
@@ -3657,8 +3657,6 @@ def entity_registry_retired_entries_from_previous_snapshot(
             source_surface=str(previous_entry.get("source_surface") or "previous_entity_registry_snapshot"),
             owner=str(previous_entry.get("owner") or "unresolved"),
             status=retired_status,
-            signal_count=int_value(previous_freshness.get("signal_count")),
-            session_count=int_value(previous_freshness.get("session_count")),
         )
         entry["retired_from_snapshot"] = {
             "path": str(path),
@@ -17444,7 +17442,26 @@ def maintain_indexes(
                     progress_every=progress_every,
                 )
                 search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
-                search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
+                search_action["result"] = {
+                    key: result.get(key)
+                    for key in (
+                        "ok",
+                        "selected_count",
+                        "processed_count",
+                        "remaining_count",
+                        "budget_exhausted",
+                        "document_count",
+                        "removed_document_count",
+                        "entity_registry_document_count",
+                        "inserted_entity_registry_document_count",
+                        "updated_entity_registry_document_count",
+                        "unchanged_entity_registry_document_count",
+                        "removed_entity_registry_document_count",
+                        "report_json",
+                        "report_markdown",
+                        "diagnostics",
+                    )
+                }
                 action_results.append(search_action)
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
@@ -17475,6 +17492,10 @@ def maintain_indexes(
                         "artifact_type",
                         "document_count",
                         "entity_registry_document_count",
+                        "target_entity_registry_document_count",
+                        "inserted_entity_registry_document_count",
+                        "updated_entity_registry_document_count",
+                        "unchanged_entity_registry_document_count",
                         "removed_entity_registry_document_count",
                         "entity_count",
                         "elapsed_ms",
@@ -25391,6 +25412,24 @@ def delete_search_documents_by_doc_type(conn: sqlite3.Connection, doc_type: str)
     return count
 
 
+def delete_search_documents_by_rowids(conn: sqlite3.Connection, rowids: Iterable[int]) -> int:
+    normalized_rowids = [(int_value(rowid),) for rowid in rowids if int_value(rowid) > 0]
+    if not normalized_rowids:
+        return 0
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS search_delete_rowids(rowid INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    conn.executemany("INSERT OR IGNORE INTO search_delete_rowids(rowid) VALUES (?)", normalized_rowids)
+    count = int_value(conn.execute("SELECT COUNT(*) FROM search_delete_rowids").fetchone()[0])
+    if count <= 0:
+        return 0
+    conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    conn.execute("DELETE FROM search_delete_rowids")
+    return count
+
+
 def refresh_search_entity_registry_documents(
     conn: sqlite3.Connection,
     *,
@@ -25402,16 +25441,50 @@ def refresh_search_entity_registry_documents(
         write_snapshot=True,
         route_terms_db_path=route_terms_db_path,
     )
+    registry_documents_by_id = {
+        str(doc.get("id") or ""): doc
+        for doc in registry_documents
+        if str(doc.get("id") or "").strip()
+    }
     conn.execute("BEGIN")
-    removed_count = delete_search_documents_by_doc_type(conn, "entity_registry")
+    existing_documents = search_document_existing_signatures(conn, doc_type="entity_registry")
+    stale_rowids = [
+        int_value(item.get("rowid"))
+        for doc_id, item in existing_documents.items()
+        if doc_id not in registry_documents_by_id
+    ]
+    changed_rowids: list[int] = []
+    docs_to_insert: list[dict[str, Any]] = []
     inserted_count = 0
-    for doc in registry_documents:
+    updated_count = 0
+    unchanged_count = 0
+    for doc_id, doc in registry_documents_by_id.items():
+        existing = existing_documents.get(doc_id)
+        next_signature = search_document_storage_signature(doc)
+        if not existing:
+            docs_to_insert.append(doc)
+            inserted_count += 1
+            continue
+        if str(existing.get("signature") or "") == next_signature:
+            unchanged_count += 1
+            continue
+        changed_rowids.append(int_value(existing.get("rowid")))
+        docs_to_insert.append(doc)
+        updated_count += 1
+    removed_count = delete_search_documents_by_rowids(conn, [*stale_rowids, *changed_rowids])
+    stale_removed_count = len([rowid for rowid in stale_rowids if rowid > 0])
+    changed_removed_count = max(0, removed_count - stale_removed_count)
+    for doc in docs_to_insert:
         insert_search_document(conn, doc)
-        inserted_count += 1
     conn.commit()
     return {
         "inserted_count": inserted_count,
-        "removed_count": removed_count,
+        "updated_count": updated_count,
+        "unchanged_count": unchanged_count,
+        "removed_count": stale_removed_count,
+        "replaced_count": changed_removed_count,
+        "touched_count": inserted_count + updated_count + stale_removed_count,
+        "target_count": len(registry_documents_by_id),
     }
 
 
@@ -25440,13 +25513,23 @@ def refresh_entity_registry_search_documents_only(
             aoa_root=aoa_root,
             route_terms_db_path=db_path,
         )
-        entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
+        entity_registry_document_count = int_value(
+            conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0]
+        )
+        target_entity_registry_document_count = int_value(registry_refresh.get("target_count"))
+        inserted_entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
+        updated_entity_registry_document_count = int_value(registry_refresh.get("updated_count"))
+        unchanged_entity_registry_document_count = int_value(registry_refresh.get("unchanged_count"))
         removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
         document_count = int_value(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
     except sqlite3.Error as exc:
         diagnostics.append(f"sqlite_error:{exc}")
         document_count = 0
         entity_registry_document_count = 0
+        target_entity_registry_document_count = 0
+        inserted_entity_registry_document_count = 0
+        updated_entity_registry_document_count = 0
+        unchanged_entity_registry_document_count = 0
         removed_entity_registry_document_count = 0
         if conn is not None:
             try:
@@ -25466,12 +25549,20 @@ def refresh_entity_registry_search_documents_only(
         "artifact_type": "entity_registry_search_sync",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
         "generated_at": now,
-        "ok": not diagnostics and entity_registry_document_count == int_value(registry_state.get("entity_count")),
+        "ok": (
+            not diagnostics
+            and entity_registry_document_count == int_value(registry_state.get("entity_count"))
+            and target_entity_registry_document_count == int_value(registry_state.get("entity_count"))
+        ),
         "target": "entity-registry",
         "selected_count": 0,
         "processed_count": 0,
         "document_count": document_count,
         "entity_registry_document_count": entity_registry_document_count,
+        "target_entity_registry_document_count": target_entity_registry_document_count,
+        "inserted_entity_registry_document_count": inserted_entity_registry_document_count,
+        "updated_entity_registry_document_count": updated_entity_registry_document_count,
+        "unchanged_entity_registry_document_count": unchanged_entity_registry_document_count,
         "removed_entity_registry_document_count": removed_entity_registry_document_count,
         "entity_count": registry_state.get("entity_count"),
         "entity_registry": registry_state,
@@ -25990,6 +26081,108 @@ def search_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in doc.items() if key not in SEARCH_DOCUMENT_COLUMN_KEYS}
 
 
+SEARCH_DOCUMENT_DELTA_VOLATILE_COLUMNS = frozenset({"raw_sha256", "session_date"})
+
+
+def canonical_search_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def search_document_storage_signature_from_parts(
+    *,
+    column_values: dict[str, Any],
+    payload: Any,
+    body_sha256: str,
+    body_chars: int,
+    route_entries: list[dict[str, str]],
+) -> str:
+    comparable = {
+        "columns": {
+            key: column_values.get(key)
+            for key in sorted(SEARCH_DOCUMENT_COLUMN_KEYS)
+            if key not in {"payload_json", *SEARCH_DOCUMENT_DELTA_VOLATILE_COLUMNS}
+        },
+        "payload": canonical_search_payload(payload),
+        "body_sha256": body_sha256,
+        "body_chars": body_chars,
+        "route_entries": route_entries,
+    }
+    return hashlib.sha256(
+        json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def search_document_storage_signature(doc: dict[str, Any]) -> str:
+    payload = search_doc_payload(doc)
+    full_body = str(doc.get("body") or "")
+    route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
+    route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
+    body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
+    column_values = {key: doc.get(key) for key in SEARCH_DOCUMENT_COLUMN_KEYS}
+    column_values["route_layers"] = route_layers_preview
+    column_values["route_signals"] = route_signals_preview
+    column_values["body"] = body_preview
+    return search_document_storage_signature_from_parts(
+        column_values=column_values,
+        payload=payload,
+        body_sha256=hashlib.sha256(full_body.encode("utf-8")).hexdigest(),
+        body_chars=len(full_body),
+        route_entries=document_route_entries(
+            route_layers_preview,
+            route_signals_preview,
+            doc_type=str(doc.get("doc_type") or ""),
+        ),
+    )
+
+
+def search_document_existing_signatures(conn: sqlite3.Connection, *, doc_type: str) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT documents.*,
+               document_bodies.body_sha256 AS stored_body_sha256,
+               document_bodies.body_chars AS stored_body_chars
+        FROM documents
+        LEFT JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid
+        WHERE documents.doc_type = ?
+        """,
+        (doc_type,),
+    ).fetchall()
+    signatures: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_keys = set(row.keys())
+        doc_id = str(row["id"] or "")
+        if not doc_id:
+            continue
+        body_preview = str(row["body"] or "")
+        body_sha256 = str(row["stored_body_sha256"] or hashlib.sha256(body_preview.encode("utf-8")).hexdigest())
+        body_chars = int_value(row["stored_body_chars"], len(body_preview))
+        column_values = {
+            key: row[key] if key in row_keys else None
+            for key in SEARCH_DOCUMENT_COLUMN_KEYS
+            if key != "payload_json"
+        }
+        signatures[doc_id] = {
+            "rowid": int_value(row["rowid"]),
+            "signature": search_document_storage_signature_from_parts(
+                column_values=column_values,
+                payload=row["payload_json"] if "payload_json" in row_keys else "",
+                body_sha256=body_sha256,
+                body_chars=body_chars,
+                route_entries=document_route_entries(
+                    row["route_layers"] if "route_layers" in row_keys else "",
+                    row["route_signals"] if "route_signals" in row_keys else "",
+                    doc_type=str(row["doc_type"] or ""),
+                ),
+            ),
+        }
+    return signatures
+
+
 def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, store_raw_text: bool = True) -> None:
     payload = search_doc_payload(doc)
     full_body = str(doc.get("body") or "")
@@ -26161,6 +26354,7 @@ def search_documents_for_entity_registry(
             [{"layer": route_layer, "key": route_key}] if route_layer and route_key else []
         )
         refs = entry.get("source_refs") if isinstance(entry.get("source_refs"), list) else []
+        compact_payload = compact_registry_payload(entry, refs)
         body = search_doc_text(
             [
                 entry.get("entity_id"),
@@ -26170,7 +26364,7 @@ def search_documents_for_entity_registry(
                 entry.get("status"),
                 entry.get("source_surface"),
                 entry.get("owner"),
-                entry.get("freshness"),
+                compact_payload.get("freshness"),
                 refs,
             ],
             max_chars=3600,
@@ -26186,7 +26380,7 @@ def search_documents_for_entity_registry(
                 "route_layers": route_layers,
                 "route_signals": route_signals,
                 "tags": f"entity_registry {entry.get('kind')} {entry.get('status')}",
-                "entity_registry": compact_registry_payload(entry, refs),
+                "entity_registry": compact_payload,
                 "truth_status": registry.get("truth_status"),
             }
         )
@@ -26752,6 +26946,9 @@ def search_index_sessions(
     inline_optimize_count = 0
     committed_count = 0
     removed_entity_registry_document_count = 0
+    inserted_entity_registry_document_count = 0
+    updated_entity_registry_document_count = 0
+    unchanged_entity_registry_document_count = 0
     budget_exhausted = False
 
     def progress_event(event: str, payload: dict[str, Any]) -> None:
@@ -26926,12 +27123,19 @@ def search_index_sessions(
                 aoa_root=aoa_root,
                 route_terms_db_path=write_db_path,
             )
-            counts["entity_registry"] += int_value(registry_refresh.get("inserted_count"))
+            entity_registry_document_count = int_value(registry_refresh.get("target_count"))
+            inserted_entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
+            updated_entity_registry_document_count = int_value(registry_refresh.get("updated_count"))
+            unchanged_entity_registry_document_count = int_value(registry_refresh.get("unchanged_count"))
+            counts["entity_registry"] += entity_registry_document_count
             removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
             record_phase(
                 "entity_registry_refresh",
                 registry_started,
-                inserted_count=int_value(registry_refresh.get("inserted_count")),
+                document_count=entity_registry_document_count,
+                inserted_count=inserted_entity_registry_document_count,
+                updated_count=updated_entity_registry_document_count,
+                unchanged_count=unchanged_entity_registry_document_count,
                 removed_count=removed_entity_registry_document_count,
             )
         elif not include_entity_registry:
@@ -26966,6 +27170,9 @@ def search_index_sessions(
                 "document_count": sum(counts.values()),
                 "removed_document_count": removed_document_count,
                 "removed_entity_registry_document_count": removed_entity_registry_document_count,
+                "inserted_entity_registry_document_count": inserted_entity_registry_document_count,
+                "updated_entity_registry_document_count": updated_entity_registry_document_count,
+                "unchanged_entity_registry_document_count": unchanged_entity_registry_document_count,
                 "max_raw_bytes": effective_max_raw_bytes,
                 "requested_max_raw_bytes": max_raw_bytes,
                 "raw_lexical_policy": raw_lexical_policy,
@@ -27005,6 +27212,9 @@ def search_index_sessions(
             "document_count": 0,
             "removed_document_count": removed_document_count,
             "removed_entity_registry_document_count": removed_entity_registry_document_count,
+            "inserted_entity_registry_document_count": inserted_entity_registry_document_count,
+            "updated_entity_registry_document_count": updated_entity_registry_document_count,
+            "unchanged_entity_registry_document_count": unchanged_entity_registry_document_count,
             "max_raw_bytes": effective_max_raw_bytes,
             "requested_max_raw_bytes": max_raw_bytes,
             "raw_lexical_policy": raw_lexical_policy,
@@ -27078,6 +27288,9 @@ def search_index_sessions(
         "document_count": document_count,
         "removed_document_count": removed_document_count,
         "removed_entity_registry_document_count": removed_entity_registry_document_count,
+        "inserted_entity_registry_document_count": inserted_entity_registry_document_count,
+        "updated_entity_registry_document_count": updated_entity_registry_document_count,
+        "unchanged_entity_registry_document_count": unchanged_entity_registry_document_count,
         "session_document_count": counts.get("session", 0),
         "segment_document_count": counts.get("segment", 0),
         "event_document_count": counts.get("event", 0),
@@ -41697,6 +41910,10 @@ def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "document_count",
         "entity_count",
         "entity_registry_document_count",
+        "target_entity_registry_document_count",
+        "inserted_entity_registry_document_count",
+        "updated_entity_registry_document_count",
+        "unchanged_entity_registry_document_count",
         "removed_entity_registry_document_count",
         "selected_count",
         "processed_count",

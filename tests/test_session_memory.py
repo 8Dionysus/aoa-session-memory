@@ -1592,7 +1592,13 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     refreshed_registry = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
     assert refreshed_search["ok"] is True
     assert refreshed_search["entity_registry_document_count"] == refreshed_registry["entity_count"]
-    assert refreshed_search["removed_entity_registry_document_count"] >= filtered_snapshot["entity_count"]
+    assert refreshed_search["removed_entity_registry_document_count"] < refreshed_registry["entity_count"]
+    assert refreshed_search["inserted_entity_registry_document_count"] >= 1
+    assert (
+        refreshed_search["inserted_entity_registry_document_count"]
+        + refreshed_search["updated_entity_registry_document_count"]
+        + refreshed_search["unchanged_entity_registry_document_count"]
+    ) == refreshed_registry["entity_count"]
     refreshed_maintenance = module.entity_registry_maintenance_status(aoa_root)
     assert refreshed_maintenance["needs_maintenance"] is False
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
@@ -1602,6 +1608,14 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     newer_search = module.search_sessions(aoa_root=aoa_root, query="aoa-newer-skill", doc_type="entity_registry", limit=5)
     assert newer_search["ok"] is True
     assert newer_search["results"][0]["doc_type"] == "entity_registry"
+
+    noop_refresh = module.refresh_entity_registry_search_documents_only(aoa_root=aoa_root, budget_seconds=30)
+    assert noop_refresh["ok"] is True
+    assert noop_refresh["entity_registry_document_count"] == refreshed_registry["entity_count"]
+    assert noop_refresh["inserted_entity_registry_document_count"] == 0
+    assert noop_refresh["updated_entity_registry_document_count"] == 0
+    assert noop_refresh["removed_entity_registry_document_count"] == 0
+    assert noop_refresh["unchanged_entity_registry_document_count"] == refreshed_registry["entity_count"]
 
 
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
@@ -1768,6 +1782,18 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     assert steps["registry_lookup"]["summary"]["registered"] is True
     assert steps["narrow_entity_registry_refresh"]["summary"]["selected_count"] == 0
     assert steps["narrow_entity_registry_refresh"]["summary"]["processed_count"] == 0
+    assert steps["narrow_entity_registry_refresh"]["summary"]["inserted_entity_registry_document_count"] == 0
+    assert steps["narrow_entity_registry_refresh"]["summary"]["removed_entity_registry_document_count"] == 0
+    assert (
+        steps["narrow_entity_registry_refresh"]["summary"]["updated_entity_registry_document_count"]
+        < steps["narrow_entity_registry_refresh"]["summary"]["entity_registry_document_count"]
+    )
+    assert steps["narrow_entity_registry_refresh"]["summary"]["unchanged_entity_registry_document_count"] > 0
+    assert (
+        steps["narrow_entity_registry_refresh"]["summary"]["unchanged_entity_registry_document_count"]
+        + steps["narrow_entity_registry_refresh"]["summary"]["updated_entity_registry_document_count"]
+        == steps["narrow_entity_registry_refresh"]["summary"]["entity_registry_document_count"]
+    )
     assert steps["narrow_search_index_refresh"]["summary"]["selected_count"] == 1
     assert steps["narrow_search_index_refresh"]["summary"]["processed_count"] == 1
     assert applied["diagnosis"]["refresh_path"]["entity_registry_refresh_reindexes_session_docs"] is False

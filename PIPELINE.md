@@ -644,6 +644,11 @@ python3 scripts/aoa_session_memory.py entity-registry \
 `index-maintenance` refreshes the registry when the snapshot is missing, stale,
 or older than its source surfaces. MCP may expose entity inventory and lookup
 read-only; `--write` registry refresh stays outside MCP.
+The search projection sync for `doc_type=entity_registry` is intentionally
+delta-based. It rewrites the generated snapshot, then compares stored search
+docs by semantic storage fingerprint and only inserts, replaces, or removes
+changed rows. Snapshot-only volatility such as the registry file hash must not
+turn an otherwise unchanged inventory into a full FTS/body rewrite.
 
 When an agent needs to debug or study one operational thing, use the resolver
 instead of guessing one axis by hand:

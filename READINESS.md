@@ -614,6 +614,16 @@ Last observed result:
   `auto-maintenance` now enforces that route by returning
   `deferred_full_search_rebuild_to_deep` from non-`deep` profiles when search
   freshness requires a full rewrite.
+- 2026-06-21 entity-registry delta-sync proof: the generated registry search
+  sync no longer deletes and reinserts all `doc_type=entity_registry` rows.
+  It excludes registry docs from route-term evidence to avoid projection
+  self-feedback, does not carry retired snapshot signal counts as fresh
+  evidence, and compares stored rows by semantic storage fingerprint. The
+  one-time live catch-up replaced old rows in `76.1s`; the immediate no-op
+  refresh completed in `4.64s` with `3442` unchanged docs and `0` inserted,
+  updated, or removed. `maintenance-status --full` then reported `ok=true`,
+  search `current`, graph `current_with_retired_sources`, entity registry
+  `current`, `warning_count=0`, and no `slow_phases`.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event
