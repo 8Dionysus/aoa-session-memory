@@ -720,6 +720,15 @@ Last observed result:
   (6,411,000 rows total) in about 56 minutes; the apply path is therefore
   documented as `manual-bulk`, has a disk-headroom preflight, and should not be
   used as an interactive query path.
+- 2026-06-21 graph SQLite compaction route: `graph-sqlite-compact` is the
+  explicit preflight/staging lane for physical graph DB shrink after generated
+  projection cleanup. Dry-run is read-only and reports conservative headroom for
+  `VACUUM INTO`; apply runs under the maintenance coordinator, creates an
+  integrity-checked compact copy by default, and does not replace live
+  `graph.sqlite3`. Source-mutating `VACUUM` requires `--confirm-source-vacuum`.
+  On the live 57.2 GiB graph store the default 25 GiB post-operation reserve
+  currently blocks compaction until more disk headroom is reserved or graph
+  cardinality is reduced.
 - Optional host-provider proof: `search-provider-status --include-host`
   probes host capability gates without making them authority. If
   `abyss-machine nervous quality-audit` reports warnings, `.aoa` keeps

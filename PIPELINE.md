@@ -401,6 +401,13 @@ growth can be large before checkpoint. Dry-run reports aggregate candidates
 from materialized graph type counts; contribution-row delete counts are measured
 only during apply.
 
+When the generated graph store still needs physical SQLite shrink after a
+projection prune, use `graph-sqlite-compact` as the preflight/staging route.
+The default is read-only and computes conservative headroom for `VACUUM INTO`.
+Apply defaults to a staged compact copy that is integrity-checked and does not
+replace the live `graph.sqlite3`; source-mutating `VACUUM` requires
+`--confirm-source-vacuum`.
+
 Use `storage-maintenance` for the current safe live shrink lane. It only runs
 SQLite WAL checkpoint/truncate for the graph and search stores, reports busy
 readers/writers instead of killing them, and leaves raw evidence, graph rebuilds,
@@ -945,6 +952,7 @@ prune the snapshots after proof/export:
 ```bash
 python3 scripts/aoa_session_memory.py graph-prune-sidecar --apply --write-report
 python3 scripts/aoa_session_memory.py graph-raw-ref-prune --apply --min-free-gb 20 --write-report
+python3 scripts/aoa_session_memory.py graph-sqlite-compact --write-report
 ```
 
 A fully absent sidecar is `not_exported`, not a freshness failure, as long as

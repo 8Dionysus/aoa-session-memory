@@ -342,6 +342,21 @@ another way. The command updates graph type counts and creates SQLite freelist
 pages; it does not run `VACUUM`, so the physical `graph.sqlite3` file may stay
 large until a controlled rebuild or VACUUM route has enough disk headroom.
 
+Plan that physical compaction explicitly before running it:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-sqlite-compact \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+The default route is read-only and reports conservative free-space requirements
+for a staged `VACUUM INTO` copy. `--apply --method vacuum-into --target-path
+...` creates and integrity-checks a compact copy without replacing the live
+`graph.sqlite3`. Source-mutating `--method vacuum` requires
+`--confirm-source-vacuum` and the same disk-headroom guard.
+
 For live-churn checks, keep the strict default as full truth and use
 `graph-freshness-check --stable --quiet-seconds 120` only when the operator
 wants a quiescent-subset gate. Stable mode reports recent writes under
@@ -540,7 +555,10 @@ The current safe storage route is:
   `storage-audit` reports old `raw_ref` graph materialization rows, run
   `graph-raw-ref-prune --apply --write-report` first. This route is
   `manual-bulk`, requires disk headroom for WAL growth, and physical file shrink
-  still needs reserved disk for VACUUM or a controlled rebuild.
+  still needs reserved disk for VACUUM or a controlled rebuild. Use
+  `graph-sqlite-compact --write-report` as the explicit preflight before any
+  physical graph SQLite compaction; its default `vacuum-into` route creates a
+  checked copy and does not replace the live store.
 - Search store: new search rebuilds keep full text in FTS and compressed
   `document_bodies`, while `documents.body` keeps only a bounded hot preview.
 - Raw blocks: do not delete duplicated raw blocks yet. They need an

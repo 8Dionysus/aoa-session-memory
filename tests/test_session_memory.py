@@ -3242,6 +3242,83 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
     assert "has_raw_ref" not in cardinality["projection"]["counts"]["edge"]
 
 
+def test_graph_sqlite_compact_plans_and_stages_vacuum_copy(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_dir = aoa_root / "graph"
+    graph_dir.mkdir(parents=True)
+    db_path = graph_dir / "graph.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE nodes(id TEXT PRIMARY KEY, payload_json TEXT)")
+        for index in range(120):
+            conn.execute("INSERT INTO nodes(id, payload_json) VALUES (?, ?)", (f"node-{index}", "x" * 4096))
+        conn.execute("DELETE FROM nodes WHERE id LIKE 'node-1%'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    blocked_plan = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        min_free_after_gb=10**9,
+        write_report=True,
+    )
+    assert blocked_plan["ok"] is True
+    assert blocked_plan["mutates"] is False
+    assert blocked_plan["status"] == "blocked_low_disk_headroom"
+    assert blocked_plan["plan"]["apply_ready"] is False
+    assert Path(blocked_plan["report_json"]).exists()
+    assert Path(blocked_plan["report_markdown"]).exists()
+
+    blocked_target = tmp_path / "blocked-vacuum-copy.sqlite3"
+    blocked_apply = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        target_path=blocked_target,
+        min_free_after_gb=10**9,
+    )
+    assert blocked_apply["ok"] is False
+    assert blocked_apply["mutates"] is False
+    assert blocked_apply["status"] == "preflight_failed"
+    assert "sqlite_compaction_low_disk_headroom" in blocked_apply["diagnostics"]
+    assert not blocked_target.exists()
+
+    missing_target_apply = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        min_free_after_gb=0,
+    )
+    assert missing_target_apply["ok"] is False
+    assert missing_target_apply["mutates"] is False
+    assert "vacuum_into_target_path_required" in missing_target_apply["diagnostics"]
+
+    source_vacuum = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        method="vacuum",
+        min_free_after_gb=0,
+    )
+    assert source_vacuum["ok"] is False
+    assert source_vacuum["mutates"] is False
+    assert "source_vacuum_requires_confirm_source_vacuum" in source_vacuum["diagnostics"]
+
+    target = tmp_path / "graph-vacuum-copy.sqlite3"
+    applied = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        target_path=target,
+        min_free_after_gb=0,
+        write_report=True,
+    )
+    assert applied["ok"] is True
+    assert applied["mutates"] is True
+    assert applied["method"] == "vacuum-into"
+    assert applied["action"]["integrity_check"]["ok"] is True
+    assert target.exists()
+    assert db_path.exists()
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+
+
 def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"

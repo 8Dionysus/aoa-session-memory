@@ -161,6 +161,8 @@ GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
 GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE = "manual_bulk_single_transaction_delete_v1"
 GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
+GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
+GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB = 25.0
 GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
@@ -35265,6 +35267,13 @@ def human_size(size_bytes: int) -> str:
     return f"{size:.1f} TiB"
 
 
+def existing_storage_path(path: Path) -> Path:
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return path
+
+
 def sqlite_page_stats_from_connection(conn: sqlite3.Connection, db_path: Path) -> dict[str, Any]:
     page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
     page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
@@ -35296,12 +35305,7 @@ def graph_raw_ref_prune_disk_preflight(
     allow_low_free: bool = False,
 ) -> dict[str, Any]:
     min_free_bytes = max(0, int(float(min_free_gb) * 1024 * 1024 * 1024))
-    usage_path = graph_store_path.parent
-    if not usage_path.exists():
-        for candidate in (usage_path, *usage_path.parents):
-            if candidate.exists():
-                usage_path = candidate
-                break
+    usage_path = existing_storage_path(graph_store_path.parent)
     try:
         usage = shutil.disk_usage(usage_path)
         free_bytes = int(usage.free)
@@ -35542,6 +35546,344 @@ def graph_raw_ref_prune(
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
         write_markdown(report_md, graph_raw_ref_prune_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def sqlite_integrity_check(db_path: Path) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "status": "missing",
+            "path": str(db_path),
+            "result": "",
+            "diagnostics": ["sqlite_db_missing"],
+        }
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            result = str(row[0] if row else "")
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+        return {
+            "ok": False,
+            "status": "sqlite_error",
+            "path": str(db_path),
+            "result": "",
+            "diagnostics": diagnostics,
+        }
+    ok = result == "ok"
+    return {
+        "ok": ok,
+        "status": "ok" if ok else "failed",
+        "path": str(db_path),
+        "result": result,
+        "diagnostics": [] if ok else ["sqlite_integrity_check_failed"],
+    }
+
+
+def sqlite_vacuum_headroom_plan(
+    *,
+    db_path: Path,
+    method: str = "vacuum-into",
+    target_path: Path | None = None,
+    min_free_after_gb: float = GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    allow_low_free: bool = False,
+) -> dict[str, Any]:
+    method = method if method in {"vacuum-into", "vacuum"} else "vacuum-into"
+    store = sqlite_storage_stats(db_path)
+    db_bytes = int_value(store.get("size_bytes"))
+    freelist_bytes = int_value(store.get("freelist_bytes"))
+    wal_bytes = int_value((store.get("wal") or {}).get("size_bytes") if isinstance(store.get("wal"), dict) else 0)
+    conservative_output_bytes = max(0, db_bytes - freelist_bytes)
+    conservative_reclaim_bytes = max(0, freelist_bytes)
+    min_free_after_bytes = max(0, int(float(min_free_after_gb) * 1024 * 1024 * 1024))
+    if method == "vacuum-into":
+        usage_path = existing_storage_path((target_path or db_path).parent)
+        work_bytes = conservative_output_bytes
+    else:
+        usage_path = existing_storage_path(db_path.parent)
+        # SQLite VACUUM rebuilds the database through temporary storage; use the
+        # current file size as a conservative work-space floor.
+        work_bytes = db_bytes
+    try:
+        usage = shutil.disk_usage(usage_path)
+        free_bytes = int(usage.free)
+        total_bytes = int(usage.total)
+        used_bytes = int(usage.used)
+        disk_status = "ok"
+        disk_diagnostics: list[str] = []
+    except OSError as exc:
+        free_bytes = 0
+        total_bytes = 0
+        used_bytes = 0
+        disk_status = "disk_usage_error"
+        disk_diagnostics = [f"disk_usage_error:{exc}"]
+    required_free_bytes = max(0, work_bytes + min_free_after_bytes)
+    apply_ready = bool(store.get("ok")) and (allow_low_free or (disk_status == "ok" and free_bytes >= required_free_bytes))
+    diagnostics = list(disk_diagnostics)
+    if not store.get("ok"):
+        diagnostics.extend(str(item) for item in store.get("diagnostics", []) if item)
+    if disk_status == "ok" and free_bytes < required_free_bytes and not allow_low_free:
+        diagnostics.append("sqlite_compaction_low_disk_headroom")
+    status = "ready" if apply_ready else "blocked_low_disk_headroom"
+    if not store.get("ok"):
+        status = "missing_or_unreadable"
+    elif disk_status != "ok" and not allow_low_free:
+        status = disk_status
+    return {
+        "ok": disk_status == "ok" and bool(store.get("ok")),
+        "status": status,
+        "method": method,
+        "db_path": str(db_path),
+        "target_path": str(target_path) if target_path else "",
+        "usage_path": str(usage_path),
+        "store": store,
+        "db_bytes": db_bytes,
+        "db_human": human_size(db_bytes),
+        "wal_bytes": wal_bytes,
+        "wal_human": human_size(wal_bytes),
+        "freelist_bytes": freelist_bytes,
+        "freelist_human": human_size(freelist_bytes),
+        "conservative_output_bytes": conservative_output_bytes,
+        "conservative_output_human": human_size(conservative_output_bytes),
+        "conservative_reclaimable_bytes": conservative_reclaim_bytes,
+        "conservative_reclaimable_human": human_size(conservative_reclaim_bytes),
+        "work_bytes": work_bytes,
+        "work_human": human_size(work_bytes),
+        "min_free_after_gb": float(min_free_after_gb),
+        "min_free_after_bytes": min_free_after_bytes,
+        "min_free_after_human": human_size(min_free_after_bytes),
+        "required_free_bytes": required_free_bytes,
+        "required_free_human": human_size(required_free_bytes),
+        "free_bytes": free_bytes,
+        "free_human": human_size(free_bytes),
+        "used_bytes": used_bytes,
+        "used_human": human_size(used_bytes),
+        "total_bytes": total_bytes,
+        "total_human": human_size(total_bytes),
+        "free_after_if_applied_bytes": free_bytes - work_bytes if free_bytes else 0,
+        "free_after_if_applied_human": human_size(max(0, free_bytes - work_bytes)) if free_bytes else "0 B",
+        "allow_low_free": bool(allow_low_free),
+        "apply_ready": apply_ready,
+        "diagnostics": diagnostics,
+        "note": "This is a conservative SQLite compaction preflight; actual VACUUM output can differ from freelist-only estimates.",
+    }
+
+
+def sqlite_vacuum_into(db_path: Path, target_path: Path, *, timeout: float = 120.0, overwrite: bool = False) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    if not db_path.exists():
+        return {"ok": False, "status": "missing", "mutates": False, "diagnostics": ["sqlite_db_missing"]}
+    if target_path.exists():
+        if overwrite:
+            target_path.unlink()
+        else:
+            return {"ok": False, "status": "target_exists", "mutates": False, "diagnostics": ["sqlite_vacuum_target_exists"]}
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    before = {
+        "source_bytes": path_total_size(db_path),
+        "target_exists": target_path.exists(),
+        "target_bytes": path_total_size(target_path),
+    }
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
+        try:
+            conn.execute("VACUUM INTO ?", (str(target_path),))
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    integrity = sqlite_integrity_check(target_path) if target_path.exists() else {"ok": False, "status": "missing", "diagnostics": ["sqlite_vacuum_target_missing"]}
+    after = {
+        "source_bytes": path_total_size(db_path),
+        "target_exists": target_path.exists(),
+        "target_bytes": path_total_size(target_path),
+    }
+    if not integrity.get("ok"):
+        diagnostics.extend(str(item) for item in integrity.get("diagnostics", []) if item)
+    status = "created" if not diagnostics else "sqlite_error"
+    return {
+        "ok": not diagnostics,
+        "status": status,
+        "mutates": bool(target_path.exists()),
+        "source_path": str(db_path),
+        "target_path": str(target_path),
+        "before": before,
+        "after": after,
+        "integrity_check": integrity,
+        "diagnostics": diagnostics,
+    }
+
+
+def sqlite_vacuum_in_place(db_path: Path, *, timeout: float = 120.0) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    before = sqlite_storage_stats(db_path)
+    if not before.get("ok"):
+        return {"ok": False, "status": "missing_or_unreadable", "mutates": False, "before": before, "diagnostics": before.get("diagnostics", [])}
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
+        try:
+            conn.execute("VACUUM")
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    after = sqlite_storage_stats(db_path)
+    integrity = sqlite_integrity_check(db_path)
+    if not integrity.get("ok"):
+        diagnostics.extend(str(item) for item in integrity.get("diagnostics", []) if item)
+    before_total = int_value(before.get("total_with_wal_bytes"))
+    after_total = int_value(after.get("total_with_wal_bytes"))
+    return {
+        "ok": not diagnostics,
+        "status": "vacuumed" if not diagnostics else "sqlite_error",
+        "mutates": True,
+        "before": before,
+        "after": after,
+        "integrity_check": integrity,
+        "reclaimed_bytes": max(0, before_total - after_total),
+        "reclaimed_human": human_size(max(0, before_total - after_total)),
+        "diagnostics": diagnostics,
+    }
+
+
+def graph_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    lines = [
+        "# Graph SQLite Compact",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- method: `{payload.get('method')}`",
+        f"- execution_profile: `{payload.get('execution_profile')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Plan",
+        "",
+        f"- db: `{plan.get('db_human')}`",
+        f"- freelist: `{plan.get('freelist_human')}`",
+        f"- conservative_output: `{plan.get('conservative_output_human')}`",
+        f"- conservative_reclaimable: `{plan.get('conservative_reclaimable_human')}`",
+        f"- required_free: `{plan.get('required_free_human')}`",
+        f"- free: `{plan.get('free_human')}`",
+        f"- min_free_after: `{plan.get('min_free_after_human')}`",
+        f"- apply_ready: `{plan.get('apply_ready')}`",
+        "",
+        "## Action",
+        "",
+        f"- status: `{action.get('status')}`",
+        f"- target_path: `{action.get('target_path')}`",
+        f"- reclaimed: `{action.get('reclaimed_human')}`",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def graph_sqlite_compact(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    method: str = "vacuum-into",
+    target_path: Path | None = None,
+    min_free_after_gb: float = GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    allow_low_free: bool = False,
+    confirm_source_vacuum: bool = False,
+    overwrite_target: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    graph_store_path = graph_paths(aoa_root)["store"]
+    method = method if method in {"vacuum-into", "vacuum"} else "vacuum-into"
+    explicit_target_path = target_path is not None
+    plan_target_path = target_path
+    if plan_target_path is None and method == "vacuum-into":
+        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{compact_stamp()}__graph.sqlite3.vacuum-copy"
+    plan = sqlite_vacuum_headroom_plan(
+        db_path=graph_store_path,
+        method=method,
+        target_path=plan_target_path,
+        min_free_after_gb=min_free_after_gb,
+        allow_low_free=allow_low_free,
+    )
+    plan_diagnostics = [str(item) for item in plan.get("diagnostics", []) if item]
+    diagnostics: list[str] = []
+    if not plan.get("ok"):
+        diagnostics.extend(plan_diagnostics)
+    action: dict[str, Any] = {}
+    status = "dry_run_ready" if plan.get("apply_ready") else str(plan.get("status") or "dry_run")
+    if apply and method == "vacuum" and not confirm_source_vacuum:
+        diagnostics.append("source_vacuum_requires_confirm_source_vacuum")
+        status = "preflight_failed"
+    if apply and not plan.get("apply_ready"):
+        diagnostics.extend(item for item in plan_diagnostics if item not in diagnostics)
+        status = "preflight_failed"
+    if apply and method == "vacuum-into" and not explicit_target_path:
+        diagnostics.append("vacuum_into_target_path_required")
+        status = "preflight_failed"
+    if apply and not diagnostics:
+        if method == "vacuum-into":
+            action = sqlite_vacuum_into(graph_store_path, target_path or graph_store_path.with_suffix(".vacuum-copy"), overwrite=overwrite_target)
+            status = str(action.get("status") or "applied")
+        else:
+            action = sqlite_vacuum_in_place(graph_store_path)
+            status = str(action.get("status") or "applied")
+        diagnostics.extend(str(item) for item in action.get("diagnostics", []) if item)
+    ok = not diagnostics and (not apply or bool(action.get("ok")))
+    if not apply and plan.get("apply_ready"):
+        next_route = "run graph-sqlite-compact --apply with an explicit target path for a staged compact copy, then verify and plan a separate swap/replace route"
+    elif not apply:
+        next_route = "do not compact yet; reserve disk headroom or reduce graph cardinality/search pressure first"
+    elif method == "vacuum-into" and action.get("ok"):
+        next_route = "verify the compact copy, then use a separate controlled swap route if the operator chooses to replace graph.sqlite3"
+    elif method == "vacuum" and action.get("ok"):
+        next_route = "run storage-audit --write-report and maintenance-status --full to verify graph size and route health"
+    else:
+        next_route = "fix diagnostics before retrying graph-sqlite-compact"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_sqlite_compact",
+        "generated_at": utc_now(),
+        "ok": ok,
+        "mutates": bool(action.get("mutates")),
+        "apply": bool(apply),
+        "status": status,
+        "method": method,
+        "execution_profile": GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE,
+        "aoa_root": str(aoa_root),
+        "store_path": str(graph_store_path),
+        "target_path": str(plan_target_path) if plan_target_path else "",
+        "target_path_explicit": explicit_target_path,
+        "plan": plan,
+        "action": action,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+        "stop_line": "This route compacts only the generated graph SQLite projection. It does not delete raw/session evidence and does not replace graph.sqlite3 after VACUUM INTO.",
+        "next_route": next_route,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__graph-sqlite-compact"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, graph_sqlite_compact_markdown(payload))
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
@@ -36091,6 +36433,12 @@ def storage_audit(
         sample=graph_store.get("aggregate_payload_compaction_sample") if isinstance(graph_store.get("aggregate_payload_compaction_sample"), dict) else {},
     )
     raw_ref_materialization = graph_raw_ref_materialization_recommendation(aoa_root)
+    graph_sqlite_plan = sqlite_vacuum_headroom_plan(
+        db_path=graph_paths_payload["store"],
+        method="vacuum-into",
+        target_path=aoa_root / DIAGNOSTICS_ROOT / "graph.sqlite3.vacuum-copy",
+        min_free_after_gb=GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    )
     sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
         search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
     )
@@ -36145,6 +36493,19 @@ def storage_audit(
                 "estimated_reclaimable_human": raw_ref_materialization["estimated_reclaimable_human"],
                 "estimate_status": raw_ref_materialization["estimate_status"],
                 "next_route": raw_ref_materialization["next_route"],
+            },
+            {
+                "id": "graph_sqlite_physical_compaction",
+                "status": graph_sqlite_plan["status"],
+                "quality_tradeoff": "none_expected_for_vacuum_into_copy; source graph.sqlite3 is not replaced by the staged route",
+                "speed_tradeoff": "manual-bulk SQLite copy/rewrite; not an interactive query path",
+                "estimated_reclaimable_bytes": graph_sqlite_plan["conservative_reclaimable_bytes"],
+                "estimated_reclaimable_human": graph_sqlite_plan["conservative_reclaimable_human"],
+                "required_free_human": graph_sqlite_plan["required_free_human"],
+                "free_human": graph_sqlite_plan["free_human"],
+                "min_free_after_human": graph_sqlite_plan["min_free_after_human"],
+                "apply_ready": graph_sqlite_plan["apply_ready"],
+                "next_route": "run graph-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient",
             },
             {
                 "id": "raw_block_offset_or_compressed_store",
@@ -44552,6 +44913,41 @@ def command_storage_maintenance(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    target_path = Path(args.target_path) if args.target_path else None
+
+    def run_compact() -> dict[str, Any]:
+        return graph_sqlite_compact(
+            aoa_root=root,
+            apply=args.apply,
+            method=args.method,
+            target_path=target_path,
+            min_free_after_gb=args.min_free_after_gb,
+            allow_low_free=args.allow_low_free,
+            confirm_source_vacuum=args.confirm_source_vacuum,
+            overwrite_target=args.overwrite_target,
+            write_report=args.write_report,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_compact,
+            owner_job="graph-sqlite-compact",
+            mode="manual-bulk",
+            target="graph/sqlite_compaction",
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+        )
+        if args.apply
+        else run_compact()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_build(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -49132,6 +49528,23 @@ def build_parser() -> argparse.ArgumentParser:
     storage_maintenance_parser.add_argument("--aoa-root")
     storage_maintenance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown storage maintenance reports under .aoa/diagnostics.")
     storage_maintenance_parser.set_defaults(func=command_storage_maintenance)
+
+    graph_sqlite_compact_parser = sub.add_parser(
+        "graph-sqlite-compact",
+        aliases=["graph-compact-plan"],
+        help="Plan or stage SQLite compaction for the generated graph store with disk-headroom guards.",
+    )
+    graph_sqlite_compact_parser.add_argument("--workspace-root")
+    graph_sqlite_compact_parser.add_argument("--aoa-root")
+    graph_sqlite_compact_parser.add_argument("--apply", action="store_true", help="Run the selected compaction method after preflight. Default is read-only plan.")
+    graph_sqlite_compact_parser.add_argument("--method", choices=["vacuum-into", "vacuum"], default="vacuum-into", help="Compaction method. vacuum-into creates a verified copy; vacuum mutates graph.sqlite3 and requires --confirm-source-vacuum.")
+    graph_sqlite_compact_parser.add_argument("--target-path", help="Target SQLite path for --method vacuum-into. Dry-run suggests a timestamped diagnostics path; apply requires an explicit target.")
+    graph_sqlite_compact_parser.add_argument("--min-free-after-gb", type=float, default=GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB, help="Minimum free disk space to keep after expected compaction work. Default: 25 GiB.")
+    graph_sqlite_compact_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom guard when the operator has reserved capacity another way.")
+    graph_sqlite_compact_parser.add_argument("--confirm-source-vacuum", action="store_true", help="Allow --method vacuum to mutate graph.sqlite3 after preflight.")
+    graph_sqlite_compact_parser.add_argument("--overwrite-target", action="store_true", help="Allow --method vacuum-into to replace an existing target path.")
+    graph_sqlite_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown graph compaction reports under .aoa/diagnostics.")
+    graph_sqlite_compact_parser.set_defaults(func=command_graph_sqlite_compact)
 
     graph_build = sub.add_parser(
         "graph-build",
