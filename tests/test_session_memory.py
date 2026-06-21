@@ -3166,6 +3166,72 @@ def test_storage_maintenance_checkpoints_sqlite_wal(tmp_path: Path) -> None:
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    tmp_store = graph_root / ".graph.sqlite3.987654.rebuild.tmp"
+    tmp_wal = Path(f"{tmp_store}-wal")
+    tmp_store.write_bytes(b"x" * 1024)
+    tmp_wal.write_bytes(b"y" * 512)
+    owner = {
+        **module.maintenance_owner_packet(
+            aoa_root=aoa_root,
+            owner_job="graph-build",
+            mode="manual-bulk",
+            target="all",
+            reason="operator_requested",
+            touched_surfaces=["graph"],
+            budget_seconds=5400,
+        ),
+        "pid": 987654,
+    }
+    module.write_maintenance_coordinator_active(aoa_root, owner)
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    dry_run = module.maintenance_cleanup(aoa_root=aoa_root, apply=False)
+
+    assert dry_run["status"] == "cleanup_needed"
+    assert dry_run["mutates"] is False
+    assert dry_run["stale_active_job"] is True
+    assert dry_run["graph_rebuild_temps"]["orphaned_count"] == 1
+    assert "orphaned_graph_store_rebuild_tmp" in dry_run["diagnostics"]
+    assert tmp_store.exists()
+    assert tmp_wal.exists()
+
+    applied = module.maintenance_cleanup(aoa_root=aoa_root, apply=True, write_report=True)
+    state = module.read_maintenance_coordinator_state(aoa_root)
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["mutates"] is True
+    assert applied["action_counts"]["stale_active_job_cleared"] == 1
+    assert applied["action_counts"]["graph_rebuild_tmp_removed"] == 1
+    assert applied["removed_bytes"] == 1536
+    assert not tmp_store.exists()
+    assert not tmp_wal.exists()
+    assert state["active_job"] == {}
+    assert state["last_stale_job"]["owner_job"] == "graph-build"
+    assert state["last_event"]["status"] == "stale_active_job_cleared"
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+
+
+def test_storage_status_reports_orphaned_graph_rebuild_tmp(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    tmp_store = graph_root / ".graph.sqlite3.111222.rebuild.tmp"
+    tmp_store.write_bytes(b"z" * 256)
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    storage = module.maintenance_storage_status(aoa_root)
+
+    assert storage["graph_rebuild_temps"]["status"] == "cleanup_needed"
+    assert storage["graph_rebuild_temps"]["orphaned_count"] == 1
+    assert storage["graph_rebuild_temps"]["orphaned_bytes"] == 256
+
+
 def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     shared_node_id = module.graph_route_node_id("entity", "shared_graph_anchor")
@@ -3876,6 +3942,57 @@ def test_graph_source_recommendation_routes_mass_missing_sources_to_budgeted_rec
     assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
 
 
+def test_graph_source_recommendation_routes_mostly_missing_partial_store_to_rebuild() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4815,
+        existing_source_count=118,
+        dirty_count=62,
+        missing_count=4626,
+        orphaned_count=0,
+        blocked_count=8,
+        reason_group_counts={
+            "graph_source_missing": 4626,
+            "source_sha_mismatch": 62,
+            "missing_graph_source_path": 71,
+        },
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+    )
+
+    assert recommendation["route"] == "store_only_rebuild"
+    assert recommendation["reason"] == "graph_store_mostly_missing_sources_store_only_rebuild"
+    assert recommendation["source_count"] == 4815
+    assert recommendation["existing_source_count"] == 118
+    assert "graph-build all" in recommendation["command"]
+    assert "--write --store-only --progress-every 10" in recommendation["command"]
+    assert "--in-place" not in recommendation["command"]
+    assert "store_only_rebuild_is_manual_resource_gated" in recommendation["notes"]
+    assert "use_in_place_only_when_storage_headroom_is_low" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_routes_ledger_store_mismatch_to_budgeted_recovery() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4215,
+        existing_source_count=121,
+        dirty_count=0,
+        missing_count=4031,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={
+            "graph_source_ledger_store_count_mismatch": 4031,
+        },
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+    )
+
+    assert recommendation["route"] == "budgeted_graph_maintenance"
+    assert recommendation["reason"] == "graph_store_ledger_mismatch_budgeted_recovery"
+    assert "graph-maintenance all" in recommendation["command"]
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
+    assert "--store-only" not in recommendation["command"]
+    assert "ledger_store_mismatch_sources_can_be_reinserted_incrementally" in recommendation["notes"]
+
+
 def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=6,
@@ -3934,6 +4051,104 @@ def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path
     assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in command_text
     assert str(workspace) in command_text
     assert str(aoa_root) in command_text
+
+
+def test_maintenance_next_actions_routes_mostly_missing_graph_store_to_rebuild(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 4688,
+        "maintenance_recommendation": {
+            "route": "store_only_rebuild",
+            "reason": "graph_store_mostly_missing_sources_store_only_rebuild",
+            "command": "graph-build all --write --store-only --progress-every 10",
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_store_rebuild"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "graph-build all" in command_text
+    assert "--write --store-only --progress-every 10" in command_text
+    assert "--in-place" not in command_text
+    assert "resource-gated store-only rebuild" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_prioritizes_runtime_cleanup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    (graph_root / ".graph.sqlite3.222333.rebuild.tmp").write_bytes(b"x")
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={
+            "status": "stale",
+            "needs_maintenance": True,
+            "actionable_count": 10,
+            "maintenance_recommendation": {"route": "store_only_rebuild", "reason": "mostly_missing"},
+            "diagnostics": [],
+        },
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance_cleanup"
+    assert actions[0]["id"] == "repair_maintenance_cleanup"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "maintenance-cleanup" in command_text
+    assert "--apply --write-report" in command_text
+
+
+def test_graph_status_preserves_existing_source_count_for_rebuild_recommendation(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph_state = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "needs_full_rebuild": False,
+        "source_count": 118,
+        "source_state": {
+            "source_count": 4815,
+            "missing_count": 4626,
+            "dirty_count": 62,
+            "blocked_count": 8,
+            "orphaned_count": 0,
+        },
+        "diagnostics": ["latest_graph_maintenance_remaining_sources"],
+        "latest_maintenance": {
+            "usable_for_hot_gate": True,
+            "remaining_count": 4688,
+        },
+    }
+
+    summary = module.graph_maintenance_status_from_state(
+        graph_state,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert summary["existing_source_count"] == 118
+    assert summary["maintenance_recommendation"]["route"] == "store_only_rebuild"
+    assert summary["maintenance_recommendation"]["existing_source_count"] == 118
+    assert "graph-build all" in summary["maintenance_recommendation"]["command"]
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:

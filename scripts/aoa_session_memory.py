@@ -18630,6 +18630,275 @@ def maintenance_lock_snapshot(aoa_root: Path) -> dict[str, Any]:
     }
 
 
+def process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def graph_rebuild_tmp_pid(path: Path) -> int:
+    name = path.name
+    for suffix in ("-wal", "-shm"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    match = re.match(r"^\.graph\.sqlite3\.(\d+)\.rebuild\.tmp$", name)
+    return int_value(match.group(1), 0) if match else 0
+
+
+def graph_rebuild_tmp_entries(aoa_root: Path) -> list[dict[str, Any]]:
+    graph_root = aoa_root / GRAPH_ROOT
+    if not graph_root.exists():
+        return []
+    groups: dict[str, set[Path]] = {}
+    for path in graph_root.glob(".graph.sqlite3.*.rebuild.tmp*"):
+        pid = graph_rebuild_tmp_pid(path)
+        if pid <= 0:
+            continue
+        name = path.name
+        base_name = name
+        for suffix in ("-wal", "-shm"):
+            if base_name.endswith(suffix):
+                base_name = base_name[: -len(suffix)]
+                break
+        base = graph_root / base_name
+        groups.setdefault(base_name, set()).add(base)
+        groups[base_name].add(path)
+        for companion in sqlite_companion_paths(base):
+            if companion.exists():
+                groups[base_name].add(companion)
+    now = time.time()
+    entries: list[dict[str, Any]] = []
+    for base_name, paths in sorted(groups.items()):
+        base = graph_root / base_name
+        pid = graph_rebuild_tmp_pid(base)
+        existing_paths = sorted((path for path in paths if path.exists() or path.is_symlink()), key=lambda item: item.name)
+        if not existing_paths:
+            continue
+        size_bytes = sum(path_total_size(path) for path in existing_paths)
+        mtimes = [path_mtime(path) for path in existing_paths if path.exists()]
+        latest_mtime = max(mtimes) if mtimes else 0.0
+        pid_alive = process_is_alive(pid)
+        status = "active_or_pid_alive" if pid_alive else "orphaned"
+        entries.append(
+            {
+                "base": str(base),
+                "pid": pid,
+                "pid_alive": pid_alive,
+                "status": status,
+                "safe_to_remove": not pid_alive,
+                "path_count": len(existing_paths),
+                "paths": [str(path) for path in existing_paths],
+                "size_bytes": size_bytes,
+                "size_human": human_size(size_bytes),
+                "latest_mtime": latest_mtime,
+                "latest_mtime_iso": iso_from_epoch(latest_mtime),
+                "age_seconds": max(0, int(now - latest_mtime)) if latest_mtime > 0 else None,
+            }
+        )
+    return entries
+
+
+def graph_rebuild_tmp_status(aoa_root: Path) -> dict[str, Any]:
+    entries = graph_rebuild_tmp_entries(aoa_root)
+    orphaned = [entry for entry in entries if entry.get("status") == "orphaned" and entry.get("safe_to_remove")]
+    active_or_unknown = [entry for entry in entries if entry not in orphaned]
+    total_bytes = sum(int_value(entry.get("size_bytes")) for entry in entries)
+    orphaned_bytes = sum(int_value(entry.get("size_bytes")) for entry in orphaned)
+    diagnostics: list[str] = []
+    if orphaned:
+        diagnostics.append("orphaned_graph_store_rebuild_tmp")
+    if active_or_unknown:
+        diagnostics.append("graph_store_rebuild_tmp_pid_alive")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_rebuild_tmp_status",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "status": "cleanup_needed" if orphaned else ("active_or_unknown" if active_or_unknown else "clean"),
+        "needs_cleanup": bool(orphaned),
+        "entry_count": len(entries),
+        "orphaned_count": len(orphaned),
+        "active_or_unknown_count": len(active_or_unknown),
+        "total_bytes": total_bytes,
+        "total_human": human_size(total_bytes),
+        "orphaned_bytes": orphaned_bytes,
+        "orphaned_human": human_size(orphaned_bytes),
+        "entries": entries,
+        "diagnostics": diagnostics,
+    }
+
+
+def maintenance_cleanup_markdown(payload: dict[str, Any]) -> str:
+    action_counts = payload.get("action_counts") if isinstance(payload.get("action_counts"), dict) else {}
+    lines = [
+        "# Session Memory Maintenance Cleanup",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- removed_bytes: `{payload.get('removed_human', '0 B')}`",
+        f"- stale_active_jobs_cleared: `{action_counts.get('stale_active_job_cleared', 0)}`",
+        f"- graph_rebuild_tmp_removed: `{action_counts.get('graph_rebuild_tmp_removed', 0)}`",
+        "",
+        payload.get("stop_line", ""),
+    ]
+    return "\n".join(line for line in lines if line is not None).rstrip() + "\n"
+
+
+def maintenance_cleanup(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    lock_path = maintenance_lock_path(aoa_root)
+    state_path = maintenance_coordinator_state_path(aoa_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle: Any | None = None
+    lock_acquired = False
+    lock_active = False
+    lock_owner: dict[str, Any] = {}
+    if apply:
+        lock_handle = lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_acquired = True
+        except BlockingIOError:
+            lock_owner = read_maintenance_lock_owner(lock_handle)
+            lock_active = True
+    else:
+        snapshot = maintenance_lock_snapshot(aoa_root)
+        lock_active = bool(snapshot.get("active"))
+        lock_owner = snapshot.get("owner") if isinstance(snapshot.get("owner"), dict) else {}
+
+    state = read_maintenance_coordinator_state(aoa_root)
+    active_job = state.get("active_job") if isinstance(state.get("active_job"), dict) else {}
+    stale_active_job = bool(active_job) and not lock_active
+    tmp_status = graph_rebuild_tmp_status(aoa_root)
+    removable_tmp_entries = [
+        entry
+        for entry in tmp_status.get("entries", [])
+        if isinstance(entry, dict) and entry.get("status") == "orphaned" and entry.get("safe_to_remove")
+    ]
+    diagnostics: list[str] = []
+    if stale_active_job:
+        diagnostics.append("stale_active_job_without_lock")
+    if removable_tmp_entries:
+        diagnostics.append("orphaned_graph_store_rebuild_tmp")
+    if lock_active:
+        diagnostics.append("maintenance_lock_active_cleanup_deferred")
+
+    removed_paths: list[str] = []
+    removed_bytes = 0
+    cleared_active_job: dict[str, Any] = {}
+    action_counts = {"stale_active_job_cleared": 0, "graph_rebuild_tmp_removed": 0}
+    if apply and not lock_active:
+        if stale_active_job:
+            started_epoch = float(active_job.get("started_epoch") or 0.0)
+            cleared_active_job = {
+                **active_job,
+                "status": "stale_cleared",
+                "finished_at": now,
+                "elapsed_ms": int(max(0.0, time.time() - started_epoch) * 1000) if started_epoch else 0,
+                "result_summary": {
+                    "ok": False,
+                    "status": "stale_active_job_without_lock",
+                    "diagnostics": ["maintenance_process_missing_or_killed_before_coordinator_finish"],
+                },
+            }
+            state.update(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "artifact_type": "session_memory_maintenance_coordinator_state",
+                    "generated_at": now,
+                    "lock_path": str(lock_path),
+                    "active_job": {},
+                    "last_stale_job": cleared_active_job,
+                    "last_event": {
+                        "status": "stale_active_job_cleared",
+                        "job_id": active_job.get("job_id"),
+                        "mode": active_job.get("mode"),
+                        "owner_job": active_job.get("owner_job"),
+                        "touched_surfaces": active_job.get("touched_surfaces", []),
+                        "at": now,
+                    },
+                }
+            )
+            write_json(state_path, state)
+            action_counts["stale_active_job_cleared"] = 1
+        for entry in removable_tmp_entries:
+            paths = [Path(str(path)) for path in entry.get("paths", []) if path]
+            removed_bytes += int_value(entry.get("size_bytes"))
+            removed = remove_existing_paths(paths)
+            removed_paths.extend(removed)
+            if removed:
+                action_counts["graph_rebuild_tmp_removed"] += 1
+        tmp_status = graph_rebuild_tmp_status(aoa_root)
+
+    if lock_handle is not None:
+        if lock_acquired:
+            try:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        lock_handle.close()
+
+    cleanup_needed = stale_active_job or bool(removable_tmp_entries)
+    changed = any(action_counts.values()) or bool(removed_paths)
+    if lock_active:
+        status = "deferred_active_writer"
+    elif apply and changed:
+        status = "applied"
+    elif cleanup_needed:
+        status = "cleanup_needed"
+    else:
+        status = "nothing_to_do"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_cleanup",
+        "generated_at": now,
+        "ok": not lock_active,
+        "mutates": bool(apply and changed),
+        "apply": apply,
+        "status": status,
+        "aoa_root": str(aoa_root),
+        "lock_path": str(lock_path),
+        "state_path": str(state_path),
+        "lock_active": lock_active,
+        "lock_owner": lock_owner if lock_active else {},
+        "stale_active_job": stale_active_job,
+        "cleared_active_job": maintenance_coordinator_brief(cleared_active_job) if cleared_active_job else {},
+        "graph_rebuild_temps": tmp_status,
+        "action_counts": action_counts,
+        "removed_paths": removed_paths,
+        "removed_bytes": removed_bytes if removed_paths else 0,
+        "removed_human": human_size(removed_bytes if removed_paths else 0),
+        "diagnostics": sorted(set(diagnostics)),
+        "stop_line": "Only stale maintenance coordinator state and orphaned generated graph rebuild temp files are cleaned. Raw sessions, indexes, and the live graph store are not deleted.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__maintenance-cleanup"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, maintenance_cleanup_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def maintenance_lock_conflict_kind(*, requested_mode: str, blocking_owner: dict[str, Any]) -> str:
     blocking_mode = str(blocking_owner.get("mode") or "")
     if requested_mode == "hot" and blocking_mode in MAINTENANCE_BULK_MODES:
@@ -34151,6 +34420,7 @@ def graph_source_reason_summary(states: list[dict[str, Any]], *, limit: int = 40
 def graph_source_maintenance_recommendation(
     *,
     source_count: int,
+    existing_source_count: int | None = None,
     dirty_count: int,
     missing_count: int,
     orphaned_count: int,
@@ -34161,10 +34431,13 @@ def graph_source_maintenance_recommendation(
 ) -> dict[str, Any]:
     actionable_count = max(0, int_value(dirty_count) + int_value(missing_count) + int_value(orphaned_count))
     source_total = max(0, int_value(source_count))
+    existing_total = max(0, int_value(existing_source_count, source_total)) if existing_source_count is not None else source_total
+    missing_total = max(0, int_value(missing_count))
     classifier_mismatch = int_value(reason_group_counts.get("route_signal_classifier_mismatch"))
     event_route_policy_mismatch = int_value(reason_group_counts.get("graph_event_route_signal_edge_policy_mismatch"))
     source_sha_mismatch = int_value(reason_group_counts.get("source_sha_mismatch"))
     graph_missing = int_value(reason_group_counts.get("graph_source_missing"))
+    ledger_store_mismatch = int_value(reason_group_counts.get("graph_source_ledger_store_count_mismatch"))
     missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
     blocked = max(0, int_value(blocked_count))
     root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
@@ -34178,10 +34451,30 @@ def graph_source_maintenance_recommendation(
             f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report"
         )
 
+    def graph_store_only_rebuild_command() -> str:
+        return (
+            "python3 scripts/aoa_session_memory.py graph-build all "
+            f"{root_args} --write --store-only --progress-every 10"
+        )
+
+    mostly_missing_partial_store = (
+        source_total >= 500
+        and missing_total >= max(500, int(source_total * 0.75))
+        and existing_total <= max(100, int(source_total * 0.15))
+    )
+
     if actionable_count <= 0:
         route = "none"
         reason = "graph_sources_current"
         command = ""
+    elif existing_source_count is not None and ledger_store_mismatch and actionable_count > 100:
+        route = "budgeted_graph_maintenance"
+        reason = "graph_store_ledger_mismatch_budgeted_recovery"
+        command = graph_maintenance_command(budgeted_batch_limit)
+    elif mostly_missing_partial_store:
+        route = "store_only_rebuild"
+        reason = "graph_store_mostly_missing_sources_store_only_rebuild"
+        command = graph_store_only_rebuild_command()
     elif (
         source_total
         and int_value(dirty_count) >= max(20, int(source_total * 0.25))
@@ -34223,11 +34516,18 @@ def graph_source_maintenance_recommendation(
         notes.append("missing_graph_source_paths_are_retired_or_non_actionable")
     if graph_missing:
         notes.append("missing_sources_can_be_inserted_by_incremental_or_rebuild_route")
+    if ledger_store_mismatch:
+        notes.append("ledger_store_mismatch_sources_can_be_reinserted_incrementally")
+    if route == "store_only_rebuild":
+        notes.append("store_only_rebuild_is_manual_resource_gated")
+        notes.append("use_in_place_only_when_storage_headroom_is_low")
     if route == "budgeted_graph_maintenance" and actionable_count > 100:
         notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
         "route": route,
         "reason": reason,
+        "source_count": source_total,
+        "existing_source_count": existing_total,
         "actionable_count": actionable_count,
         "blocked_count": blocked,
         "dominant_reason": max(reason_group_counts.items(), key=lambda item: int_value(item[1]))[0] if reason_group_counts else "",
@@ -34346,6 +34646,7 @@ def graph_source_states(
     workspace_root = str(aoa_root.parent)
     recommendation = graph_source_maintenance_recommendation(
         source_count=len(candidates),
+        existing_source_count=len(existing),
         dirty_count=counts.get("dirty", 0),
         missing_count=counts.get("missing", 0),
         orphaned_count=counts.get("orphaned", 0),
@@ -34678,6 +34979,7 @@ def graph_source_state_summary(
         **reason_summary,
         "maintenance_recommendation": graph_source_maintenance_recommendation(
             source_count=len(states),
+            existing_source_count=int_value(states_payload.get("existing_source_count")),
             dirty_count=counts.get("dirty", 0),
             missing_count=counts.get("missing", 0),
             orphaned_count=counts.get("orphaned", 0),
@@ -40199,6 +40501,7 @@ def graph_maintenance_status_from_state(
             int_value(source_version_state.get("source_count")),
             int_value(ledger.get("source_count")),
         ),
+        existing_source_count=int_value(graph_state.get("source_count")),
         dirty_count=dirty_count,
         missing_count=missing_count,
         orphaned_count=int_value(source_state.get("orphaned_count")),
@@ -40212,6 +40515,7 @@ def graph_maintenance_status_from_state(
         "needs_maintenance": bool(graph_state.get("needs_maintenance")),
         "needs_full_rebuild": bool(graph_state.get("needs_full_rebuild")),
         "source_count": graph_state.get("source_count") or source_state.get("source_count") or source_version_state.get("source_count"),
+        "existing_source_count": int_value(graph_state.get("source_count")),
         "status_counts": status_counts,
         "dirty_count": dirty_count,
         "missing_count": missing_count,
@@ -40304,6 +40608,7 @@ def maintenance_storage_status(aoa_root: Path) -> dict[str, Any]:
         "graph_db": maintenance_light_sqlite_size(graph_db),
         "search_root": storage_size_entry(search_root, label="search"),
         "graph_root": storage_size_entry(graph_root, label="graph"),
+        "graph_rebuild_temps": graph_rebuild_tmp_status(aoa_root),
     }
 
 
@@ -40604,6 +40909,7 @@ def session_memory_ops_warnings(
     warnings: list[dict[str, Any]] = []
     search_db = storage.get("search_db") if isinstance(storage.get("search_db"), dict) else {}
     graph_db = storage.get("graph_db") if isinstance(storage.get("graph_db"), dict) else {}
+    graph_rebuild_temps = storage.get("graph_rebuild_temps") if isinstance(storage.get("graph_rebuild_temps"), dict) else {}
     for item in (
         ops_size_warning(
             code="search_db_large",
@@ -40624,6 +40930,16 @@ def session_memory_ops_warnings(
     ):
         if item is not None:
             warnings.append(item)
+    if int_value(graph_rebuild_temps.get("orphaned_count")) > 0:
+        warnings.append(
+            {
+                "code": "graph_rebuild_tmp_orphaned",
+                "severity": "critical" if int_value(graph_rebuild_temps.get("orphaned_bytes")) >= OPS_GRAPH_DB_WARNING_BYTES else "warning",
+                "orphaned_count": graph_rebuild_temps.get("orphaned_count"),
+                "orphaned_bytes": graph_rebuild_temps.get("orphaned_bytes"),
+                "orphaned_human": graph_rebuild_temps.get("orphaned_human"),
+            }
+        )
     last_job = writer.get("last_job") if isinstance(writer.get("last_job"), dict) else {}
     owner = writer.get("owner") if isinstance(writer.get("owner"), dict) else {}
     if int_value(writer.get("active_elapsed_ms")) >= OPS_WRITER_WARNING_MS:
@@ -40746,6 +41062,16 @@ def session_memory_ops_long_maintenance_reasons(
                     "size_human": human_size(total_bytes),
                 }
             )
+    graph_rebuild_temps = storage.get("graph_rebuild_temps") if isinstance(storage.get("graph_rebuild_temps"), dict) else {}
+    if int_value(graph_rebuild_temps.get("orphaned_count")) > 0:
+        reasons.append(
+            {
+                "reason": "orphaned_graph_rebuild_tmp",
+                "orphaned_count": graph_rebuild_temps.get("orphaned_count"),
+                "orphaned_bytes": graph_rebuild_temps.get("orphaned_bytes"),
+                "orphaned_human": graph_rebuild_temps.get("orphaned_human"),
+            }
+        )
     return reasons[:12]
 
 
@@ -41087,6 +41413,26 @@ def session_memory_maintenance_next_actions(
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
     actions: list[dict[str, Any]] = []
     coordinator = coordinator if isinstance(coordinator, dict) else {}
+    cleanup_status = maintenance_cleanup(aoa_root=aoa_root, apply=False, write_report=False)
+    cleanup_diagnostics = cleanup_status.get("diagnostics") if isinstance(cleanup_status.get("diagnostics"), list) else []
+    cleanup_needed = str(cleanup_status.get("status") or "") == "cleanup_needed"
+    if cleanup_needed:
+        actions.append(
+            {
+                "id": "repair_maintenance_cleanup",
+                "reason": ",".join(str(item) for item in cleanup_diagnostics if item) or "stale_generated_runtime_cleanup_needed",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "maintenance-cleanup",
+                    *root_args,
+                    "--apply",
+                    "--write-report",
+                ],
+                "note": "Clear stale maintenance coordinator state and orphaned generated graph rebuild temp files before planning another graph rebuild or queue repair.",
+            }
+        )
+        return "run_maintenance_cleanup", actions
     graph_diagnostics = graph.get("diagnostics") if isinstance(graph.get("diagnostics"), list) else []
     graph_locked = str(graph.get("status") or "") == "sqlite_locked" or any(
         str(item).startswith("graph_store_sqlite_locked:") for item in graph_diagnostics
@@ -41205,8 +41551,8 @@ def session_memory_maintenance_next_actions(
                 {
                     "id": "repair_graph_store_rebuild",
                     "reason": graph_recommendation.get("reason") or "graph_source_version_drift",
-                    "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--in-place", "--progress-every", "10"],
-                    "note": "Mass graph source drift is cheaper and cleaner as a store-only rebuild than as queue maintenance.",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--progress-every", "10"],
+                    "note": "A mostly missing generated graph store is cheaper and cleaner as a resource-gated store-only rebuild than as many small queue batches; add --in-place only when storage headroom is low.",
                 }
             )
             return "run_maintenance", actions
@@ -42195,6 +42541,7 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
             reason_group_counts[str(reason)] = int_value(count)
     recommendation = graph_source_maintenance_recommendation(
         source_count=max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
+        existing_source_count=int_value(hot_state.get("source_count")),
         dirty_count=int_value(status_counts.get("dirty")) + source_version_mismatch_count,
         missing_count=max(int_value(status_counts.get("missing")) + ledger_store_missing_count, latest_remaining_count),
         orphaned_count=int_value(status_counts.get("orphaned")),
@@ -46007,6 +46354,18 @@ def command_storage_maintenance(args: argparse.Namespace) -> int:
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     payload = storage_maintenance(
         aoa_root=root,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_maintenance_cleanup(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = maintenance_cleanup(
+        aoa_root=root,
+        apply=args.apply,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -51468,6 +51827,16 @@ def build_parser() -> argparse.ArgumentParser:
     storage_maintenance_parser.add_argument("--aoa-root")
     storage_maintenance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown storage maintenance reports under .aoa/diagnostics.")
     storage_maintenance_parser.set_defaults(func=command_storage_maintenance)
+
+    maintenance_cleanup_parser = sub.add_parser(
+        "maintenance-cleanup",
+        help="Clear stale maintenance coordinator state and orphaned generated graph rebuild temp files.",
+    )
+    maintenance_cleanup_parser.add_argument("--workspace-root")
+    maintenance_cleanup_parser.add_argument("--aoa-root")
+    maintenance_cleanup_parser.add_argument("--apply", action="store_true", help="Apply cleanup. Default is a dry-run plan.")
+    maintenance_cleanup_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown maintenance cleanup reports under .aoa/diagnostics.")
+    maintenance_cleanup_parser.set_defaults(func=command_maintenance_cleanup)
 
     graph_sqlite_compact_parser = sub.add_parser(
         "graph-sqlite-compact",
