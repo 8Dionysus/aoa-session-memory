@@ -3311,6 +3311,44 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     assert updated["projection"]["counts"]["edge"]["has_event"] == 1
 
 
+def test_graph_source_version_state_tracks_event_route_signal_policy_mismatch(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:policy-mismatch:000",
+            "source_type": "segment",
+            "session_id": "policy-mismatch",
+            "session_label": "2026-06-21__001__policy-mismatch",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-policy-mismatch",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [{"id": "event:policy-mismatch:000:000001", "type": "event"}],
+        "edges": [],
+    }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        current = store.source_version_state()
+        assert current["status"] == "current"
+        store.conn.execute("UPDATE graph_sources SET graph_event_route_signal_edge_policy = ''")
+        dirty = store.source_version_state()
+    finally:
+        store.close()
+
+    assert dirty["status"] == "dirty"
+    assert dirty["reason_group_counts"]["graph_event_route_signal_edge_policy_mismatch"] == 1
+    assert dirty["expected_versions"]["graph_event_route_signal_edge_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    assert dirty["observed_versions"]["graph_event_route_signal_edge_policy"] == [""]
+
+
 def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     session_id = "session-raw-ref-prune"
@@ -3661,7 +3699,71 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
-def test_graph_source_recommendation_routes_mass_classifier_drift_to_store_rebuild() -> None:
+def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-21T00-20-00-route-materialization.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-21T00:20:00Z", "type": "session_meta", "payload": {"id": "route-materialization", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-21T00:20:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use aoa-decision and continue implementation."}]}},
+            {"timestamp": "2026-06-21T00:20:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I used the skill and kept the scope contract visible."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "route-materialization",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "route-materialization")
+    session_dir = Path(record["path"])
+    manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    segment_index_path = next((session_dir / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    events = segment_index["events"]
+    assert len(events) >= 2
+    segment_id = str(segment_index["segment_id"])
+    session_id = str(manifest["session_id"])
+    skill_signal = {"layer": "skill", "key": "aoa_decision", "route_signal": "skill:aoa_decision"}
+    scope_signal = {"layer": "scope_contract", "key": "wide_summary_probe", "route_signal": "scope_contract:wide_summary_probe"}
+    events[0].setdefault("facets", {}).setdefault("route_signals", []).extend([skill_signal, scope_signal])
+    events[1].setdefault("facets", {}).setdefault("route_signals", []).append(scope_signal)
+    segment_index_path.write_text(json.dumps(segment_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    contributions, diagnostics = module.graph_contributions_for_record(record)
+
+    assert diagnostics == []
+    segment_contribution = next(
+        contribution for contribution in contributions
+        if contribution["source"]["source_type"] == "segment"
+    )
+    assert segment_contribution["source"]["graph_event_route_signal_edge_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    edges = segment_contribution["edges"]
+    skill_route_node_id = module.graph_route_node_id("skill", "aoa_decision")
+    scope_route_node_id = module.graph_route_node_id("scope_contract", "wide_summary_probe")
+    first_event_node_id = f"event:{session_id}:{segment_id}:{events[0]['event_id']}"
+    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    assert any(edge["source"] == first_event_node_id and edge["target"] == skill_route_node_id for edge in mention_edges)
+    assert not any(edge["target"] == scope_route_node_id for edge in mention_edges)
+    summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
+    skill_summary = next(edge for edge in summary_edges if edge["target"] == skill_route_node_id)
+    scope_summary = next(edge for edge in summary_edges if edge["target"] == scope_route_node_id)
+    assert skill_summary["count"] == 1
+    assert scope_summary["count"] == 2
+    assert scope_summary["materialization_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+
+
+def test_graph_source_recommendation_routes_mass_classifier_drift_to_budgeted_repair() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4000,
         dirty_count=3900,
@@ -3675,13 +3777,35 @@ def test_graph_source_recommendation_routes_mass_classifier_drift_to_store_rebui
         },
     )
 
-    assert recommendation["route"] == "store_only_rebuild"
-    assert recommendation["reason"] == "route_signal_classifier_drift_dominates"
-    assert "--store-only --in-place" in recommendation["command"]
+    assert recommendation["route"] == "budgeted_graph_maintenance"
+    assert recommendation["reason"] == "route_signal_classifier_drift_budgeted_repair"
+    assert "graph-maintenance all" in recommendation["command"]
+    assert "--batch-limit 3" in recommendation["command"]
     assert "blocked_sources_need_lower_layer_repair" in recommendation["notes"]
+    assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
 
 
-def test_graph_source_recommendation_routes_mass_missing_sources_to_store_rebuild() -> None:
+def test_graph_source_recommendation_routes_event_edge_policy_drift_to_budgeted_repair() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4000,
+        dirty_count=3900,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={
+            "source_sha_mismatch": 3900,
+            "graph_event_route_signal_edge_policy_mismatch": 3900,
+        },
+    )
+
+    assert recommendation["route"] == "budgeted_graph_maintenance"
+    assert recommendation["reason"] == "graph_event_route_signal_edge_policy_drift_budgeted_repair"
+    assert "graph-maintenance all" in recommendation["command"]
+    assert "--batch-limit 3" in recommendation["command"]
+    assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_routes_mass_missing_sources_to_budgeted_recovery() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4200,
         dirty_count=0,
@@ -3694,11 +3818,39 @@ def test_graph_source_recommendation_routes_mass_missing_sources_to_store_rebuil
         },
     )
 
-    assert recommendation["route"] == "store_only_rebuild"
-    assert recommendation["reason"] == "graph_store_missing_sources_dominate"
-    assert "--store-only --in-place" in recommendation["command"]
+    assert recommendation["route"] == "budgeted_graph_maintenance"
+    assert recommendation["reason"] == "graph_store_missing_sources_budgeted_recovery"
+    assert "graph-maintenance all" in recommendation["command"]
+    assert "--batch-limit 3" in recommendation["command"]
     assert "missing_sources_can_be_inserted_by_incremental_or_rebuild_route" in recommendation["notes"]
     assert "missing_graph_source_paths_are_blocked_evidence_sources" in recommendation["notes"]
+    assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=6,
+        dirty_count=0,
+        missing_count=4698,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={
+            "graph_source_ledger_store_count_mismatch": 4146,
+            "latest_graph_maintenance_remaining_sources": 4698,
+        },
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+    )
+
+    assert recommendation["route"] == "budgeted_graph_maintenance"
+    assert recommendation["reason"] == "mixed_or_medium_backlog"
+    assert "graph-maintenance all" in recommendation["command"]
+    assert "--workspace-root /srv/AbyssOS" in recommendation["command"]
+    assert "--aoa-root /srv/AbyssOS/.aoa" in recommendation["command"]
+    assert "--apply" in recommendation["command"]
+    assert "--refresh-chunk-size 64" in recommendation["command"]
+    assert "--plan-refresh-costs" not in recommendation["command"]
+    assert "/path/to/workspace" not in recommendation["command"]
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5050,7 +5202,7 @@ def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypa
             }
 
         def state_counts(self) -> dict[str, int]:
-            raise AssertionError("hot graph state must not count aggregate nodes or edges")
+            return {"node_count": 10, "edge_count": 12, "source_count": 1}
 
         def source_count(self) -> int:
             return 1
@@ -5094,8 +5246,19 @@ def test_graph_hot_state_detects_stale_graph_source_versions_without_source_scan
                     "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
                     "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
                 },
-                "nodes": [],
-                "edges": [],
+                "nodes": [
+                    {"id": "session:goal-hot-drift", "type": "session", "label": "goal-hot-drift"},
+                    {"id": "route:goal:goal-hot-drift", "type": "goal", "label": "goal-hot-drift"},
+                ],
+                "edges": [
+                    {
+                        "id": "session:goal-hot-drift->route:goal:goal-hot-drift:mentions_route_signal",
+                        "source": "session:goal-hot-drift",
+                        "target": "route:goal:goal-hot-drift",
+                        "type": "mentions_route_signal",
+                        "label": "mentions_route_signal",
+                    }
+                ],
             }
         )
         store.conn.execute(
@@ -5161,6 +5324,244 @@ def test_graph_hot_state_detects_stale_graph_source_versions_without_source_scan
     assert payload["ok"] is False
     assert payload["needs_graph_maintenance"] is True
     assert payload["graph_store"]["source_version_state"]["samples"][0]["source_key"] == source_key
+
+
+def test_graph_hot_state_detects_empty_store_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    store.close()
+    module.write_graph_source_state_ledger(aoa_root, {"sources": {}})
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("empty graph hot gate must not scan session sources")
+
+    monkeypatch.setattr(module, "chronological_session_records", fail_source_scan)
+    monkeypatch.setattr(module, "latest_index_source_mtime", fail_source_scan)
+    monkeypatch.setattr(module, "route_index_drift_records", fail_source_scan)
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "indexed_session_state_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 0, "diagnostics": []},
+    )
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_maintenance_status_from_state(
+        state,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=summary,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True, "needs_offline_graph_build": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert state["status"] == "stale"
+    assert state["needs_maintenance"] is True
+    assert state["needs_full_rebuild"] is True
+    assert state["node_count"] == 0
+    assert state["edge_count"] == 0
+    assert "graph_store_nodes_empty" in state["diagnostics"]
+    assert "graph_store_edges_empty" in state["diagnostics"]
+    assert summary["needs_full_rebuild"] is True
+    assert summary["reason_group_counts"]["graph_store_nodes_empty"] == 1
+    assert payload["ok"] is False
+    assert payload["needs_graph_maintenance"] is True
+    assert payload["needs_offline_graph_build"] is True
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_store_incremental_recovery"
+    assert "graph-maintenance" in module.shlex.join(actions[0]["command"])
+    assert "graph-build" not in module.shlex.join(actions[0]["command"])
+
+
+def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:partial-store:000",
+            "source_type": "segment",
+            "session_id": "partial-store",
+            "session_label": "2026-06-21__001__partial-store",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-partial-store",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": "event:partial-store:000:000001", "type": "event"},
+            {"id": "route:skill:aoa_decision", "type": "skill"},
+        ],
+        "edges": [
+            {
+                "id": "event:partial-store:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "source": "event:partial-store:000:000001",
+                "target": "route:skill:aoa_decision",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                "segment:partial-store:000": {"source_key": "segment:partial-store:000", "status": "clean"},
+                "segment:partial-store:001": {"source_key": "segment:partial-store:001", "status": "clean"},
+                "segment:partial-store:002": {"source_key": "segment:partial-store:002", "status": "clean"},
+            }
+        },
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_maintenance_status_from_state(
+        state,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=summary,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True, "needs_offline_graph_build": False},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert state["status"] == "stale"
+    assert state["needs_maintenance"] is True
+    assert state["needs_full_rebuild"] is False
+    assert state["ledger"]["store_missing_source_estimate"] == 2
+    assert "graph_source_ledger_store_count_mismatch" in state["diagnostics"]
+    assert summary["missing_count"] == 2
+    assert summary["actionable_count"] == 2
+    assert summary["maintenance_recommendation"]["route"] == "bounded_graph_maintenance"
+    nested_command = summary["maintenance_recommendation"]["command"]
+    assert str(workspace) in nested_command
+    assert str(aoa_root) in nested_command
+    assert "/path/to/workspace" not in nested_command
+    assert "--apply" in nested_command
+    assert "--refresh-chunk-size 64" in nested_command
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_budgeted"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "graph-maintenance" in command_text
+    assert str(workspace) in command_text
+    assert str(aoa_root) in command_text
+    assert "/path/to/workspace" not in command_text
+    assert "graph-build" not in command_text
+
+
+def test_graph_hot_state_uses_latest_graph_maintenance_remaining_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:remaining-report:000",
+            "source_type": "segment",
+            "session_id": "remaining-report",
+            "session_label": "2026-06-21__001__remaining-report",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-remaining-report",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": "event:remaining-report:000:000001", "type": "event"},
+            {"id": "route:skill:aoa_decision", "type": "skill"},
+        ],
+        "edges": [
+            {
+                "id": "event:remaining-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "source": "event:remaining-report:000:000001",
+                "target": "route:skill:aoa_decision",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {"sources": {"segment:remaining-report:000": {"source_key": "segment:remaining-report:000", "status": "clean"}}},
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+    diagnostics_dir = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics_dir.mkdir(parents=True)
+    report_path = diagnostics_dir / "20260621T175500Z__graph-maintenance.json"
+    module.write_json(
+        report_path,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_maintenance",
+            "generated_at": "2026-06-21T17:55:00Z",
+            "ok": True,
+            "apply": True,
+            "target": "all",
+            "selected_count": 3,
+            "remaining_count": 10,
+        },
+    )
+    graph_store_mtime = module.path_mtime(module.graph_paths(aoa_root)["store"])
+    os.utime(report_path, (graph_store_mtime + 10, graph_store_mtime + 10))
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_maintenance_status_from_state(state)
+
+    assert state["status"] == "stale"
+    assert state["needs_maintenance"] is True
+    assert state["latest_maintenance"]["usable_for_hot_gate"] is True
+    assert state["latest_maintenance"]["remaining_count"] == 10
+    assert "latest_graph_maintenance_remaining_sources" in state["diagnostics"]
+    assert summary["missing_count"] == 10
+    assert summary["actionable_count"] == 10
+    assert summary["reason_group_counts"]["latest_graph_maintenance_remaining_sources"] == 10
 
 
 def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() -> None:
@@ -7550,6 +7951,50 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert "storage-audit" in summary["optional_deep_audit_command"]
 
 
+def test_graph_pressure_summary_does_not_mark_missing_projection_normal(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=8: {
+            "status": "projection_missing",
+            "counts": {},
+            "top": {},
+            "diagnostics": ["graph_store_nodes_empty"],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_vacuum_headroom_plan",
+        lambda **_kwargs: {
+            "status": "ready",
+            "apply_ready": True,
+            "freelist_bytes": 0,
+            "freelist_human": "0 B",
+            "conservative_reclaimable_bytes": 0,
+            "conservative_reclaimable_human": "0 B",
+            "required_free_human": "25.0 GiB",
+            "free_human": "120.0 GiB",
+            "min_free_after_human": "25.0 GiB",
+            "diagnostics": [],
+        },
+    )
+
+    summary = module.session_memory_graph_pressure_summary(
+        aoa_root=aoa_root,
+        storage={"graph_db": {"total_with_wal_bytes": 80 * 1024, "total_with_wal_human": "80.0 KiB"}},
+    )
+
+    assert summary["status"] == "cardinality_projection_missing_or_stale"
+    assert summary["projection_status"] == "projection_missing"
+    assert summary["node_count"] == 0
+    assert summary["edge_count"] == 0
+    assert "repair graph freshness" in summary["next_route"]
+    assert "continue using graph/search" not in summary["next_route"]
+
+
 def test_graph_store_sqlite_lock_is_not_structural_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     module.graph_paths(aoa_root)["store"].parent.mkdir(parents=True)
@@ -8061,6 +8506,45 @@ def test_hot_auto_maintenance_defers_when_bulk_lease_is_active(tmp_path: Path, m
     assert coordinator["blocking_owner"]["owner_job"] == "index-maintenance"
     assert coordinator["blocking_owner"]["mode"] == "manual-bulk"
     assert coordinator["blocking_owner"]["touched_surfaces"] == ["atlas", "graph", "search"]
+
+
+def test_manual_maintenance_lock_returns_conflict_instead_of_blocking(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    lock_path = module.maintenance_lock_path(aoa_root)
+    lock_path.parent.mkdir(parents=True)
+    owner = module.maintenance_owner_packet(
+        aoa_root=aoa_root,
+        owner_job="auto-maintenance:catchup",
+        mode="catchup",
+        profile="catchup",
+        target="all",
+        reason="timer_catchup",
+        touched_surfaces=["search", "atlas"],
+        budget_seconds=900,
+    )
+
+    def fail_callback() -> dict[str, Any]:
+        raise AssertionError("manual maintenance must not run while the lock is held")
+
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(lock_handle, owner)
+        payload = module.run_with_maintenance_lock(
+            aoa_root,
+            fail_callback,
+            owner_job="graph-maintenance",
+            mode="manual-bulk",
+            target="all",
+            touched_surfaces=["graph"],
+            lock_timeout_sec=0.0,
+        )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "skipped_lock_held"
+    assert payload["mutates"] is False
+    assert payload["owner_job"] == "graph-maintenance"
+    assert payload["blocking_owner"]["owner_job"] == "auto-maintenance:catchup"
+    assert payload["conflict_kind"] == "lock_held"
 
 
 def test_maintenance_status_reports_active_coordinator_lock(tmp_path: Path, monkeypatch: Any) -> None:

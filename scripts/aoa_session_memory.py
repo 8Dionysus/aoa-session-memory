@@ -162,6 +162,30 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_evidence_refs_v2"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_segment_summary_v1"
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS = frozenset(
+    {
+        "skill",
+        "mcp",
+        "hook",
+        "hook_health",
+        "tool",
+        "api",
+        "plugin",
+        "agent",
+        "script",
+        "validator",
+        "test",
+        "eval",
+        "git",
+        "playbook",
+        "technique",
+        "mechanic",
+        "graph",
+        "memory",
+        "goal",
+    }
+)
 GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE = "manual_bulk_single_transaction_delete_v1"
 GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
 GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
@@ -181,6 +205,7 @@ OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT = 10_000_000
 OPS_SQLITE_WAL_WARNING_BYTES = 512 * 1024 * 1024
 OPS_WRITER_WARNING_MS = 10 * 60 * 1000
 OPS_LOCK_WAIT_WARNING_MS = 1000
+MANUAL_MAINTENANCE_LOCK_TIMEOUT_SEC = 5.0
 OPS_SEARCH_PHASE_WARNING_MS = 10 * 60 * 1000
 OPS_SEARCH_INDEX_WARNING_MS = 60 * 1000
 OPS_DIAGNOSTIC_SCAN_LIMIT = 80
@@ -18564,12 +18589,45 @@ def run_with_maintenance_lock(
     reason: str = "operator_requested",
     touched_surfaces: list[str] | None = None,
     budget_seconds: float | None = None,
+    lock_timeout_sec: float | None = MANUAL_MAINTENANCE_LOCK_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     lock_path = maintenance_lock_path(aoa_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         wait_started = time.monotonic()
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        lock_timeout = MANUAL_MAINTENANCE_LOCK_TIMEOUT_SEC if lock_timeout_sec is None else max(0.0, float(lock_timeout_sec))
+        deadline = wait_started + lock_timeout
+        blocking_owner: dict[str, Any] = {}
+        while True:
+            try:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                blocking_owner = read_maintenance_lock_owner(lock_handle)
+                if lock_timeout <= 0 or time.monotonic() >= deadline:
+                    lock_wait_ms = int((time.monotonic() - wait_started) * 1000)
+                    conflict_kind = maintenance_lock_conflict_kind(requested_mode=mode, blocking_owner=blocking_owner)
+                    return {
+                        "schema_version": SCHEMA_VERSION,
+                        "artifact_type": "session_memory_maintenance_lock_conflict",
+                        "generated_at": utc_now(),
+                        "ok": True,
+                        "status": "skipped_lock_held",
+                        "mutates": False,
+                        "target": target,
+                        "owner_job": owner_job,
+                        "mode": mode,
+                        "reason": reason,
+                        "touched_surfaces": sorted(touched_surfaces or []),
+                        "lock_path": str(lock_path),
+                        "state_path": str(maintenance_coordinator_state_path(aoa_root)),
+                        "lock_wait_ms": lock_wait_ms,
+                        "lock_timeout_sec": lock_timeout,
+                        "blocking_owner": blocking_owner,
+                        "conflict_kind": conflict_kind,
+                        "diagnostics": [conflict_kind],
+                    }
+                time.sleep(0.25)
         lock_wait_ms = int((time.monotonic() - wait_started) * 1000)
         owner = maintenance_owner_packet(
             aoa_root=aoa_root,
@@ -30702,6 +30760,12 @@ def graph_route_node_id(layer: str, key: str) -> str:
     return f"route:{node_type}:{normalized_layer}:{normalized_key}"
 
 
+def graph_should_materialize_event_route_signal_edge(layer: str, key: str = "") -> bool:
+    del key
+    normalized_layer = route_key_slug(layer, fallback="")
+    return normalized_layer in GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS
+
+
 def graph_goal_lifecycle_node_id(session_id: str, goal_id: str) -> str:
     return f"goal_lifecycle:{route_key_slug(session_id, fallback='session', max_chars=80)}:{route_key_slug(goal_id, fallback='goal', max_chars=80)}"
 
@@ -31195,6 +31259,7 @@ def graph_source_metadata(
     identity_payload = {
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "source_type": source_type,
         "session_id": session_id,
@@ -31215,6 +31280,7 @@ def graph_source_metadata(
         "source_mtime": max_mtime,
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "status": "blocked" if diagnostics else "current",
         "diagnostics": diagnostics,
@@ -31566,6 +31632,7 @@ def graph_contributions_for_record(
             continue
         segment_nodes: dict[str, dict[str, Any]] = {}
         segment_edges: dict[str, dict[str, Any]] = {}
+        segment_route_signal_counts: Counter[tuple[str, str, str]] = Counter()
 
         def add_segment_node(node: dict[str, Any]) -> None:
             graph_add_node(segment_nodes, node)
@@ -31686,42 +31753,50 @@ def graph_contributions_for_record(
             for signal in route_signals:
                 layer = signal["layer"]
                 key = signal["key"]
+                route_signal_value = signal["route_signal"]
                 route_node_id = graph_route_node_id(layer, key)
-                add_segment_node(
-                    {
-                        "id": route_node_id,
-                        "type": graph_route_node_type(layer, key),
-                        "label": signal["route_signal"],
-                        "route_layer": layer,
-                        "route_key": key,
-                        "route_signal": signal["route_signal"],
-                        "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
-                        "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
-                    }
-                )
-                add_segment_edge(
-                    {
-                        "source": event_node_id,
-                        "target": route_node_id,
-                        "type": "mentions_route_signal",
-                        "session_id": session_id,
-                        "segment_id": segment_id,
-                        "event_id": event_id,
-                        "route_signal": signal["route_signal"],
-                        "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
-                    }
-                )
-                add_registry_route_links(
-                    add_node=add_segment_node,
-                    add_edge=add_segment_edge,
-                    owner_node_id=event_node_id,
-                    route_node_id=route_node_id,
-                    layer=layer,
-                    key=key,
-                    evidence_refs=[{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
-                    edge_type="event_mentions_registered_entity",
-                    extra={"segment_id": segment_id, "event_id": event_id},
-                )
+                segment_route_signal_counts[(layer, key, route_signal_value)] += 1
+                materialize_event_edge = graph_should_materialize_event_route_signal_edge(layer, key)
+                registry_entry = registry_entry_for_route(layer, key)
+                if materialize_event_edge or registry_entry:
+                    add_segment_node(
+                        {
+                            "id": route_node_id,
+                            "type": graph_route_node_type(layer, key),
+                            "label": route_signal_value,
+                            "route_layer": layer,
+                            "route_key": key,
+                            "route_signal": route_signal_value,
+                            "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
+                            "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
+                        }
+                    )
+                if materialize_event_edge:
+                    add_segment_edge(
+                        {
+                            "source": event_node_id,
+                            "target": route_node_id,
+                            "type": "mentions_route_signal",
+                            "session_id": session_id,
+                            "segment_id": segment_id,
+                            "event_id": event_id,
+                            "route_signal": route_signal_value,
+                            "materialization_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                            "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
+                        }
+                    )
+                if registry_entry:
+                    add_registry_route_links(
+                        add_node=add_segment_node,
+                        add_edge=add_segment_edge,
+                        owner_node_id=event_node_id,
+                        route_node_id=route_node_id,
+                        layer=layer,
+                        key=key,
+                        evidence_refs=[{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
+                        edge_type="event_mentions_registered_entity",
+                        extra={"segment_id": segment_id, "event_id": event_id},
+                    )
             for relation in event.get("relationships", []) if isinstance(event.get("relationships"), list) else []:
                 if not isinstance(relation, dict) or not relation.get("event_id"):
                     continue
@@ -31739,6 +31814,34 @@ def graph_contributions_for_record(
                         "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                     }
                 )
+        for layer, key, route_signal_value in sorted(segment_route_signal_counts):
+            route_node_id = graph_route_node_id(layer, key)
+            evidence_refs = [{"session_id": session_id, "segment_id": segment_id, "refs": segment_refs}]
+            add_segment_node(
+                {
+                    "id": route_node_id,
+                    "type": graph_route_node_type(layer, key),
+                    "label": route_signal_value,
+                    "route_layer": layer,
+                    "route_key": key,
+                    "route_signal": route_signal_value,
+                    "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(layer, ""),
+                    "evidence_refs": evidence_refs,
+                }
+            )
+            add_segment_edge(
+                {
+                    "source": segment_node_id,
+                    "target": route_node_id,
+                    "type": "segment_has_route_signal",
+                    "session_id": session_id,
+                    "segment_id": segment_id,
+                    "count": int_value(segment_route_signal_counts[(layer, key, route_signal_value)], 1),
+                    "route_signal": route_signal_value,
+                    "materialization_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                    "evidence_refs": evidence_refs,
+                }
+            )
         node_rows, edge_rows = graph_rows_from_maps(segment_nodes, segment_edges)
         contributions.append(
             {
@@ -31806,6 +31909,7 @@ class GraphSqliteStore:
                 source_mtime REAL NOT NULL DEFAULT 0,
                 graph_schema_version INTEGER NOT NULL,
                 graph_store_schema_version INTEGER NOT NULL,
+                graph_event_route_signal_edge_policy TEXT NOT NULL DEFAULT '',
                 route_signal_classifier_version INTEGER NOT NULL,
                 indexed_at TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -31815,6 +31919,9 @@ class GraphSqliteStore:
             )
             """
         )
+        existing_source_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(graph_sources)").fetchall()}
+        if "graph_event_route_signal_edge_policy" not in existing_source_columns:
+            self.conn.execute("ALTER TABLE graph_sources ADD COLUMN graph_event_route_signal_edge_policy TEXT NOT NULL DEFAULT ''")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS node_contribs (
@@ -31896,6 +32003,10 @@ class GraphSqliteStore:
         )
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             ("graph_materialize_raw_ref_nodes", "1" if GRAPH_MATERIALIZE_RAW_REF_NODES else "0"),
         )
         self.conn.commit()
@@ -31915,9 +32026,10 @@ class GraphSqliteStore:
                 source_key, source_type, session_id, session_label, segment_id,
                 source_path, source_paths_json, source_sha, source_mtime,
                 graph_schema_version, graph_store_schema_version,
+                graph_event_route_signal_edge_policy,
                 route_signal_classifier_version, indexed_at, status, diagnostic,
                 node_count, edge_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source.get("source_key"),
@@ -31931,6 +32043,7 @@ class GraphSqliteStore:
                 float(source.get("source_mtime") or 0.0),
                 int_value(source.get("graph_schema_version"), GRAPH_SCHEMA_VERSION),
                 int_value(source.get("graph_store_schema_version"), GRAPH_STORE_SCHEMA_VERSION),
+                str(source.get("graph_event_route_signal_edge_policy") or GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY),
                 int_value(source.get("route_signal_classifier_version"), ROUTE_SIGNAL_CLASSIFIER_VERSION),
                 utc_now(),
                 status,
@@ -32185,6 +32298,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
+        self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -32225,6 +32339,7 @@ class GraphSqliteStore:
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
+        self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -32264,6 +32379,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
+        self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         return {"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []}
 
     def remove_source(self, source_key: str) -> dict[str, Any]:
@@ -32292,6 +32408,7 @@ class GraphSqliteStore:
         self._upsert_metadata("updated_at", now)
         self._upsert_metadata("graph_store_aggregate_payload_mode", GRAPH_STORE_AGGREGATE_PAYLOAD_MODE)
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
+        self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         type_counts_projection = self.refresh_type_counts(commit=False)
         self.conn.commit()
         return {
@@ -32376,10 +32493,12 @@ class GraphSqliteStore:
                 COUNT(*) AS source_count,
                 SUM(CASE WHEN graph_schema_version != ? THEN 1 ELSE 0 END) AS graph_schema_mismatch_count,
                 SUM(CASE WHEN graph_store_schema_version != ? THEN 1 ELSE 0 END) AS graph_store_schema_mismatch_count,
+                SUM(CASE WHEN graph_event_route_signal_edge_policy != ? THEN 1 ELSE 0 END) AS graph_event_route_signal_edge_policy_mismatch_count,
                 SUM(CASE WHEN route_signal_classifier_version != ? THEN 1 ELSE 0 END) AS route_signal_classifier_mismatch_count,
                 SUM(CASE
                     WHEN graph_schema_version != ?
                       OR graph_store_schema_version != ?
+                      OR graph_event_route_signal_edge_policy != ?
                       OR route_signal_classifier_version != ?
                     THEN 1 ELSE 0 END
                 ) AS version_mismatch_source_count,
@@ -32394,20 +32513,25 @@ class GraphSqliteStore:
             (
                 GRAPH_SCHEMA_VERSION,
                 GRAPH_STORE_SCHEMA_VERSION,
+                GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                 ROUTE_SIGNAL_CLASSIFIER_VERSION,
                 GRAPH_SCHEMA_VERSION,
                 GRAPH_STORE_SCHEMA_VERSION,
+                GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                 ROUTE_SIGNAL_CLASSIFIER_VERSION,
             ),
         ).fetchone()
         reason_group_counts: dict[str, int] = {}
         graph_schema_mismatch_count = int_value(row["graph_schema_mismatch_count"]) if row else 0
         graph_store_schema_mismatch_count = int_value(row["graph_store_schema_mismatch_count"]) if row else 0
+        graph_event_route_signal_edge_policy_mismatch_count = int_value(row["graph_event_route_signal_edge_policy_mismatch_count"]) if row else 0
         route_signal_classifier_mismatch_count = int_value(row["route_signal_classifier_mismatch_count"]) if row else 0
         if graph_schema_mismatch_count:
             reason_group_counts["graph_schema_mismatch"] = graph_schema_mismatch_count
         if graph_store_schema_mismatch_count:
             reason_group_counts["graph_store_schema_mismatch"] = graph_store_schema_mismatch_count
+        if graph_event_route_signal_edge_policy_mismatch_count:
+            reason_group_counts["graph_event_route_signal_edge_policy_mismatch"] = graph_event_route_signal_edge_policy_mismatch_count
         if route_signal_classifier_mismatch_count:
             reason_group_counts["route_signal_classifier_mismatch"] = route_signal_classifier_mismatch_count
         bounded_limit = max(0, min(int_value(sample_limit, 12), 50))
@@ -32420,32 +32544,47 @@ class GraphSqliteStore:
                     "session_id": str(sample["session_id"] or ""),
                     "session_label": str(sample["session_label"] or ""),
                     "segment_id": str(sample["segment_id"] or ""),
-                    "graph_schema_version": int_value(sample["graph_schema_version"]),
-                    "graph_store_schema_version": int_value(sample["graph_store_schema_version"]),
-                    "route_signal_classifier_version": int_value(sample["route_signal_classifier_version"]),
-                    "status": str(sample["status"] or ""),
-                }
-                for sample in self.conn.execute(
-                    """
-                    SELECT source_key, source_type, session_id, session_label, segment_id,
-                           graph_schema_version, graph_store_schema_version,
-                           route_signal_classifier_version, status
-                    FROM graph_sources
-                    WHERE graph_schema_version != ?
-                       OR graph_store_schema_version != ?
-                       OR route_signal_classifier_version != ?
-                    ORDER BY source_key
-                    LIMIT ?
-                    """,
-                    (
-                        GRAPH_SCHEMA_VERSION,
-                        GRAPH_STORE_SCHEMA_VERSION,
-                        ROUTE_SIGNAL_CLASSIFIER_VERSION,
-                        bounded_limit,
-                    ),
+                        "graph_schema_version": int_value(sample["graph_schema_version"]),
+                        "graph_store_schema_version": int_value(sample["graph_store_schema_version"]),
+                        "graph_event_route_signal_edge_policy": str(sample["graph_event_route_signal_edge_policy"] or ""),
+                        "route_signal_classifier_version": int_value(sample["route_signal_classifier_version"]),
+                        "status": str(sample["status"] or ""),
+                    }
+                    for sample in self.conn.execute(
+                        """
+                        SELECT source_key, source_type, session_id, session_label, segment_id,
+                               graph_schema_version, graph_store_schema_version,
+                               graph_event_route_signal_edge_policy,
+                               route_signal_classifier_version, status
+                        FROM graph_sources
+                        WHERE graph_schema_version != ?
+                           OR graph_store_schema_version != ?
+                           OR graph_event_route_signal_edge_policy != ?
+                           OR route_signal_classifier_version != ?
+                        ORDER BY source_key
+                        LIMIT ?
+                        """,
+                        (
+                            GRAPH_SCHEMA_VERSION,
+                            GRAPH_STORE_SCHEMA_VERSION,
+                            GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                            bounded_limit,
+                        ),
                 ).fetchall()
             ]
         version_mismatch_source_count = int_value(row["version_mismatch_source_count"]) if row else 0
+        observed_event_route_signal_edge_policies = [
+            str(policy_row["graph_event_route_signal_edge_policy"] or "")
+            for policy_row in self.conn.execute(
+                """
+                SELECT DISTINCT graph_event_route_signal_edge_policy
+                FROM graph_sources
+                ORDER BY graph_event_route_signal_edge_policy
+                LIMIT 20
+                """
+            ).fetchall()
+        ]
         return {
             "status": "dirty" if version_mismatch_source_count else "current",
             "needs_maintenance": bool(version_mismatch_source_count),
@@ -32455,6 +32594,7 @@ class GraphSqliteStore:
             "expected_versions": {
                 "graph_schema_version": GRAPH_SCHEMA_VERSION,
                 "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+                "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                 "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
             },
             "observed_versions": {
@@ -32488,6 +32628,7 @@ class GraphSqliteStore:
                         if value
                     }
                 ),
+                "graph_event_route_signal_edge_policy": observed_event_route_signal_edge_policies,
             },
             "samples": samples,
             "truth_status": "graph_sources_table_version_summary_no_session_source_scan",
@@ -32738,6 +32879,7 @@ def graph_index_payload_from_counts(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_index",
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "generated_at": generated_at,
         "ok": node_count > 0 and not diagnostics,
         "truth_status": "derived_route_graph_not_reviewed_truth",
@@ -33885,6 +34027,7 @@ def graph_source_maintenance_recommendation(
     actionable_count = max(0, int_value(dirty_count) + int_value(missing_count) + int_value(orphaned_count))
     source_total = max(0, int_value(source_count))
     classifier_mismatch = int_value(reason_group_counts.get("route_signal_classifier_mismatch"))
+    event_route_policy_mismatch = int_value(reason_group_counts.get("graph_event_route_signal_edge_policy_mismatch"))
     source_sha_mismatch = int_value(reason_group_counts.get("source_sha_mismatch"))
     graph_missing = int_value(reason_group_counts.get("graph_source_missing"))
     missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
@@ -33899,25 +34042,36 @@ def graph_source_maintenance_recommendation(
         and int_value(dirty_count) >= max(20, int(source_total * 0.25))
         and classifier_mismatch >= max(1, int(int_value(dirty_count) * 0.5))
     ):
-        route = "store_only_rebuild"
-        reason = "route_signal_classifier_drift_dominates"
+        route = "budgeted_graph_maintenance"
+        reason = "route_signal_classifier_drift_budgeted_repair"
         command = (
-            "python3 scripts/aoa_session_memory.py graph-build all "
-            f"{root_args} --write --store-only --in-place --progress-every 10"
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
+        )
+    elif (
+        source_total
+        and int_value(dirty_count) >= max(20, int(source_total * 0.25))
+        and event_route_policy_mismatch >= max(1, int(int_value(dirty_count) * 0.5))
+    ):
+        route = "budgeted_graph_maintenance"
+        reason = "graph_event_route_signal_edge_policy_drift_budgeted_repair"
+        command = (
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
         )
     elif source_total and int_value(dirty_count) >= max(100, int(source_total * 0.35)) and source_sha_mismatch >= max(1, int(int_value(dirty_count) * 0.8)):
-        route = "store_only_rebuild"
-        reason = "mass_source_fingerprint_drift"
+        route = "budgeted_graph_maintenance"
+        reason = "mass_source_fingerprint_drift_budgeted_repair"
         command = (
-            "python3 scripts/aoa_session_memory.py graph-build all "
-            f"{root_args} --write --store-only --in-place --progress-every 10"
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
         )
     elif source_total and graph_missing >= max(500, int(source_total * 0.5)):
-        route = "store_only_rebuild"
-        reason = "graph_store_missing_sources_dominate"
+        route = "budgeted_graph_maintenance"
+        reason = "graph_store_missing_sources_budgeted_recovery"
         command = (
-            "python3 scripts/aoa_session_memory.py graph-build all "
-            f"{root_args} --write --store-only --in-place --progress-every 10"
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
         )
     elif actionable_count <= 100:
         route = "bounded_graph_maintenance"
@@ -33931,7 +34085,7 @@ def graph_source_maintenance_recommendation(
         reason = "mixed_or_medium_backlog"
         command = (
             "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --plan-refresh-costs --batch-limit 3 --budget-seconds 300 --write-report"
+            f"{root_args} --apply --batch-limit 3 --budget-seconds 300 --refresh-chunk-size 64 --write-report"
         )
     notes: list[str] = []
     if blocked:
@@ -33942,6 +34096,8 @@ def graph_source_maintenance_recommendation(
         notes.append("missing_graph_source_paths_are_retired_or_non_actionable")
     if graph_missing:
         notes.append("missing_sources_can_be_inserted_by_incremental_or_rebuild_route")
+    if route == "budgeted_graph_maintenance" and actionable_count > 100:
+        notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
         "route": route,
         "reason": reason,
@@ -34005,6 +34161,8 @@ def graph_source_states(
                 reasons.append("graph_schema_mismatch")
             if int_value(row.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
                 reasons.append("graph_store_schema_mismatch")
+            if str(row.get("graph_event_route_signal_edge_policy") or "") != GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY:
+                reasons.append("graph_event_route_signal_edge_policy_mismatch")
             if int_value(row.get("route_signal_classifier_version")) != ROUTE_SIGNAL_CLASSIFIER_VERSION:
                 reasons.append("route_signal_classifier_mismatch")
             if str(row.get("status") or "") != "current":
@@ -36885,6 +37043,7 @@ def graph_cardinality_projection_read(aoa_root: Path, *, limit: int = 40) -> dic
         "generated_at": metadata.get("graph_type_counts_generated_at", ""),
         "updated_at": metadata.get("graph_type_counts_updated_at", ""),
         "graph_updated_at": metadata.get("graph_type_counts_graph_updated_at", ""),
+        "metadata": metadata,
         "counts": counts,
         "top": top,
         "diagnostics": [] if status == "current" else ["graph_type_counts_projection_missing"],
@@ -36939,6 +37098,7 @@ def graph_cardinality(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_cardinality",
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "generated_at": utc_now(),
         "ok": str(projection.get("status") or "") == "current",
         "mutates": mutates,
@@ -37171,9 +37331,10 @@ def graph_from_store_neighborhood(
                   CASE edge_type
                     WHEN 'registry_entity_has_route_signal' THEN 0
                     WHEN 'mentions_route_signal' THEN 1
-                    WHEN 'event_mentions_registered_entity' THEN 2
-                    WHEN 'session_has_registered_entity' THEN 3
-                    WHEN 'has_event' THEN 4
+                    WHEN 'segment_has_route_signal' THEN 2
+                    WHEN 'event_mentions_registered_entity' THEN 3
+                    WHEN 'session_has_registered_entity' THEN 4
+                    WHEN 'has_event' THEN 5
                     WHEN 'answered_by' THEN 5
                     WHEN 'responds_to' THEN 5
                     ELSE 6
@@ -39830,10 +39991,16 @@ def session_memory_timer_status() -> dict[str, Any]:
     }
 
 
-def graph_maintenance_status_from_state(graph_state: dict[str, Any]) -> dict[str, Any]:
+def graph_maintenance_status_from_state(
+    graph_state: dict[str, Any],
+    *,
+    workspace_root: Path | str = "/path/to/workspace",
+    aoa_root: Path | str = "/path/to/workspace/.aoa",
+) -> dict[str, Any]:
     source_state = graph_state.get("source_state") if isinstance(graph_state.get("source_state"), dict) else {}
     ledger = graph_state.get("ledger") if isinstance(graph_state.get("ledger"), dict) else {}
     queue = graph_state.get("queue") if isinstance(graph_state.get("queue"), dict) else {}
+    latest_maintenance = graph_state.get("latest_maintenance") if isinstance(graph_state.get("latest_maintenance"), dict) else {}
     source_version_state = graph_state.get("source_version_state") if isinstance(graph_state.get("source_version_state"), dict) else {}
     status_counts = (
         source_state.get("status_counts")
@@ -39841,11 +40008,19 @@ def graph_maintenance_status_from_state(graph_state: dict[str, Any]) -> dict[str
         else ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
     )
     source_version_mismatch_count = int_value(source_version_state.get("version_mismatch_source_count"))
+    ledger_store_missing_count = int_value(ledger.get("store_missing_source_estimate"))
+    latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
     dirty_count = int_value(source_state.get("dirty_count")) + source_version_mismatch_count
-    missing_count = int_value(source_state.get("missing_count"))
+    missing_count = max(int_value(source_state.get("missing_count")) + ledger_store_missing_count, latest_remaining_count)
     blocked_count = int_value(source_state.get("blocked_count"))
     retired_count = int_value(source_state.get("retired_count") or ledger.get("retired_count"))
-    actionable_count = int_value(ledger.get("actionable_count")) + int_value(queue.get("actionable_count")) + source_version_mismatch_count
+    actionable_count = (
+        int_value(ledger.get("actionable_count"))
+        + int_value(queue.get("actionable_count"))
+        + source_version_mismatch_count
+        + ledger_store_missing_count
+    )
+    actionable_count = max(actionable_count, latest_remaining_count)
     deferred_live_count = int_value(ledger.get("deferred_live_source_count")) + int_value(queue.get("deferred_live_source_count"))
     if actionable_count and dirty_count <= 0 and missing_count <= 0:
         dirty_count = actionable_count
@@ -39854,13 +40029,27 @@ def graph_maintenance_status_from_state(graph_state: dict[str, Any]) -> dict[str
     if isinstance(source_reason_group_counts, dict):
         for reason, count in source_reason_group_counts.items():
             reason_group_counts[str(reason)] = int_value(count)
+    if ledger_store_missing_count:
+        reason_group_counts["graph_source_ledger_store_count_mismatch"] = ledger_store_missing_count
+    if latest_remaining_count:
+        reason_group_counts["latest_graph_maintenance_remaining_sources"] = latest_remaining_count
+    for reason in graph_state.get("diagnostics", []) if isinstance(graph_state.get("diagnostics"), list) else []:
+        if reason in {"graph_store_nodes_empty", "graph_store_edges_empty", "graph_store_schema_mismatch", "graph_schema_mismatch"}:
+            reason_group_counts[str(reason)] = max(1, int_value(reason_group_counts.get(str(reason))))
     maintenance_recommendation = graph_source_maintenance_recommendation(
-        source_count=max(int_value(graph_state.get("source_count")), int_value(source_state.get("source_count")), int_value(source_version_state.get("source_count"))),
+        source_count=max(
+            int_value(graph_state.get("source_count")),
+            int_value(source_state.get("source_count")),
+            int_value(source_version_state.get("source_count")),
+            int_value(ledger.get("source_count")),
+        ),
         dirty_count=dirty_count,
         missing_count=missing_count,
         orphaned_count=int_value(source_state.get("orphaned_count")),
         blocked_count=blocked_count,
         reason_group_counts=reason_group_counts,
+        workspace_root=str(workspace_root),
+        aoa_root=str(aoa_root),
     )
     return {
         "status": graph_state.get("status"),
@@ -39873,6 +40062,9 @@ def graph_maintenance_status_from_state(graph_state: dict[str, Any]) -> dict[str
         "blocked_count": blocked_count,
         "retired_count": retired_count,
         "actionable_count": actionable_count,
+        "queued_count": int_value(queue.get("queued_count")),
+        "ledger_store_missing_count": ledger_store_missing_count,
+        "latest_maintenance_remaining_count": latest_remaining_count,
         "deferred_live_source_count": deferred_live_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
@@ -40427,12 +40619,12 @@ def session_memory_graph_pressure_summary(
     reclaimable_bytes = int_value(compaction_plan.get("conservative_reclaimable_bytes"))
     reclaim_ratio = round(reclaimable_bytes / graph_total_bytes, 6) if graph_total_bytes > 0 else 0.0
     projection_status = str(projection.get("status") or "unknown")
-    if graph_total_bytes < OPS_GRAPH_DB_WARNING_BYTES:
+    if projection_status != "current":
+        status = "large_cardinality_unknown" if graph_total_bytes >= OPS_GRAPH_DB_WARNING_BYTES else "cardinality_projection_missing_or_stale"
+        next_route = "repair graph freshness first or refresh graph-cardinality through the resource lane before treating graph storage pressure as normal"
+    elif graph_total_bytes < OPS_GRAPH_DB_WARNING_BYTES:
         status = "normal"
         next_route = "continue using graph/search; no graph storage action is needed"
-    elif projection_status != "current":
-        status = "large_cardinality_unknown"
-        next_route = "refresh graph-cardinality through the heavy resource lane before planning graph shrink or sharding"
     elif edge_count >= OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT:
         status = "large_cardinality_dominates"
         next_route = "prioritize graph cardinality reduction, sharding, or high-fanout query projections; physical SQLite compaction is not the primary fix"
@@ -40459,6 +40651,8 @@ def session_memory_graph_pressure_summary(
         "edge_count": edge_count,
         "top_node_types": top_node_types[:8],
         "top_edge_types": top_edge_types[:8],
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "graph_event_route_signal_edge_layers": sorted(GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS),
         "physical_compaction": {
             "status": compaction_plan.get("status"),
             "apply_ready": compaction_plan.get("apply_ready"),
@@ -40813,6 +41007,34 @@ def session_memory_maintenance_next_actions(
             }
         )
     if graph.get("needs_full_rebuild"):
+        empty_store = any(reason in graph_diagnostics for reason in ("graph_store_nodes_empty", "graph_store_edges_empty"))
+        schema_or_store_version_rebuild = any(
+            reason in graph_diagnostics for reason in ("graph_store_schema_mismatch", "graph_schema_mismatch")
+        )
+        if empty_store and not schema_or_store_version_rebuild:
+            actions.append(
+                {
+                    "id": "repair_graph_store_incremental_recovery",
+                    "reason": "graph_store_empty_generated_projection",
+                    "command": [
+                        "python3",
+                        "scripts/aoa_session_memory.py",
+                        "graph-maintenance",
+                        "all",
+                        *root_args,
+                        "--apply",
+                        "--batch-limit",
+                        "3",
+                        "--budget-seconds",
+                        "300",
+                        "--refresh-chunk-size",
+                        "64",
+                        "--write-report",
+                    ],
+                    "note": "The graph store is a generated projection and is empty; recover it through bounded incremental batches instead of retrying a full in-place rebuild after an OOM-style failure.",
+                }
+            )
+            return "run_maintenance", actions
         actions.append(
             {
                 "id": "repair_graph_store_rebuild",
@@ -40829,6 +41051,30 @@ def session_memory_maintenance_next_actions(
                     "reason": graph_recommendation.get("reason") or "graph_source_version_drift",
                     "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--in-place", "--progress-every", "10"],
                     "note": "Mass graph source drift is cheaper and cleaner as a store-only rebuild than as queue maintenance.",
+                }
+            )
+            return "run_maintenance", actions
+        if graph_recommendation.get("route") in {"bounded_graph_maintenance", "budgeted_graph_maintenance"} and graph_recommendation.get("command"):
+            actions.append(
+                {
+                    "id": "repair_graph_budgeted",
+                    "reason": graph_recommendation.get("reason") or "graph_budgeted_maintenance",
+                    "command": [
+                        "python3",
+                        "scripts/aoa_session_memory.py",
+                        "graph-maintenance",
+                        "all",
+                        *root_args,
+                        "--apply",
+                        "--batch-limit",
+                        "3",
+                        "--budget-seconds",
+                        "300",
+                        "--refresh-chunk-size",
+                        "64",
+                        "--write-report",
+                    ],
+                    "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild.",
                 }
             )
             return "run_maintenance", actions
@@ -41025,7 +41271,11 @@ def session_memory_maintenance_status(
     )
     graph_state = route_status.get("graph_store") if isinstance(route_status.get("graph_store"), dict) else {}
     search = search_maintenance_status_from_provider(provider_status)
-    graph = graph_maintenance_status_from_state(graph_state)
+    graph = graph_maintenance_status_from_state(
+        graph_state,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+    )
     entity_registry = entity_registry_maintenance_status(aoa_root)
     route = {
         "status": "current" if route_status.get("ok") else "needs_attention",
@@ -41722,14 +41972,21 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     hot_state = graph_hot_state if isinstance(graph_hot_state, dict) else graph_store_hot_state(aoa_root)
     ledger = hot_state.get("ledger") if isinstance(hot_state.get("ledger"), dict) else {}
     queue = hot_state.get("queue") if isinstance(hot_state.get("queue"), dict) else {}
+    latest_maintenance = hot_state.get("latest_maintenance") if isinstance(hot_state.get("latest_maintenance"), dict) else {}
     source_version_state = hot_state.get("source_version_state") if isinstance(hot_state.get("source_version_state"), dict) else {}
     status_counts = ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
     reason_group_counts: dict[str, int] = {}
     ledger_actionable_count = graph_actionable_source_count_from_counts(status_counts)
     source_version_mismatch_count = int_value(source_version_state.get("version_mismatch_source_count"))
+    ledger_store_missing_count = int_value(ledger.get("store_missing_source_estimate"))
+    latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
     queued_count = int_value(queue.get("queued_count"))
     if ledger_actionable_count and not queued_count:
         reason_group_counts["ledger_actionable_sources_not_queued"] = ledger_actionable_count
+    if ledger_store_missing_count:
+        reason_group_counts["graph_source_ledger_store_count_mismatch"] = ledger_store_missing_count
+    if latest_remaining_count:
+        reason_group_counts["latest_graph_maintenance_remaining_sources"] = latest_remaining_count
     source_reason_group_counts = source_version_state.get("reason_group_counts")
     if isinstance(source_reason_group_counts, dict):
         for reason, count in source_reason_group_counts.items():
@@ -41737,7 +41994,7 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     recommendation = graph_source_maintenance_recommendation(
         source_count=max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
         dirty_count=int_value(status_counts.get("dirty")) + source_version_mismatch_count,
-        missing_count=int_value(status_counts.get("missing")),
+        missing_count=max(int_value(status_counts.get("missing")) + ledger_store_missing_count, latest_remaining_count),
         orphaned_count=int_value(status_counts.get("orphaned")),
         blocked_count=int_value(status_counts.get("blocked")),
         reason_group_counts=reason_group_counts,
@@ -41749,12 +42006,14 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
         "existing_source_count": int_value(hot_state.get("source_count")),
         "status_counts": dict(status_counts),
         "dirty_count": int_value(status_counts.get("dirty")) + source_version_mismatch_count,
-        "missing_count": int_value(status_counts.get("missing")),
+        "missing_count": max(int_value(status_counts.get("missing")) + ledger_store_missing_count, latest_remaining_count),
         "blocked_count": int_value(status_counts.get("blocked")),
         "retired_count": graph_retired_source_count_from_counts(status_counts),
         "partial_evidence_count": graph_partial_evidence_count_from_counts(status_counts),
         "orphaned_count": int_value(status_counts.get("orphaned")),
         "queued_count": queued_count,
+        "ledger_store_missing_count": ledger_store_missing_count,
+        "latest_maintenance_remaining_count": latest_remaining_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
         "reason_examples": {},
@@ -41789,7 +42048,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
     try:
         store = GraphSqliteStore(aoa_root)
         metadata = store.metadata()
-        counts = {"source_count": store.source_count()}
+        counts = store.state_counts() if hasattr(store, "state_counts") else {"source_count": store.source_count()}
         if hasattr(store, "source_version_state"):
             source_version_state = store.source_version_state()
         store.close()
@@ -41813,6 +42072,32 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "truth_status": "hot_gate_store_sqlite_error",
             "diagnostics": [diagnostic],
         }
+    latest_maintenance: dict[str, Any] = {
+        "exists": False,
+        "remaining_count": 0,
+        "usable_for_hot_gate": False,
+    }
+    latest_graph_reports = diagnostic_json_payloads(aoa_root, "*__graph-maintenance.json", limit=1)
+    if latest_graph_reports:
+        latest_report = latest_graph_reports[0]
+        report_mtime = ops_float_value(latest_report.get("_diagnostic_mtime"))
+        store_metadata_updated_at = parse_utc_timestamp(str(metadata.get("updated_at") or ""))
+        store_updated_epoch = store_metadata_updated_at.timestamp() if store_metadata_updated_at is not None else path_mtime(paths["store"])
+        remaining_count = int_value(latest_report.get("remaining_count"))
+        usable_for_hot_gate = bool(report_mtime and report_mtime >= store_updated_epoch and remaining_count > 0)
+        latest_maintenance = {
+            "exists": True,
+            "path": latest_report.get("_diagnostic_path"),
+            "mtime": report_mtime,
+            "store_updated_epoch": store_updated_epoch,
+            "store_updated_at": metadata.get("updated_at"),
+            "ok": latest_report.get("ok"),
+            "apply": latest_report.get("apply"),
+            "target": latest_report.get("target"),
+            "remaining_count": remaining_count,
+            "selected_count": latest_report.get("selected_count"),
+            "usable_for_hot_gate": usable_for_hot_gate,
+        }
     ledger_exists = paths["source_state_ledger"].exists()
     queue_exists = paths["maintenance_queue"].exists()
     ledger = read_graph_source_state_ledger(aoa_root)
@@ -41825,6 +42110,9 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         if isinstance(item, dict)
     )
     retired_count = graph_retired_source_count_from_counts(ledger_status_counts)
+    ledger_non_retired_count = max(0, len(ledger_sources) - retired_count)
+    stored_source_count = int_value(counts.get("source_count"))
+    ledger_store_missing_count = max(0, ledger_non_retired_count - stored_source_count)
     ledger_actionable_items = [
         item
         for item in ledger_sources.values()
@@ -41836,14 +42124,30 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
     ledger_actionable_count = int_value(ledger_live_summary.get("actionable_source_count"))
     deferred_live_source_count = int_value(queue_live_summary.get("deferred_live_source_count")) + int_value(ledger_live_summary.get("deferred_live_source_count"))
     queued_count = len(queue_items)
+    latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
         diagnostics.append("graph_store_schema_mismatch")
     if int_value(metadata.get("graph_schema_version")) != GRAPH_SCHEMA_VERSION:
         diagnostics.append("graph_schema_mismatch")
+    if int_value(counts.get("node_count")) <= 0:
+        diagnostics.append("graph_store_nodes_empty")
+    if int_value(counts.get("edge_count")) <= 0:
+        diagnostics.append("graph_store_edges_empty")
+    if ledger_store_missing_count:
+        diagnostics.append("graph_source_ledger_store_count_mismatch")
+    if latest_remaining_count:
+        diagnostics.append("latest_graph_maintenance_remaining_sources")
     if ledger_actionable_count and not queued_count:
         diagnostics.append("maintenance_queue_empty_but_ledger_actionable_sources_present")
     source_version_maintenance_count = int_value(source_version_state.get("version_mismatch_source_count"))
-    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count:
+    structural_rebuild_reasons = {
+        "graph_store_schema_mismatch",
+        "graph_schema_mismatch",
+        "graph_store_nodes_empty",
+        "graph_store_edges_empty",
+    }
+    needs_full_rebuild = any(item in diagnostics for item in structural_rebuild_reasons)
+    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or ledger_store_missing_count or latest_remaining_count:
         status = "dirty"
     elif queued_count or deferred_live_source_count:
         status = "current_with_deferred_live_sources"
@@ -41855,8 +42159,15 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         status = "current_hot_unverified"
     return {
         "status": status if not diagnostics else "stale",
-        "needs_maintenance": bool(queued_actionable_count or ledger_actionable_count or source_version_maintenance_count),
-        "needs_full_rebuild": any(item in diagnostics for item in {"graph_store_schema_mismatch", "graph_schema_mismatch"}),
+        "needs_maintenance": bool(
+            queued_actionable_count
+            or ledger_actionable_count
+            or source_version_maintenance_count
+            or ledger_store_missing_count
+            or latest_remaining_count
+            or needs_full_rebuild
+        ),
+        "needs_full_rebuild": needs_full_rebuild,
         "db_path": str(paths["store"]),
         "db_mtime": path_mtime(paths["store"]),
         "metadata": metadata,
@@ -41869,9 +42180,12 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "source_count": len(ledger_sources),
             "status_counts": dict(ledger_status_counts),
             "retired_count": retired_count,
+            "non_retired_count": ledger_non_retired_count,
+            "store_missing_source_estimate": ledger_store_missing_count,
             "actionable_count": ledger_actionable_count,
             "deferred_live_source_count": int_value(ledger_live_summary.get("deferred_live_source_count")),
         },
+        "latest_maintenance": latest_maintenance,
         "queue": {
             "path": str(paths["maintenance_queue"]),
             "exists": queue_exists,
