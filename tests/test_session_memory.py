@@ -7436,6 +7436,85 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
     assert Path(review_payload["report_markdown"]).exists()
 
 
+def test_route_layer_readiness_treats_api_plugin_as_optional_operational_signals(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-22__001__optional-operational-taxonomy"
+    session_dir.mkdir(parents=True)
+    maps_root = aoa_root / "maps"
+    maps_root.mkdir(parents=True)
+    module.write_json(maps_root / "index.json", {"entry_count": 1})
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "optional-operational-taxonomy",
+            "archive_status": "indexed",
+            "updated_at": "2026-06-22T00:00:00Z",
+            "display": {"label": session_dir.name},
+            "segments": [],
+        },
+    )
+    route_counts = {
+        layer: {f"{layer}_key": 1}
+        for layer in module.route_readiness_required_layers()
+        if layer not in {"api", "plugin"}
+    }
+    module.write_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        {
+            "route_signal_schema_version": module.ROUTE_SIGNAL_SCHEMA_VERSION,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            "route_signal_counts": route_counts,
+        },
+    )
+
+    required_axes = {axis for axis in module.ROUTE_SIGNAL_LAYER_TO_AXIS.values() if axis}
+    monkeypatch.setattr(
+        module,
+        "atlas_axis_states",
+        lambda _aoa_root: {
+            axis: {
+                "axis": axis,
+                "source_readme_exists": True,
+                "entries_dir_exists": True,
+                "generated_index_exists": True,
+                "entry_count": 1,
+                "index": str(maps_root / axis / "index.json"),
+            }
+            for axis in required_axes
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {"ok": True, "providers": {"portable_sqlite": {"ok": True}}},
+    )
+
+    payload = module.route_layer_readiness(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[
+            {
+                "path": str(session_dir),
+                "session_label": session_dir.name,
+                "archive_status": "indexed",
+            }
+        ],
+        sample_limit=0,
+    )
+
+    by_id = {item["id"]: item for item in payload["requirements"]}
+    operational = by_id["operational_entity_taxonomy"]
+
+    assert payload["ok"] is True
+    assert operational["status"] == "covered"
+    assert operational["missing_layers"] == []
+    assert set(operational["optional_signal_layers"]) == {"api", "plugin"}
+    assert set(operational["optional_absent_layers"]) == {"api", "plugin"}
+    layer_counts = {layer["layer"]: layer["signal_count"] for layer in operational["layers"]}
+    assert layer_counts["api"] == 0
+    assert layer_counts["plugin"] == 0
+
+
 def test_index_source_mtime_ignores_generated_root_aggregates(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "2026-05-24__freshness"

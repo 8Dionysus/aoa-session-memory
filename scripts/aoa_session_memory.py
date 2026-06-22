@@ -751,6 +751,7 @@ ROUTE_READINESS_REQUIREMENTS = [
             "graph",
             "memory",
         ],
+        "optional_signal_layers": ["api", "plugin"],
     },
     {
         "id": "verification_map",
@@ -48510,7 +48511,21 @@ def route_layer_readiness(
     requirements: list[dict[str, Any]] = []
     for item in ROUTE_READINESS_REQUIREMENTS:
         req_layers = [str(layer) for layer in item.get("required_layers", [])]
-        missing_layers = [layer for layer in req_layers if layer_counts.get(layer, 0) <= 0]
+        optional_signal_layers = {
+            str(layer)
+            for layer in item.get("optional_signal_layers", [])
+            if str(layer) in req_layers
+        }
+        missing_layers = [
+            layer
+            for layer in req_layers
+            if layer not in optional_signal_layers and layer_counts.get(layer, 0) <= 0
+        ]
+        optional_absent_layers = [
+            layer
+            for layer in req_layers
+            if layer in optional_signal_layers and layer_counts.get(layer, 0) <= 0
+        ]
         layer_payloads: list[dict[str, Any]] = []
         missing_axes: list[str] = []
         missing_generated_axes: list[str] = []
@@ -48548,7 +48563,9 @@ def route_layer_readiness(
                 "title": item.get("title"),
                 "status": status,
                 "required_layers": req_layers,
+                "optional_signal_layers": sorted(optional_signal_layers),
                 "missing_layers": missing_layers,
+                "optional_absent_layers": optional_absent_layers,
                 "missing_axes": sorted(set(missing_axes)),
                 "missing_generated_axes": sorted(set(missing_generated_axes)),
                 "layers": layer_payloads,
@@ -48671,7 +48688,14 @@ def route_layer_readiness_markdown(payload: dict[str, Any]) -> str:
             for layer in req.get("layers", [])
             if isinstance(layer, dict)
         )
-        missing = ", ".join(str(item) for item in req.get("missing_layers", []) if item)
+        missing_parts: list[str] = []
+        missing_layers = [str(item) for item in req.get("missing_layers", []) if item]
+        optional_absent = [str(item) for item in req.get("optional_absent_layers", []) if item]
+        if missing_layers:
+            missing_parts.append(", ".join(missing_layers))
+        if optional_absent:
+            missing_parts.append("optional absent: " + ", ".join(optional_absent))
+        missing = "; ".join(missing_parts)
         lines.append(f"| `{req.get('id')}` | {req.get('title')} | `{req.get('status')}` | `{layer_summary}` | `{missing}` |")
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
