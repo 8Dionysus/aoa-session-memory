@@ -4048,13 +4048,13 @@ def test_graph_source_recommendation_routes_mostly_missing_partial_store_to_rebu
 def test_graph_source_recommendation_routes_ledger_store_mismatch_to_budgeted_recovery() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4215,
-        existing_source_count=121,
+        existing_source_count=3900,
         dirty_count=0,
-        missing_count=4031,
+        missing_count=260,
         orphaned_count=0,
         blocked_count=0,
         reason_group_counts={
-            "graph_source_ledger_store_count_mismatch": 4031,
+            "graph_source_ledger_store_count_mismatch": 260,
         },
         workspace_root="/srv/AbyssOS",
         aoa_root="/srv/AbyssOS/.aoa",
@@ -4066,6 +4066,31 @@ def test_graph_source_recommendation_routes_ledger_store_mismatch_to_budgeted_re
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert "--store-only" not in recommendation["command"]
     assert "ledger_store_mismatch_sources_can_be_reinserted_incrementally" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_routes_mostly_missing_ledger_mismatch_to_rebuild() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=4215,
+        existing_source_count=190,
+        dirty_count=148,
+        missing_count=4753,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={
+            "graph_event_route_signal_edge_policy_mismatch": 148,
+            "graph_source_ledger_store_count_mismatch": 3962,
+            "latest_graph_maintenance_remaining_sources": 4753,
+        },
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+    )
+
+    assert recommendation["route"] == "store_only_rebuild"
+    assert recommendation["reason"] == "graph_store_mostly_missing_sources_store_only_rebuild"
+    assert "graph-build all" in recommendation["command"]
+    assert "--write --store-only --progress-every 10" in recommendation["command"]
+    assert "ledger_store_mismatch_sources_can_be_reinserted_incrementally" in recommendation["notes"]
+    assert "store_only_rebuild_is_manual_resource_gated" in recommendation["notes"]
 
 
 def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> None:

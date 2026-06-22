@@ -35084,14 +35084,14 @@ def graph_source_maintenance_recommendation(
         route = "none"
         reason = "graph_sources_current"
         command = ""
-    elif existing_source_count is not None and ledger_store_mismatch and actionable_count > 100:
-        route = "budgeted_graph_maintenance"
-        reason = "graph_store_ledger_mismatch_budgeted_recovery"
-        command = graph_maintenance_command(budgeted_batch_limit)
     elif mostly_missing_partial_store:
         route = "store_only_rebuild"
         reason = "graph_store_mostly_missing_sources_store_only_rebuild"
         command = graph_store_only_rebuild_command()
+    elif existing_source_count is not None and ledger_store_mismatch and actionable_count > 100:
+        route = "budgeted_graph_maintenance"
+        reason = "graph_store_ledger_mismatch_budgeted_recovery"
+        command = graph_maintenance_command(budgeted_batch_limit)
     elif (
         source_total
         and int_value(dirty_count) >= max(20, int(source_total * 0.25))
