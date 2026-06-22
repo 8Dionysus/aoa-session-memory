@@ -582,7 +582,10 @@ For backlog timers, `--graph-drip-on-block` is the safe fallback route: if the
 medium auto-maintenance launch is blocked by host pressure, the wrapper may run
 a capped probe-class `graph-maintenance` batch, record `fallback_graph_drip`,
 and still keep the outer report `ok=false` so agents do not mistake partial
-graph progress for a completed backlog profile.
+graph progress for a completed backlog profile. The fallback may set
+`--graph-drip-candidate-pool-limit` to exact-plan a wider bounded candidate
+window before selecting the cheapest real refresh plan; node/edge refresh caps
+remain the operational safety boundary.
 
 Use `auto-maintenance catchup --apply` or
 `index-maintenance --repair-limit <n> --skip-graph-repair --apply` when a live

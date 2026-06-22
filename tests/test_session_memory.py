@@ -4553,6 +4553,115 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     assert observed["closed"] is True
 
 
+def test_graph_maintenance_explicit_candidate_pool_finds_cheaper_source_beyond_default(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__graph-wide-pool"
+    session_dir.mkdir(parents=True)
+    observed: dict[str, Any] = {"updated_keys": set()}
+    cheap_source_key = "segment:session-1:020"
+    states = [
+        {
+            "source_key": f"segment:session-1:{index:03d}",
+            "source_type": "segment",
+            "session_id": "session-1",
+            "session_label": "graph-wide-pool",
+            "segment_id": f"{index:03d}",
+            "session_dir": str(session_dir),
+            "status": "missing",
+            "stored_node_count": 0,
+            "stored_edge_count": 0,
+        }
+        for index in range(30)
+    ]
+
+    class FakeConn:
+        def commit(self) -> None:
+            observed["committed"] = True
+
+        def rollback(self) -> None:
+            observed["rolled_back"] = True
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.conn = FakeConn()
+
+        def source_contribution_ids(self, _source_key: str) -> tuple[set[str], set[str]]:
+            return set(), set()
+
+        def replace_sources(self, contributions: list[dict[str, Any]], *, budget_deadline: float | None = None) -> dict[str, Any]:
+            updated_keys = {item["source"]["source_key"] for item in contributions}
+            observed["updated_keys"] = updated_keys
+            return {
+                "results": [
+                    {"source_key": source_key, "status": "updated", "diagnostics": []}
+                    for source_key in sorted(updated_keys)
+                ],
+                "refreshed_node_count": len(updated_keys),
+                "refreshed_edge_count": 0,
+                "node_refresh": {"requested_count": len(updated_keys), "chunk_count": 1, "row_count": len(updated_keys), "missing_count": 0},
+                "edge_refresh": {"requested_count": 0, "chunk_count": 0, "row_count": 0, "missing_count": 0},
+                "refresh_chunk_size": 64,
+            }
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    def fake_graph_source_states(**_: Any) -> dict[str, Any]:
+        updated_keys = observed.get("updated_keys", set())
+        post_states = []
+        for state in states:
+            item = dict(state)
+            if item["source_key"] in updated_keys:
+                item["status"] = "clean"
+            post_states.append(item)
+        return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
+
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        keys = sorted(source_keys or [])
+        observed["source_key_count"] = len(keys)
+        return (
+            [
+                {
+                    "source": {"source_key": source_key, "source_type": "segment"},
+                    "nodes": [{"id": f"new:{source_key}"}],
+                    "edges": []
+                    if source_key == cheap_source_key
+                    else [
+                        {"source": f"new:{source_key}", "target": f"neighbor:{edge_index}", "type": "RELATED_TO"}
+                        for edge_index in range(5)
+                    ],
+                }
+                for source_key in keys
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+    monkeypatch.setattr(module, "graph_contributions_for_record", fake_graph_contributions_for_record)
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        batch_limit=1,
+        candidate_pool_limit=25,
+    )
+
+    detail = payload["maintenance_detail"]
+    assert payload["ok"] is True
+    assert payload["selected_count"] == 1
+    assert payload["selected"][0]["source_key"] == cheap_source_key
+    assert detail["candidate_pool_policy"] == "apply_explicit_candidate_pool"
+    assert detail["candidate_pool_limit"] == 25
+    assert detail["candidate_pool_count"] == 25
+    assert detail["candidate_pool_truncated_count"] == 5
+    assert detail["selected_planned_refresh_edge_count"] == 0
+    assert observed["source_key_count"] == 25
+    assert observed["committed"] is True
+    assert observed["closed"] is True
+
+
 def test_graph_maintenance_dry_exact_plan_uses_bounded_candidate_pool(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -8327,6 +8436,7 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
         graph_drip_on_block=True,
         graph_drip_batch_limit=10,
         graph_drip_budget_seconds=120,
+        graph_drip_candidate_pool_limit=150,
     )
 
     assert payload["ok"] is False
@@ -8335,8 +8445,11 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert payload["recommended_exit_code"] == 0
     assert payload["fallback_graph_drip"]["ok"] is True
     assert payload["fallback_graph_drip"]["status"] == "completed"
+    assert payload["fallback_graph_drip"]["candidate_pool_limit"] == 150
     assert "graph-maintenance" in calls[1]
     assert "--batch-limit" in calls[1]
+    assert "--candidate-pool-limit" in calls[1]
+    assert "150" in calls[1]
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()

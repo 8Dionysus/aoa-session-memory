@@ -569,7 +569,10 @@ heavier work outside hooks and MCP reads without hiding resource-pressure
 deferrals from agents. Backlog timers may also enable `--graph-drip-on-block`:
 when medium backlog is blocked, the wrapper can run a tightly capped
 probe-class `graph-maintenance` batch and record it in the same resource
-diagnostic without claiming the full backlog profile succeeded.
+diagnostic without claiming the full backlog profile succeeded. Use
+`--graph-drip-candidate-pool-limit` to let the fallback exact-plan a wider
+bounded window before selecting by real node/edge refresh cost; the
+`--graph-drip-max-refresh-*` caps remain the safety boundary.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
 `maintenance-status` also reports `operations.graph_pressure` when graph

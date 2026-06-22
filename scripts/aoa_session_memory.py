@@ -227,6 +227,7 @@ GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 25
 GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
+GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
@@ -18400,6 +18401,10 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
                 f"- status: `{fallback.get('status')}`",
                 f"- batch_limit: `{fallback.get('batch_limit')}`",
                 f"- budget_seconds: `{fallback.get('budget_seconds')}`",
+                f"- refresh_chunk_size: `{fallback.get('refresh_chunk_size')}`",
+                f"- max_refresh_nodes: `{fallback.get('max_refresh_nodes')}`",
+                f"- max_refresh_edges: `{fallback.get('max_refresh_edges')}`",
+                f"- candidate_pool_limit: `{fallback.get('candidate_pool_limit')}`",
                 f"- elapsed_ms: `{fallback.get('elapsed_ms')}`",
                 f"- resource_ok: `{fallback.get('resource_ok')}`",
                 "",
@@ -18503,11 +18508,12 @@ def auto_maintenance_resource_launch(
     resource_force: bool = False,
     resource_binary: str = "abyss-machine",
     graph_drip_on_block: bool = False,
-    graph_drip_batch_limit: int = 10,
-    graph_drip_budget_seconds: float = 120.0,
+    graph_drip_batch_limit: int = 25,
+    graph_drip_budget_seconds: float = 180.0,
     graph_drip_refresh_chunk_size: int = 64,
     graph_drip_max_refresh_nodes: int | None = 20000,
     graph_drip_max_refresh_edges: int | None = 60000,
+    graph_drip_candidate_pool_limit: int | None = GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT,
     since: str | None = None,
     since_days: int | None = None,
     until: str | None = None,
@@ -18638,7 +18644,7 @@ def auto_maintenance_resource_launch(
             str(aoa_root),
             "--apply",
             "--batch-limit",
-            str(max(1, int_value(graph_drip_batch_limit, 10))),
+            str(max(1, int_value(graph_drip_batch_limit, 25))),
             "--budget-seconds",
             str(max(1.0, float(graph_drip_budget_seconds))),
             "--refresh-chunk-size",
@@ -18649,6 +18655,8 @@ def auto_maintenance_resource_launch(
             fallback_command.extend(["--max-refresh-nodes", str(int_value(graph_drip_max_refresh_nodes))])
         if graph_drip_max_refresh_edges is not None and int_value(graph_drip_max_refresh_edges) > 0:
             fallback_command.extend(["--max-refresh-edges", str(int_value(graph_drip_max_refresh_edges))])
+        if graph_drip_candidate_pool_limit is not None and int_value(graph_drip_candidate_pool_limit) > 0:
+            fallback_command.extend(["--candidate-pool-limit", str(max(1, int_value(graph_drip_candidate_pool_limit)))])
         fallback_started = time.monotonic()
         fallback_stdout = ""
         fallback_stderr = ""
@@ -18706,11 +18714,12 @@ def auto_maintenance_resource_launch(
             "status": fallback_status,
             "resource_class": "probe",
             "resource_kind": settings.get("resource_kind"),
-            "batch_limit": max(1, int_value(graph_drip_batch_limit, 10)),
+            "batch_limit": max(1, int_value(graph_drip_batch_limit, 25)),
             "budget_seconds": max(1.0, float(graph_drip_budget_seconds)),
             "refresh_chunk_size": max(1, int_value(graph_drip_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE)),
             "max_refresh_nodes": graph_drip_max_refresh_nodes,
             "max_refresh_edges": graph_drip_max_refresh_edges,
+            "candidate_pool_limit": graph_drip_candidate_pool_limit,
             "returncode": fallback_returncode,
             "elapsed_ms": fallback_elapsed_ms,
             "resource_ok": fallback_payload.get("ok"),
@@ -35636,6 +35645,7 @@ def graph_maintenance(
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
     max_refresh_nodes: int | None = None,
     max_refresh_edges: int | None = None,
+    candidate_pool_limit: int | None = None,
     budget_seconds: float | None = None,
     plan_refresh_costs: bool = False,
     export_sidecar: bool = False,
@@ -35792,23 +35802,34 @@ def graph_maintenance(
     refresh_chunk_size = max(1, min(int_value(refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     max_refresh_nodes = None if max_refresh_nodes is None or int_value(max_refresh_nodes) <= 0 else int_value(max_refresh_nodes)
     max_refresh_edges = None if max_refresh_edges is None or int_value(max_refresh_edges) <= 0 else int_value(max_refresh_edges)
+    candidate_pool_limit = None if candidate_pool_limit is None or int_value(candidate_pool_limit) <= 0 else max(batch_limit, int_value(candidate_pool_limit))
     cheap_sorted_actionable = sorted(
         actionable,
         key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")),
     )
     selected = cheap_sorted_actionable[:batch_limit]
     if apply:
-        candidate_pool_policy = "apply_batch_multiplier"
-        candidate_pool_requested_limit = max(
+        default_candidate_pool_limit = max(
             batch_limit * GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
             batch_limit,
         )
+        if candidate_pool_limit is not None:
+            candidate_pool_policy = "apply_explicit_candidate_pool"
+            candidate_pool_requested_limit = candidate_pool_limit
+        else:
+            candidate_pool_policy = "apply_batch_multiplier"
+            candidate_pool_requested_limit = default_candidate_pool_limit
         candidate_pool_hard_limit = None
     elif plan_refresh_costs:
-        candidate_pool_policy = "bounded_dry_exact_plan"
-        candidate_pool_requested_limit = max(batch_limit, GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR)
-        candidate_pool_hard_limit = GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT
-        candidate_pool_requested_limit = min(candidate_pool_requested_limit, candidate_pool_hard_limit)
+        if candidate_pool_limit is not None:
+            candidate_pool_policy = "dry_explicit_candidate_pool"
+            candidate_pool_requested_limit = candidate_pool_limit
+            candidate_pool_hard_limit = None
+        else:
+            candidate_pool_policy = "bounded_dry_exact_plan"
+            candidate_pool_requested_limit = max(batch_limit, GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR)
+            candidate_pool_hard_limit = GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT
+            candidate_pool_requested_limit = min(candidate_pool_requested_limit, candidate_pool_hard_limit)
     else:
         candidate_pool_policy = "stored_count_batch"
         candidate_pool_requested_limit = batch_limit
@@ -35823,6 +35844,7 @@ def graph_maintenance(
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
+        "candidate_pool_limit": candidate_pool_limit,
         "selection_strategy": (
             "cheap_first_exact_refresh_cost"
             if apply
@@ -36231,6 +36253,7 @@ def graph_maintenance(
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
         "max_refresh_edges": max_refresh_edges,
+        "candidate_pool_limit": candidate_pool_limit,
         "budget_seconds": budget_seconds,
         "plan_refresh_costs": bool(plan_refresh_costs),
         "elapsed_ms": elapsed_ms,
@@ -36290,6 +36313,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- refresh_chunk_size: `{payload.get('refresh_chunk_size')}`",
         f"- max_refresh_nodes: `{payload.get('max_refresh_nodes')}`",
         f"- max_refresh_edges: `{payload.get('max_refresh_edges')}`",
+        f"- candidate_pool_limit: `{payload.get('candidate_pool_limit')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- plan_refresh_costs: `{payload.get('plan_refresh_costs')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
@@ -36330,6 +36354,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- refresh_chunk_size: `{detail.get('refresh_chunk_size')}`",
                 f"- max_refresh_nodes: `{detail.get('max_refresh_nodes')}`",
                 f"- max_refresh_edges: `{detail.get('max_refresh_edges')}`",
+                f"- candidate_pool_limit: `{detail.get('candidate_pool_limit')}`",
                 f"- budget_seconds: `{detail.get('budget_seconds')}`",
                 f"- elapsed_ms: `{detail.get('elapsed_ms')}`",
                 f"- budget_exhausted: `{detail.get('budget_exhausted')}`",
@@ -41319,6 +41344,10 @@ def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
             "status": fallback_graph_drip.get("status"),
             "batch_limit": fallback_graph_drip.get("batch_limit"),
             "budget_seconds": fallback_graph_drip.get("budget_seconds"),
+            "refresh_chunk_size": fallback_graph_drip.get("refresh_chunk_size"),
+            "max_refresh_nodes": fallback_graph_drip.get("max_refresh_nodes"),
+            "max_refresh_edges": fallback_graph_drip.get("max_refresh_edges"),
+            "candidate_pool_limit": fallback_graph_drip.get("candidate_pool_limit"),
             "elapsed_ms": fallback_graph_drip.get("elapsed_ms"),
             "resource_ok": fallback_graph_drip.get("resource_ok"),
             "blocked_reasons": fallback_graph_drip.get("blocked_reasons", []) if isinstance(fallback_graph_drip.get("blocked_reasons"), list) else [],
@@ -42911,7 +42940,18 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "blocked_reasons": report.get("blocked_reasons", [])[:4] if isinstance(report.get("blocked_reasons"), list) else [],
                 "fallback_graph_drip": {
                     key: (report.get("fallback_graph_drip") or {}).get(key)
-                    for key in ("ok", "status", "batch_limit", "budget_seconds", "elapsed_ms", "resource_ok")
+                    for key in (
+                        "ok",
+                        "status",
+                        "batch_limit",
+                        "budget_seconds",
+                        "refresh_chunk_size",
+                        "max_refresh_nodes",
+                        "max_refresh_edges",
+                        "candidate_pool_limit",
+                        "elapsed_ms",
+                        "resource_ok",
+                    )
                     if isinstance(report.get("fallback_graph_drip"), dict)
                     and key in (report.get("fallback_graph_drip") or {})
                 },
@@ -46620,6 +46660,7 @@ def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
         graph_drip_refresh_chunk_size=args.graph_drip_refresh_chunk_size,
         graph_drip_max_refresh_nodes=args.graph_drip_max_refresh_nodes,
         graph_drip_max_refresh_edges=args.graph_drip_max_refresh_edges,
+        graph_drip_candidate_pool_limit=args.graph_drip_candidate_pool_limit,
         since=since,
         since_days=None if args.since is not None else args.since_days,
         until=args.until,
@@ -47209,6 +47250,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             refresh_chunk_size=args.refresh_chunk_size,
             max_refresh_nodes=getattr(args, "max_refresh_nodes", None),
             max_refresh_edges=getattr(args, "max_refresh_edges", None),
+            candidate_pool_limit=getattr(args, "candidate_pool_limit", None),
             budget_seconds=getattr(args, "budget_seconds", None),
             plan_refresh_costs=getattr(args, "plan_refresh_costs", False),
             export_sidecar=args.export_sidecar,
@@ -47254,6 +47296,7 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
         "refresh_chunk_size",
         "max_refresh_nodes",
         "max_refresh_edges",
+        "candidate_pool_limit",
         "budget_seconds",
         "elapsed_ms",
         "budget_exhausted",
@@ -47308,8 +47351,8 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
                 "matched_source_key_count",
                 "matched_source_key_sample",
                 "candidate_pool_policy",
-                "candidate_pool_count",
                 "candidate_pool_limit",
+                "candidate_pool_count",
                 "candidate_pool_requested_limit",
                 "candidate_pool_hard_limit",
                 "candidate_pool_actionable_count",
@@ -52243,11 +52286,12 @@ def build_parser() -> argparse.ArgumentParser:
     auto_resource_parser.add_argument("--resource-binary", default="abyss-machine", help="Resource launcher binary.")
     auto_resource_parser.add_argument("--fail-on-block", action="store_true", help="Return a non-zero process exit when the resource gate blocks the child.")
     auto_resource_parser.add_argument("--graph-drip-on-block", action="store_true", help="When the requested auto-maintenance launch is resource-blocked, try a bounded probe-class graph-maintenance fallback.")
-    auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, default=10, help="Fallback graph-maintenance source batch size.")
-    auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, default=120.0, help="Fallback graph-maintenance wall-clock budget.")
+    auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, default=25, help="Fallback graph-maintenance source batch size.")
+    auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, default=180.0, help="Fallback graph-maintenance wall-clock budget.")
     auto_resource_parser.add_argument("--graph-drip-refresh-chunk-size", type=int, default=64, help="Fallback graph-maintenance aggregate refresh chunk size.")
     auto_resource_parser.add_argument("--graph-drip-max-refresh-nodes", type=int, default=20000, help="Fallback graph-maintenance aggregate node refresh cap; <=0 disables the guard.")
     auto_resource_parser.add_argument("--graph-drip-max-refresh-edges", type=int, default=60000, help="Fallback graph-maintenance aggregate edge refresh cap; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--graph-drip-candidate-pool-limit", type=int, default=GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT, help="Fallback exact-plan candidate pool before selecting by real refresh cost; <=0 uses graph-maintenance default.")
     auto_resource_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown resource launch reports under .aoa/diagnostics.")
     auto_resource_parser.add_argument("--full", action="store_true", help="Print complete resource launch payload to stdout.")
     auto_resource_parser.set_defaults(func=command_auto_maintenance_resource)
@@ -52658,6 +52702,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--refresh-chunk-size", type=int, default=GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE, help="Aggregate refresh IN-list chunk size for node/edge recomputation.")
     graph_maintenance_parser.add_argument("--max-refresh-nodes", type=int, help="Defer source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
     graph_maintenance_parser.add_argument("--max-refresh-edges", type=int, help="Defer source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
+    graph_maintenance_parser.add_argument("--candidate-pool-limit", type=int, help="Exact-plan at most this many cheap stored-count candidates before selecting by real refresh cost; <=0 uses the profile default.")
     graph_maintenance_parser.add_argument("--budget-seconds", type=float, help="Stop planning or roll back the current mutation pass once this wall-clock budget is exhausted.")
     graph_maintenance_parser.add_argument("--plan-refresh-costs", action="store_true", help="In dry-run mode, compute exact old-plus-new aggregate refresh costs for the candidate pool without mutating the graph store.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
