@@ -8893,6 +8893,42 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
 
 
+def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    report = diagnostics / "20260621T000040Z__auto-maintenance-resource-backlog.json"
+    module.write_json(
+        report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-06-21T00:00:40Z",
+            "ok": False,
+            "status": "resource_blocked_graph_drip_completed",
+            "profile": "backlog",
+            "resource_ok": False,
+            "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+            "fallback_graph_drip": {
+                "ok": True,
+                "status": "completed",
+                "resource_ok": True,
+                "execution": {
+                    "ok": True,
+                    "stdout_tail": '{"artifact_type":"session_memory_maintenance_lock_conflict","mutates":false}',
+                },
+            },
+            "diagnostics": [
+                "graph_drip_fallback_completed",
+                "resource_blocked:indexing_unattended_swap_used_pressure",
+            ],
+        },
+    )
+
+    assert module.diagnostic_report_problem(module.read_json(report, {})) is False
+    assert module.recent_problem_maintenance_reports(aoa_root) == []
+
+
 def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()

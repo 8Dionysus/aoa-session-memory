@@ -41469,7 +41469,19 @@ def latest_auto_maintenance_resource_reports(aoa_root: Path) -> dict[str, Any]:
     return profiles
 
 
+def diagnostic_report_handled_resource_fallback(report: dict[str, Any]) -> bool:
+    if str(report.get("artifact_type") or "") != "auto_maintenance_resource_launch":
+        return False
+    if str(report.get("status") or "") != "resource_blocked_graph_drip_completed":
+        return False
+    fallback = report.get("fallback_graph_drip") if isinstance(report.get("fallback_graph_drip"), dict) else {}
+    diagnostics = report.get("diagnostics") if isinstance(report.get("diagnostics"), list) else []
+    return fallback.get("ok") is True and "graph_drip_fallback_completed" in {str(item) for item in diagnostics}
+
+
 def diagnostic_report_problem(report: dict[str, Any]) -> bool:
+    if diagnostic_report_handled_resource_fallback(report):
+        return False
     status = str(report.get("status") or "").lower()
     coordinator = maintenance_report_coordinator(report)
     coordinator_status = str(coordinator.get("status") or "").lower()
