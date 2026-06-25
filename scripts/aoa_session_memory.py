@@ -48783,7 +48783,7 @@ def command_graph_freshness_gates(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
-    if getattr(args, "mode", "deep") == "hot":
+    if getattr(args, "mode", "hot") == "hot":
         payload = route_cache_freshness_gates(
             aoa_root=root,
             target=args.session,
@@ -56236,7 +56236,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_freshness_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
     graph_freshness_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     graph_freshness_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
-    graph_freshness_parser.add_argument("--mode", choices=["deep", "hot"], default="deep", help="hot checks route cache plus graph ledger/queue; deep scans graph sources.")
+    graph_freshness_parser.add_argument("--mode", choices=["hot", "deep"], default="hot", help="hot checks route cache plus graph ledger/queue; deep scans graph sources and refs.")
     graph_freshness_parser.add_argument("--ref-sample-limit", type=int, default=200)
     graph_freshness_parser.add_argument("--stable", action="store_true", help="Check only sessions quiet for --quiet-seconds and report recent live writes as deferred.")
     graph_freshness_parser.add_argument("--quiet-seconds", type=float, default=120.0, help="Minimum source quiet period used by --stable.")

@@ -6172,6 +6172,55 @@ def test_route_cache_hot_gate_scoped_filters_scan_selected_records(tmp_path: Pat
     assert payload["selected_count"] == 1
 
 
+def test_graph_freshness_check_cli_defaults_to_hot_mode() -> None:
+    parser = module.build_parser()
+
+    default_args = parser.parse_args(["graph-freshness-check"])
+    deep_args = parser.parse_args(["graph-freshness-check", "--mode", "deep"])
+
+    assert default_args.mode == "hot"
+    assert deep_args.mode == "deep"
+
+
+def test_graph_freshness_command_missing_mode_uses_hot_route(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_hot(**kwargs: Any) -> dict[str, Any]:
+        calls["hot"] = kwargs
+        return {
+            "ok": True,
+            "artifact_type": "session_memory_route_cache_freshness_gates",
+            "target": kwargs["target"],
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_hot)
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_: (_ for _ in ()).throw(AssertionError("missing mode should default to hot")))
+    args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        session="all",
+        since=None,
+        since_days=None,
+        until=None,
+        limit=None,
+        write_report=False,
+        full=False,
+    )
+
+    assert module.command_graph_freshness_gates(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert calls["hot"]["target"] == "all"
+    assert payload["artifact_type"] == "session_memory_route_cache_freshness_gates"
+
+
 def test_sqlite_search_index_state_scoped_uses_session_state_without_global_counts(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
