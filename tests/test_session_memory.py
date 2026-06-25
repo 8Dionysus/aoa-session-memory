@@ -8850,6 +8850,101 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     )
     os.utime(blocked_resource_report, (base_mtime + 5, base_mtime + 5))
 
+    search_shards_report = diagnostics / "20260621T000050Z__search-shards.json"
+    module.write_json(
+        search_shards_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "generated_at": "2026-06-21T00:00:50Z",
+            "ok": True,
+            "status": "current",
+            "target": "all",
+            "requested_shard": "",
+            "selected_count": 2,
+            "processed_count": 2,
+            "elapsed_ms": 4000,
+            "shard_count": 1,
+            "document_count": 2000,
+            "structured_only": True,
+            "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+            "shards": [
+                {
+                    "shard": "month/2026-05",
+                    "status": "current",
+                    "ok": True,
+                    "session_count": 2,
+                    "processed_count": 2,
+                    "document_count": 2000,
+                    "elapsed_ms": 4000,
+                    "db_path": str(module.search_shard_db_path(aoa_root, "month/2026-05")),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    os.utime(search_shards_report, (base_mtime + 6, base_mtime + 6))
+
+    current_shard_db = module.search_shard_db_path(aoa_root, "month/2026-05")
+    stale_shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    search_db = module.search_db_path(aoa_root)
+    search_db.parent.mkdir(parents=True, exist_ok=True)
+    with search_db.open("wb") as handle:
+        handle.truncate(13 * 1024 * 1024 * 1024)
+    current_shard_db.parent.mkdir(parents=True, exist_ok=True)
+    stale_shard_db.parent.mkdir(parents=True, exist_ok=True)
+    current_shard_db.write_bytes(b"x" * 4096)
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "generated_at": "2026-06-21T00:00:45Z",
+            "ok": True,
+            "status": "current",
+            "mutates": False,
+            "aoa_root": str(aoa_root),
+            "catalog_path": str(module.search_catalog_path(aoa_root)),
+            "source_db_path": str(module.search_db_path(aoa_root)),
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "fallback": {"status": "active"},
+            "session_count": 3,
+            "shard_count": 2,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": "month/2026-05",
+                    "shard_db_path": str(current_shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "session_count": 2,
+                    "current_session_count": 2,
+                    "stale_session_count": 0,
+                    "missing_session_count": 0,
+                    "document_count": 2000,
+                    "storage_mode": module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                },
+                {
+                    "shard": "month/2026-06",
+                    "shard_db_path": str(stale_shard_db),
+                    "materialized": False,
+                    "status": "stale",
+                    "session_count": 1,
+                    "current_session_count": 0,
+                    "stale_session_count": 1,
+                    "missing_session_count": 0,
+                    "document_count": 1000,
+                    "storage_mode": module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                },
+            ],
+            "diagnostics": [],
+        },
+    )
+
     storage = {
         "search_db": {
             "size_bytes": 13 * 1024 * 1024 * 1024,
@@ -8884,10 +8979,22 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["last_auto_maintenance_resource_launch"]["backlog"]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
     assert ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
     assert ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
+    assert ops["search_shards"]["status"] == "incomplete"
+    assert ops["search_shards"]["materialized_shard_count"] == 1
+    assert ops["search_shards"]["noncurrent_shards"][0]["shard"] == "month/2026-06"
+    assert ops["search_shards"]["latest_materialization"]["documents_per_second"] == 500.0
     warning_codes = {item["code"] for item in ops["warnings"]}
-    assert {"search_db_large", "graph_db_large", "search_wal_large", "search_actionable_dirty_sessions", "recent_problem_jobs"} <= warning_codes
+    assert {
+        "search_db_large",
+        "graph_db_large",
+        "search_wal_large",
+        "search_actionable_dirty_sessions",
+        "search_shards_not_current",
+        "search_projection_combined_large",
+        "recent_problem_jobs",
+    } <= warning_codes
     reason_kinds = {item["reason"] for item in ops["why_maintenance_long"]}
-    assert {"search_index_phase", "sqlite_index_build", "large_sqlite_projection"} <= reason_kinds
+    assert {"search_index_phase", "sqlite_index_build", "large_sqlite_projection", "large_search_projection_stack"} <= reason_kinds
     assert ops["graph_pressure"]["status"] == "large_cardinality_unknown"
     assert ops["graph_pressure"]["projection_status"] == "missing"
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
@@ -10144,8 +10251,11 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert shards["structured_only"] is True
     assert shards["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
     assert shards["shard_count"] == 2
+    assert shards["elapsed_ms"] >= 0
+    assert shards["documents_per_second"] is not None
     assert {item["shard"] for item in shards["shards"]} == {"month/2026-05", "month/2026-06"}
     assert all(Path(item["db_path"]).exists() for item in shards["shards"])
+    assert all("elapsed_ms" in item for item in shards["shards"])
     may_shard = next(item for item in shards["shards"] if item["shard"] == "month/2026-05")
     shard_conn = sqlite3.connect(str(may_shard["db_path"]))
     shard_body_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
@@ -10169,6 +10279,18 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert catalog["materialized_shard_count"] == 2
     assert all(item["materialized"] for item in catalog["shards"])
     assert all(item["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK for item in catalog["shards"])
+    ops = module.session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+        entity_registry={"status": "current", "needs_maintenance": False, "entity_count": 0},
+        coordinator={"active": False},
+        storage=module.maintenance_storage_status(aoa_root),
+    )
+    assert ops["search_shards"]["status"] == "current"
+    assert ops["search_shards"]["materialized_shard_count"] == 2
+    assert ops["search_shards"]["latest_materialization"]["exists"] is True
+    assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
 
     fanout = module.search_sessions(
         aoa_root=aoa_root,
