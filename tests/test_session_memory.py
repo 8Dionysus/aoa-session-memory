@@ -4054,7 +4054,7 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
     assert "has_raw_ref" not in cardinality["projection"]["counts"]["edge"]
 
 
-def test_graph_event_sequence_prune_removes_sequence_edges_and_updates_source_policy(tmp_path: Path) -> None:
+def test_graph_event_sequence_prune_removes_sequence_edges_and_updates_source_policy(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
@@ -4144,12 +4144,21 @@ def test_graph_event_sequence_prune_removes_sequence_edges_and_updates_source_po
     finally:
         store.close()
 
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("sequence prune no-op must not rescan session sources")
+
+    monkeypatch.setattr(module, "graph_source_candidates", fail_source_scan)
     second_apply = module.graph_event_sequence_prune(aoa_root=aoa_root, apply=True, allow_low_free=True)
     assert second_apply["ok"] is True
+    assert second_apply["mutates"] is False
+    assert second_apply["status"] == "skipped_noop"
+    assert second_apply["source_candidate_scan_mode"] == "skipped_current_no_sequence_edges"
+    assert second_apply["source_record_count"] == 0
+    assert second_apply["source_candidate_count"] == 0
     assert second_apply["action_counts"]["edges_next_event"] == 0
     assert second_apply["action_counts"]["edges_previous_event"] == 0
-    assert second_apply["prune_result"]["source_update_counts"]["already_current"] == 1
-    assert second_apply["prune_result"]["source_update_counts"].get("updated", 0) == 0
+    assert second_apply["source_version_state"]["status"] == "current"
+    assert second_apply["prune_result"]["status"] == "skipped_noop"
 
 
 def test_graph_sqlite_compact_plans_and_stages_vacuum_copy(tmp_path: Path) -> None:

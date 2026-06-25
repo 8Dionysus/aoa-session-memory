@@ -35462,152 +35462,7 @@ class GraphSqliteStore:
         return int(row[0] or 0) if row else 0
 
     def source_version_state(self, *, sample_limit: int = 12) -> dict[str, Any]:
-        row = self.conn.execute(
-            """
-            SELECT
-                COUNT(*) AS source_count,
-                SUM(CASE WHEN graph_schema_version != ? THEN 1 ELSE 0 END) AS graph_schema_mismatch_count,
-                SUM(CASE WHEN graph_store_schema_version != ? THEN 1 ELSE 0 END) AS graph_store_schema_mismatch_count,
-                SUM(CASE WHEN graph_event_route_signal_edge_policy != ? THEN 1 ELSE 0 END) AS graph_event_route_signal_edge_policy_mismatch_count,
-                SUM(CASE WHEN route_signal_classifier_version != ? THEN 1 ELSE 0 END) AS route_signal_classifier_mismatch_count,
-                SUM(CASE
-                    WHEN graph_schema_version != ?
-                      OR graph_store_schema_version != ?
-                      OR graph_event_route_signal_edge_policy != ?
-                      OR route_signal_classifier_version != ?
-                    THEN 1 ELSE 0 END
-                ) AS version_mismatch_source_count,
-                MIN(graph_schema_version) AS min_graph_schema_version,
-                MAX(graph_schema_version) AS max_graph_schema_version,
-                MIN(graph_store_schema_version) AS min_graph_store_schema_version,
-                MAX(graph_store_schema_version) AS max_graph_store_schema_version,
-                MIN(route_signal_classifier_version) AS min_route_signal_classifier_version,
-                MAX(route_signal_classifier_version) AS max_route_signal_classifier_version
-            FROM graph_sources
-            """,
-            (
-                GRAPH_SCHEMA_VERSION,
-                GRAPH_STORE_SCHEMA_VERSION,
-                GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
-                ROUTE_SIGNAL_CLASSIFIER_VERSION,
-                GRAPH_SCHEMA_VERSION,
-                GRAPH_STORE_SCHEMA_VERSION,
-                GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
-                ROUTE_SIGNAL_CLASSIFIER_VERSION,
-            ),
-        ).fetchone()
-        reason_group_counts: dict[str, int] = {}
-        graph_schema_mismatch_count = int_value(row["graph_schema_mismatch_count"]) if row else 0
-        graph_store_schema_mismatch_count = int_value(row["graph_store_schema_mismatch_count"]) if row else 0
-        graph_event_route_signal_edge_policy_mismatch_count = int_value(row["graph_event_route_signal_edge_policy_mismatch_count"]) if row else 0
-        route_signal_classifier_mismatch_count = int_value(row["route_signal_classifier_mismatch_count"]) if row else 0
-        if graph_schema_mismatch_count:
-            reason_group_counts["graph_schema_mismatch"] = graph_schema_mismatch_count
-        if graph_store_schema_mismatch_count:
-            reason_group_counts["graph_store_schema_mismatch"] = graph_store_schema_mismatch_count
-        if graph_event_route_signal_edge_policy_mismatch_count:
-            reason_group_counts["graph_event_route_signal_edge_policy_mismatch"] = graph_event_route_signal_edge_policy_mismatch_count
-        if route_signal_classifier_mismatch_count:
-            reason_group_counts["route_signal_classifier_mismatch"] = route_signal_classifier_mismatch_count
-        bounded_limit = max(0, min(int_value(sample_limit, 12), 50))
-        samples: list[dict[str, Any]] = []
-        if bounded_limit and reason_group_counts:
-            samples = [
-                {
-                    "source_key": str(sample["source_key"] or ""),
-                    "source_type": str(sample["source_type"] or ""),
-                    "session_id": str(sample["session_id"] or ""),
-                    "session_label": str(sample["session_label"] or ""),
-                    "segment_id": str(sample["segment_id"] or ""),
-                        "graph_schema_version": int_value(sample["graph_schema_version"]),
-                        "graph_store_schema_version": int_value(sample["graph_store_schema_version"]),
-                        "graph_event_route_signal_edge_policy": str(sample["graph_event_route_signal_edge_policy"] or ""),
-                        "route_signal_classifier_version": int_value(sample["route_signal_classifier_version"]),
-                        "status": str(sample["status"] or ""),
-                    }
-                    for sample in self.conn.execute(
-                        """
-                        SELECT source_key, source_type, session_id, session_label, segment_id,
-                               graph_schema_version, graph_store_schema_version,
-                               graph_event_route_signal_edge_policy,
-                               route_signal_classifier_version, status
-                        FROM graph_sources
-                        WHERE graph_schema_version != ?
-                           OR graph_store_schema_version != ?
-                           OR graph_event_route_signal_edge_policy != ?
-                           OR route_signal_classifier_version != ?
-                        ORDER BY source_key
-                        LIMIT ?
-                        """,
-                        (
-                            GRAPH_SCHEMA_VERSION,
-                            GRAPH_STORE_SCHEMA_VERSION,
-                            GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
-                            ROUTE_SIGNAL_CLASSIFIER_VERSION,
-                            bounded_limit,
-                        ),
-                ).fetchall()
-            ]
-        version_mismatch_source_count = int_value(row["version_mismatch_source_count"]) if row else 0
-        observed_event_route_signal_edge_policies = [
-            str(policy_row["graph_event_route_signal_edge_policy"] or "")
-            for policy_row in self.conn.execute(
-                """
-                SELECT DISTINCT graph_event_route_signal_edge_policy
-                FROM graph_sources
-                ORDER BY graph_event_route_signal_edge_policy
-                LIMIT 20
-                """
-            ).fetchall()
-        ]
-        return {
-            "status": "dirty" if version_mismatch_source_count else "current",
-            "needs_maintenance": bool(version_mismatch_source_count),
-            "source_count": int_value(row["source_count"]) if row else 0,
-            "version_mismatch_source_count": version_mismatch_source_count,
-            "reason_group_counts": reason_group_counts,
-            "expected_versions": {
-                "graph_schema_version": GRAPH_SCHEMA_VERSION,
-                "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
-                "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
-                "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
-            },
-            "observed_versions": {
-                "graph_schema_version": sorted(
-                    {
-                        value
-                        for value in (
-                            int_value(row["min_graph_schema_version"]) if row else 0,
-                            int_value(row["max_graph_schema_version"]) if row else 0,
-                        )
-                        if value
-                    }
-                ),
-                "graph_store_schema_version": sorted(
-                    {
-                        value
-                        for value in (
-                            int_value(row["min_graph_store_schema_version"]) if row else 0,
-                            int_value(row["max_graph_store_schema_version"]) if row else 0,
-                        )
-                        if value
-                    }
-                ),
-                "route_signal_classifier_version": sorted(
-                    {
-                        value
-                        for value in (
-                            int_value(row["min_route_signal_classifier_version"]) if row else 0,
-                            int_value(row["max_route_signal_classifier_version"]) if row else 0,
-                        )
-                        if value
-                    }
-                ),
-                "graph_event_route_signal_edge_policy": observed_event_route_signal_edge_policies,
-            },
-            "samples": samples,
-            "truth_status": "graph_sources_table_version_summary_no_session_source_scan",
-        }
+        return graph_source_version_state_from_connection(self.conn, sample_limit=sample_limit)
 
     def metadata(self) -> dict[str, str]:
         return {str(row["key"]): str(row["value"]) for row in self.conn.execute("SELECT key, value FROM metadata").fetchall()}
@@ -36951,6 +36806,223 @@ def graph_store_existing_sources(aoa_root: Path) -> tuple[dict[str, dict[str, An
     except sqlite3.Error as exc:
         return {}, [f"graph_store_sqlite_error:{exc}"]
     return {str(row["source_key"]): dict(row) for row in rows}, []
+
+
+def graph_source_version_state_default_payload(
+    *,
+    status: str,
+    reason_group_counts: dict[str, int],
+    diagnostics: list[str],
+    truth_status: str,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "needs_maintenance": status != "current",
+        "source_count": 0,
+        "version_mismatch_source_count": 0,
+        "reason_group_counts": reason_group_counts,
+        "expected_versions": {
+            "graph_schema_version": GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "observed_versions": {},
+        "samples": [],
+        "diagnostics": diagnostics,
+        "truth_status": truth_status,
+    }
+
+
+def graph_source_version_state_from_connection(
+    conn: sqlite3.Connection,
+    *,
+    sample_limit: int = 12,
+    truth_status: str = "graph_sources_table_version_summary_no_session_source_scan",
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS source_count,
+            SUM(CASE WHEN graph_schema_version != ? THEN 1 ELSE 0 END) AS graph_schema_mismatch_count,
+            SUM(CASE WHEN graph_store_schema_version != ? THEN 1 ELSE 0 END) AS graph_store_schema_mismatch_count,
+            SUM(CASE WHEN graph_event_route_signal_edge_policy != ? THEN 1 ELSE 0 END) AS graph_event_route_signal_edge_policy_mismatch_count,
+            SUM(CASE WHEN route_signal_classifier_version != ? THEN 1 ELSE 0 END) AS route_signal_classifier_mismatch_count,
+            SUM(CASE
+                WHEN graph_schema_version != ?
+                  OR graph_store_schema_version != ?
+                  OR graph_event_route_signal_edge_policy != ?
+                  OR route_signal_classifier_version != ?
+                THEN 1 ELSE 0 END
+            ) AS version_mismatch_source_count,
+            MIN(graph_schema_version) AS min_graph_schema_version,
+            MAX(graph_schema_version) AS max_graph_schema_version,
+            MIN(graph_store_schema_version) AS min_graph_store_schema_version,
+            MAX(graph_store_schema_version) AS max_graph_store_schema_version,
+            MIN(route_signal_classifier_version) AS min_route_signal_classifier_version,
+            MAX(route_signal_classifier_version) AS max_route_signal_classifier_version
+        FROM graph_sources
+        """,
+        (
+            GRAPH_SCHEMA_VERSION,
+            GRAPH_STORE_SCHEMA_VERSION,
+            GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            GRAPH_SCHEMA_VERSION,
+            GRAPH_STORE_SCHEMA_VERSION,
+            GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        ),
+    ).fetchone()
+    reason_group_counts: dict[str, int] = {}
+    graph_schema_mismatch_count = int_value(row["graph_schema_mismatch_count"]) if row else 0
+    graph_store_schema_mismatch_count = int_value(row["graph_store_schema_mismatch_count"]) if row else 0
+    graph_event_route_signal_edge_policy_mismatch_count = int_value(row["graph_event_route_signal_edge_policy_mismatch_count"]) if row else 0
+    route_signal_classifier_mismatch_count = int_value(row["route_signal_classifier_mismatch_count"]) if row else 0
+    if graph_schema_mismatch_count:
+        reason_group_counts["graph_schema_mismatch"] = graph_schema_mismatch_count
+    if graph_store_schema_mismatch_count:
+        reason_group_counts["graph_store_schema_mismatch"] = graph_store_schema_mismatch_count
+    if graph_event_route_signal_edge_policy_mismatch_count:
+        reason_group_counts["graph_event_route_signal_edge_policy_mismatch"] = graph_event_route_signal_edge_policy_mismatch_count
+    if route_signal_classifier_mismatch_count:
+        reason_group_counts["route_signal_classifier_mismatch"] = route_signal_classifier_mismatch_count
+    bounded_limit = max(0, min(int_value(sample_limit, 12), 50))
+    samples: list[dict[str, Any]] = []
+    if bounded_limit and reason_group_counts:
+        samples = [
+            {
+                "source_key": str(sample["source_key"] or ""),
+                "source_type": str(sample["source_type"] or ""),
+                "session_id": str(sample["session_id"] or ""),
+                "session_label": str(sample["session_label"] or ""),
+                "segment_id": str(sample["segment_id"] or ""),
+                "graph_schema_version": int_value(sample["graph_schema_version"]),
+                "graph_store_schema_version": int_value(sample["graph_store_schema_version"]),
+                "graph_event_route_signal_edge_policy": str(sample["graph_event_route_signal_edge_policy"] or ""),
+                "route_signal_classifier_version": int_value(sample["route_signal_classifier_version"]),
+                "status": str(sample["status"] or ""),
+            }
+            for sample in conn.execute(
+                """
+                SELECT source_key, source_type, session_id, session_label, segment_id,
+                       graph_schema_version, graph_store_schema_version,
+                       graph_event_route_signal_edge_policy,
+                       route_signal_classifier_version, status
+                FROM graph_sources
+                WHERE graph_schema_version != ?
+                   OR graph_store_schema_version != ?
+                   OR graph_event_route_signal_edge_policy != ?
+                   OR route_signal_classifier_version != ?
+                ORDER BY source_key
+                LIMIT ?
+                """,
+                (
+                    GRAPH_SCHEMA_VERSION,
+                    GRAPH_STORE_SCHEMA_VERSION,
+                    GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                    ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                    bounded_limit,
+                ),
+            ).fetchall()
+        ]
+    version_mismatch_source_count = int_value(row["version_mismatch_source_count"]) if row else 0
+    observed_event_route_signal_edge_policies = [
+        str(policy_row["graph_event_route_signal_edge_policy"] or "")
+        for policy_row in conn.execute(
+            """
+            SELECT DISTINCT graph_event_route_signal_edge_policy
+            FROM graph_sources
+            ORDER BY graph_event_route_signal_edge_policy
+            LIMIT 20
+            """
+        ).fetchall()
+    ]
+    return {
+        "status": "dirty" if version_mismatch_source_count else "current",
+        "needs_maintenance": bool(version_mismatch_source_count),
+        "source_count": int_value(row["source_count"]) if row else 0,
+        "version_mismatch_source_count": version_mismatch_source_count,
+        "reason_group_counts": reason_group_counts,
+        "expected_versions": {
+            "graph_schema_version": GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "observed_versions": {
+            "graph_schema_version": sorted(
+                {
+                    value
+                    for value in (
+                        int_value(row["min_graph_schema_version"]) if row else 0,
+                        int_value(row["max_graph_schema_version"]) if row else 0,
+                    )
+                    if value
+                }
+            ),
+            "graph_store_schema_version": sorted(
+                {
+                    value
+                    for value in (
+                        int_value(row["min_graph_store_schema_version"]) if row else 0,
+                        int_value(row["max_graph_store_schema_version"]) if row else 0,
+                    )
+                    if value
+                }
+            ),
+            "route_signal_classifier_version": sorted(
+                {
+                    value
+                    for value in (
+                        int_value(row["min_route_signal_classifier_version"]) if row else 0,
+                        int_value(row["max_route_signal_classifier_version"]) if row else 0,
+                    )
+                    if value
+                }
+            ),
+            "graph_event_route_signal_edge_policy": observed_event_route_signal_edge_policies,
+        },
+        "samples": samples,
+        "diagnostics": [],
+        "truth_status": truth_status,
+    }
+
+
+def graph_source_version_state_readonly(aoa_root: Path, *, sample_limit: int = 12) -> dict[str, Any]:
+    truth_status = "readonly_graph_sources_table_version_summary_no_session_source_scan"
+    paths = graph_paths(aoa_root)
+    if not paths["store"].exists():
+        return graph_source_version_state_default_payload(
+            status="missing",
+            reason_group_counts={"graph_store_missing": 1},
+            diagnostics=["graph_store_missing"],
+            truth_status=truth_status,
+        )
+    try:
+        conn = sqlite3.connect(f"{paths['store'].resolve().as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_sources' LIMIT 1"
+            ).fetchone() is not None
+            if not table_exists:
+                return graph_source_version_state_default_payload(
+                    status="missing",
+                    reason_group_counts={"graph_sources_table_missing": 1},
+                    diagnostics=["graph_sources_table_missing"],
+                    truth_status=truth_status,
+                )
+            return graph_source_version_state_from_connection(conn, sample_limit=sample_limit, truth_status=truth_status)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return graph_source_version_state_default_payload(
+            status="sqlite_error",
+            reason_group_counts={"graph_sources_sqlite_error": 1},
+            diagnostics=[sqlite_error_diagnostic(exc)],
+            truth_status=truth_status,
+        )
 
 
 def graph_source_reason_group(reason: str) -> str:
@@ -38811,6 +38883,9 @@ def graph_event_sequence_prune_markdown(payload: dict[str, Any]) -> str:
         f"- omitted_edge_types: `{json.dumps(payload.get('omitted_edge_types', []), ensure_ascii=False)}`",
         f"- affected_row_count: `{payload.get('affected_row_count')}`",
         f"- candidate_sequence_edge_count: `{payload.get('candidate_sequence_edge_count')}`",
+        f"- source_candidate_scan_mode: `{payload.get('source_candidate_scan_mode')}`",
+        f"- source_candidate_scan_reason: `{payload.get('source_candidate_scan_reason')}`",
+        f"- source_record_count: `{payload.get('source_record_count')}`",
         f"- source_candidate_count: `{payload.get('source_candidate_count')}`",
         f"- sqlite_freelist_delta: `{payload.get('sqlite_freelist_delta_human')}`",
         f"- stop_line: `{payload.get('stop_line')}`",
@@ -38853,7 +38928,7 @@ def graph_event_sequence_prune(
     started_at = time.monotonic()
     graph_store_path = graph_paths(aoa_root)["store"]
     diagnostics: list[str] = []
-    before_store = sqlite_storage_stats(graph_store_path, row_counts=True)
+    before_store = sqlite_storage_stats(graph_store_path, row_counts=False)
     table_sizes = {
         item.get("name"): int_value(item.get("size_bytes"))
         for item in before_store.get("table_sizes", []) if isinstance(item, dict)
@@ -38863,13 +38938,39 @@ def graph_event_sequence_prune(
         graph_store=before_store,
         table_sizes=table_sizes,
     )
-    records, candidates, candidate_diagnostics = graph_source_candidates(aoa_root, target="all")
-    diagnostics.extend(str(item) for item in candidate_diagnostics if item)
-    disk_preflight = graph_raw_ref_prune_disk_preflight(
-        graph_store_path,
-        min_free_gb=min_free_gb,
-        allow_low_free=allow_low_free,
-        operation_id="graph_event_sequence_prune",
+    source_version_state = graph_source_version_state_readonly(aoa_root)
+    candidate_scan_mode = "full_source_scan"
+    candidate_scan_reason = "sequence_edges_or_source_version_drift_require_source_candidates"
+    skip_candidate_scan = (
+        int_value(before_counts.get("sequence_edge_count")) == 0
+        and str(before_counts.get("projection_status") or "") == "current"
+        and str(source_version_state.get("status") or "") == "current"
+    )
+    records: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    if skip_candidate_scan:
+        candidate_scan_mode = "skipped_current_no_sequence_edges"
+        candidate_scan_reason = "graph_type_counts_current_no_sequence_edges_and_graph_sources_versions_current"
+    else:
+        records, candidates, candidate_diagnostics = graph_source_candidates(aoa_root, target="all")
+        diagnostics.extend(str(item) for item in candidate_diagnostics if item)
+    disk_preflight = (
+        {
+            "ok": True,
+            "status": "skipped_noop",
+            "path": str(existing_storage_path(graph_store_path.parent)),
+            "min_free_gb": float(min_free_gb),
+            "allow_low_free": bool(allow_low_free),
+            "diagnostics": [],
+            "note": "No sequence graph edges or source-version drift were visible; disk-headroom preflight was skipped for a non-mutating no-op.",
+        }
+        if skip_candidate_scan
+        else graph_raw_ref_prune_disk_preflight(
+            graph_store_path,
+            min_free_gb=min_free_gb,
+            allow_low_free=allow_low_free,
+            operation_id="graph_event_sequence_prune",
+        )
     )
     prune_result: dict[str, Any] = {}
     wal_checkpoint: dict[str, Any] = {}
@@ -38886,7 +38987,15 @@ def graph_event_sequence_prune(
     if apply and not disk_preflight.get("ok"):
         status = "preflight_failed"
         diagnostics.extend(str(item) for item in disk_preflight.get("diagnostics", []) if item)
-    if apply and not diagnostics:
+    if apply and skip_candidate_scan and not diagnostics:
+        status = "skipped_noop"
+        prune_result = {
+            "status": "skipped_noop",
+            "reason": candidate_scan_reason,
+            "source_version_state": source_version_state,
+            "truth_status": "readonly_graph_projection_and_graph_sources_summary_no_session_source_scan",
+        }
+    if apply and status == "dry_run" and not diagnostics:
         store = GraphSqliteStore(aoa_root)
         try:
             prune_result = store.prune_event_sequence_relationship_edges(candidates=candidates, reason=reason)
@@ -38904,26 +39013,32 @@ def graph_event_sequence_prune(
                 for item in (wal_checkpoint.get("diagnostics", []) if isinstance(wal_checkpoint.get("diagnostics"), list) else [])
                 if item
             )
-    after_store = sqlite_storage_stats(graph_store_path, row_counts=True)
-    after_counts = graph_event_sequence_projection_recommendation(
-        aoa_root=aoa_root,
-        graph_store=after_store,
-        table_sizes={
-            item.get("name"): int_value(item.get("size_bytes"))
-            for item in after_store.get("table_sizes", []) if isinstance(item, dict)
-        },
-    )
+    if status == "skipped_noop":
+        after_store = before_store
+        after_counts = before_counts
+    else:
+        after_store = sqlite_storage_stats(graph_store_path, row_counts=False)
+        after_counts = graph_event_sequence_projection_recommendation(
+            aoa_root=aoa_root,
+            graph_store=after_store,
+            table_sizes={
+                item.get("name"): int_value(item.get("size_bytes"))
+                for item in after_store.get("table_sizes", []) if isinstance(item, dict)
+            },
+        )
     affected_rows = sum(int_value(value) for value in action_counts.values()) if status == "applied" else 0
     before_freelist = int_value(before_store.get("freelist_bytes"))
     after_freelist = int_value(after_store.get("freelist_bytes"))
     freelist_delta = max(0, after_freelist - before_freelist)
     file_delta = int_value(before_store.get("total_with_wal_bytes")) - int_value(after_store.get("total_with_wal_bytes"))
     remaining_sequence_edges = int_value(after_counts.get("sequence_edge_count"))
-    ok = not diagnostics and (not apply or status == "applied")
+    ok = not diagnostics and (not apply or status in {"applied", "skipped_noop"})
     if status == "preflight_failed":
         next_route = "reserve disk headroom or rerun graph-event-sequence-prune --apply --allow-low-free only with an explicit operator decision"
     elif apply and remaining_sequence_edges:
         next_route = "sequence graph edges remain; rerun graph-event-sequence-prune --apply --write-report or use controlled graph-maintenance if source metadata was skipped"
+    elif status == "skipped_noop":
+        next_route = "no sequence-edge prune is needed; use maintenance-status for the broader graph/search/entity freshness gate"
     elif apply:
         next_route = "run maintenance-status and graph-cardinality --refresh; physical graph.sqlite3 shrink still requires controlled VACUUM or rebuild"
     elif int_value(before_counts.get("sequence_edge_count")):
@@ -38951,6 +39066,9 @@ def graph_event_sequence_prune(
         "after_counts": after_counts,
         "before_store": before_store,
         "after_store": after_store,
+        "source_version_state": source_version_state,
+        "source_candidate_scan_mode": candidate_scan_mode,
+        "source_candidate_scan_reason": candidate_scan_reason,
         "prune_result": prune_result,
         "wal_checkpoint": wal_checkpoint,
         "action_counts": action_counts,
