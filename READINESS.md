@@ -156,6 +156,11 @@ Build the `.aoa` session-memory mechanism end to end:
   search/atlas gates; if route-cache work spends the hot budget before graph
   work starts, a bounded graph job is queued as the automatic continuation
   route with a separate profile graph budget
+- Search catalog freshness sync keeps shard route packets current after
+  live-sync or freshness probes update `search_freshness_state`: deferred-live
+  sessions now update `search/catalog.json` shard freshness counters without a
+  heavy raw/session-index scan, so MCP/agent fast-path defaults do not fall
+  back to monolith merely because catalog freshness lagged the SQLite state.
 - Graph hot-state recovery guards: `maintenance-status` detects empty
   generated graph stores (`graph_store_nodes_empty` / `graph_store_edges_empty`)
   without a full source scan, routes them to bounded incremental

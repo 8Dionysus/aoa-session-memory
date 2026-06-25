@@ -16636,10 +16636,22 @@ def write_search_freshness_probe_state(
     finally:
         if conn is not None:
             conn.close()
+    catalog_sync = {"ok": True, "status": "skipped_no_updates", "updated_count": 0, "diagnostics": []}
+    if updated and not diagnostics:
+        catalog_sync = sync_search_catalog_freshness_from_state(
+            aoa_root,
+            session_ids=[str(item.get("session_id") or "") for item in projection_fingerprints if item.get("session_id")],
+        )
+        if catalog_sync.get("diagnostics"):
+            diagnostics.extend(str(item) for item in catalog_sync.get("diagnostics", []) if item)
     return {
         "ok": not diagnostics,
         "updated_count": updated,
         "status_counts": dict(sorted(status_counts.items())),
+        "search_catalog_sync": {
+            key: catalog_sync.get(key)
+            for key in ("ok", "status", "updated_count", "diagnostics")
+        },
         "diagnostics": diagnostics,
     }
 
@@ -16711,7 +16723,24 @@ def mark_search_freshness_stale_for_session(
     finally:
         if conn is not None:
             conn.close()
-    return {"ok": not diagnostics, "status": status, "updated": not diagnostics, "diagnostics": diagnostics}
+    catalog_sync = {"ok": True, "status": "skipped_not_updated", "updated_count": 0, "diagnostics": []}
+    if not diagnostics:
+        catalog_sync = sync_search_catalog_freshness_from_state(
+            aoa_root,
+            session_ids=[str(projection.get("session_id") or ""), str(projection.get("session_label") or "")],
+        )
+        if catalog_sync.get("diagnostics"):
+            diagnostics.extend(str(item) for item in catalog_sync.get("diagnostics", []) if item)
+    return {
+        "ok": not diagnostics,
+        "status": status,
+        "updated": not diagnostics,
+        "search_catalog_sync": {
+            key: catalog_sync.get(key)
+            for key in ("ok", "status", "updated_count", "diagnostics")
+        },
+        "diagnostics": diagnostics,
+    }
 
 
 
@@ -26404,6 +26433,180 @@ def read_search_catalog(aoa_root: Path) -> dict[str, Any]:
     payload = dict(payload)
     payload["mutates"] = False
     return payload
+
+
+def recompute_search_catalog_shard_summaries(payload: dict[str, Any]) -> None:
+    sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
+    existing_shards = {
+        str(item.get("shard") or ""): item
+        for item in payload.get("shards", [])
+        if isinstance(item, dict) and item.get("shard")
+    }
+    shards: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        shard_key = str(session.get("shard") or "")
+        if not shard_key:
+            continue
+        existing = existing_shards.get(shard_key, {})
+        shard_path = str(session.get("shard_db_path") or existing.get("shard_db_path") or "")
+        item = shards.setdefault(
+            shard_key,
+            {
+                "shard": shard_key,
+                "shard_db_path": shard_path,
+                "materialized": False,
+                "session_count": 0,
+                "current_session_count": 0,
+                "stale_session_count": 0,
+                "missing_session_count": 0,
+                "document_count": 0,
+                "freshness_counts": {},
+                "storage_mode": existing.get("storage_mode") or session.get("shard_storage_mode") or "",
+                "raw_text_query_support": existing.get("raw_text_query_support")
+                or session.get("shard_raw_text_query_support")
+                or "",
+                "storage_profile": existing.get("storage_profile") or session.get("shard_storage_profile") or "",
+                "expected_storage_profile": existing.get("expected_storage_profile")
+                or session.get("expected_shard_storage_profile")
+                or "",
+            },
+        )
+        if shard_path and not item.get("shard_db_path"):
+            item["shard_db_path"] = shard_path
+        for target_key, session_key in (
+            ("storage_mode", "shard_storage_mode"),
+            ("raw_text_query_support", "shard_raw_text_query_support"),
+            ("storage_profile", "shard_storage_profile"),
+            ("expected_storage_profile", "expected_shard_storage_profile"),
+        ):
+            if not item.get(target_key) and session.get(session_key):
+                item[target_key] = session.get(session_key)
+        item["session_count"] += 1
+        shard_status = str(session.get("shard_status") or "missing")
+        if shard_status == "current":
+            item["current_session_count"] += 1
+        elif shard_status == "missing":
+            item["missing_session_count"] += 1
+        else:
+            item["stale_session_count"] += 1
+        item["document_count"] += int_value(session.get("document_count"))
+        freshness = session.get("freshness") if isinstance(session.get("freshness"), dict) else {}
+        freshness_status = str(freshness.get("status") or "unverifiable")
+        item["freshness_counts"][freshness_status] = int_value(item["freshness_counts"].get(freshness_status)) + 1
+    for item in shards.values():
+        item["materialized"] = int_value(item.get("session_count")) > 0 and int_value(item.get("current_session_count")) == int_value(item.get("session_count"))
+        shard_path = Path(str(item.get("shard_db_path") or ""))
+        item["status"] = "current" if item["materialized"] else ("stale" if shard_path.exists() else "missing")
+    ordered = [shards[key] for key in sorted(shards)]
+    payload["shards"] = ordered
+    payload["session_count"] = len([item for item in sessions if isinstance(item, dict)])
+    payload["shard_count"] = len(ordered)
+    payload["materialized_shard_count"] = sum(1 for item in ordered if item.get("materialized"))
+
+
+def sync_search_catalog_freshness_from_state(
+    aoa_root: Path,
+    *,
+    session_ids: list[str] | None = None,
+    write: bool = True,
+) -> dict[str, Any]:
+    catalog_path = search_catalog_path(aoa_root)
+    payload = read_json(catalog_path, {})
+    if not isinstance(payload, dict) or payload.get("artifact_type") != "session_memory_search_catalog":
+        return {"ok": True, "status": "skipped_missing_catalog", "updated_count": 0, "diagnostics": []}
+    sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
+    if not sessions:
+        return {"ok": True, "status": "skipped_empty_catalog", "updated_count": 0, "diagnostics": []}
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {"ok": True, "status": "skipped_search_index_missing", "updated_count": 0, "diagnostics": []}
+    requested = {str(value) for value in session_ids or [] if str(value)}
+    try:
+        conn = connect_existing_search_db(db_path)
+        states = sqlite_search_freshness_states(conn)
+        conn.close()
+    except sqlite3.Error as exc:
+        return {"ok": False, "status": sqlite_error_status(exc), "updated_count": 0, "diagnostics": [sqlite_error_diagnostic(exc)]}
+    state_by_key: dict[str, dict[str, Any]] = {}
+    for state in states.values():
+        for key in (state.get("session_id"), state.get("session_label")):
+            if key:
+                state_by_key[str(key)] = state
+    updated = 0
+    updated_keys: list[str] = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        keys = [str(session.get("session_id") or ""), str(session.get("session_label") or "")]
+        if requested and not any(key in requested for key in keys if key):
+            continue
+        state = next((state_by_key[key] for key in keys if key in state_by_key), None)
+        if not state:
+            continue
+        freshness = {
+            "status": str(state.get("status") or "unverifiable"),
+            "reason": str(state.get("reason") or ""),
+            "last_checked": str(state.get("last_checked") or ""),
+            "last_indexed_at": str(state.get("last_indexed_at") or ""),
+            "deferred_live_reason": str(state.get("deferred_live_reason") or ""),
+            "updated_at": str(state.get("updated_at") or ""),
+        }
+        before = (
+            session.get("freshness"),
+            session.get("source_fingerprint"),
+            session.get("source_latest_mtime"),
+            session.get("document_count"),
+            session.get("shard_status"),
+            session.get("shard_materialized"),
+        )
+        session["freshness"] = freshness
+        if state.get("source_fingerprint"):
+            session["source_fingerprint"] = str(state.get("source_fingerprint") or "")
+        if state.get("source_latest_mtime") is not None:
+            session["source_latest_mtime"] = float(state.get("source_latest_mtime") or 0.0)
+        if int_value(state.get("document_count")) > 0:
+            session["document_count"] = int_value(state.get("document_count"))
+        schema_versions = session.get("schema_versions") if isinstance(session.get("schema_versions"), dict) else {}
+        schema_versions["search_schema_version"] = str(state.get("search_schema_version") or schema_versions.get("search_schema_version") or "")
+        schema_versions["route_signal_classifier_version"] = int_value(
+            state.get("route_signal_classifier_version"),
+            int_value(schema_versions.get("route_signal_classifier_version")),
+        )
+        schema_versions["projection_fingerprint_mode"] = str(
+            state.get("projection_fingerprint_mode") or schema_versions.get("projection_fingerprint_mode") or ""
+        )
+        schema_versions.setdefault("expected_projection_fingerprint_mode", SEARCH_PROJECTION_FINGERPRINT_MODE)
+        session["schema_versions"] = schema_versions
+        if freshness["status"] == "deferred_live" or freshness["status"] not in {"current", ""}:
+            session["shard_status"] = "stale"
+            session["shard_materialized"] = False
+        after = (
+            session.get("freshness"),
+            session.get("source_fingerprint"),
+            session.get("source_latest_mtime"),
+            session.get("document_count"),
+            session.get("shard_status"),
+            session.get("shard_materialized"),
+        )
+        if after != before:
+            updated += 1
+            updated_keys.append(next((key for key in keys if key), ""))
+    if updated:
+        recompute_search_catalog_shard_summaries(payload)
+        payload["freshness_state_synced_at"] = utc_now()
+        payload["freshness_state_sync_basis"] = "search_freshness_state"
+        payload["freshness_state_sync_updated_count"] = updated
+        if write:
+            write_json(catalog_path, payload)
+    return {
+        "ok": True,
+        "status": "updated" if updated else "unchanged",
+        "updated_count": updated,
+        "updated_sessions": updated_keys[:8],
+        "diagnostics": [],
+    }
 
 
 def search_catalog_markdown(payload: dict[str, Any]) -> str:

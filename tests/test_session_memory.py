@@ -10338,6 +10338,105 @@ def test_search_shards_deferred_live_tail_is_not_actionable_ops_warning(tmp_path
     assert "live_tail" in completeness["deferred_surface_ids"]
 
 
+def test_live_sync_updates_search_catalog_deferred_shard_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "13"
+        / "rollout-2026-06-13T00-00-00-live-catalog-sync.jsonl"
+    )
+    base_rows = [
+        {
+            "timestamp": "2026-06-13T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "live-catalog-sync", "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-06-13T00:00:01Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep shard catalog live."}]},
+        },
+        {
+            "timestamp": "2026-06-13T00:00:02Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Initial shard answer."}]},
+        },
+    ]
+    write_jsonl(transcript, base_rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-catalog-sync",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    shards = module.materialize_search_shards(aoa_root=aoa_root, target="all")
+    assert shards["ok"] is True
+    current_catalog = module.read_search_catalog(aoa_root)
+    current_shard = next(item for item in current_catalog["shards"] if item["shard"] == "month/2026-06")
+    assert current_shard["status"] == "current"
+
+    write_jsonl(
+        transcript,
+        [
+            *base_rows,
+            {
+                "timestamp": "2026-06-13T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Fresh live tail answer."}],
+                },
+            },
+        ],
+    )
+    synced = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "live-catalog-sync",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    freshness = synced["archive"]["search_freshness_state"]
+    assert freshness["status"] == "deferred_live"
+    assert freshness["search_catalog_sync"]["updated_count"] == 1
+
+    deferred_catalog = module.read_search_catalog(aoa_root)
+    deferred_shard = next(item for item in deferred_catalog["shards"] if item["shard"] == "month/2026-06")
+    assert deferred_shard["status"] == "stale"
+    assert deferred_shard["stale_session_count"] == 1
+    assert deferred_shard["freshness_counts"] == {"deferred_live": 1}
+
+    ops = module.session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 1},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+        entity_registry={"status": "current", "needs_maintenance": False, "entity_count": 1},
+        coordinator={"active": False},
+        storage=module.maintenance_storage_status(aoa_root),
+    )
+    assert ops["search_shards"]["status"] == "current_with_deferred_live_updates"
+    assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["default_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    warning_codes = {item["code"] for item in ops["warnings"]}
+    assert "search_shards_not_current" not in warning_codes
+
+
 def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
