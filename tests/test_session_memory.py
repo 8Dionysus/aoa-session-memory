@@ -25,6 +25,27 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
 
 
+def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
+    compact = module.graph_compact_node_for_packet(
+        {
+            "id": "event:session:001:000001",
+            "type": "event",
+            "title": "Tool call: exec_command",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "segment_id": "001",
+                    "event_id": "000001",
+                    "refs": {"raw": "raw:line:1", "segment": "001.md#event-000001"},
+                }
+            ],
+        }
+    )
+
+    assert compact["refs"]["raw"] == "raw:line:1"
+    assert compact["evidence_refs"][0]["refs"]["segment"] == "001.md#event-000001"
+
+
 def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "graph.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -1720,6 +1741,135 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert usage_audit["usage_event_count"] >= 1
     assert usage_audit["quality"]["direct_usage_present"] is True
     assert usage_audit["usage_events"][0]["session_act"] == "goal_completed"
+
+
+def test_graph_timeline_falls_back_to_usage_events_when_graph_store_has_no_event_nodes(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_graph_neighborhood(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "nodes": [
+                {"id": "route:mcp:mcp:aoa_session_memory_mcp", "type": "mcp", "label": "mcp:aoa_session_memory_mcp"},
+                {"id": "segment:session-1:001", "type": "segment", "label": "session segment 001"},
+            ],
+            "edges": [],
+            "resolved": {
+                "anchor": "mcp:aoa_session_memory_mcp",
+                "kind": "mcp",
+                "start_node_ids": ["route:mcp:mcp:aoa_session_memory_mcp"],
+            },
+            "freshness": {"status": "graph_store_current", "graph_source": "sqlite_graph_store"},
+            "diagnostics": [],
+        }
+
+    def fake_entity_usage_audit(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["anchor"] == "mcp:aoa_session_memory_mcp"
+        assert kwargs["kind"] == "mcp"
+        return {
+            "ok": True,
+            "diagnostics": [],
+            "usage_event_count": 1,
+            "consequence_event_count": 1,
+            "usage_events": [
+                {
+                    "doc_id": "event:session-1:001:000010",
+                    "source": "search",
+                    "role": "usage",
+                    "session_id": "session-1",
+                    "session_label": "2026-06-25__001__mcp-timeline",
+                    "session_date": "2026-06-25",
+                    "segment_id": "001",
+                    "event_id": "000010",
+                    "event_type": "TOOL_CALL",
+                    "family": "mcp",
+                    "phase": "act",
+                    "actor": "assistant",
+                    "action": "call_tool",
+                    "outcome": "requested",
+                    "conversation_act": "tool_call_request",
+                    "session_act": "tool_call",
+                    "route_signals": ["mcp:aoa_session_memory_mcp", "tool:aoa_session_search"],
+                    "title": "Tool call: aoa_session_search",
+                    "refs": {
+                        "session": str(tmp_path / "session.manifest.json"),
+                        "segment": "001.md#event-000010",
+                        "segment_index": str(tmp_path / "001.index.json"),
+                        "raw": "raw:line:10",
+                        "raw_block": "raw/blocks/001.raw.jsonl",
+                    },
+                    "freshness": {"status": "fresh"},
+                }
+            ],
+            "result_events": [],
+            "outcome_events": [],
+            "entrypoint_events": [],
+            "context_events": [],
+            "consequence_events": [
+                {
+                    "doc_id": "event:session-1:001:000011",
+                    "source": "segment_neighbor",
+                    "role": "result",
+                    "session_id": "session-1",
+                    "session_label": "2026-06-25__001__mcp-timeline",
+                    "session_date": "2026-06-25",
+                    "segment_id": "001",
+                    "event_id": "000011",
+                    "event_type": "TOOL_OUTPUT",
+                    "actor": "tool",
+                    "conversation_act": "tool_output_success",
+                    "session_act": "tool_result",
+                    "title": "Tool output: call-search",
+                    "refs": {
+                        "session": str(tmp_path / "session.manifest.json"),
+                        "segment": "001.md#event-000011",
+                        "segment_index": str(tmp_path / "001.index.json"),
+                        "raw": "raw:line:11",
+                        "raw_block": "raw/blocks/001.raw.jsonl",
+                    },
+                    "freshness": {"status": "fresh"},
+                }
+            ],
+            "quality": {
+                "direct_usage_present": True,
+                "consequence_present": True,
+                "fresh_event_count": 2,
+                "stale_event_count": 0,
+                "unverifiable_event_count": 0,
+                "usage_role_fast_path_applied": True,
+                "search_has_route_index": True,
+                "search_has_route_terms": True,
+            },
+            "provider": {
+                "schema_version": 1,
+                "artifact_type": "search_provider_status",
+                "ok": True,
+                "selected_provider": "portable_sqlite",
+                "providers": {
+                    "portable_sqlite": {
+                        "provider": "portable_sqlite",
+                        "ok": True,
+                        "status": "ready",
+                        "has_route_index": True,
+                        "has_route_terms": True,
+                        "freshness": {"status": "current", "checked": True},
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(module, "graph_neighborhood", fake_graph_neighborhood)
+    monkeypatch.setattr(module, "entity_usage_audit", fake_entity_usage_audit)
+
+    timeline = module.graph_timeline(aoa_root=tmp_path / ".aoa", anchor="mcp:aoa_session_memory_mcp", kind="mcp", limit=5)
+
+    assert timeline["ok"] is True
+    assert timeline["timeline_source"] == "entity_usage_audit_fallback"
+    assert timeline["freshness"]["graph_event_node_status"] == "missing_in_graph_neighborhood"
+    assert timeline["provider"]["response_compacted"] is True
+    assert timeline["quality"]["usage_role_fast_path_applied"] is True
+    assert [event["title"] for event in timeline["events"]] == ["Tool call: aoa_session_search", "Tool output: call-search"]
+    assert all(event["type"] == "event" for event in timeline["events"])
+    assert any(ref.get("refs", {}).get("raw") == "raw:line:10" for ref in timeline["evidence_refs"])
+    assert "graph_timeline_event_nodes_missing_used_entity_usage_fallback" in timeline["diagnostics"]
 
 
 def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_path: Path, monkeypatch: Any) -> None:

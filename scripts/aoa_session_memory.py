@@ -43158,6 +43158,12 @@ def graph_collect_evidence(
 def graph_compact_node_for_packet(node: dict[str, Any], *, evidence_limit: int = 3) -> dict[str, Any]:
     compact = dict(node)
     if isinstance(compact.get("evidence_refs"), list):
+        if not isinstance(compact.get("refs"), dict) or not compact.get("refs"):
+            for ref in compact["evidence_refs"]:
+                refs = ref.get("refs") if isinstance(ref, dict) and isinstance(ref.get("refs"), dict) else {}
+                if refs:
+                    compact["refs"] = refs
+                    break
         compact["evidence_refs"] = compact["evidence_refs"][:evidence_limit]
         if len(node.get("evidence_refs", [])) > evidence_limit:
             compact["evidence_ref_count"] = len(node.get("evidence_refs", []))
@@ -43175,9 +43181,15 @@ def graph_compact_edge_for_packet(edge: dict[str, Any], *, evidence_limit: int =
     return compact
 
 
-def graph_route_signals_from_pipe(value: Any) -> list[dict[str, str]]:
+def graph_route_signals_from_values(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, str):
+        tokens = value.strip("|").split("|")
+    elif isinstance(value, (list, tuple)):
+        tokens = [str(item) for item in value if item]
+    else:
+        tokens = []
     signals: list[dict[str, str]] = []
-    for token in str(value or "").strip("|").split("|"):
+    for token in tokens:
         if ":" not in token:
             continue
         layer, key = token.split(":", 1)
@@ -43186,6 +43198,56 @@ def graph_route_signals_from_pipe(value: Any) -> list[dict[str, str]]:
         if layer_slug and key_slug:
             signals.append({"layer": layer_slug, "key": key_slug, "route_signal": route_signal_token(layer_slug, key_slug)})
     return graph_unique_records(signals, limit=80)
+
+
+def graph_event_node_from_usage_event(event: dict[str, Any]) -> dict[str, Any]:
+    refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    session_id = str(event.get("session_id") or "")
+    segment_id = str(event.get("segment_id") or "")
+    event_id = str(event.get("event_id") or "")
+    doc_id = str(event.get("doc_id") or "")
+    node_id = doc_id if doc_id.startswith("event:") else f"event:{session_id}:{segment_id}:{event_id or route_key_slug(doc_id, fallback='event')}"
+    evidence_ref = {
+        "session_id": session_id,
+        "segment_id": segment_id,
+        "event_id": event_id,
+        "doc_id": doc_id,
+        "refs": refs,
+    }
+    return {
+        "id": node_id,
+        "type": "event",
+        "label": event.get("title") or doc_id or event_id,
+        "title": event.get("title"),
+        "session_id": session_id,
+        "session_label": event.get("session_label"),
+        "session_date": event.get("session_date"),
+        "segment_id": segment_id,
+        "event_id": event_id,
+        "event_type": event.get("event_type"),
+        "family": event.get("family"),
+        "phase": event.get("phase"),
+        "actor": event.get("actor"),
+        "action": event.get("action"),
+        "outcome": event.get("outcome"),
+        "conversation_act": event.get("conversation_act"),
+        "session_act": event.get("session_act"),
+        "role": event.get("role"),
+        "source": event.get("source"),
+        "relation": event.get("relation"),
+        "distance": event.get("distance"),
+        "timestamp": event.get("timestamp") or event.get("session_date"),
+        "line": line_from_raw_ref(refs.get("raw")),
+        "matched_routes": event.get("matched_routes", []) if isinstance(event.get("matched_routes"), list) else [],
+        "route_signals": graph_route_signals_from_values(event.get("route_signals")),
+        "refs": refs,
+        "freshness": event.get("freshness"),
+        "evidence_refs": [evidence_ref],
+    }
+
+
+def graph_route_signals_from_pipe(value: Any) -> list[dict[str, str]]:
+    return graph_route_signals_from_values(value)
 
 
 def graph_from_search_results(
@@ -43534,7 +43596,86 @@ def graph_timeline(
     events.sort(key=lambda node: (str(node.get("timestamp") or ""), str(node.get("session_label") or ""), int_value(node.get("line")), str(node.get("event_id") or "")))
     selected = events[: max(1, min(int_value(limit, 40), 200))]
     evidence_refs = graph_collect_evidence(selected, [], limit=80)
-    return {
+    timeline_source = "graph_neighborhood"
+    provider_summary: dict[str, Any] = {}
+    quality: dict[str, Any] = {}
+    freshness = packet.get("freshness")
+    diagnostics = packet.get("diagnostics", []) if isinstance(packet.get("diagnostics"), list) else []
+    if not selected and resolved.get("start_node_ids"):
+        audit_limit = max(1, min(int_value(limit, 40), 200))
+        usage_audit = entity_usage_audit(
+            aoa_root=aoa_root,
+            anchor=anchor,
+            kind=route_kind,
+            limit=audit_limit,
+            per_route_limit=max(audit_limit, min(audit_limit * 2, 100)),
+            consequence_window=2,
+            document_limit=40,
+        )
+        fallback_nodes: list[dict[str, Any]] = []
+        seen_node_ids: set[str] = set()
+        for bucket in (
+            "usage_events",
+            "result_events",
+            "outcome_events",
+            "entrypoint_events",
+            "context_events",
+            "consequence_events",
+        ):
+            for event in usage_audit.get(bucket, []) if isinstance(usage_audit.get(bucket), list) else []:
+                if not isinstance(event, dict):
+                    continue
+                node = graph_event_node_from_usage_event(event)
+                node_id = str(node.get("id") or "")
+                if not node_id or node_id in seen_node_ids:
+                    continue
+                seen_node_ids.add(node_id)
+                fallback_nodes.append(node)
+        fallback_nodes.sort(key=lambda node: (str(node.get("timestamp") or ""), str(node.get("session_label") or ""), int_value(node.get("line")), str(node.get("event_id") or "")))
+        selected = fallback_nodes[:audit_limit]
+        evidence_refs = graph_collect_evidence(selected, [], limit=80)
+        if selected:
+            timeline_source = "entity_usage_audit_fallback"
+            provider = usage_audit.get("provider") if isinstance(usage_audit.get("provider"), dict) else {}
+            provider_summary = compact_search_provider_status_for_route(provider, provider_name="portable_sqlite") if provider else {}
+            provider_payload = provider_summary.get("providers", {}).get("portable_sqlite") if isinstance(provider_summary.get("providers"), dict) else {}
+            provider_freshness = provider_payload.get("freshness") if isinstance(provider_payload, dict) else {}
+            freshness = {
+                "status": "usage_route_current",
+                "timeline_source": timeline_source,
+                "graph_status": (packet.get("freshness") or {}).get("status") if isinstance(packet.get("freshness"), dict) else None,
+                "graph_source": (packet.get("freshness") or {}).get("graph_source") if isinstance(packet.get("freshness"), dict) else None,
+                "graph_event_node_status": "missing_in_graph_neighborhood",
+                "search_provider_status": provider_payload.get("status") if isinstance(provider_payload, dict) else None,
+                "search_provider_freshness_status": provider_freshness.get("status") if isinstance(provider_freshness, dict) else None,
+                "law": "timeline fallback routes through usage events; raw/segment refs remain stronger than graph packets",
+            }
+            usage_quality = usage_audit.get("quality") if isinstance(usage_audit.get("quality"), dict) else {}
+            quality = {
+                "fallback_source": "entity_usage_audit",
+                "usage_event_count": usage_audit.get("usage_event_count"),
+                "consequence_event_count": usage_audit.get("consequence_event_count"),
+                "direct_usage_present": usage_quality.get("direct_usage_present"),
+                "consequence_present": usage_quality.get("consequence_present"),
+                "fresh_event_count": usage_quality.get("fresh_event_count"),
+                "stale_event_count": usage_quality.get("stale_event_count"),
+                "unverifiable_event_count": usage_quality.get("unverifiable_event_count"),
+                "usage_role_fast_path_applied": usage_quality.get("usage_role_fast_path_applied"),
+                "search_has_route_index": usage_quality.get("search_has_route_index"),
+                "search_has_route_terms": usage_quality.get("search_has_route_terms"),
+            }
+            diagnostics = [
+                *diagnostics,
+                *(usage_audit.get("diagnostics", []) if isinstance(usage_audit.get("diagnostics"), list) else []),
+                "graph_timeline_event_nodes_missing_used_entity_usage_fallback",
+            ]
+        else:
+            diagnostics = [
+                *diagnostics,
+                *(usage_audit.get("diagnostics", []) if isinstance(usage_audit.get("diagnostics"), list) else []),
+                "graph_timeline_event_nodes_missing_usage_fallback_empty",
+            ]
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_timeline",
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
@@ -43544,13 +43685,19 @@ def graph_timeline(
         "truth_status": "graph_timeline_packet_not_reviewed_truth",
         "anchor": anchor,
         **trace_kind_payload_fields(kind, route_kind),
+        "timeline_source": timeline_source,
         "event_count": len(selected),
         "events": [graph_compact_node_for_packet(event) for event in selected],
         "resolved": resolved,
         "evidence_refs": evidence_refs,
-        "freshness": packet.get("freshness"),
-        "diagnostics": packet.get("diagnostics", []),
+        "freshness": freshness,
+        "diagnostics": diagnostics,
     }
+    if provider_summary:
+        payload["provider"] = provider_summary
+    if quality:
+        payload["quality"] = quality
+    return payload
 
 
 def graph_shortest_path(
