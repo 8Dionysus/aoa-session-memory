@@ -10431,6 +10431,7 @@ def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Pa
     recommendations = {item["id"]: item for item in audit["recommendations"]}
     sequence = recommendations["graph_event_sequence_edge_projection"]
     search_compaction = recommendations["search_sqlite_physical_compaction"]
+    raw_text_fallback = recommendations["search_raw_text_fallback_dependency"]
 
     assert sequence["status"] == "policy_applied_after_rebuild_existing_store_mixed"
     assert sequence["omitted_edge_types"] == ["next_event", "previous_event"]
@@ -10442,6 +10443,10 @@ def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Pa
     assert "search-sqlite-compact" in search_compaction["next_route"]
     assert search_compaction["reclaim_ratio"] == 0.0
     assert "raw/session evidence is untouched" in search_compaction["quality_tradeoff"]
+    assert raw_text_fallback["status"] == "requires_shard_materialization"
+    assert raw_text_fallback["estimated_reclaimable_bytes"] == 0
+    assert raw_text_fallback["estimate_status"] == "route_dependency_not_reclaim_estimate"
+    assert "search-shards" in raw_text_fallback["next_route"]
 
 
 def test_graph_pressure_summary_does_not_mark_missing_projection_normal(tmp_path: Path, monkeypatch: Any) -> None:
@@ -11824,6 +11829,15 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["default_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
     assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["rollback_flag"] == "--no-shards"
     assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["raw_text_query_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert (
+        ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["raw_text_fallback_dependency_status"]
+        == "monolith_required_for_raw_text_query"
+    )
+    assert ops["search_shards"]["raw_text_fallback_dependency"]["structured_only_shard_count"] == 2
+    assert ops["search_shards"]["raw_text_fallback_dependency"]["unsupported_shards"] == ["month/2026-05", "month/2026-06"]
+    assert ops["search_shards"]["raw_text_fallback_dependency"]["route_blocked_shards"] == ["month/2026-05", "month/2026-06"]
+    assert ops["search_shards"]["raw_text_fallback_dependency"]["scoped_full_text_next_commands"][0]["shard"] == "month/2026-05"
+    assert "--full-text" in ops["search_shards"]["raw_text_fallback_dependency"]["scoped_full_text_next_commands"][0]["command"]
     assert ops["search_shards"]["largest_shards"][0]["storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["exists"] is True
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
@@ -11918,6 +11932,16 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert raw_text_fallback["search_projection"]["requested_mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
     assert raw_text_fallback["search_projection"]["fallback_reason"] == "search_shard_fanout_raw_text_uses_monolith_fallback"
     assert raw_text_fallback["search_projection"]["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["status"] == "monolith_required_for_raw_text_query"
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["unsupported_shards"] == ["month/2026-06"]
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["nonmaterialized_shards"] == ["month/2026-05"]
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["route_blocked_shards"] == ["month/2026-05", "month/2026-06"]
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["monolith_fallback_db_path"] == str(module.search_db_path(aoa_root))
+    assert (
+        raw_text_fallback["search_projection"]["raw_text_fallback"]["scoped_full_text_next_commands"][0]["command"]
+        == module.search_shard_full_text_command(aoa_root, "month/2026-05")
+    )
+    assert raw_text_fallback["search_projection"]["raw_text_fallback"]["global_full_text_next_command"] == module.search_shard_full_text_command(aoa_root)
     assert raw_text_fallback["result_count"] >= 1
 
     full_text_shard = module.materialize_search_shards(

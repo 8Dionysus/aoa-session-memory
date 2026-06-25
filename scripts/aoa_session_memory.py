@@ -25509,6 +25509,112 @@ def expected_search_document_storage_profile_from_metadata(metadata: dict[str, A
     return SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
 
 
+def search_shard_full_text_command(aoa_root: Path, shard_key: str | None = None) -> str:
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "search-shards",
+        "all",
+        "--aoa-root",
+        str(aoa_root),
+    ]
+    if shard_key:
+        command.extend(["--shard", shard_key])
+    command.extend(["--full-text", "--write-report"])
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def search_raw_text_fallback_route_packet(
+    *,
+    aoa_root: Path,
+    shard_rows: list[dict[str, Any]] | None = None,
+    unsupported_shards: list[str] | None = None,
+    nonmaterialized_shards: list[str] | None = None,
+    candidate_shard_count: int | None = None,
+    queried_shard_count: int | None = None,
+) -> dict[str, Any]:
+    rows = [item for item in shard_rows or [] if isinstance(item, dict)]
+    normalized_rows: list[dict[str, Any]] = []
+    for item in rows:
+        shard = str(item.get("shard") or "")
+        if not shard:
+            continue
+        raw_support = str(item.get("raw_text_query_support") or item.get("shard_raw_text_query_support") or "").strip()
+        if not raw_support:
+            db_path = Path(str(item.get("shard_db_path") or item.get("db_path") or ""))
+            raw_support = search_raw_text_query_support_from_metadata(search_db_metadata_at_path(db_path)) if db_path else ""
+        materialized = bool(item.get("materialized"))
+        status = str(item.get("status") or ("current" if materialized else "missing"))
+        normalized_rows.append(
+            {
+                "shard": shard,
+                "status": status,
+                "materialized": materialized,
+                "raw_text_query_support": raw_support,
+                "db_path": str(item.get("shard_db_path") or item.get("db_path") or ""),
+                "storage_profile": str(item.get("storage_profile") or ""),
+            }
+        )
+    unsupported_set = {str(value) for value in unsupported_shards or [] if str(value)}
+    if not unsupported_set:
+        unsupported_set = {
+            item["shard"]
+            for item in normalized_rows
+            if item.get("raw_text_query_support") != SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
+        }
+    nonmaterialized_set = {str(value) for value in nonmaterialized_shards or [] if str(value)}
+    unsupported = sorted(unsupported_set)
+    route_blocked = sorted(unsupported_set | nonmaterialized_set)
+    full_text = [item for item in normalized_rows if item.get("raw_text_query_support") == SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL]
+    structured_only = [item for item in normalized_rows if item.get("raw_text_query_support") != SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL]
+    materialized_count = sum(1 for item in normalized_rows if item.get("materialized") or item.get("status") == "current")
+    if not normalized_rows:
+        status = "no_shards"
+    elif route_blocked:
+        status = "monolith_required_for_raw_text_query"
+    elif len(full_text) == len(normalized_rows):
+        status = "shard_full_text_ready"
+    else:
+        status = "mixed_or_incomplete"
+    scoped_commands = [
+        {
+            "shard": shard,
+            "command": search_shard_full_text_command(aoa_root, shard),
+        }
+        for shard in route_blocked[:8]
+    ]
+    return {
+        "status": status,
+        "raw_text_query_support": SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
+        if status == "shard_full_text_ready"
+        else SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+        "monolith_fallback_db_path": str(search_db_path(aoa_root)),
+        "candidate_shard_count": candidate_shard_count if candidate_shard_count is not None else len(normalized_rows),
+        "queried_shard_count": queried_shard_count if queried_shard_count is not None else len(normalized_rows),
+        "materialized_shard_count": materialized_count,
+        "full_text_shard_count": len(full_text),
+        "structured_only_shard_count": len(structured_only),
+        "unsupported_shard_count": len(unsupported),
+        "unsupported_shards": unsupported,
+        "nonmaterialized_shard_count": len(nonmaterialized_set),
+        "nonmaterialized_shards": sorted(nonmaterialized_set),
+        "route_blocked_shard_count": len(route_blocked),
+        "route_blocked_shards": route_blocked,
+        "scoped_full_text_next_commands": scoped_commands,
+        "global_full_text_next_command": search_shard_full_text_command(aoa_root),
+        "quality_tradeoff": "raw-text recall is preserved by monolith fallback until a scoped full-text shard is explicitly materialized.",
+        "weight_tradeoff": "structured shards stay slim; full-text shards add FTS and compressed-body weight, so use scoped full-text shards for repeated literal raw-text work.",
+        "authority_boundary": "monolith and shards are generated search projections; raw transcript and session indexes remain the evidence authority.",
+        "next_route": (
+            "use the scoped full-text command for repeated literal raw-text queries in the affected shard"
+            if unsupported
+            else "use shard fan-out for raw-text queries"
+            if status == "shard_full_text_ready"
+            else "materialize search shards before relying on shard raw-text route"
+        ),
+    }
+
+
 def search_db_metadata_at_path(db_path: Path) -> dict[str, Any]:
     if not db_path.exists():
         return {}
@@ -30892,13 +30998,14 @@ def search_sessions_shard_fanout(
         except ValueError:
             session_scope_record = {}
         session_scope_label = str(session_scope_record.get("session_label") or "")
+        session_scope_date = session_record_date(session_scope_record) if session_scope_record else ""
         if not session_scope_label and session_filter_column == "documents.session_label":
             session_scope_label = session_filter_value
-        session_scope_date = session_record_date(session_scope_record) if session_scope_record else ""
         if session_scope_label or session_scope_date:
             session_scope_shard = search_shard_key_for_session(session_scope_label, session_scope_date)
     candidate_shards: list[dict[str, Any]] = []
     uses_fts = bool(fts_query_from_user(query))
+    skipped_raw_text_nonmaterialized_shards: list[str] = []
     for item in shards:
         if not isinstance(item, dict):
             continue
@@ -30912,6 +31019,7 @@ def search_sessions_shard_fanout(
         if session_scope_shard and shard_key != session_scope_shard:
             continue
         if not shard_materialized and uses_fts:
+            skipped_raw_text_nonmaterialized_shards.append(shard_key)
             continue
         candidate_shards.append(item)
     candidate_shards.sort(key=lambda item: str(item.get("shard") or ""), reverse=True)
@@ -30924,7 +31032,7 @@ def search_sessions_shard_fanout(
         if isinstance(item, dict) and not item.get("materialized") and str(item.get("shard") or "")
     ]
     if not queried_shards:
-        return search_shard_fanout_unavailable_payload(
+        payload = search_shard_fanout_unavailable_payload(
             reason="search_shard_fanout_no_materialized_shards_fallback_monolith",
             aoa_root=aoa_root,
             query=query,
@@ -30958,6 +31066,15 @@ def search_sessions_shard_fanout(
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             query_timeout_ms=query_timeout_ms,
         )
+        if uses_fts or skipped_raw_text_nonmaterialized_shards:
+            payload.setdefault("search_projection", {})["raw_text_fallback"] = search_raw_text_fallback_route_packet(
+                aoa_root=aoa_root,
+                shard_rows=[],
+                nonmaterialized_shards=skipped_raw_text_nonmaterialized_shards,
+                candidate_shard_count=0,
+                queried_shard_count=0,
+            )
+        return payload
     effective_limit = max(1, int_value(limit, 20))
     if uses_fts:
         unsupported_raw_text_shards: list[str] = []
@@ -30970,6 +31087,14 @@ def search_sessions_shard_fanout(
             if raw_text_support != SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL:
                 unsupported_raw_text_shards.append(shard_key)
         if unsupported_raw_text_shards:
+            raw_text_fallback = search_raw_text_fallback_route_packet(
+                aoa_root=aoa_root,
+                shard_rows=queried_shards,
+                unsupported_shards=unsupported_raw_text_shards,
+                nonmaterialized_shards=skipped_raw_text_nonmaterialized_shards,
+                candidate_shard_count=len(candidate_shards),
+                queried_shard_count=len(queried_shards),
+            )
             payload = search_shard_fanout_unavailable_payload(
                 reason="search_shard_fanout_raw_text_uses_monolith_fallback",
                 aoa_root=aoa_root,
@@ -31006,6 +31131,7 @@ def search_sessions_shard_fanout(
             )
             payload.setdefault("search_projection", {})["unsupported_raw_text_shards"] = unsupported_raw_text_shards
             payload.setdefault("search_projection", {})["raw_text_query_support"] = SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+            payload.setdefault("search_projection", {})["raw_text_fallback"] = raw_text_fallback
             return payload
     structured_route_filter = bool(
         any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, usage_role, task_episode_id, route_layer, route_signal])
@@ -40714,6 +40840,38 @@ def search_sqlite_physical_compaction_recommendation(plan: dict[str, Any]) -> di
     }
 
 
+def search_raw_text_fallback_dependency_recommendation(packet: dict[str, Any]) -> dict[str, Any]:
+    status = str(packet.get("status") or "unknown")
+    if status == "shard_full_text_ready":
+        recommendation_status = "scoped_full_text_ready"
+        next_route = "raw-text shard fan-out is available for materialized shard scope; keep monolith as generated fallback until broader route benchmarks justify removal"
+    elif status == "monolith_required_for_raw_text_query":
+        recommendation_status = "controlled_monolith_dependency"
+        next_route = str(packet.get("next_route") or "use scoped full-text shard materialization for repeated literal raw-text work")
+    elif status == "no_shards":
+        recommendation_status = "requires_shard_materialization"
+        next_route = "run search-shards all --write-report before evaluating raw-text shard fallback dependency"
+    else:
+        recommendation_status = "mixed_projection_review"
+        next_route = str(packet.get("next_route") or "refresh search catalog and inspect shard raw-text support")
+    return {
+        "status": recommendation_status,
+        "raw_text_fallback_status": status,
+        "quality_tradeoff": packet.get("quality_tradeoff"),
+        "speed_tradeoff": "structured routes stay fast and slim; literal raw-text queries use monolith fallback unless scoped full-text shards are materialized",
+        "weight_tradeoff": packet.get("weight_tradeoff"),
+        "estimated_reclaimable_bytes": 0,
+        "estimated_reclaimable_human": "0 B",
+        "estimate_status": "route_dependency_not_reclaim_estimate",
+        "unsupported_shard_count": packet.get("unsupported_shard_count"),
+        "structured_only_shard_count": packet.get("structured_only_shard_count"),
+        "full_text_shard_count": packet.get("full_text_shard_count"),
+        "scoped_full_text_next_commands": packet.get("scoped_full_text_next_commands"),
+        "global_full_text_next_command": packet.get("global_full_text_next_command"),
+        "next_route": next_route,
+    }
+
+
 def storage_audit(
     *,
     aoa_root: Path,
@@ -40766,6 +40924,12 @@ def storage_audit(
         method="vacuum-into",
         target_path=aoa_root / DIAGNOSTICS_ROOT / "aoa-search.sqlite3.vacuum-copy",
         min_free_after_gb=SEARCH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    )
+    search_shard_projection = session_memory_search_shard_projection_summary(aoa_root)
+    search_raw_text_fallback = (
+        search_shard_projection.get("raw_text_fallback_dependency")
+        if isinstance(search_shard_projection.get("raw_text_fallback_dependency"), dict)
+        else search_raw_text_fallback_route_packet(aoa_root=aoa_root)
     )
     sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
         search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
@@ -40855,6 +41019,10 @@ def storage_audit(
                 "next_route": "run graph-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient",
             },
             {"id": "search_sqlite_physical_compaction", **search_sqlite_physical_compaction_recommendation(search_sqlite_plan)},
+            {
+                "id": "search_raw_text_fallback_dependency",
+                **search_raw_text_fallback_dependency_recommendation(search_raw_text_fallback),
+            },
             {
                 "id": "raw_block_offset_or_compressed_store",
                 "status": "current_no_plain_duplicates" if raw_block_reclaim_bytes == 0 else "planned_safe_route",
@@ -44525,6 +44693,14 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         materialized_shard_count=materialized_shard_count,
         shard_rows=shard_rows,
     )
+    raw_text_fallback_dependency = search_raw_text_fallback_route_packet(
+        aoa_root=aoa_root,
+        shard_rows=shard_rows,
+        candidate_shard_count=shard_count,
+        queried_shard_count=materialized_shard_count,
+    )
+    fast_path_defaults.setdefault("agent_event_routes", {})["raw_text_fallback_dependency_status"] = raw_text_fallback_dependency["status"]
+    fast_path_defaults.setdefault("agent_event_routes", {})["raw_text_fallback_dependency_next_route"] = raw_text_fallback_dependency["next_route"]
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_shard_projection_summary",
@@ -44561,6 +44737,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         "noncurrent_shards": noncurrent_shards[:8],
         "latest_materialization": latest_materialization,
         "fast_path_defaults": fast_path_defaults,
+        "raw_text_fallback_dependency": raw_text_fallback_dependency,
         "raw_text_query_route": "structured shards use monolith fallback for raw-text queries unless materialized with --full-text",
         "exact_refresh_command": f"python3 scripts/aoa_session_memory.py search-catalog --aoa-root {aoa_root} --refresh",
         "exact_materialize_command": f"python3 scripts/aoa_session_memory.py search-shards all --aoa-root {aoa_root} --write-report",
