@@ -599,7 +599,11 @@ directly. The wrapper still uses `abyss-machine resource launch --kind indexing
 `diagnostics/*__auto-maintenance-resource-<profile>.json` when the host resource
 gate blocks or denies the child before `auto-maintenance` starts. This keeps
 heavier work outside hooks and MCP reads without hiding resource-pressure
-deferrals from agents. Resource-blocked backlog and deep runs can fall back to a
+deferrals from agents. For `catchup all`, the wrapper reuses the live-tail
+packet and launches the targeted `index-maintenance <session>
+--skip-graph-repair --skip-token-accounting` route when the quiet window is
+ready, instead of starting broad `auto-maintenance catchup all` for a single
+deferred live session. Resource-blocked backlog and deep runs can fall back to a
 tightly capped probe-class graph drip instead of leaving graph maintenance idle:
 backlog enables this explicitly from its timer/service flags, while the `deep`
 profile enables it by default because unattended heavy indexing is commonly

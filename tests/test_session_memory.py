@@ -9681,6 +9681,94 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
 
 
+def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_label = "2026-06-18__001__live-session"
+    calls: dict[str, Any] = {}
+
+    def fake_maintenance_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "recommendation": "run_live_catchup",
+            "live_tail": {
+                "status": "ready_for_catchup",
+                "catchup_ready_to_run": True,
+                "catchup_command_kind": "targeted_index_maintenance_without_graph",
+                "catchup_scope": "single_search_deferred_session",
+                "catchup_target": session_label,
+                "catchup_target_session_id": "live-1",
+                "catchup_target_session_label": session_label,
+                "catchup_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "index-maintenance",
+                    session_label,
+                    "--workspace-root",
+                    str(workspace),
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--apply",
+                    "--skip-graph-repair",
+                    "--skip-token-accounting",
+                    "--write-report",
+                ],
+                "graph_followup": "graph repair is intentionally deferred",
+            },
+        }
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls["command"] = command
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-06-25T22:00:00-06:00",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {"ok": True, "returncode": 0, "stdout_tail": "{\"ok\": true}"},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="timer_catchup",
+        budget_seconds=900,
+        resource_force=True,
+    )
+
+    separator = calls["command"].index("--")
+    child = calls["command"][separator + 1 :]
+    assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["live_tail_fast_path"]["used"] is True
+    assert payload["live_tail_fast_path"]["command_kind"] == "targeted_index_maintenance_without_graph"
+    assert payload["live_tail_fast_path"]["target"] == session_label
+    assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
+    assert "--force" in calls["command"]
+    assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]
+    assert "auto-maintenance" not in child
+    assert "--skip-token-accounting" in child
+    assert "--skip-graph-repair" in child
+    assert "--budget-seconds" in child
+    assert "900" in child
+    assert "--reason" in child
+    assert "auto_maintenance_resource:catchup:timer_catchup" in child
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
 def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

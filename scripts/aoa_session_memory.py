@@ -18769,10 +18769,33 @@ def auto_maintenance_resource_launcher(
     write_report: bool,
     reason: str | None = None,
     extra_auto_args: Iterable[str] | None = None,
+    child_command: Iterable[str] | None = None,
     resource_force: bool = False,
     resource_binary: str = "abyss-machine",
 ) -> list[str]:
     settings = auto_maintenance_profile(profile)
+    if child_command is None:
+        child_args = [
+            "python3",
+            str(Path(__file__).resolve()),
+            "auto-maintenance",
+            profile,
+            target,
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+        ]
+        if apply:
+            child_args.append("--apply")
+        if write_report:
+            child_args.append("--write-report")
+        if reason:
+            child_args.extend(["--reason", reason])
+        if extra_auto_args:
+            child_args.extend(str(item) for item in extra_auto_args)
+    else:
+        child_args = [str(item) for item in child_command]
     command = [
         resource_binary,
         "resource",
@@ -18785,33 +18808,77 @@ def auto_maintenance_resource_launcher(
     ]
     if resource_force:
         command.append("--force")
-    command.extend(
-        [
-        "--timeout",
-        str(settings["timeout_sec"]),
-        "--success-on-block",
-        "--json",
-        "--",
-        "python3",
-        str(Path(__file__).resolve()),
-        "auto-maintenance",
-        profile,
-        target,
-        "--workspace-root",
-        str(workspace_root),
-        "--aoa-root",
-        str(aoa_root),
-        ]
-    )
-    if apply:
-        command.append("--apply")
-    if write_report:
-        command.append("--write-report")
-    if reason:
-        command.extend(["--reason", reason])
-    if extra_auto_args:
-        command.extend(str(item) for item in extra_auto_args)
+    command.extend(["--timeout", str(settings["timeout_sec"]), "--success-on-block", "--json", "--", *child_args])
     return command
+
+
+def normalize_session_memory_child_command(command: Iterable[Any]) -> list[str]:
+    parts = [str(item) for item in command]
+    if len(parts) >= 2 and parts[0] == "python3" and parts[1] in {"scripts/aoa_session_memory.py", "./scripts/aoa_session_memory.py"}:
+        parts[1] = str(Path(__file__).resolve())
+    return parts
+
+
+def append_child_arg(command: list[str], flag: str, value: Any | None) -> None:
+    if value is None or flag in command:
+        return
+    command.extend([flag, str(value)])
+
+
+def auto_maintenance_live_tail_resource_route(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    profile: str,
+    target: str,
+    apply: bool,
+    since: str | None,
+    since_days: int | None,
+    until: str | None,
+    limit: int | None,
+    repair_indexes: bool | None,
+    repair_graph: bool | None,
+    reason: str,
+    budget_seconds: float | None,
+) -> dict[str, Any]:
+    if profile != "catchup" or target != "all" or not apply:
+        return {"used": False, "reason": "not_catchup_all_apply"}
+    if since is not None or since_days is not None or until is not None or limit is not None:
+        return {"used": False, "reason": "explicit_selection_filters_present"}
+    if repair_indexes is False:
+        return {"used": False, "reason": "index_repair_disabled"}
+    if repair_graph is True:
+        return {"used": False, "reason": "explicit_graph_repair_requested"}
+    try:
+        status = session_memory_maintenance_status(workspace_root=workspace_root, aoa_root=aoa_root, include_timers=False)
+    except Exception as exc:
+        return {"used": False, "reason": "maintenance_status_failed", "diagnostics": [f"live_tail_status_failed:{exc}"]}
+    live_tail = status.get("live_tail") if isinstance(status.get("live_tail"), dict) else {}
+    command = live_tail.get("catchup_command") if isinstance(live_tail.get("catchup_command"), list) else []
+    command_kind = str(live_tail.get("catchup_command_kind") or "")
+    if status.get("recommendation") != "run_live_catchup":
+        return {"used": False, "reason": "recommendation_not_live_catchup", "recommendation": status.get("recommendation")}
+    if not live_tail.get("catchup_ready_to_run"):
+        return {"used": False, "reason": "live_tail_not_ready", "live_tail_status": live_tail.get("status")}
+    if command_kind not in {"targeted_index_maintenance_without_graph", "bounded_index_maintenance_without_graph"}:
+        return {"used": False, "reason": "unsupported_live_tail_command_kind", "command_kind": command_kind}
+    if not command:
+        return {"used": False, "reason": "missing_live_tail_command"}
+    child_command = normalize_session_memory_child_command(command)
+    append_child_arg(child_command, "--budget-seconds", budget_seconds)
+    append_child_arg(child_command, "--reason", f"auto_maintenance_resource:{profile}:{reason}")
+    return {
+        "used": True,
+        "reason": "ready_live_tail_catchup",
+        "command_kind": command_kind,
+        "scope": live_tail.get("catchup_scope"),
+        "target": live_tail.get("catchup_target"),
+        "target_session_id": live_tail.get("catchup_target_session_id"),
+        "target_session_label": live_tail.get("catchup_target_session_label"),
+        "child_command": child_command,
+        "exact_child_command": shlex.join(child_command),
+        "graph_followup": live_tail.get("graph_followup"),
+    }
 
 
 def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
@@ -20138,6 +20205,26 @@ def auto_maintenance_resource_launch(
         budget_seconds=budget_seconds,
         progress_every=progress_every,
     )
+    live_tail_fast_path = auto_maintenance_live_tail_resource_route(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        profile=profile,
+        target=target,
+        apply=apply,
+        since=since,
+        since_days=since_days,
+        until=until,
+        limit=limit,
+        repair_indexes=repair_indexes,
+        repair_graph=repair_graph,
+        reason=reason,
+        budget_seconds=budget_seconds,
+    )
+    live_tail_child_command = (
+        live_tail_fast_path.get("child_command")
+        if live_tail_fast_path.get("used") and isinstance(live_tail_fast_path.get("child_command"), list)
+        else None
+    )
     command = auto_maintenance_resource_launcher(
         profile=profile,
         target=target,
@@ -20146,7 +20233,8 @@ def auto_maintenance_resource_launch(
         apply=apply,
         write_report=write_report,
         reason=reason,
-        extra_auto_args=extra_args,
+        extra_auto_args=None if live_tail_child_command else extra_args,
+        child_command=live_tail_child_command,
         resource_force=resource_force,
         resource_binary=resource_binary,
     )
@@ -20341,6 +20429,7 @@ def auto_maintenance_resource_launch(
         "profile": profile,
         "target": target,
         "reason": reason,
+        "live_tail_fast_path": live_tail_fast_path,
         "graph_drip_on_block": effective_graph_drip_on_block,
         "graph_drip_on_block_source": "profile_default" if graph_drip_on_block is None else "explicit",
         "fallback_graph_drip": fallback_graph_drip,

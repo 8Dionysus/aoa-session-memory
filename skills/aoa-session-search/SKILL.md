@@ -129,6 +129,10 @@ combination so a partial dirty selection cannot replace a full shard DB.
 By default this route skips rows still marked `deferred_live`; run the
 live-tail catch-up route first, or pass `--include-deferred-live` only as an
 explicit operator override.
+Timer/resource catch-up follows the same boundary: `auto-maintenance-resource
+catchup all` must wrap the targeted live-tail `index-maintenance <session>
+--skip-graph-repair --skip-token-accounting` command when it is ready, instead
+of broadening one deferred live session into full catch-up.
 
 When only the generated entity inventory is stale, refresh it without touching
 session documents:

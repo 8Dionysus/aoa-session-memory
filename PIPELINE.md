@@ -665,6 +665,13 @@ hooks and MCP read paths light while allowing the machine resource layer to use
 available CPU, memory, IO, and thermal headroom without hiding resource-pressure
 deferrals. `aoa_session_memory` MCP remains read-only and plan-only; it may
 report freshness and the maintenance route, but it must not run maintenance.
+For `catchup all`, the resource wrapper first checks the same `live_tail`
+packet as `maintenance-status`: when a deferred search session is already past
+the quiet window, the child command is the targeted
+`index-maintenance <session> --skip-graph-repair --skip-token-accounting`
+route, not broad `auto-maintenance catchup all`. This keeps timer catch-up from
+turning a single live-tail repair into bulk archive selection or token-ledger
+backfill.
 For backlog and deep resource-blocked runs, graph drip is the safe fallback
 route: backlog can enable it from timer/service flags, and `deep` enables it by
 profile default because unattended heavy indexing is commonly capped by the host

@@ -147,6 +147,11 @@ Build the `.aoa` session-memory mechanism end to end:
   freshness rows with `waiting_for_quiet_window` vs `ready_for_catchup`,
   quiet-window remaining seconds, `next_ready_at`, and the typed catch-up
   command so agents do not confuse non-actionable live tail with broken search;
+  `auto-maintenance-resource catchup all` uses that same packet as a fast-path
+  preflight and wraps targeted `index-maintenance <session>
+  --skip-graph-repair --skip-token-accounting` when live-tail is ready, instead
+  of launching broad `auto-maintenance catchup all` for a single deferred live
+  session;
   2026-06-21 live proof: manual `graph-maintenance all --apply` behind an
   active `auto-maintenance:hot` lease returned `mutates=false` and persisted
   `last_conflict` with `blocking_owner=auto-maintenance:hot`,
@@ -773,6 +778,16 @@ Last observed result:
   touched only `entity_registry` and `search`. The previous fallback route for
   the same class of source-card change took `84.125s`, including `27.019s` of
   unrelated session bulk indexing and `56.945s` of registry refresh.
+- 2026-06-25 resource live-tail fast-path proof: a timer-driven
+  `auto-maintenance-resource catchup all` launched broad
+  `auto-maintenance catchup all`, selected `285` sessions, touched
+  `token_accounting`, and took `377.7s` for a situation where
+  `maintenance-status` already exposed a targeted live-tail command. The
+  resource wrapper now preflights that packet and, when ready, wraps
+  `index-maintenance <session> --skip-graph-repair --skip-token-accounting`
+  under `abyss-machine resource launch` instead of broad catch-up. The regression
+  test proves the child command contains no `auto-maintenance` token and carries
+  the bounded budget/reason into the targeted route.
 - 2026-06-25 operations telemetry proof: `search-index` and `search-shards`
   reports now include bounded `slow_sessions` rows with session label,
   elapsed time, document count, docs/sec, raw-text status, and shard when
