@@ -3640,6 +3640,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     parser = module.build_parser()
     assert parser.parse_args(["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
+    assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer"]).use_shards is True
+    assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer", "--no-shards"]).use_shards is False
+    assert parser.parse_args(["answer-neighborhood", "--session", "latest"]).use_shards is True
+    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-shards"]).use_shards is False
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
     assert scenario_audit["quality"]["sample_count"] == 2
@@ -11976,7 +11980,6 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
         limit=5,
-        use_shards=True,
         explain=True,
     )
     assert answers["ok"] is True
@@ -11985,6 +11988,17 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert answers["cost_profile"]["uses_fts"] is False
     assert answers["cost_profile"]["hydrates_body"] is False
     assert answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+    monolith_answers = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_answer"],
+        limit=5,
+        use_shards=False,
+        explain=True,
+    )
+    assert monolith_answers["ok"] is True
+    assert monolith_answers["search_projection"] == {}
+    assert monolith_answers["cost_profile"].get("uses_shards") is not True
+    assert monolith_answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
 
     progress = module.agent_event_route_search(
         aoa_root=aoa_root,

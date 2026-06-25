@@ -31716,6 +31716,7 @@ def agent_event_shard_next_expansion_command(
     classes: list[str],
     include_stream_copies: bool,
     max_shards: int,
+    query_timeout_ms: int | None = None,
 ) -> str:
     args = [
         "python3",
@@ -31727,6 +31728,10 @@ def agent_event_shard_next_expansion_command(
     ]
     if query:
         args.extend(["--query", query])
+    effective_query_timeout_ms = normalized_search_fts_query_timeout_ms(query_timeout_ms) if query_timeout_ms is not None else 0
+    if effective_query_timeout_ms > 0:
+        expanded_timeout_ms = max(effective_query_timeout_ms * 4, 30000)
+        args.extend(["--query-timeout-ms", str(expanded_timeout_ms)])
     if session:
         args.extend(["--session", session])
     if task_episode_id:
@@ -31829,6 +31834,46 @@ def agent_event_cost_profile_summary(payloads: list[dict[str, Any]]) -> dict[str
     }
 
 
+def agent_event_bounded_timeout_summary(
+    bounded_timeouts: list[dict[str, Any]],
+    *,
+    query: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    include_stream_copies: bool,
+    max_shards: int,
+) -> dict[str, Any]:
+    if not bounded_timeouts:
+        return {}
+    expansion_commands = [
+        str(item.get("next_expansion_command") or "")
+        for item in bounded_timeouts
+        if isinstance(item, dict) and item.get("next_expansion_command")
+    ]
+    timeout_ms = max(
+        (int_value(item.get("query_timeout_ms"), 0) for item in bounded_timeouts if isinstance(item, dict)),
+        default=0,
+    )
+    summary = {
+        "status": SEARCH_FTS_QUERY_TIMEOUT_STATUS,
+        "items": bounded_timeouts,
+        "next_route": "Use structured agent-event filters without a text query, or run an explicit offline raw-text scan.",
+        "next_expansion_command": agent_event_shard_next_expansion_command(
+            query=query,
+            session=session,
+            task_episode_id=task_episode_id,
+            classes=classes,
+            include_stream_copies=include_stream_copies,
+            max_shards=max_shards,
+            query_timeout_ms=timeout_ms or None,
+        ),
+    }
+    if expansion_commands:
+        summary["fallback_next_expansion_commands"] = expansion_commands
+    return summary
+
+
 def search_agent_event_documents_with_shards(
     *,
     aoa_root: Path,
@@ -31911,11 +31956,15 @@ def search_agent_event_documents_with_shards(
         "search_projection": projection,
         "cost_profile": cost_profile,
         "provider": provider_payload,
-        "bounded_timeout": {
-            "status": SEARCH_FTS_QUERY_TIMEOUT_STATUS,
-            "items": bounded_timeouts,
-            "next_route": "Use structured agent-event filters without a text query, or run an explicit offline raw-text scan.",
-        } if bounded_timeouts else {},
+        "bounded_timeout": agent_event_bounded_timeout_summary(
+            bounded_timeouts,
+            query=query,
+            session=session,
+            task_episode_id=task_episode_id,
+            classes=classes,
+            include_stream_copies=include_stream_copies,
+            max_shards=max_shards,
+        ),
         "result_count": len(results),
         "results": results,
         "diagnostics": diagnostics,
@@ -32188,7 +32237,7 @@ def agent_event_route_search(
     provider: str = "portable_sqlite",
     explain: bool = True,
     include_stream_copies: bool = False,
-    use_shards: bool = False,
+    use_shards: bool = True,
     max_shards: int = 24,
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
@@ -32321,7 +32370,7 @@ def agent_event_windows(
     after: int = 6,
     provider: str = "portable_sqlite",
     include_stream_copies: bool = False,
-    use_shards: bool = False,
+    use_shards: bool = True,
     max_shards: int = 24,
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
@@ -50832,7 +50881,7 @@ def command_agent_responses(args: argparse.Namespace) -> int:
         provider=args.provider,
         explain=args.explain,
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
-        use_shards=bool(getattr(args, "use_shards", False)),
+        use_shards=bool(getattr(args, "use_shards", True)),
         max_shards=int_value(getattr(args, "max_shards", 24), 24),
         query_timeout_ms=getattr(args, "query_timeout_ms", SEARCH_FTS_QUERY_TIMEOUT_MS),
     )
@@ -50855,7 +50904,7 @@ def command_agent_event_windows(args: argparse.Namespace) -> int:
         after=args.after,
         provider=args.provider,
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
-        use_shards=bool(getattr(args, "use_shards", False)),
+        use_shards=bool(getattr(args, "use_shards", True)),
         max_shards=int_value(getattr(args, "max_shards", 24), 24),
         query_timeout_ms=getattr(args, "query_timeout_ms", SEARCH_FTS_QUERY_TIMEOUT_MS),
     )
@@ -55820,6 +55869,23 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def add_search_shard_route_controls(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--use-shards",
+        dest="use_shards",
+        action="store_true",
+        default=True,
+        help="Use materialized monthly shard DBs through the generated search catalog when available (default).",
+    )
+    parser.add_argument(
+        "--no-shards",
+        dest="use_shards",
+        action="store_false",
+        help="Force the monolithic portable SQLite projection for debugging or rollback.",
+    )
+    parser.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AoA Codex session memory archive hooks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -56493,8 +56559,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_responses.add_argument("--verification-state", choices=["any", "verified"], default="any")
     agent_responses.add_argument("--failure-state", choices=["any", "failed", "blocked"], default="any")
     agent_responses.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
-    agent_responses.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
-    agent_responses.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    add_search_shard_route_controls(agent_responses)
     agent_responses.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_responses.add_argument("--explain", action="store_true")
     agent_responses.set_defaults(func=command_agent_responses)
@@ -56509,8 +56574,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_closeouts.add_argument("--session", dest="session_filter")
     agent_closeouts.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     agent_closeouts.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
-    agent_closeouts.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
-    agent_closeouts.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    add_search_shard_route_controls(agent_closeouts)
     agent_closeouts.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_closeouts.add_argument("--explain", action="store_true")
     agent_closeouts.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_final_closeout"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
@@ -56525,8 +56589,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_progress.add_argument("--session", dest="session_filter")
     agent_progress.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     agent_progress.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
-    agent_progress.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
-    agent_progress.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    add_search_shard_route_controls(agent_progress)
     agent_progress.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     agent_progress.add_argument("--explain", action="store_true")
     agent_progress.set_defaults(func=lambda args: command_agent_responses(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_progress_update"], "closeout_final": False, "verification_state": "any", "failure_state": "any"})))
@@ -56543,8 +56606,7 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning_windows.add_argument("--before", type=int, default=3)
     reasoning_windows.add_argument("--after", type=int, default=6)
     reasoning_windows.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
-    reasoning_windows.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
-    reasoning_windows.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    add_search_shard_route_controls(reasoning_windows)
     reasoning_windows.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
 
@@ -56561,8 +56623,7 @@ def build_parser() -> argparse.ArgumentParser:
     answer_neighborhood.add_argument("--before", type=int, default=3)
     answer_neighborhood.add_argument("--after", type=int, default=6)
     answer_neighborhood.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
-    answer_neighborhood.add_argument("--use-shards", action="store_true", help="Use materialized monthly shard DBs through the generated search catalog when available.")
-    answer_neighborhood.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
+    add_search_shard_route_controls(answer_neighborhood)
     answer_neighborhood.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     answer_neighborhood.set_defaults(func=command_agent_event_windows)
 
