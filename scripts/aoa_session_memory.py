@@ -44242,6 +44242,44 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
     }
 
 
+def search_shard_fast_path_defaults(
+    *,
+    status: str,
+    shard_count: int,
+    materialized_shard_count: int,
+    shard_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    shard_fanout_ready = status == "current" and shard_count > 0 and materialized_shard_count == shard_count
+    raw_text_support = {
+        str(item.get("raw_text_query_support") or "")
+        for item in shard_rows
+        if isinstance(item, dict) and item.get("raw_text_query_support")
+    }
+    raw_text_shards_ready = shard_fanout_ready and raw_text_support == {SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL}
+    default_projection = SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT if shard_fanout_ready else SEARCH_ACTIVE_PROJECTION_MONOLITH
+    return {
+        "agent_event_routes": {
+            "default_use_shards": True,
+            "default_projection": default_projection,
+            "readiness": status,
+            "shard_fanout_ready": shard_fanout_ready,
+            "fallback_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "rollback_flag": "--no-shards",
+            "default_max_shards": 24,
+            "raw_text_query_projection": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT if raw_text_shards_ready else SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "raw_text_query_route": "structured shards use monolith fallback for raw-text queries unless materialized with --full-text",
+            "commands": [
+                "agent-responses",
+                "agent-closeouts",
+                "agent-progress-updates",
+                "agent-reasoning-windows",
+                "answer-neighborhood",
+            ],
+            "authority_boundary": "raw transcript and session indexes remain authority; shards and monolith are generated routing projections.",
+        }
+    }
+
+
 def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, Any]:
     catalog = read_search_catalog(aoa_root)
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
@@ -44308,6 +44346,12 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
     else:
         status = "current"
     combined_bytes = monolith_total_bytes + total_shard_bytes
+    fast_path_defaults = search_shard_fast_path_defaults(
+        status=status,
+        shard_count=shard_count,
+        materialized_shard_count=materialized_shard_count,
+        shard_rows=shard_rows,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_shard_projection_summary",
@@ -44343,6 +44387,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         "largest_shards": sorted(shard_rows, key=lambda item: int_value(item.get("total_with_wal_bytes")), reverse=True)[:8],
         "noncurrent_shards": noncurrent_shards[:8],
         "latest_materialization": latest_materialization,
+        "fast_path_defaults": fast_path_defaults,
         "raw_text_query_route": "structured shards use monolith fallback for raw-text queries unless materialized with --full-text",
         "exact_refresh_command": f"python3 scripts/aoa_session_memory.py search-catalog --aoa-root {aoa_root} --refresh",
         "exact_materialize_command": f"python3 scripts/aoa_session_memory.py search-shards all --aoa-root {aoa_root} --write-report",
@@ -45819,6 +45864,9 @@ def session_memory_maintenance_status(
         coordinator=coordinator,
         storage=storage,
     )
+    operations_search_shards = operations.get("search_shards") if isinstance(operations.get("search_shards"), dict) else {}
+    if isinstance(operations_search_shards.get("fast_path_defaults"), dict):
+        agent_route["fast_path_defaults"] = operations_search_shards["fast_path_defaults"]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
@@ -46211,6 +46259,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "shard_db_total_human",
                 "monolith_db_total_human",
                 "combined_search_projection_total_human",
+                "fast_path_defaults",
                 "raw_text_query_route",
                 "exact_materialize_command",
                 "truth_status",

@@ -9574,6 +9574,8 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert payload["agent_route"]["action"] == "run_live_catchup_for_recent_live"
     assert payload["agent_route"]["can_use_graph_search"] is True
     assert payload["agent_route"]["maintenance_required"] is True
+    assert payload["agent_route"]["fast_path_defaults"]["agent_event_routes"]["default_use_shards"] is True
+    assert payload["agent_route"]["fast_path_defaults"]["agent_event_routes"]["rollback_flag"] == "--no-shards"
     assert payload["search"]["actionable_dirty_session_count"] == 0
     assert payload["search"]["deferred_live_session_count"] == 2
     assert payload["graph"]["actionable_count"] == 0
@@ -9589,6 +9591,7 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert payload["live_tail"]["catchup_ready_to_run"] is True
     assert "graph repair is intentionally deferred" in payload["live_tail"]["graph_followup"]
     assert compact["agent_route"]["live_catchup_pending"] is True
+    assert compact["agent_route"]["fast_path_defaults"]["agent_event_routes"]["default_use_shards"] is True
     assert payload["live_tail"]["status"] == "ready_for_catchup"
     assert payload["live_tail"]["ready_count"] == 1
     assert payload["live_tail"]["waiting_count"] == 0
@@ -11766,6 +11769,10 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     )
     assert ops["search_shards"]["status"] == "current"
     assert ops["search_shards"]["materialized_shard_count"] == 2
+    assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["default_use_shards"] is True
+    assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["default_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["rollback_flag"] == "--no-shards"
+    assert ops["search_shards"]["fast_path_defaults"]["agent_event_routes"]["raw_text_query_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
     assert ops["search_shards"]["largest_shards"][0]["storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["exists"] is True
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
