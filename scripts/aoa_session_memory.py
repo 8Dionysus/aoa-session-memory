@@ -43755,6 +43755,25 @@ def entity_usage_event_role(event_type: str, conversation_act: str = "", session
     return "context"
 
 
+def entity_usage_segment_event_is_tool_result(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("type") or event.get("event_type") or "").upper()
+    if event_type in ENTITY_USAGE_RESULT_TYPES:
+        return True
+    if event_type != "HOOK_EVENT":
+        return False
+    title = str(event.get("title") or "").casefold()
+    action = str(event.get("action") or "").casefold()
+    return any(
+        marker in " ".join([title, action])
+        for marker in (
+            "mcp_tool_call_end",
+            "tool_call_end",
+            "function_call_output",
+            "tool_output",
+        )
+    )
+
+
 def compact_usage_route_signals(value: Any, *, limit: int = ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT) -> tuple[list[str], int]:
     signals: list[str] = []
     if isinstance(value, str):
@@ -43997,15 +44016,16 @@ def consequence_events_for_usage_hit(hit: dict[str, Any], *, window: int = 8) ->
     for distance, event in enumerate(events[start + 1 : start + 1 + max_distance], start=1):
         event_type = str(event.get("type") or "")
         correlation = str(event.get("correlation_id") or "")
+        is_tool_result = entity_usage_segment_event_is_tool_result(event)
         relation = "next_relevant_event"
         if usage_correlation and correlation == usage_correlation:
             relation = "same_correlation_id"
-        elif event_type not in ENTITY_USAGE_CONSEQUENCE_TYPES:
+        elif event_type not in ENTITY_USAGE_CONSEQUENCE_TYPES and not is_tool_result:
             continue
         facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
         conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
         session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
-        role = entity_usage_event_role(event_type, str(conversation_act.get("kind") or ""), str(session_act.get("kind") or ""))
+        role = "result" if is_tool_result else entity_usage_event_role(event_type, str(conversation_act.get("kind") or ""), str(session_act.get("kind") or ""))
         selected.append(
             compact_usage_event_from_segment_event(
                 event,
@@ -44102,10 +44122,13 @@ def local_usage_neighborhood_for_hit(
             compact = compact_usage_event_from_search_hit(hit, role="usage", source="route_only_search")
             role = "usage"
         else:
+            is_tool_result = entity_usage_segment_event_is_tool_result(event)
             if offset > 0 and source_correlation and correlation == source_correlation:
                 relation = "same_correlation_id"
-            elif offset > 0 and str(event.get("type") or "") in ENTITY_USAGE_CONSEQUENCE_TYPES:
+            elif offset > 0 and (str(event.get("type") or "") in ENTITY_USAGE_CONSEQUENCE_TYPES or is_tool_result):
                 relation = "consequence_candidate"
+            if is_tool_result and role == "context":
+                role = "result"
             compact = compact_usage_event_from_segment_event(
                 event,
                 hit=hit,
@@ -44583,6 +44606,7 @@ def entity_usage_neighborhood(
     ]
     raw_preview_counts: Counter[str] = Counter()
     consequence_count = 0
+    audit_consequence_count = int_value(audit.get("consequence_event_count"))
     document_refs: list[dict[str, Any]] = []
     seen_doc_refs: set[tuple[str, str, str]] = set()
     for neighborhood in neighborhoods:
@@ -44605,11 +44629,13 @@ def entity_usage_neighborhood(
                 break
     quality = {
         "usage_neighborhood_present": bool(neighborhoods),
-        "consequence_present": consequence_count > 0,
+        "consequence_present": consequence_count > 0 or audit_consequence_count > 0,
         "raw_preview_available": int_value(raw_preview_counts.get("available")) > 0,
         "document_refs_present": bool(document_refs),
         "neighborhood_count": len(neighborhoods),
         "consequence_event_count": consequence_count,
+        "local_consequence_event_count": consequence_count,
+        "audit_consequence_event_count": audit_consequence_count,
         "raw_preview_counts": dict(sorted(raw_preview_counts.items())),
         "audit_usage_event_count": audit.get("usage_event_count"),
         "audit_route_candidate_count": (audit.get("quality") or {}).get("route_candidate_count") if isinstance(audit.get("quality"), dict) else None,

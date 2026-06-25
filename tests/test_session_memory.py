@@ -2171,6 +2171,114 @@ def test_entity_usage_audit_skips_text_fallback_for_agent_event_route_evidence(t
     assert set(called_queries) == {""}
 
 
+def test_entity_usage_neighborhood_quality_uses_source_audit_consequences(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_event = {
+        "doc_id": "event:session:001:000001",
+        "event_id": "000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "title": "Tool call: aoa_decisions_summary",
+        "refs": {"raw": "raw:line:1", "segment_index": str(tmp_path / "missing.index.json")},
+    }
+
+    def fake_usage_audit(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "diagnostics": [],
+            "usage_event_count": 1,
+            "event_count": 1,
+            "usage_events": [usage_event],
+            "consequence_event_count": 2,
+            "route_candidates": [],
+            "route_result_summaries": [],
+            "quality": {
+                "text_result_count": 0,
+                "freshness_counts": {"fresh": 3},
+                "route_candidate_count": 1,
+                "candidate_event_count": 3,
+                "candidate_usage_event_count": 1,
+            },
+        }
+
+    monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
+
+    payload = module.entity_usage_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["source_audit"]["consequence_event_count"] == 2
+    assert payload["quality"]["consequence_present"] is True
+    assert payload["quality"]["local_consequence_event_count"] == 0
+    assert payload["quality"]["audit_consequence_event_count"] == 2
+
+
+def test_local_usage_neighborhood_treats_mcp_tool_call_end_as_consequence(tmp_path: Path) -> None:
+    segment_index = tmp_path / "001.index.json"
+    module.write_json(
+        segment_index,
+        {
+            "events": [
+                {
+                    "event_id": "000001",
+                    "type": "TOOL_CALL",
+                    "title": "Tool call: aoa_decisions_summary",
+                    "family": "tool_interaction",
+                    "phase": "act",
+                    "actor": "assistant",
+                    "action": "call_tool",
+                    "outcome": "requested",
+                    "md_anchor": "001.md#event-000001",
+                    "raw_ref": "raw:line:1",
+                    "facets": {
+                        "conversation_act": {"kind": "tool_call_request"},
+                        "session_act": {"kind": "tool_call"},
+                    },
+                },
+                {
+                    "event_id": "000002",
+                    "type": "HOOK_EVENT",
+                    "title": "Event message: mcp_tool_call_end",
+                    "family": "session_lifecycle",
+                    "phase": "hook",
+                    "actor": "codex_runtime",
+                    "action": "emit_event",
+                    "outcome": "observed",
+                    "md_anchor": "001.md#event-000002",
+                    "raw_ref": "raw:line:2",
+                    "facets": {},
+                },
+            ]
+        },
+    )
+    hit = {
+        "doc_id": "event:session:001:000001",
+        "session_id": "session",
+        "session_label": "2026-06-13__005__why-skills-broke",
+        "session_date": "2026-06-13",
+        "segment_id": "001",
+        "event_id": "000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "refs": {"segment_index": str(segment_index), "segment": "001.md#event-000001", "raw": "raw:line:1"},
+        "freshness": {"status": "fresh"},
+    }
+
+    neighborhood = module.local_usage_neighborhood_for_hit(hit, before=0, after=2, raw_preview_chars=0)
+
+    assert neighborhood["ok"] is True
+    assert neighborhood["consequence_event_count"] == 1
+    assert neighborhood["consequence_events"][0]["event_type"] == "HOOK_EVENT"
+    assert neighborhood["consequence_events"][0]["role"] == "result"
+    assert neighborhood["consequence_events"][0]["relation"] == "consequence_candidate"
+
+
 def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
