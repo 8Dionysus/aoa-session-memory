@@ -256,6 +256,7 @@ GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
 OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
 OPS_SEARCH_DB_CRITICAL_BYTES = 20 * 1024 * 1024 * 1024
+OPS_SEARCH_DB_NEAR_WARNING_RATIO = 0.80
 OPS_GRAPH_DB_WARNING_BYTES = 40 * 1024 * 1024 * 1024
 OPS_GRAPH_DB_CRITICAL_BYTES = 80 * 1024 * 1024 * 1024
 OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT = 10_000_000
@@ -17085,6 +17086,85 @@ def refresh_search_projection_states_for_materialized_shards(
     }
 
 
+def repair_search_shards_with_stale_segment_refs(
+    *,
+    aoa_root: Path,
+    target: str,
+    records: list[dict[str, Any]],
+    stale_shards: set[str],
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    max_raw_bytes: int | None = None,
+    budget_deadline: float | None = None,
+    write_report: bool = False,
+    progress_every: int = 0,
+) -> dict[str, Any]:
+    repaired_shards: set[str] = set()
+    diagnostics: list[str] = []
+    repairs: list[dict[str, Any]] = []
+    for shard_key in sorted(stale_shards):
+        shard_records = [record for record in records if search_shard_key_for_record(record) == shard_key]
+        if not shard_records:
+            diagnostics.append(f"{shard_key}:no_selected_records_for_stale_segment_ref_repair")
+            repairs.append(
+                {
+                    "shard": shard_key,
+                    "ok": False,
+                    "status": "no_selected_records",
+                    "selected_count": 0,
+                    "diagnostics": ["no_selected_records_for_stale_segment_ref_repair"],
+                }
+            )
+            continue
+        budget_seconds = max(0.1, budget_deadline - time.monotonic()) if budget_deadline is not None else None
+        result = materialize_search_shards(
+            aoa_root=aoa_root,
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+            shard=shard_key,
+            max_raw_bytes=max_raw_bytes,
+            write_report=write_report,
+            budget_seconds=budget_seconds,
+            progress_every=progress_every,
+            structured_only=True,
+            rebuild_shards=False,
+            dirty_only=False,
+            include_deferred_live=True,
+            selected_records=shard_records,
+        )
+        if result.get("ok"):
+            repaired_shards.add(shard_key)
+        result_diagnostics = [str(item) for item in result.get("diagnostics", []) if item]
+        diagnostics.extend(result_diagnostics)
+        repairs.append(
+            {
+                "shard": shard_key,
+                "ok": bool(result.get("ok")),
+                "status": result.get("status"),
+                "selected_count": result.get("selected_count"),
+                "processed_count": result.get("processed_count"),
+                "document_count": result.get("document_count"),
+                "elapsed_ms": result.get("elapsed_ms"),
+                "report_json": result.get("report_json"),
+                "report_markdown": result.get("report_markdown"),
+                "diagnostics": result_diagnostics,
+            }
+        )
+    unrepaired_shards = sorted(stale_shards - repaired_shards)
+    return {
+        "ok": not unrepaired_shards and not diagnostics,
+        "status": "repaired" if not unrepaired_shards and not diagnostics else "remaining",
+        "requested_shards": sorted(stale_shards),
+        "repaired_shards": sorted(repaired_shards),
+        "unrepaired_shards": unrepaired_shards,
+        "repairs": repairs,
+        "diagnostics": diagnostics,
+    }
+
+
 def refreshable_search_projection_records(
     aoa_root: Path,
     records: list[dict[str, Any]],
@@ -18081,9 +18161,59 @@ def maintain_indexes(
                     indexed_at=now,
                     budget_deadline=deadline,
                 )
+                stale_ref_shards = diagnostic_report_stale_segment_ref_shards(
+                    {
+                        "artifact_type": "index_maintenance",
+                        "diagnostics": shard_result.get("diagnostics", []) if isinstance(shard_result.get("diagnostics"), list) else [],
+                    }
+                )
+                if stale_ref_shards:
+                    stale_ref_repair = repair_search_shards_with_stale_segment_refs(
+                        aoa_root=aoa_root,
+                        target=target,
+                        records=search_state_refresh_records,
+                        stale_shards=stale_ref_shards,
+                        since=since,
+                        until=until,
+                        limit=limit,
+                        max_raw_bytes=max_raw_bytes,
+                        budget_deadline=deadline,
+                        write_report=write_report,
+                        progress_every=progress_every,
+                    )
+                    result["shard_document_repair"] = stale_ref_repair
+                    repaired_stale_ref_shards = set(stale_ref_repair.get("repaired_shards", []))
+                    if stale_ref_repair.get("ok") and stale_ref_shards.issubset(repaired_stale_ref_shards):
+                        shard_diagnostics = [
+                            str(item)
+                            for item in shard_result.get("diagnostics", [])
+                            if not (
+                                item.partition(":")[1]
+                                and item.partition(":")[2] == "search_documents_stale_segment_refs"
+                                and item.partition(":")[0] in repaired_stale_ref_shards
+                            )
+                        ]
+                        shard_result["diagnostics"] = shard_diagnostics
+                        shard_result["ok"] = not shard_diagnostics and not bool(shard_result.get("budget_exhausted"))
+                        shard_result["stale_segment_refs_repaired"] = True
+                        shard_result["repaired_stale_segment_ref_shards"] = sorted(repaired_stale_ref_shards)
+                    else:
+                        result.setdefault("diagnostics", []).extend(
+                            str(item) for item in stale_ref_repair.get("diagnostics", []) if item
+                        )
                 result["shard_state_refresh"] = {
                     key: shard_result.get(key)
-                    for key in ("ok", "updated_count", "skipped_count", "missing_shard_count", "budget_exhausted", "diagnostics", "shards")
+                    for key in (
+                        "ok",
+                        "updated_count",
+                        "skipped_count",
+                        "missing_shard_count",
+                        "budget_exhausted",
+                        "diagnostics",
+                        "shards",
+                        "stale_segment_refs_repaired",
+                        "repaired_stale_segment_ref_shards",
+                    )
                 }
                 if shard_result.get("diagnostics"):
                     result.setdefault("diagnostics", []).extend(str(item) for item in shard_result.get("diagnostics", []) if item)
@@ -18104,7 +18234,19 @@ def maintain_indexes(
                     if result.get("ok")
                     else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
                 )
-                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "budget_exhausted", "shard_state_refresh", "search_catalog_refresh", "diagnostics")}
+                search_state_refresh_action["result"] = {
+                    key: result.get(key)
+                    for key in (
+                        "ok",
+                        "updated_count",
+                        "skipped_count",
+                        "budget_exhausted",
+                        "shard_state_refresh",
+                        "shard_document_repair",
+                        "search_catalog_refresh",
+                        "diagnostics",
+                    )
+                }
                 action_results.append(search_state_refresh_action)
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
@@ -26903,6 +27045,7 @@ def materialize_search_shards(
     rebuild_shards: bool = True,
     dirty_only: bool = False,
     include_deferred_live: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -26958,30 +27101,33 @@ def materialize_search_shards(
         else SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
     )
     storage_profile = search_document_storage_profile(store_raw_text=not structured_only)
-    try:
-        records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
-    except ValueError as exc:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "artifact_type": "search_shard_materialization",
-            "search_schema_version": SEARCH_SCHEMA_VERSION,
-            "generated_at": now,
-            "ok": False,
-            "status": "target_error",
-            "target": target,
-            "selected_count": 0,
-            "processed_count": 0,
-            "shard_strategy": SEARCH_SHARD_STRATEGY,
-            "structured_only": structured_only,
-            "rebuild_shards": rebuild_shards,
-            "shard_storage_mode": shard_storage_mode,
-            "search_fts_storage_mode": shard_fts_storage_mode,
-            "raw_text_query_support": raw_text_query_support,
-            "shard_count": 0,
-            "document_count": 0,
-            "shards": [],
-            "diagnostics": [str(exc)],
-        }
+    if selected_records is None:
+        try:
+            records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
+        except ValueError as exc:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "search_shard_materialization",
+                "search_schema_version": SEARCH_SCHEMA_VERSION,
+                "generated_at": now,
+                "ok": False,
+                "status": "target_error",
+                "target": target,
+                "selected_count": 0,
+                "processed_count": 0,
+                "shard_strategy": SEARCH_SHARD_STRATEGY,
+                "structured_only": structured_only,
+                "rebuild_shards": rebuild_shards,
+                "shard_storage_mode": shard_storage_mode,
+                "search_fts_storage_mode": shard_fts_storage_mode,
+                "raw_text_query_support": raw_text_query_support,
+                "shard_count": 0,
+                "document_count": 0,
+                "shards": [],
+                "diagnostics": [str(exc)],
+            }
+    else:
+        records = list(selected_records)
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         shard_key = search_shard_key_for_record(record)
@@ -46665,6 +46811,135 @@ def session_memory_ops_long_maintenance_reasons(
     return reasons[:12]
 
 
+def session_memory_search_pressure_summary(
+    *,
+    aoa_root: Path,
+    storage: dict[str, Any],
+    search_shards: dict[str, Any],
+) -> dict[str, Any]:
+    search_db_entry = storage.get("search_db") if isinstance(storage.get("search_db"), dict) else {}
+    search_root_entry = storage.get("search_root") if isinstance(storage.get("search_root"), dict) else {}
+    monolith_total_bytes = int_value(
+        search_shards.get("monolith_db_total_bytes"),
+        int_value(search_db_entry.get("total_with_wal_bytes"), int_value(search_db_entry.get("size_bytes"))),
+    )
+    shard_total_bytes = int_value(search_shards.get("shard_db_total_bytes"))
+    combined_total_bytes = int_value(search_shards.get("combined_search_projection_total_bytes"), monolith_total_bytes + shard_total_bytes)
+    warning_ratio = round(combined_total_bytes / OPS_SEARCH_DB_WARNING_BYTES, 6) if OPS_SEARCH_DB_WARNING_BYTES > 0 else 0.0
+    critical_ratio = round(combined_total_bytes / OPS_SEARCH_DB_CRITICAL_BYTES, 6) if OPS_SEARCH_DB_CRITICAL_BYTES > 0 else 0.0
+    freshness_status = str(search_shards.get("status") or "unknown")
+    raw_text_fallback = (
+        search_shards.get("raw_text_fallback_dependency")
+        if isinstance(search_shards.get("raw_text_fallback_dependency"), dict)
+        else {}
+    )
+    raw_text_fallback_status = str(raw_text_fallback.get("status") or "unknown")
+    actionable_noncurrent_shard_count = int_value(search_shards.get("actionable_noncurrent_shard_count"))
+    deferred_live_session_count = int_value(search_shards.get("deferred_live_session_count"))
+    near_warning_bytes = int(OPS_SEARCH_DB_WARNING_BYTES * OPS_SEARCH_DB_NEAR_WARNING_RATIO)
+    if combined_total_bytes >= OPS_SEARCH_DB_CRITICAL_BYTES:
+        status = "critical_projection_stack"
+    elif combined_total_bytes >= OPS_SEARCH_DB_WARNING_BYTES:
+        status = "large_projection_stack"
+    elif combined_total_bytes >= near_warning_bytes:
+        status = "near_warning_projection_stack"
+    else:
+        status = "normal"
+
+    if freshness_status not in {"current", "empty", "current_with_deferred_live_updates"}:
+        next_route = (
+            "restore search catalog/shard freshness before making storage decisions; use the exact materialize command "
+            "or projection-catchup, then re-run maintenance-status --full"
+        )
+    elif freshness_status == "current_with_deferred_live_updates":
+        next_route = (
+            "wait for the live quiet window or run the targeted live catch-up; avoid broad full-text shard materialization "
+            "while only deferred_live sessions are pending"
+        )
+    elif status in {"critical_projection_stack", "large_projection_stack"}:
+        next_route = (
+            "run storage-audit --deep-dbstat --write-report and a search-sqlite-compact dry-run; preserve the monolith raw-text "
+            "fallback unless a scoped full-text replacement is intentionally materialized and verified"
+        )
+    elif status == "near_warning_projection_stack":
+        next_route = (
+            "keep structured shard fast paths as default and monitor growth; use storage-audit if the combined projection crosses "
+            "the warning threshold"
+        )
+    elif raw_text_fallback_status == "monolith_required_for_raw_text_query":
+        next_route = (
+            "structured routes are healthy; use scoped full-text shard commands only for repeated literal raw-text queries"
+        )
+    else:
+        next_route = "continue using structured search/shard fast paths; no search storage action is needed"
+
+    if combined_total_bytes >= OPS_SEARCH_DB_WARNING_BYTES or monolith_total_bytes >= OPS_SEARCH_DB_WARNING_BYTES:
+        physical_compaction_status = "requires_explicit_plan"
+        physical_compaction_reason = (
+            "maintenance-status keeps the hot route lightweight; run search-sqlite-compact dry-run for freelist/headroom evidence"
+        )
+    else:
+        physical_compaction_status = "below_warning_not_checked"
+        physical_compaction_reason = "below warning threshold; defer physical SQLite compaction planning"
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_pressure_summary",
+        "mutates": False,
+        "status": status,
+        "freshness_status": freshness_status,
+        "monolith_db_total_bytes": monolith_total_bytes,
+        "monolith_db_total_human": search_shards.get("monolith_db_total_human")
+        or search_db_entry.get("total_with_wal_human")
+        or human_size(monolith_total_bytes),
+        "shard_db_total_bytes": shard_total_bytes,
+        "shard_db_total_human": search_shards.get("shard_db_total_human") or human_size(shard_total_bytes),
+        "combined_search_projection_total_bytes": combined_total_bytes,
+        "combined_search_projection_total_human": search_shards.get("combined_search_projection_total_human")
+        or human_size(combined_total_bytes),
+        "search_root_total_bytes": search_root_entry.get("size_bytes"),
+        "search_root_total_human": search_root_entry.get("size_human"),
+        "warning_bytes": OPS_SEARCH_DB_WARNING_BYTES,
+        "warning_human": human_size(OPS_SEARCH_DB_WARNING_BYTES),
+        "critical_bytes": OPS_SEARCH_DB_CRITICAL_BYTES,
+        "critical_human": human_size(OPS_SEARCH_DB_CRITICAL_BYTES),
+        "near_warning_ratio": OPS_SEARCH_DB_NEAR_WARNING_RATIO,
+        "warning_ratio": warning_ratio,
+        "critical_ratio": critical_ratio,
+        "shard_strategy": search_shards.get("shard_strategy"),
+        "active_projection": search_shards.get("active_projection"),
+        "materialized_shard_count": search_shards.get("materialized_shard_count"),
+        "shard_count": search_shards.get("shard_count"),
+        "actionable_noncurrent_shard_count": actionable_noncurrent_shard_count,
+        "deferred_live_session_count": deferred_live_session_count,
+        "raw_text_fallback_status": raw_text_fallback_status,
+        "raw_text_query_route": search_shards.get("raw_text_query_route"),
+        "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
+        "quality_boundary": "structured routes and raw-text fallback are routing projections; raw transcripts and segment indexes remain authority",
+        "speed_boundary": "agent-event/entity/goal routes should use structured shards; literal raw-text stays bounded and may use the monolith fallback",
+        "weight_boundary": "do not remove the monolith solely for size while it is the verified raw-text fallback",
+        "physical_compaction": {
+            "status": physical_compaction_status,
+            "reason": physical_compaction_reason,
+            "exact_plan_command": (
+                f"python3 scripts/aoa_session_memory.py search-sqlite-compact --workspace-root {aoa_root.parent} "
+                f"--aoa-root {aoa_root} --write-report"
+            ),
+        },
+        "exact_storage_audit_command": (
+            f"python3 scripts/aoa_session_memory.py storage-audit --workspace-root {aoa_root.parent} "
+            f"--aoa-root {aoa_root} --deep-dbstat --write-report"
+        ),
+        "exact_refresh_command": search_shards.get("exact_refresh_command"),
+        "exact_materialize_command": search_shards.get("exact_materialize_command"),
+        "scoped_full_text_next_commands": raw_text_fallback.get("scoped_full_text_next_commands", [])[:3]
+        if isinstance(raw_text_fallback.get("scoped_full_text_next_commands"), list)
+        else [],
+        "next_route": next_route,
+        "truth_status": "diagnostic_projection_for_operator_routing_not_archive_truth",
+    }
+
+
 def session_memory_graph_pressure_summary(
     *,
     aoa_root: Path,
@@ -46764,6 +47039,11 @@ def session_memory_operations_summary(
     last_auto_maintenance_resource_launch = latest_auto_maintenance_resource_reports(aoa_root)
     recent_problem_jobs = recent_problem_maintenance_reports(aoa_root)
     search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    search_pressure = session_memory_search_pressure_summary(
+        aoa_root=aoa_root,
+        storage=storage,
+        search_shards=search_shards,
+    )
     graph_pressure = session_memory_graph_pressure_summary(aoa_root=aoa_root, storage=storage)
     warnings = session_memory_ops_warnings(
         storage=storage,
@@ -46800,6 +47080,7 @@ def session_memory_operations_summary(
         "writer": writer,
         "latest_search_index": latest_search_index,
         "search_shards": search_shards,
+        "search_pressure": search_pressure,
         "graph_pressure": graph_pressure,
         "last_successful_auto_maintenance": last_successful_auto_maintenance,
         "last_auto_maintenance_resource_launch": last_auto_maintenance_resource_launch,
@@ -47821,6 +48102,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             if isinstance(item, dict)
         ]
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
+    search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
     compact_operations = {
         "warning_count": operations.get("warning_count"),
         "warnings": [
@@ -47896,6 +48178,49 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 if isinstance(item, dict)
             ]
         },
+        "search_pressure": {
+            key: search_pressure.get(key)
+            for key in (
+                "status",
+                "freshness_status",
+                "monolith_db_total_human",
+                "shard_db_total_human",
+                "combined_search_projection_total_human",
+                "search_root_total_human",
+                "warning_human",
+                "critical_human",
+                "warning_ratio",
+                "critical_ratio",
+                "active_projection",
+                "materialized_shard_count",
+                "shard_count",
+                "actionable_noncurrent_shard_count",
+                "deferred_live_session_count",
+                "raw_text_fallback_status",
+                "raw_text_query_route",
+                "quality_boundary",
+                "speed_boundary",
+                "weight_boundary",
+                "exact_storage_audit_command",
+                "exact_refresh_command",
+                "exact_materialize_command",
+                "next_route",
+                "truth_status",
+            )
+            if key in search_pressure
+        }
+        | (
+            {
+                "physical_compaction": {
+                    key: (search_pressure.get("physical_compaction") or {}).get(key)
+                    for key in ("status", "reason", "exact_plan_command")
+                    if isinstance(search_pressure.get("physical_compaction"), dict)
+                    and key in (search_pressure.get("physical_compaction") or {})
+                }
+            }
+            if isinstance(search_pressure.get("physical_compaction"), dict)
+            else {}
+        ),
         "graph_pressure": {
             key: graph_pressure.get(key)
             for key in (
@@ -48167,6 +48492,10 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     latest_search_shards = (
         search_shards.get("latest_materialization") if isinstance(search_shards.get("latest_materialization"), dict) else {}
     )
+    search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
+    search_pressure_compaction = (
+        search_pressure.get("physical_compaction") if isinstance(search_pressure.get("physical_compaction"), dict) else {}
+    )
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     graph_pressure_compaction = graph_pressure.get("physical_compaction") if isinstance(graph_pressure.get("physical_compaction"), dict) else {}
     lines = [
@@ -48186,6 +48515,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- last_maintenance: `{last_job.get('owner_job', '')}` status=`{last_job.get('status', '')}` finished_at=`{last_job.get('finished_at', '')}` elapsed_ms=`{last_job.get('elapsed_ms', '')}`",
         f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
         f"- search_shards: `{search_shards.get('status')}` materialized=`{search_shards.get('materialized_shard_count')}/{search_shards.get('shard_count')}` shard_total=`{search_shards.get('shard_db_total_human')}` combined=`{search_shards.get('combined_search_projection_total_human')}`",
+        f"- search_pressure: `{search_pressure.get('status')}` freshness=`{search_pressure.get('freshness_status')}` combined=`{search_pressure.get('combined_search_projection_total_human')}` physical=`{search_pressure_compaction.get('status')}` next=`{search_pressure.get('next_route')}`",
         f"- latest_search_shards: processed=`{latest_search_shards.get('processed_count')}` docs=`{latest_search_shards.get('document_count')}` elapsed_ms=`{latest_search_shards.get('elapsed_ms')}` docs_per_sec=`{latest_search_shards.get('documents_per_second')}`",
         f"- graph_db: `{graph_db.get('size_human')}` wal=`{(graph_db.get('wal') or {}).get('size_human') if isinstance(graph_db.get('wal'), dict) else ''}` total=`{graph_db.get('total_with_wal_human')}`",
         f"- graph_pressure: `{graph_pressure.get('status')}` nodes=`{graph_pressure.get('node_count')}` edges=`{graph_pressure.get('edge_count')}` physical=`{graph_pressure_compaction.get('status')}` reclaim=`{graph_pressure_compaction.get('conservative_reclaimable_human')}` next=`{graph_pressure.get('next_route')}`",

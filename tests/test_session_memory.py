@@ -10332,6 +10332,10 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["search_shards"]["latest_materialization"]["documents_per_second"] == 500.0
     assert ops["search_shards"]["latest_materialization"]["slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
     assert ops["search_shards"]["latest_materialization"]["slow_session_warning_count"] == 1
+    assert ops["search_pressure"]["status"] == "large_projection_stack"
+    assert ops["search_pressure"]["freshness_status"] == "incomplete"
+    assert ops["search_pressure"]["physical_compaction"]["status"] == "requires_explicit_plan"
+    assert "restore search catalog/shard freshness" in ops["search_pressure"]["next_route"]
     warning_codes = {item["code"] for item in ops["warnings"]}
     assert {
         "search_db_large",
@@ -10422,6 +10426,9 @@ def test_search_shards_deferred_live_tail_is_not_actionable_ops_warning(tmp_path
     )
     warning_codes = {item["code"] for item in ops["warnings"]}
     assert "search_shards_not_current" not in warning_codes
+    assert ops["search_pressure"]["status"] == "normal"
+    assert ops["search_pressure"]["freshness_status"] == "current_with_deferred_live_updates"
+    assert "live quiet window" in ops["search_pressure"]["next_route"]
 
     completeness = module.projection_catchup_completeness_check(
         auto_payload={
@@ -10842,6 +10849,43 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert summary["physical_compaction"]["reclaim_ratio"] < 0.1
     assert "cardinality reduction" in summary["next_route"]
     assert "storage-audit" in summary["optional_deep_audit_command"]
+
+
+def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    combined_bytes = int(module.OPS_SEARCH_DB_WARNING_BYTES * 0.9)
+    summary = module.session_memory_search_pressure_summary(
+        aoa_root=aoa_root,
+        storage={
+            "search_db": {
+                "total_with_wal_bytes": combined_bytes,
+                "total_with_wal_human": "10.8 GiB",
+            },
+            "search_root": {"size_bytes": combined_bytes, "size_human": "10.8 GiB"},
+        },
+        search_shards={
+            "status": "current",
+            "monolith_db_total_bytes": combined_bytes,
+            "monolith_db_total_human": "10.8 GiB",
+            "shard_db_total_bytes": 0,
+            "shard_db_total_human": "0 B",
+            "combined_search_projection_total_bytes": combined_bytes,
+            "combined_search_projection_total_human": "10.8 GiB",
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "materialized_shard_count": 2,
+            "shard_count": 2,
+            "raw_text_query_route": "structured shards use monolith fallback",
+            "raw_text_fallback_dependency": {"status": "monolith_required_for_raw_text_query"},
+        },
+    )
+
+    assert summary["mutates"] is False
+    assert summary["status"] == "near_warning_projection_stack"
+    assert summary["physical_compaction"]["status"] == "below_warning_not_checked"
+    assert "monitor growth" in summary["next_route"]
+    assert "search-sqlite-compact" in summary["physical_compaction"]["exact_plan_command"]
 
 
 def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
@@ -12508,6 +12552,7 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
     assert ops["search_shards"]["latest_materialization"]["slow_sessions"]
+    assert ops["search_pressure"]["raw_text_fallback_status"] == "monolith_required_for_raw_text_query"
     compact = module.compact_maintenance_status_payload(
         {
             "schema_version": module.SCHEMA_VERSION,
@@ -12516,6 +12561,8 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
         }
     )
     assert compact["operations"]["search_shards"]["latest_materialization"]["slow_sessions"]
+    assert compact["operations"]["search_pressure"]["raw_text_fallback_status"] == "monolith_required_for_raw_text_query"
+    assert compact["operations"]["search_pressure"]["physical_compaction"]["status"]
 
     archive_session("june-shard-incremental", "2026-06-25T00:00:00Z", "june-shard-incremental-anchor")
     incremental_monolith = module.search_index_sessions(
@@ -13870,6 +13917,69 @@ def test_search_provider_status_hot_route_detects_projection_fingerprint_contrac
     current = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
     assert current["ok"] is True
     assert current["providers"]["portable_sqlite"]["freshness"]["projection_fingerprint_mode_mismatch_count"] == 0
+    current_catalog = module.build_search_catalog(aoa_root, write=True, selected_records=[record])
+    assert current_catalog["sessions"][0]["monolith_status"] == "current"
+    assert current_catalog["sessions"][0]["shard_status"] == "current"
+
+
+def test_index_maintenance_repairs_stale_shard_segment_refs_for_refreshable_search_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-stale-shard-ref.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "stale-shard-ref", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Shard stale ref"}]}},
+            {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Repair only the shard docs."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "stale-shard-ref",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    module.materialize_search_shards(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "stale-shard-ref")
+    shard_path = module.search_shard_db_path(aoa_root, "month/2026-06")
+
+    monolith_conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    try:
+        monolith_conn.execute("UPDATE session_index_state SET projection_fingerprint_mode = 'legacy_contract'")
+        monolith_conn.execute("UPDATE search_freshness_state SET projection_fingerprint_mode = 'legacy_contract'")
+        monolith_conn.commit()
+    finally:
+        monolith_conn.close()
+    shard_conn = sqlite3.connect(str(shard_path))
+    try:
+        shard_conn.execute("UPDATE documents SET segment_index_sha256 = 'stale-shard-segment-ref'")
+        shard_conn.commit()
+    finally:
+        shard_conn.close()
+
+    stale_catalog = module.build_search_catalog(aoa_root, write=True, selected_records=[record])
+    assert stale_catalog["sessions"][0]["monolith_status"] == "stale"
+
+    maintained = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="stale-shard-ref",
+        apply=True,
+        repair_graph=False,
+        repair_token_accounting=False,
+    )
+    actions = {action["id"]: action for action in maintained["actions"]}
+    refresh = actions["refresh_search_projection_state"]
+    assert refresh["status"] == "applied"
+    assert refresh["result"]["shard_state_refresh"]["stale_segment_refs_repaired"] is True
+    assert refresh["result"]["shard_document_repair"]["repaired_shards"] == ["month/2026-06"]
+    assert "search_documents_stale_segment_refs" not in " ".join(maintained["diagnostics"])
     current_catalog = module.build_search_catalog(aoa_root, write=True, selected_records=[record])
     assert current_catalog["sessions"][0]["monolith_status"] == "current"
     assert current_catalog["sessions"][0]["shard_status"] == "current"
