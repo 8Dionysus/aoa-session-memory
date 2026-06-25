@@ -37082,6 +37082,7 @@ def graph_source_maintenance_recommendation(
     source_sha_mismatch = int_value(reason_group_counts.get("source_sha_mismatch"))
     graph_missing = int_value(reason_group_counts.get("graph_source_missing"))
     ledger_store_mismatch = int_value(reason_group_counts.get("graph_source_ledger_store_count_mismatch"))
+    ledger_coverage_gap = int_value(reason_group_counts.get("graph_source_ledger_coverage_gap"))
     missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
     blocked = max(0, int_value(blocked_count))
     root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
@@ -37107,13 +37108,23 @@ def graph_source_maintenance_recommendation(
             f"{root_args} --apply --write-report"
         )
 
+    def graph_ledger_catchup_command() -> str:
+        return (
+            "python3 scripts/aoa_session_memory.py graph-maintenance all "
+            f"{root_args} --mode deep --write-ledger --write-report"
+        )
+
     mostly_missing_partial_store = (
         source_total >= 500
         and missing_total >= max(500, int(source_total * 0.75))
         and existing_total <= max(100, int(source_total * 0.15))
     )
 
-    if actionable_count <= 0:
+    if actionable_count <= 0 and ledger_coverage_gap:
+        route = "graph_ledger_catchup"
+        reason = "graph_source_ledger_coverage_gap"
+        command = graph_ledger_catchup_command()
+    elif actionable_count <= 0:
         route = "none"
         reason = "graph_sources_current"
         command = ""
@@ -37177,6 +37188,8 @@ def graph_source_maintenance_recommendation(
         notes.append("missing_sources_can_be_inserted_by_incremental_or_rebuild_route")
     if ledger_store_mismatch:
         notes.append("ledger_store_mismatch_sources_can_be_reinserted_incrementally")
+    if ledger_coverage_gap:
+        notes.append("graph_source_ledger_needs_deep_catchup_before_hot_noop")
     if route == "store_only_rebuild":
         notes.append("store_only_rebuild_is_manual_resource_gated")
         notes.append("use_in_place_only_when_storage_headroom_is_low")
@@ -37677,6 +37690,148 @@ def filter_graph_source_states_by_key(
     )
 
 
+def graph_maintenance_no_source_scan_payload(
+    *,
+    aoa_root: Path,
+    now: str,
+    started: float,
+    graph_hot_state: dict[str, Any],
+    source_state: dict[str, Any],
+    target: str,
+    since: str | None,
+    until: str | None,
+    limit: int | None,
+    source_keys: list[str],
+    apply: bool,
+    use_queue: bool,
+    write_queue: bool,
+    write_ledger: bool,
+    batch_limit: int,
+    refresh_chunk_size: int,
+    max_refresh_nodes: int | None,
+    max_refresh_edges: int | None,
+    budget_seconds: float | None,
+    plan_refresh_costs: bool,
+    reason: str,
+    mode: str,
+    state_window: str,
+    selection_strategy: str,
+    matched_source_key_count: int,
+    matched_source_key_sample: list[str] | None,
+    queue_selected_source_count: int,
+    queue_update: dict[str, Any],
+    next_route: str,
+    write_report: bool,
+) -> dict[str, Any]:
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    diagnostics = list(graph_hot_state.get("diagnostics", []) if isinstance(graph_hot_state.get("diagnostics"), list) else [])
+    pre_actionable_count = (
+        int_value(source_state.get("dirty_count"))
+        + int_value(source_state.get("missing_count"))
+        + int_value(source_state.get("orphaned_count"))
+    )
+    maintenance_detail = {
+        "refresh_chunk_size": refresh_chunk_size,
+        "max_refresh_nodes": max_refresh_nodes,
+        "max_refresh_edges": max_refresh_edges,
+        "selection_strategy": selection_strategy,
+        "requested_source_keys": source_keys,
+        "use_queue": bool(use_queue),
+        "queue_selected_source_count": queue_selected_source_count,
+        "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
+        "matched_source_key_count": matched_source_key_count,
+        "matched_source_key_sample": matched_source_key_sample or [],
+        "missing_source_keys": [],
+        "mode": mode,
+        "source_scan": False,
+        "truth_status": source_state.get("truth_status") or graph_hot_state.get("truth_status"),
+        "state_window": state_window,
+        "post_source_state_refreshed": False,
+        "pre_actionable_count": pre_actionable_count,
+        "post_actionable_count": None,
+        "pre_remaining_count": pre_actionable_count,
+        "post_remaining_count": None,
+        "budget_seconds": budget_seconds,
+        "elapsed_ms": elapsed_ms,
+        "budget_exhausted": False,
+        "mutation_rolled_back": False,
+        "time_budget_deferred_source_count": 0,
+        "time_budget_deferred_sources": [],
+        "time_budget_deferred_plan": [],
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_maintenance",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": (
+            not diagnostics
+            and pre_actionable_count == 0
+            and not graph_hot_state.get("needs_maintenance")
+            and not graph_hot_state.get("needs_full_rebuild")
+        ),
+        "mutates": False,
+        "apply": apply,
+        "use_queue": bool(use_queue),
+        "write_queue": write_queue,
+        "write_ledger": write_ledger,
+        "target": target,
+        "since": since,
+        "until": until,
+        "limit": limit,
+        "source_keys": source_keys,
+        "batch_limit": batch_limit,
+        "refresh_chunk_size": refresh_chunk_size,
+        "max_refresh_nodes": max_refresh_nodes,
+        "max_refresh_edges": max_refresh_edges,
+        "budget_seconds": budget_seconds,
+        "plan_refresh_costs": bool(plan_refresh_costs),
+        "mode": mode,
+        "source_scan": False,
+        "elapsed_ms": elapsed_ms,
+        "budget_exhausted": False,
+        "reason": reason,
+        "state_window": state_window,
+        "source_state": source_state,
+        "pre_source_state": source_state,
+        "post_source_state": {},
+        "unfiltered_source_state": {},
+        "pre_unfiltered_source_state": {},
+        "post_unfiltered_source_state": {},
+        "selected_count": 0,
+        "pre_actionable_count": pre_actionable_count,
+        "post_actionable_count": None,
+        "remaining_count": pre_actionable_count,
+        "pre_remaining_count": pre_actionable_count,
+        "post_remaining_count": None,
+        "budget_deferred_source_count": 0,
+        "oversized_source_count": 0,
+        "batch_deferred_source_count": 0,
+        "time_budget_deferred_source_count": 0,
+        "mutation_rolled_back": False,
+        "selected": [],
+        "results": [],
+        "maintenance_detail": maintenance_detail,
+        "ledger_update": {},
+        "queue_update": queue_update,
+        "sidecar": {},
+        "diagnostics": diagnostics,
+        "next_route": next_route,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__graph-maintenance"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, graph_maintenance_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def graph_maintenance(
     *,
     aoa_root: Path,
@@ -37693,6 +37848,7 @@ def graph_maintenance(
     candidate_pool_limit: int | None = None,
     budget_seconds: float | None = None,
     plan_refresh_costs: bool = False,
+    mode: str = "hot",
     export_sidecar: bool = False,
     write_report: bool = False,
     use_queue: bool = False,
@@ -37710,6 +37866,9 @@ def graph_maintenance(
             budget_seconds = None
     deadline = started + budget_seconds if budget_seconds is not None else None
     batch_limit = max(1, min(int_value(batch_limit, GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT), 500))
+    mode = str(mode or "hot").strip().lower()
+    if mode not in {"hot", "deep"}:
+        mode = "hot"
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
     queue_payload: dict[str, Any] | None = None
     queue_selected_source_keys: list[str] = []
@@ -37724,109 +37883,106 @@ def graph_maintenance(
         else:
             graph_hot_state = graph_store_hot_state(aoa_root)
             source_state = graph_hot_source_state_summary(aoa_root, graph_hot_state)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            diagnostics = list(graph_hot_state.get("diagnostics", []) if isinstance(graph_hot_state.get("diagnostics"), list) else [])
-            pre_actionable_count = (
-                int_value(source_state.get("dirty_count"))
-                + int_value(source_state.get("missing_count"))
-                + int_value(source_state.get("orphaned_count"))
-            )
-            maintenance_detail = {
-                "refresh_chunk_size": refresh_chunk_size,
-                "max_refresh_nodes": max_refresh_nodes,
-                "max_refresh_edges": max_refresh_edges,
-                "selection_strategy": "queue_empty_no_source_scan",
-                "requested_source_keys": [],
-                "use_queue": True,
-                "queue_selected_source_count": 0,
-                "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
-                "matched_source_key_count": 0,
-                "matched_source_key_sample": [],
-                "missing_source_keys": [],
-                "state_window": "queue_empty_hot_state",
-                "post_source_state_refreshed": False,
-                "pre_actionable_count": pre_actionable_count,
-                "post_actionable_count": None,
-                "pre_remaining_count": pre_actionable_count,
-                "post_remaining_count": None,
-                "budget_seconds": budget_seconds,
-                "elapsed_ms": elapsed_ms,
-                "budget_exhausted": False,
-                "mutation_rolled_back": False,
-                "time_budget_deferred_source_count": 0,
-                "time_budget_deferred_sources": [],
-                "time_budget_deferred_plan": [],
-            }
-            payload = {
-                "schema_version": SCHEMA_VERSION,
-                "artifact_type": "session_memory_graph_maintenance",
-                "graph_schema_version": GRAPH_SCHEMA_VERSION,
-                "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
-                "generated_at": now,
-                "ok": not diagnostics and pre_actionable_count == 0 and not graph_hot_state.get("needs_full_rebuild"),
-                "mutates": False,
-                "apply": apply,
-                "use_queue": True,
-                "write_queue": write_queue,
-                "write_ledger": write_ledger,
-                "target": target,
-                "since": since,
-                "until": until,
-                "limit": limit,
-                "source_keys": [],
-                "batch_limit": batch_limit,
-                "refresh_chunk_size": refresh_chunk_size,
-                "max_refresh_nodes": max_refresh_nodes,
-                "max_refresh_edges": max_refresh_edges,
-                "budget_seconds": budget_seconds,
-                "plan_refresh_costs": bool(plan_refresh_costs),
-                "elapsed_ms": elapsed_ms,
-                "budget_exhausted": False,
-                "reason": reason,
-                "state_window": "queue_empty_hot_state",
-                "source_state": source_state,
-                "pre_source_state": source_state,
-                "post_source_state": {},
-                "unfiltered_source_state": {},
-                "pre_unfiltered_source_state": {},
-                "post_unfiltered_source_state": {},
-                "selected_count": 0,
-                "pre_actionable_count": pre_actionable_count,
-                "post_actionable_count": None,
-                "remaining_count": pre_actionable_count,
-                "pre_remaining_count": pre_actionable_count,
-                "post_remaining_count": None,
-                "budget_deferred_source_count": 0,
-                "oversized_source_count": 0,
-                "batch_deferred_source_count": 0,
-                "time_budget_deferred_source_count": 0,
-                "mutation_rolled_back": False,
-                "selected": [],
-                "results": [],
-                "maintenance_detail": maintenance_detail,
-                "ledger_update": {},
-                "queue_update": {
+            return graph_maintenance_no_source_scan_payload(
+                aoa_root=aoa_root,
+                now=now,
+                started=started,
+                graph_hot_state=graph_hot_state,
+                source_state=source_state,
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+                source_keys=[],
+                apply=apply,
+                use_queue=True,
+                write_queue=write_queue,
+                write_ledger=write_ledger,
+                batch_limit=batch_limit,
+                refresh_chunk_size=refresh_chunk_size,
+                max_refresh_nodes=max_refresh_nodes,
+                max_refresh_edges=max_refresh_edges,
+                budget_seconds=budget_seconds,
+                plan_refresh_costs=plan_refresh_costs,
+                reason=reason,
+                mode=mode,
+                state_window="queue_empty_hot_state",
+                selection_strategy="queue_empty_no_source_scan",
+                matched_source_key_count=0,
+                matched_source_key_sample=[],
+                queue_selected_source_count=0,
+                queue_update={
                     "path": str(graph_paths(aoa_root)["maintenance_queue"]),
                     "queued_count": 0,
                     "enqueued_or_refreshed_count": 0,
                     "removed_count": 0,
                     "reason": "queue_empty_no_source_scan",
                 },
-                "sidecar": {},
-                "diagnostics": diagnostics,
-                "next_route": "Queue is empty; use graph-freshness-check --mode deep or graph-maintenance without --use-queue when a full source audit is needed.",
-            }
-            if write_report:
-                diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
-                diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                stem = f"{compact_stamp()}__graph-maintenance"
-                report_json = diagnostics_dir / f"{stem}.json"
-                report_md = diagnostics_dir / f"{stem}.md"
-                write_json(report_json, payload)
-                write_markdown(report_md, graph_maintenance_markdown(payload))
-                payload["report_json"] = str(report_json)
-                payload["report_markdown"] = str(report_md)
-            return payload
+                next_route="Queue is empty; use graph-freshness-check --mode deep or graph-maintenance all --mode deep when a full source audit is needed.",
+                write_report=write_report,
+            )
+    hot_noop_eligible = (
+        mode == "hot"
+        and str(target or "all") == "all"
+        and since is None
+        and until is None
+        and limit is None
+        and not requested_source_keys
+        and selected_records is None
+        and not use_queue
+        and not plan_refresh_costs
+        and not export_sidecar
+        and not write_queue
+        and not write_ledger
+    )
+    if hot_noop_eligible:
+        graph_hot_state = graph_store_hot_state(aoa_root)
+        source_state = graph_hot_source_state_summary(aoa_root, graph_hot_state)
+        pre_actionable_count = (
+            int_value(source_state.get("dirty_count"))
+            + int_value(source_state.get("missing_count"))
+            + int_value(source_state.get("orphaned_count"))
+        )
+        diagnostics = graph_hot_state.get("diagnostics") if isinstance(graph_hot_state.get("diagnostics"), list) else []
+        if (
+            not diagnostics
+            and pre_actionable_count == 0
+            and not graph_hot_state.get("needs_maintenance")
+            and not graph_hot_state.get("needs_full_rebuild")
+            and not graph_hot_state.get("deep_audit_recommended")
+        ):
+            return graph_maintenance_no_source_scan_payload(
+                aoa_root=aoa_root,
+                now=now,
+                started=started,
+                graph_hot_state=graph_hot_state,
+                source_state=source_state,
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+                source_keys=[],
+                apply=apply,
+                use_queue=False,
+                write_queue=write_queue,
+                write_ledger=write_ledger,
+                batch_limit=batch_limit,
+                refresh_chunk_size=refresh_chunk_size,
+                max_refresh_nodes=max_refresh_nodes,
+                max_refresh_edges=max_refresh_edges,
+                budget_seconds=budget_seconds,
+                plan_refresh_costs=plan_refresh_costs,
+                reason=reason,
+                mode=mode,
+                state_window="hot_noop_cached_state",
+                selection_strategy="hot_noop_no_source_scan",
+                matched_source_key_count=int_value(source_state.get("source_count")),
+                matched_source_key_sample=[],
+                queue_selected_source_count=0,
+                queue_update={},
+                next_route="Cached hot state shows no actionable graph maintenance; use graph-maintenance all --mode deep for a full source audit.",
+                write_report=write_report,
+            )
     states_payload = graph_source_states(
         aoa_root=aoa_root,
         target=target,
@@ -38301,6 +38457,8 @@ def graph_maintenance(
         "candidate_pool_limit": candidate_pool_limit,
         "budget_seconds": budget_seconds,
         "plan_refresh_costs": bool(plan_refresh_costs),
+        "mode": mode,
+        "source_scan": True,
         "elapsed_ms": elapsed_ms,
         "budget_exhausted": budget_exhausted,
         "reason": reason,
@@ -38361,6 +38519,8 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- candidate_pool_limit: `{payload.get('candidate_pool_limit')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- plan_refresh_costs: `{payload.get('plan_refresh_costs')}`",
+        f"- mode: `{payload.get('mode')}`",
+        f"- source_scan: `{payload.get('source_scan')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
         f"- state_window: `{payload.get('state_window')}`",
@@ -38412,6 +38572,9 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- pre_remaining_count: `{detail.get('pre_remaining_count')}`",
                 f"- post_remaining_count: `{detail.get('post_remaining_count')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
+                f"- mode: `{detail.get('mode')}`",
+                f"- source_scan: `{detail.get('source_scan')}`",
+                f"- truth_status: `{detail.get('truth_status')}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_key_count: `{detail.get('matched_source_key_count')}`",
                 f"- matched_source_key_sample: `{json.dumps(detail.get('matched_source_key_sample', []), ensure_ascii=False)}`",
@@ -46079,21 +46242,37 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     source_version_state = hot_state.get("source_version_state") if isinstance(hot_state.get("source_version_state"), dict) else {}
     status_counts = ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
     reason_group_counts: dict[str, int] = {}
+    reason_examples: dict[str, dict[str, str]] = {}
     ledger_actionable_count = graph_actionable_source_count_from_counts(status_counts)
     source_version_mismatch_count = int_value(source_version_state.get("version_mismatch_source_count"))
     ledger_store_missing_count = int_value(ledger.get("store_missing_source_estimate"))
+    ledger_coverage_gap_count = int_value(ledger.get("store_untracked_source_estimate"))
     latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
     queued_count = int_value(queue.get("queued_count"))
     if ledger_actionable_count and not queued_count:
         reason_group_counts["ledger_actionable_sources_not_queued"] = ledger_actionable_count
     if ledger_store_missing_count:
         reason_group_counts["graph_source_ledger_store_count_mismatch"] = ledger_store_missing_count
+    if ledger_coverage_gap_count:
+        reason_group_counts["graph_source_ledger_coverage_gap"] = ledger_coverage_gap_count
     if latest_remaining_count:
         reason_group_counts["latest_graph_maintenance_remaining_sources"] = latest_remaining_count
+    ledger_reason_group_counts = ledger.get("reason_group_counts")
+    if isinstance(ledger_reason_group_counts, dict):
+        for reason, count in ledger_reason_group_counts.items():
+            reason_group_counts[str(reason)] = reason_group_counts.get(str(reason), 0) + int_value(count)
+    ledger_reason_examples = ledger.get("reason_examples")
+    if isinstance(ledger_reason_examples, dict):
+        for reason, example in ledger_reason_examples.items():
+            if isinstance(example, dict):
+                reason_examples[str(reason)] = {
+                    "reason": str(example.get("reason") or ""),
+                    "source_key": str(example.get("source_key") or ""),
+                }
     source_reason_group_counts = source_version_state.get("reason_group_counts")
     if isinstance(source_reason_group_counts, dict):
         for reason, count in source_reason_group_counts.items():
-            reason_group_counts[str(reason)] = int_value(count)
+            reason_group_counts[str(reason)] = reason_group_counts.get(str(reason), 0) + int_value(count)
     recommendation = graph_source_maintenance_recommendation(
         source_count=max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
         existing_source_count=int_value(hot_state.get("source_count")),
@@ -46117,10 +46296,11 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
         "orphaned_count": int_value(status_counts.get("orphaned")),
         "queued_count": queued_count,
         "ledger_store_missing_count": ledger_store_missing_count,
+        "ledger_coverage_gap_count": ledger_coverage_gap_count,
         "latest_maintenance_remaining_count": latest_remaining_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
-        "reason_examples": {},
+        "reason_examples": reason_examples,
         "maintenance_recommendation": recommendation,
         "truth_status": "hot_gate_ledger_queue_source_version_summary_no_session_source_scan",
     }
@@ -46227,10 +46407,14 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         for item in ledger_sources.values()
         if isinstance(item, dict)
     )
+    ledger_reason_summary = graph_source_reason_summary(
+        [item for item in ledger_sources.values() if isinstance(item, dict)]
+    )
     retired_count = graph_retired_source_count_from_counts(ledger_status_counts)
     ledger_non_retired_count = max(0, len(ledger_sources) - retired_count)
     stored_source_count = int_value(counts.get("source_count"))
     ledger_store_missing_count = max(0, ledger_non_retired_count - stored_source_count)
+    ledger_coverage_gap_count = max(0, stored_source_count - len(ledger_sources)) if ledger_exists else 0
     ledger_actionable_items = [
         item
         for item in ledger_sources.values()
@@ -46253,6 +46437,8 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         diagnostics.append("graph_store_edges_empty")
     if ledger_store_missing_count:
         diagnostics.append("graph_source_ledger_store_count_mismatch")
+    if ledger_coverage_gap_count:
+        diagnostics.append("graph_source_ledger_coverage_gap")
     if latest_remaining_count:
         diagnostics.append("latest_graph_maintenance_remaining_sources")
     if ledger_actionable_count and not queued_count:
@@ -46265,7 +46451,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         "graph_store_edges_empty",
     }
     needs_full_rebuild = any(item in diagnostics for item in structural_rebuild_reasons)
-    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or ledger_store_missing_count or latest_remaining_count:
+    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or ledger_store_missing_count or ledger_coverage_gap_count or latest_remaining_count:
         status = "dirty"
     elif queued_count or deferred_live_source_count:
         status = "current_with_deferred_live_sources"
@@ -46282,6 +46468,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             or ledger_actionable_count
             or source_version_maintenance_count
             or ledger_store_missing_count
+            or ledger_coverage_gap_count
             or latest_remaining_count
             or needs_full_rebuild
         ),
@@ -46297,9 +46484,12 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "exists": ledger_exists,
             "source_count": len(ledger_sources),
             "status_counts": dict(ledger_status_counts),
+            "reason_group_counts": ledger_reason_summary.get("reason_group_counts", {}),
+            "reason_examples": ledger_reason_summary.get("reason_examples", {}),
             "retired_count": retired_count,
             "non_retired_count": ledger_non_retired_count,
             "store_missing_source_estimate": ledger_store_missing_count,
+            "store_untracked_source_estimate": ledger_coverage_gap_count,
             "actionable_count": ledger_actionable_count,
             "deferred_live_source_count": int_value(ledger_live_summary.get("deferred_live_source_count")),
         },
@@ -50425,6 +50615,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             candidate_pool_limit=getattr(args, "candidate_pool_limit", None),
             budget_seconds=getattr(args, "budget_seconds", None),
             plan_refresh_costs=getattr(args, "plan_refresh_costs", False),
+            mode=getattr(args, "mode", "hot"),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             use_queue=getattr(args, "use_queue", False),
@@ -50470,6 +50661,8 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
         "max_refresh_edges",
         "candidate_pool_limit",
         "budget_seconds",
+        "mode",
+        "source_scan",
         "elapsed_ms",
         "budget_exhausted",
         "state_window",
@@ -50518,6 +50711,9 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
             key: detail.get(key)
             for key in (
                 "selection_strategy",
+                "mode",
+                "source_scan",
+                "truth_status",
                 "use_queue",
                 "queue_selected_source_count",
                 "matched_source_key_count",
@@ -56001,6 +56197,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--candidate-pool-limit", type=int, help="Exact-plan at most this many cheap stored-count candidates before selecting by real refresh cost; <=0 uses the profile default.")
     graph_maintenance_parser.add_argument("--budget-seconds", type=float, help="Stop planning or roll back the current mutation pass once this wall-clock budget is exhausted.")
     graph_maintenance_parser.add_argument("--plan-refresh-costs", action="store_true", help="In dry-run mode, compute exact old-plus-new aggregate refresh costs for the candidate pool without mutating the graph store.")
+    graph_maintenance_parser.add_argument("--mode", choices=["hot", "deep"], default="hot", help="hot may use cached no-op state; deep always scans graph sources.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--use-queue", action="store_true", help="Use graph/maintenance-queue.json as a bounded source-key selector before scanning the full source graph.")

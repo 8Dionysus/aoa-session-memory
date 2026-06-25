@@ -6439,6 +6439,118 @@ def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path:
     assert payload["maintenance_detail"]["selection_strategy"] == "queue_empty_no_source_scan"
 
 
+def test_graph_maintenance_hot_noop_all_is_cached_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("hot graph-maintenance all no-op must not scan graph sources")
+
+    monkeypatch.setattr(module, "graph_source_states", fail_source_scan)
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "deep_audit_recommended": False,
+            "source_count": 5,
+            "source_version_state": {
+                "status": "current",
+                "source_count": 6,
+                "version_mismatch_source_count": 0,
+                "reason_group_counts": {},
+            },
+            "ledger": {
+                "source_count": 6,
+                "status_counts": {"clean": 5, "retired_partial_evidence": 1},
+                "retired_count": 1,
+                "actionable_count": 0,
+                "store_missing_source_estimate": 0,
+            },
+            "queue": {"queued_count": 0},
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_maintenance(aoa_root=aoa_root, batch_limit=5)
+
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["mode"] == "hot"
+    assert payload["source_scan"] is False
+    assert payload["state_window"] == "hot_noop_cached_state"
+    assert payload["selected_count"] == 0
+    assert payload["remaining_count"] == 0
+    assert payload["source_state"]["retired_count"] == 1
+    assert payload["maintenance_detail"]["selection_strategy"] == "hot_noop_no_source_scan"
+    assert payload["maintenance_detail"]["matched_source_key_count"] == 6
+
+
+def test_graph_maintenance_deep_mode_scans_sources_even_when_hot_state_is_clean(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "deep_audit_recommended": False,
+            "source_count": 0,
+            "source_version_state": {
+                "status": "current",
+                "source_count": 0,
+                "version_mismatch_source_count": 0,
+                "reason_group_counts": {},
+            },
+            "ledger": {"source_count": 0, "status_counts": {}, "store_missing_source_estimate": 0},
+            "queue": {"queued_count": 0},
+            "diagnostics": [],
+        },
+    )
+
+    def fake_graph_source_states(**_: Any) -> dict[str, Any]:
+        calls.append("graph_source_states")
+        return {
+            "states": [],
+            "source_count": 0,
+            "existing_source_count": 0,
+            "status_counts": {},
+            "dirty_count": 0,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "retired_count": 0,
+            "partial_evidence_count": 0,
+            "orphaned_count": 0,
+            "out_of_scope_existing_count": 0,
+            "orphan_scope": "global",
+            "selection_scope": "global",
+            "workspace_root": str(tmp_path),
+            "aoa_root": str(aoa_root),
+            "reason_counts": {},
+            "reason_group_counts": {},
+            "reason_examples": {},
+            "maintenance_recommendation": {"route": "none"},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+
+    payload = module.graph_maintenance(aoa_root=aoa_root, mode="deep", batch_limit=5)
+
+    assert calls == ["graph_source_states"]
+    assert payload["ok"] is True
+    assert payload["mode"] == "deep"
+    assert payload["source_scan"] is True
+    assert payload["state_window"] == "pre_apply"
+    assert payload["maintenance_detail"]["selection_strategy"] == "cheap_first_stored_counts"
+
+
 def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / "graph"
@@ -6621,6 +6733,81 @@ def test_graph_hot_state_detects_stale_graph_source_versions_without_source_scan
     assert payload["ok"] is False
     assert payload["needs_graph_maintenance"] is True
     assert payload["graph_store"]["source_version_state"]["samples"][0]["source_key"] == source_key
+
+
+def test_graph_hot_state_detects_ledger_coverage_gap_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / "graph"
+    graph_root.mkdir(parents=True)
+    (graph_root / "graph.sqlite3").write_text("", encoding="utf-8")
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                "session:one": {
+                    "source_key": "session:one",
+                    "status": "clean",
+                    "source_path": str(tmp_path / "one.index.json"),
+                },
+                "session:blocked": {
+                    "source_key": "session:blocked",
+                    "status": "blocked",
+                    "source_path": str(tmp_path / "blocked.index.json"),
+                    "reasons": [f"missing_graph_source_path:{tmp_path / 'blocked.index.json'}"],
+                }
+            }
+        },
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def metadata(self) -> dict[str, str]:
+            return {
+                "graph_store_schema_version": str(module.GRAPH_STORE_SCHEMA_VERSION),
+                "graph_schema_version": str(module.GRAPH_SCHEMA_VERSION),
+            }
+
+        def state_counts(self) -> dict[str, int]:
+            return {"node_count": 10, "edge_count": 12, "source_count": 3}
+
+        def source_version_state(self) -> dict[str, Any]:
+            return {
+                "status": "current",
+                "needs_maintenance": False,
+                "source_count": 3,
+                "version_mismatch_source_count": 0,
+                "reason_group_counts": {},
+                "samples": [],
+            }
+
+        def close(self) -> None:
+            pass
+
+    def fail_source_scan(*_: Any, **__: Any) -> Any:
+        raise AssertionError("ledger coverage hot gate must not scan session sources")
+
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+    monkeypatch.setattr(module, "chronological_session_records", fail_source_scan)
+    monkeypatch.setattr(module, "latest_index_source_mtime", fail_source_scan)
+    monkeypatch.setattr(module, "route_index_drift_records", fail_source_scan)
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_hot_source_state_summary(aoa_root, state)
+
+    assert state["status"] == "stale"
+    assert state["needs_maintenance"] is True
+    assert "graph_source_ledger_coverage_gap" in state["diagnostics"]
+    assert state["ledger"]["store_untracked_source_estimate"] == 1
+    assert summary["ledger_coverage_gap_count"] == 1
+    assert summary["blocked_count"] == 1
+    assert summary["reason_group_counts"]["graph_source_ledger_coverage_gap"] == 1
+    assert summary["reason_group_counts"]["missing_graph_source_path"] == 1
+    assert summary["reason_examples"]["missing_graph_source_path"]["source_key"] == "session:blocked"
+    assert summary["maintenance_recommendation"]["route"] == "graph_ledger_catchup"
+    assert "--mode deep --write-ledger" in summary["maintenance_recommendation"]["command"]
 
 
 def test_graph_hot_state_detects_empty_store_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
