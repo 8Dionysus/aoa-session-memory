@@ -48253,6 +48253,19 @@ ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS = (
     "node_modules",
     "pytest_cache",
 )
+ENTITY_USAGE_SCENARIO_SOURCE_PREFERRED_LAYERS = {"api", "mcp", "skill", "tool"}
+ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES = {"active", "available"}
+ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES = {
+    "abyss_stack_mcp_service_dir",
+    "codex_mcp_config",
+    "codex_user_skills",
+    "runtime_mcp_config",
+    "runtime_mcp_service_dirs",
+    "runtime_skills",
+}
+ENTITY_USAGE_SCENARIO_PROBE_BATCH_MULTIPLIER = 8
+ENTITY_USAGE_SCENARIO_PROBE_BATCH_FLOOR = 32
+ENTITY_USAGE_SCENARIO_PROBE_BATCH_CEILING = 256
 
 
 def entity_usage_scenario_anchor(layer: str, key: str) -> str:
@@ -48261,7 +48274,7 @@ def entity_usage_scenario_anchor(layer: str, key: str) -> str:
     return key
 
 
-def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> str:
+def entity_usage_scenario_candidate_static_reject_reason(candidate: dict[str, Any]) -> str:
     layer = str(candidate.get("layer") or "")
     key = str(candidate.get("key") or "")
     if not key:
@@ -48270,6 +48283,14 @@ def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> 
         return "namespace_key"
     if any(fragment in key for fragment in ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS):
         return "generated_runtime_key"
+    return ""
+
+
+def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> str:
+    static_reason = entity_usage_scenario_candidate_static_reject_reason(candidate)
+    if static_reason:
+        return static_reason
+    layer = str(candidate.get("layer") or "")
     event_count = int_value(candidate.get("event_document_count"))
     usage_count = int_value(candidate.get("usage_event_count"))
     result_count = int_value(candidate.get("result_event_count"))
@@ -48286,13 +48307,142 @@ def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> 
     return ""
 
 
+def entity_usage_scenario_registry_entry(
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+    *,
+    layer: str,
+    key: str,
+    anchor: str,
+) -> dict[str, Any]:
+    registry_kind = ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
+    candidate_keys = [key, route_key_slug(anchor, fallback="")]
+    for candidate_key in candidate_keys:
+        if not candidate_key:
+            continue
+        entry = registry_index.get((registry_kind, candidate_key))
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def entity_usage_scenario_registry_tier(*, layer: str, registry_entry: dict[str, Any]) -> int:
+    if layer not in ENTITY_USAGE_SCENARIO_SOURCE_PREFERRED_LAYERS:
+        return 1
+    if not registry_entry:
+        return 3
+    status = str(registry_entry.get("status") or "")
+    source_surface = str(registry_entry.get("source_surface") or "")
+    if status in ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES and source_surface in ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES:
+        return 0
+    if status in ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES:
+        return 1
+    if source_surface and source_surface != "archived_route_terms":
+        return 1
+    return 2
+
+
+def entity_usage_scenario_probe_evidence(
+    conn: sqlite3.Connection,
+    *,
+    route_id: int,
+    layer: str,
+) -> dict[str, int]:
+    event_document_count = int(
+        conn.execute(
+            """
+            SELECT 1
+            FROM document_routes
+            JOIN documents ON documents.rowid = document_routes.doc_rowid
+            WHERE document_routes.route_id = ?
+              AND documents.doc_type = 'event'
+            LIMIT 1
+            """,
+            (route_id,),
+        ).fetchone()
+        is not None
+    )
+    usage_event_count = 0
+    result_event_count = 0
+    outcome_event_count = 0
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS:
+        usage_event_count = int(
+            conn.execute(
+                """
+                SELECT 1
+                FROM document_routes
+                JOIN documents INDEXED BY idx_documents_doc_type_usage_role_date
+                  ON documents.rowid = document_routes.doc_rowid
+                WHERE document_routes.route_id = ?
+                  AND documents.doc_type = 'event'
+                  AND documents.usage_role = 'usage'
+                LIMIT 1
+                """,
+                (route_id,),
+            ).fetchone()
+            is not None
+        )
+    if layer in {"agent_event", "hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"}:
+        result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
+        outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
+        result_event_count = int(
+            conn.execute(
+                f"""
+                SELECT 1
+                FROM document_routes
+                JOIN documents INDEXED BY idx_documents_type
+                  ON documents.rowid = document_routes.doc_rowid
+                WHERE document_routes.route_id = ?
+                  AND documents.doc_type = 'event'
+                  AND documents.event_type IN ({result_type_placeholders})
+                LIMIT 1
+                """,
+                (route_id, *sorted(ENTITY_USAGE_RESULT_TYPES)),
+            ).fetchone()
+            is not None
+        )
+        outcome_event_count = int(
+            conn.execute(
+                f"""
+                SELECT 1
+                FROM document_routes
+                JOIN documents INDEXED BY idx_documents_type
+                  ON documents.rowid = document_routes.doc_rowid
+                WHERE document_routes.route_id = ?
+                  AND documents.doc_type = 'event'
+                  AND documents.event_type IN ({outcome_type_placeholders})
+                LIMIT 1
+                """,
+                (route_id, *sorted(ENTITY_USAGE_OUTCOME_TYPES)),
+            ).fetchone()
+            is not None
+        )
+    posting_count = int(
+        conn.execute(
+            "SELECT 1 FROM document_routes WHERE route_id = ? LIMIT 1",
+            (route_id,),
+        ).fetchone()
+        is not None
+    )
+    return {
+        "posting_count": posting_count,
+        "document_count": posting_count,
+        "event_document_count": event_document_count,
+        "usage_event_count": usage_event_count,
+        "result_event_count": result_event_count,
+        "outcome_event_count": outcome_event_count,
+    }
+
+
 def entity_usage_scenario_candidate_score(candidate: dict[str, Any]) -> int:
     usage_count = int_value(candidate.get("usage_event_count"))
     result_count = int_value(candidate.get("result_event_count"))
     outcome_count = int_value(candidate.get("outcome_event_count"))
     event_count = int_value(candidate.get("event_document_count"))
     document_count = int_value(candidate.get("document_count"))
+    registry_bonus = max(0, 3 - int_value(candidate.get("registry_tier"), 3)) * 2000
     return (
+        registry_bonus
+        +
         min(usage_count, 50) * 1000
         + min(outcome_count, 50) * 250
         + min(result_count, 50) * 150
@@ -48324,135 +48474,155 @@ def entity_usage_scenario_candidates(
         selected_layers = [route_key_slug(layer, fallback=layer) for layer in (layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS))]
         selected_layers = [layer for layer in selected_layers if layer]
         placeholders = ",".join("?" for _ in selected_layers)
-        result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
-        outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
-        # Keep the randomized live scenario cheap: count route postings first,
-        # then touch indexed event buckets only for evidence roles.
         rows = conn.execute(
             f"""
-            WITH candidate_routes AS (
-              SELECT id, layer, key, route_signal
-              FROM route_terms
-              WHERE key <> ''
-                AND layer IN ({placeholders})
-            ),
-            posting_counts AS (
-              SELECT document_routes.route_id, COUNT(*) AS document_count
-              FROM document_routes
-              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
-              GROUP BY document_routes.route_id
-            ),
-            usage_counts AS (
-              SELECT document_routes.route_id, COUNT(*) AS usage_event_count
-              FROM documents INDEXED BY idx_documents_doc_type_usage_role_date
-              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
-              WHERE documents.doc_type = 'event'
-                AND documents.usage_role = 'usage'
-              GROUP BY document_routes.route_id
-            ),
-            result_counts AS (
-              SELECT document_routes.route_id, COUNT(*) AS result_event_count
-              FROM documents INDEXED BY idx_documents_type
-              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
-              WHERE documents.doc_type = 'event'
-                AND documents.event_type IN ({result_type_placeholders})
-              GROUP BY document_routes.route_id
-            ),
-            outcome_counts AS (
-              SELECT document_routes.route_id, COUNT(*) AS outcome_event_count
-              FROM documents INDEXED BY idx_documents_type
-              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
-              WHERE documents.doc_type = 'event'
-                AND documents.event_type IN ({outcome_type_placeholders})
-              GROUP BY document_routes.route_id
-            )
             SELECT
-              candidate_routes.id AS route_id,
-              candidate_routes.layer AS layer,
-              candidate_routes.key AS key,
-              candidate_routes.route_signal AS route_signal,
-              COALESCE(posting_counts.document_count, 0) AS posting_count,
-              COALESCE(posting_counts.document_count, 0) AS document_count,
-              COALESCE(posting_counts.document_count, 0) AS event_document_count,
-              COALESCE(usage_counts.usage_event_count, 0) AS usage_event_count,
-              COALESCE(result_counts.result_event_count, 0) AS result_event_count,
-              COALESCE(outcome_counts.outcome_event_count, 0) AS outcome_event_count
-            FROM candidate_routes
-            JOIN posting_counts ON posting_counts.route_id = candidate_routes.id
-            LEFT JOIN usage_counts ON usage_counts.route_id = candidate_routes.id
-            LEFT JOIN result_counts ON result_counts.route_id = candidate_routes.id
-            LEFT JOIN outcome_counts ON outcome_counts.route_id = candidate_routes.id
-            WHERE COALESCE(posting_counts.document_count, 0) >= ?
+              id AS route_id,
+              layer,
+              key,
+              route_signal
+            FROM route_terms
+            WHERE key <> ''
+              AND layer IN ({placeholders})
             """,
-            [
-                *selected_layers,
-                *sorted(ENTITY_USAGE_RESULT_TYPES),
-                *sorted(ENTITY_USAGE_OUTCOME_TYPES),
-                max(1, int_value(min_postings, 1)),
-            ],
+            selected_layers,
         ).fetchall()
     except sqlite3.Error as exc:
         if conn is not None:
             conn.close()
         return [], diagnostics + [sqlite_error_diagnostic(exc)]
-    finally:
-        if conn is not None:
-            conn.close()
-    candidates: list[dict[str, Any]] = []
-    rejected_counts: Counter[str] = Counter()
-    for row in rows:
-        candidate = {
-            "route_id": int(row["route_id"]),
-            "layer": str(row["layer"]),
-            "key": str(row["key"]),
-            "kind": ENTITY_USAGE_SCENARIO_LAYER_KIND.get(str(row["layer"]), "auto"),
-            "anchor": entity_usage_scenario_anchor(str(row["layer"]), str(row["key"])),
-            "route_signal": str(row["route_signal"]),
-            "posting_count": int(row["posting_count"]),
-            "document_count": int(row["document_count"]),
-            "event_document_count": int_value(row["event_document_count"]),
-            "usage_event_count": int_value(row["usage_event_count"]),
-            "result_event_count": int_value(row["result_event_count"]),
-            "outcome_event_count": int_value(row["outcome_event_count"]),
-        }
-        reject_reason = entity_usage_scenario_candidate_reject_reason(candidate)
-        if reject_reason:
-            rejected_counts[reject_reason] += 1
-            continue
-        candidate["scenario_score"] = entity_usage_scenario_candidate_score(candidate)
-        candidates.append(candidate)
-    for reason, count in sorted(rejected_counts.items()):
-        diagnostics.append(f"candidate_pool_filtered:{reason}:{count}")
     rng = random.Random(str(seed))
     requested = max(1, min(int_value(sample_size, 8), 50))
+    registry_index = cached_entity_registry_entry_index(aoa_root)
+    raw_candidates: list[dict[str, Any]] = []
+    rejected_counts: Counter[str] = Counter()
+    for row in rows:
+        layer = str(row["layer"])
+        key = str(row["key"])
+        anchor = entity_usage_scenario_anchor(layer, key)
+        registry_entry = entity_usage_scenario_registry_entry(registry_index, layer=layer, key=key, anchor=anchor)
+        candidate = {
+            "route_id": int(row["route_id"]),
+            "layer": layer,
+            "key": key,
+            "kind": ENTITY_USAGE_SCENARIO_LAYER_KIND.get(layer, "auto"),
+            "anchor": anchor,
+            "route_signal": str(row["route_signal"]),
+            "registry_tier": entity_usage_scenario_registry_tier(layer=layer, registry_entry=registry_entry),
+            "registry_status": str(registry_entry.get("status") or ""),
+            "registry_source_surface": str(registry_entry.get("source_surface") or ""),
+        }
+        static_reject_reason = entity_usage_scenario_candidate_static_reject_reason(candidate)
+        if static_reject_reason:
+            rejected_counts[static_reject_reason] += 1
+            continue
+        raw_candidates.append(candidate)
+
     by_layer: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for candidate in candidates:
+    for candidate in raw_candidates:
         by_layer[str(candidate.get("layer") or "")].append(candidate)
     for items in by_layer.values():
         rng.shuffle(items)
-        items.sort(key=lambda item: int_value(item.get("scenario_score")), reverse=True)
+        items.sort(key=lambda item: int_value(item.get("registry_tier"), 3))
     layer_order = sorted(by_layer)
     rng.shuffle(layer_order)
     selected: list[dict[str, Any]] = []
     seen_route_ids: set[int] = set()
-    for layer in layer_order:
-        items = by_layer.get(layer) or []
-        if not items:
+    probe_count = 0
+    probe_budget = max(
+        ENTITY_USAGE_SCENARIO_PROBE_BATCH_FLOOR,
+        min(
+            ENTITY_USAGE_SCENARIO_PROBE_BATCH_CEILING,
+            requested * max(1, len(layer_order)) * ENTITY_USAGE_SCENARIO_PROBE_BATCH_MULTIPLIER,
+        ),
+    )
+
+    def probe_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal probe_count
+        if probe_count >= probe_budget:
+            return None
+        probe_count += 1
+        evidence = entity_usage_scenario_probe_evidence(
+            conn,
+            route_id=int_value(candidate.get("route_id")),
+            layer=str(candidate.get("layer") or ""),
+        )
+        candidate.update(evidence)
+        if int_value(candidate.get("posting_count")) < max(1, int_value(min_postings, 1)):
+            rejected_counts["min_postings"] += 1
+            return None
+        reject_reason = entity_usage_scenario_candidate_reject_reason(candidate)
+        if reject_reason:
+            rejected_counts[reject_reason] += 1
+            return None
+        candidate["scenario_score"] = entity_usage_scenario_candidate_score(candidate)
+        return candidate
+
+    try:
+        for layer in layer_order:
+            items = by_layer.get(layer) or []
+            for candidate in items:
+                route_id = int_value(candidate.get("route_id"))
+                if route_id in seen_route_ids:
+                    continue
+                probed = probe_candidate(candidate)
+                if not probed:
+                    continue
+                selected.append(probed)
+                seen_route_ids.add(route_id)
+                break
+            if len(selected) >= requested:
+                break
+        if len(selected) < requested:
+            remaining = [
+                candidate
+                for layer in layer_order
+                for candidate in by_layer.get(layer, [])
+                if int_value(candidate.get("route_id")) not in seen_route_ids
+            ]
+            rng.shuffle(remaining)
+            remaining.sort(key=lambda item: int_value(item.get("registry_tier"), 3))
+            for candidate in remaining:
+                route_id = int_value(candidate.get("route_id"))
+                if route_id in seen_route_ids:
+                    continue
+                probed = probe_candidate(candidate)
+                if not probed:
+                    continue
+                selected.append(probed)
+                seen_route_ids.add(route_id)
+                if len(selected) >= requested:
+                    break
+    finally:
+        if conn is not None:
+            conn.close()
+    diagnostics.append("candidate_selection_strategy:bounded_route_probe_v1")
+    diagnostics.append(f"candidate_probe_count:{probe_count}")
+    if probe_count >= probe_budget and len(selected) < requested:
+        diagnostics.append(f"candidate_probe_budget_exhausted:{probe_budget}")
+    for reason, count in sorted(rejected_counts.items()):
+        diagnostics.append(f"candidate_pool_filtered:{reason}:{count}")
+    selected.sort(key=lambda item: int_value(item.get("scenario_score")), reverse=True)
+    layer_first_selected: list[dict[str, Any]] = []
+    seen_layers: set[str] = set()
+    for candidate in selected:
+        if len(layer_first_selected) >= requested:
+            break
+        layer = str(candidate.get("layer") or "")
+        if layer in seen_layers:
             continue
-        candidate = items[0]
+        layer_first_selected.append(candidate)
+        seen_layers.add(layer)
+    seen_selected_route_ids = {int_value(item.get("route_id")) for item in layer_first_selected}
+    for candidate in selected:
         route_id = int_value(candidate.get("route_id"))
-        if route_id not in seen_route_ids:
-            selected.append(candidate)
-            seen_route_ids.add(route_id)
-        if len(selected) >= requested:
-            return selected, diagnostics
-    remaining = [candidate for candidate in candidates if int_value(candidate.get("route_id")) not in seen_route_ids]
-    rng.shuffle(remaining)
-    selected.extend(remaining[: max(0, requested - len(selected))])
-    return selected, diagnostics
+        if route_id in seen_selected_route_ids:
+            continue
+        layer_first_selected.append(candidate)
+        seen_selected_route_ids.add(route_id)
+        if len(layer_first_selected) >= requested:
+            break
+    return layer_first_selected[:requested], diagnostics
 
 
 def entity_usage_raw_preview_counts(events: list[dict[str, Any]], *, limit: int = 3) -> dict[str, int]:
