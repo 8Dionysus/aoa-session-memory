@@ -1860,9 +1860,9 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     maintenance_plan = module.maintain_indexes(aoa_root=aoa_root, target="all", repair_graph=False, max_raw_bytes=1)
     planned_refresh = next(action for action in maintenance_plan["actions"] if action["id"] == "refresh_entity_registry")
     assert planned_refresh["needed"] is True
-    assert "search-index" in planned_refresh["command"]
-    assert "--no-rebuild" in planned_refresh["command"]
-    assert "entity-registry" not in planned_refresh["command"]
+    assert "entity-registry-search-sync" in planned_refresh["command"]
+    assert "search-index" not in planned_refresh["command"]
+    assert "--no-rebuild" not in planned_refresh["command"]
 
     applied_maintenance = module.maintain_indexes(
         aoa_root=aoa_root,
@@ -1961,8 +1961,8 @@ def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: 
     assert status["search"]["storage_policy_status"] == "bounded_policy_recorded"
     assert status["search"]["needs_storage_policy_rebuild"] is False
     assert status["next_actions"][0]["id"] == "entity_registry_refresh"
-    assert "search-index" in status["next_actions"][0]["command"]
-    assert "--no-rebuild" in status["next_actions"][0]["command"]
+    assert "entity-registry-search-sync" in status["next_actions"][0]["command"]
+    assert "search-index" not in status["next_actions"][0]["command"]
 
     payload = module.auto_maintenance(
         workspace_root=workspace,

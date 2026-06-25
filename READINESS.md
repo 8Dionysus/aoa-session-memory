@@ -69,7 +69,10 @@ Build the `.aoa` session-memory mechanism end to end:
   `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
   hooks, scripts, validators, tests, evals, playbooks, techniques, mechanics,
-  graph, and memory surfaces; MCP access is read-only
+  graph, and memory surfaces; MCP access is read-only; direct
+  `entity-registry-search-sync` refreshes the generated registry snapshot and
+  SQLite registry docs without selecting an arbitrary session for
+  `search-index --no-rebuild`
 - Entity usage fast path: `entity-usage-audit` starts from typed route signals
   and direct usage classes, skips raw semantic previews during the indexed
   harvest, avoids compressed full-body hydration when bounded search rows are
@@ -761,6 +764,15 @@ Last observed result:
   `catalog_state_basis=selected_records_with_catalog_fallback`. This proves the
   scoped hot path no longer cold-refreshes the whole entity registry or rescans
   all session indexes just to refresh the catalog.
+- 2026-06-25 direct entity-registry sync proof: after a route-card/docs change
+  made only the generated entity registry stale, `maintenance-status --full`
+  proposed `entity-registry-search-sync` instead of
+  `search-index all --limit 1 --no-rebuild`. The live sync completed in
+  `8.394s`, with `selected_count=0`, `processed_count=0`, `updated=1`,
+  `unchanged=3480`, and `removed=0`, under a maintenance coordinator lease that
+  touched only `entity_registry` and `search`. The previous fallback route for
+  the same class of source-card change took `84.125s`, including `27.019s` of
+  unrelated session bulk indexing and `56.945s` of registry refresh.
 - 2026-06-25 operations telemetry proof: `search-index` and `search-shards`
   reports now include bounded `slow_sessions` rows with session label,
   elapsed time, document count, docs/sec, raw-text status, and shard when

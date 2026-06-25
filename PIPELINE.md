@@ -820,6 +820,18 @@ turn an otherwise unchanged inventory into a full FTS/body rewrite. A
 successful sync stores a stable snapshot fingerprint in SQLite `meta`; a later
 registry-only refresh may return `skipped=true` when sources and synced docs
 are already current, avoiding a cold route-term scan for no-op maintenance.
+When the entity registry is the only dirty surface, use the direct sync route:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-registry-search-sync \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write-report
+```
+
+This route updates `maps/entity-registry.json` and the SQLite
+`doc_type=entity_registry` rows under the maintenance lock without reindexing a
+random session as a side effect.
 
 When an agent needs to debug or study one operational thing, use the resolver
 instead of guessing one axis by hand:

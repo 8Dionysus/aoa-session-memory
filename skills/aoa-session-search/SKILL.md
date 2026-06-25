@@ -130,6 +130,16 @@ By default this route skips rows still marked `deferred_live`; run the
 live-tail catch-up route first, or pass `--include-deferred-live` only as an
 explicit operator override.
 
+When only the generated entity inventory is stale, refresh it without touching
+session documents:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-registry-search-sync \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --write-report
+```
+
 Check optional provider status before using host overlays:
 
 ```bash

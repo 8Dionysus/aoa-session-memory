@@ -1068,9 +1068,19 @@ python3 scripts/aoa_session_memory.py entity-registry \
 observed, stale, removed, and unknown entity states so agents can route quickly
 without treating the registry as source truth. `index-maintenance` refreshes it
 when source skill/MCP surfaces are newer, and MCP exposes it read-only.
-When the registry must stay synchronized with SQLite search, use
-`search-index --no-rebuild` or `index-maintenance`; those routes refresh the
-snapshot and `doc_type=entity_registry` documents together. A bare
+When the registry must stay synchronized with SQLite search, use the direct
+sync route:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-registry-search-sync \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+`index-maintenance` may call the same narrow path, but ordinary
+`search-index --no-rebuild` should not be used merely to refresh registry
+docs because it also indexes selected session documents. A bare
 `entity-registry --write` is only a generated snapshot refresh.
 The SQLite sync is delta-based: unchanged registry docs are left in place, new
 docs are inserted, changed docs are replaced by rowid, and missing docs are

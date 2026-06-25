@@ -17804,16 +17804,11 @@ def maintain_indexes(
         + ([] if search_rebuild_required else ["--no-rebuild"])
         + ["--write-report"]
     )
-    entity_registry_refresh_target = target
-    entity_registry_refresh_selection_args = selection_args
-    if target == "all" and not entity_registry_refresh_selection_args:
-        entity_registry_refresh_selection_args = ["--limit", "1"]
     entity_registry_search_command = (
         base
-        + ["search-index", entity_registry_refresh_target, *root_args]
-        + entity_registry_refresh_selection_args
-        + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
-        + ["--no-rebuild", "--write-report"]
+        + ["entity-registry-search-sync", *root_args]
+        + (["--budget-seconds", budget_seconds_text] if budget_seconds_text else [])
+        + ["--write-report"]
     )
     atlas_command = (
         base
@@ -47016,12 +47011,8 @@ def session_memory_maintenance_next_actions(
                 "command": [
                     "python3",
                     "scripts/aoa_session_memory.py",
-                    "search-index",
-                    "all",
+                    "entity-registry-search-sync",
                     *root_args,
-                    "--limit",
-                    "1",
-                    "--no-rebuild",
                     "--write-report",
                 ],
                 "note": "Refresh generated entity registry snapshot and its search documents together; it does not repair or promote truth.",
@@ -52682,6 +52673,31 @@ def command_entity_registry(args: argparse.Namespace) -> int:
             kind=args.kind,
             limit=args.limit,
         )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_entity_registry_search_sync(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+
+    def run_sync() -> dict[str, Any]:
+        return refresh_entity_registry_search_documents_only(
+            aoa_root=root,
+            write_report=args.write_report,
+            budget_seconds=args.budget_seconds,
+        )
+
+    payload = run_with_maintenance_lock(
+        root,
+        run_sync,
+        owner_job="entity-registry-search-sync",
+        mode="manual-bulk",
+        target="entity-registry",
+        reason="operator_requested",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=True),
+        budget_seconds=args.budget_seconds,
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
@@ -58435,6 +58451,17 @@ def build_parser() -> argparse.ArgumentParser:
     entity_registry_parser.add_argument("--no-runtime", action="store_true", help="Do not inspect live Codex skill/MCP runtime surfaces; use archived route terms only.")
     entity_registry_parser.add_argument("--no-unknown", action="store_true", help="For --lookup, return zero matches instead of an unknown/unregistered packet.")
     entity_registry_parser.set_defaults(func=command_entity_registry)
+
+    entity_registry_search_sync_parser = sub.add_parser(
+        "entity-registry-search-sync",
+        aliases=["entity-registry-sync"],
+        help="Refresh generated entity registry snapshot and its SQLite search documents without reindexing session docs.",
+    )
+    entity_registry_search_sync_parser.add_argument("--workspace-root")
+    entity_registry_search_sync_parser.add_argument("--aoa-root")
+    entity_registry_search_sync_parser.add_argument("--budget-seconds", type=float)
+    entity_registry_search_sync_parser.add_argument("--write-report", action="store_true")
+    entity_registry_search_sync_parser.set_defaults(func=command_entity_registry_search_sync)
 
     trace_route_parser = sub.add_parser(
         "trace-route",
