@@ -1873,6 +1873,49 @@ def test_graph_timeline_falls_back_to_usage_events_when_graph_store_has_no_event
     assert "graph_timeline_event_nodes_missing_used_entity_usage_fallback" in timeline["diagnostics"]
 
 
+def test_graph_timeline_uses_direct_store_events_before_neighborhood(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_direct_timeline(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["anchor"] == "tool:exec_command"
+        assert kwargs["kind"] == "tool"
+        assert kwargs["limit"] == 1
+        return {
+            "ok": True,
+            "source": "sqlite_graph_store_direct_timeline",
+            "generated_at": "2026-06-25T00:00:00Z",
+            "node_count": 1,
+            "edge_count": 0,
+            "nodes": [
+                {
+                    "id": "event:session-1:001:000010",
+                    "type": "event",
+                    "title": "Tool call: exec_command",
+                    "timestamp": "2026-06-25T00:00:01Z",
+                    "session_label": "2026-06-25__001__tool-timeline",
+                    "segment_id": "001",
+                    "event_id": "000010",
+                    "refs": {"raw": "raw:line:10"},
+                    "evidence_refs": [{"session_id": "session-1", "segment_id": "001", "event_id": "000010", "refs": {"raw": "raw:line:10"}}],
+                }
+            ],
+            "edges": [],
+            "resolved": {"start_node_ids": ["route:tool:tool:exec_command"]},
+            "diagnostics": [],
+        }
+
+    def fail_neighborhood(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("direct graph timeline should avoid neighborhood BFS")
+
+    monkeypatch.setattr(module, "graph_from_store_timeline_events", fake_direct_timeline)
+    monkeypatch.setattr(module, "graph_neighborhood", fail_neighborhood)
+
+    timeline = module.graph_timeline(aoa_root=tmp_path / ".aoa", anchor="tool:exec_command", kind="tool", limit=1)
+
+    assert timeline["ok"] is True
+    assert timeline["timeline_source"] == "sqlite_graph_store_direct_timeline"
+    assert timeline["events"][0]["refs"]["raw"] == "raw:line:10"
+    assert timeline["resolved"]["start_node_ids"] == ["route:tool:tool:exec_command"]
+
+
 def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

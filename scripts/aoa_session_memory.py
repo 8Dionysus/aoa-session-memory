@@ -43002,6 +43002,84 @@ def graph_from_store_neighborhood(
     }
 
 
+def graph_from_store_timeline_events(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 40,
+) -> dict[str, Any] | None:
+    state = graph_store_query_state(aoa_root)
+    if state.get("status") != "current":
+        return None
+    paths = graph_paths(aoa_root)
+    edge_types = ("mentions_route_signal", "event_mentions_registered_entity", "goal_lifecycle_has_event")
+    placeholders = ",".join("?" for _item in edge_types)
+    event_limit = max(1, min(int_value(limit, 40), 200))
+    edge_fetch_limit = max(event_limit, min(event_limit * 8, 400))
+    try:
+        conn = sqlite3.connect(str(paths["store"]))
+        conn.row_factory = sqlite3.Row
+        resolved = graph_store_resolve_anchor(conn, anchor, kind=kind, limit=max(10, event_limit))
+        start_node_ids = [str(node_id) for node_id in resolved.get("start_node_ids", []) if node_id]
+        event_ids: list[str] = []
+        edge_ids: list[str] = []
+        seen_events: set[str] = set()
+        seen_edges: set[str] = set()
+        for node_id in start_node_ids:
+            if len(event_ids) >= edge_fetch_limit:
+                break
+            for column, opposite_column in (("target_node", "source_node"), ("source_node", "target_node")):
+                remaining = max(1, edge_fetch_limit - len(event_ids))
+                rows = conn.execute(
+                    f"""
+                    SELECT id, source_node, target_node, edge_type
+                    FROM edges
+                    WHERE {column} = ?
+                      AND edge_type IN ({placeholders})
+                    LIMIT ?
+                    """,
+                    (node_id, *edge_types, remaining),
+                ).fetchall()
+                for row in rows:
+                    edge_id = str(row["id"])
+                    candidate = str(row[opposite_column])
+                    if not candidate.startswith("event:"):
+                        continue
+                    if edge_id and edge_id not in seen_edges:
+                        seen_edges.add(edge_id)
+                        edge_ids.append(edge_id)
+                    if candidate not in seen_events:
+                        seen_events.add(candidate)
+                        event_ids.append(candidate)
+                    if len(event_ids) >= edge_fetch_limit:
+                        break
+                if len(event_ids) >= edge_fetch_limit:
+                    break
+        nodes = graph_store_fetch_payloads(conn, "nodes", event_ids)
+        edges = graph_store_fetch_payloads(conn, "edges", edge_ids)
+        conn.close()
+    except sqlite3.Error:
+        return None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_bounded_graph",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": (state.get("metadata") or {}).get("updated_at") or (state.get("metadata") or {}).get("generated_at") or utc_now(),
+        "ok": bool(nodes),
+        "truth_status": "bounded_graph_timeline_from_sqlite_store_not_reviewed_truth",
+        "source": "sqlite_graph_store_direct_timeline",
+        "aoa_root": str(aoa_root),
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+        "resolved": resolved,
+        "store_state": state,
+        "diagnostics": state.get("diagnostics", []) if isinstance(state.get("diagnostics"), list) else [],
+    }
+
+
 def resolve_graph_anchor(
     graph: dict[str, Any],
     anchor: str,
@@ -43578,7 +43656,42 @@ def graph_timeline(
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     event_limit = max(1, min(int_value(limit, 40), 200))
     neighborhood_limit = max(event_limit * 4, min(60, event_limit + 12))
-    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=2, limit=neighborhood_limit)
+    direct_packet = graph_from_store_timeline_events(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=event_limit)
+    if direct_packet is not None and (
+        direct_packet.get("ok")
+        or (isinstance(direct_packet.get("resolved"), dict) and direct_packet["resolved"].get("start_node_ids"))
+    ):
+        direct_nodes = direct_packet.get("nodes", []) if isinstance(direct_packet.get("nodes"), list) else []
+        direct_edges = direct_packet.get("edges", []) if isinstance(direct_packet.get("edges"), list) else []
+        packet = {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_neighborhood",
+            "graph_schema_version": GRAPH_SCHEMA_VERSION,
+            "generated_at": utc_now(),
+            "ok": bool(direct_nodes),
+            "mutates": False,
+            "truth_status": "graph_route_packet_not_reviewed_truth",
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, route_kind),
+            "depth": 1,
+            "resolved": direct_packet.get("resolved") if isinstance(direct_packet.get("resolved"), dict) else {},
+            "graph": {
+                "source": direct_packet.get("source"),
+                "generated_at": direct_packet.get("generated_at"),
+                "node_count": direct_packet.get("node_count"),
+                "edge_count": direct_packet.get("edge_count"),
+            },
+            "node_count": len(direct_nodes),
+            "edge_count": len(direct_edges),
+            "nodes": [graph_compact_node_for_packet(node) for node in direct_nodes],
+            "edges": [graph_compact_edge_for_packet(edge) for edge in direct_edges],
+            "evidence_refs": graph_collect_evidence(direct_nodes, direct_edges),
+            "freshness": graph_freshness(aoa_root, direct_packet),
+            "diagnostics": direct_packet.get("diagnostics", []) if isinstance(direct_packet.get("diagnostics"), list) else [],
+            "next_route": "verify important claims through raw_ref, segment_ref, and session_ref before promotion",
+        }
+    else:
+        packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=2, limit=neighborhood_limit)
     events = [node for node in packet.get("nodes", []) if isinstance(node, dict) and node.get("type") == "event"]
     resolved = packet.get("resolved") if isinstance(packet.get("resolved"), dict) else {}
     if resolved.get("resolver_strategy") == "exact_route_node":
@@ -43598,7 +43711,9 @@ def graph_timeline(
     events.sort(key=lambda node: (str(node.get("timestamp") or ""), str(node.get("session_label") or ""), int_value(node.get("line")), str(node.get("event_id") or "")))
     selected = events[:event_limit]
     evidence_refs = graph_collect_evidence(selected, [], limit=80)
-    timeline_source = "graph_neighborhood"
+    packet_graph = packet.get("graph") if isinstance(packet.get("graph"), dict) else {}
+    packet_graph_source = str(packet_graph.get("source") or "")
+    timeline_source = "sqlite_graph_store_direct_timeline" if packet_graph_source == "sqlite_graph_store_direct_timeline" else "graph_neighborhood"
     provider_summary: dict[str, Any] = {}
     quality: dict[str, Any] = {}
     freshness = packet.get("freshness")
