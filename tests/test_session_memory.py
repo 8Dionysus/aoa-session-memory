@@ -1745,6 +1745,7 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
 
 def test_graph_timeline_falls_back_to_usage_events_when_graph_store_has_no_event_nodes(tmp_path: Path, monkeypatch: Any) -> None:
     def fake_graph_neighborhood(**_kwargs: Any) -> dict[str, Any]:
+        assert _kwargs["limit"] == 20
         return {
             "ok": True,
             "nodes": [

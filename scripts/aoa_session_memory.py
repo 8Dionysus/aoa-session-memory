@@ -43576,7 +43576,9 @@ def graph_timeline(
 ) -> dict[str, Any]:
     normalized_kind = normalize_trace_route_kind(kind)
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
-    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=2, limit=max(limit * 4, 60))
+    event_limit = max(1, min(int_value(limit, 40), 200))
+    neighborhood_limit = max(event_limit * 4, min(60, event_limit + 12))
+    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=2, limit=neighborhood_limit)
     events = [node for node in packet.get("nodes", []) if isinstance(node, dict) and node.get("type") == "event"]
     resolved = packet.get("resolved") if isinstance(packet.get("resolved"), dict) else {}
     if resolved.get("resolver_strategy") == "exact_route_node":
@@ -43594,7 +43596,7 @@ def graph_timeline(
         if direct_event_ids:
             events = [event for event in events if str(event.get("id") or "") in direct_event_ids]
     events.sort(key=lambda node: (str(node.get("timestamp") or ""), str(node.get("session_label") or ""), int_value(node.get("line")), str(node.get("event_id") or "")))
-    selected = events[: max(1, min(int_value(limit, 40), 200))]
+    selected = events[:event_limit]
     evidence_refs = graph_collect_evidence(selected, [], limit=80)
     timeline_source = "graph_neighborhood"
     provider_summary: dict[str, Any] = {}
@@ -43602,7 +43604,7 @@ def graph_timeline(
     freshness = packet.get("freshness")
     diagnostics = packet.get("diagnostics", []) if isinstance(packet.get("diagnostics"), list) else []
     if not selected and resolved.get("start_node_ids"):
-        audit_limit = max(1, min(int_value(limit, 40), 200))
+        audit_limit = event_limit
         usage_audit = entity_usage_audit(
             aoa_root=aoa_root,
             anchor=anchor,
