@@ -7291,7 +7291,11 @@ def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     assert scope_entries
     entry = json.loads(scope_entries[0].read_text(encoding="utf-8"))
     assert entry["truth_status"] == "route_signal_not_reviewed_truth"
+    assert entry["session_date"] == "2026-05-24"
     assert entry["evidence"]["raw_ref"] == "raw:line:2"
+    scope_index = json.loads((aoa_root / "maps" / "by-scope-contract" / "index.json").read_text(encoding="utf-8"))
+    indexed_entry = next(item for item in scope_index["entries"] if item["json"] == str(scope_entries[0]))
+    assert indexed_entry["session_date"] == "2026-05-24"
     identity = entry["artifact_identity"]
     assert identity["artifact_class"] == "session_memory_atlas_route_entry"
     assert identity["owner_repo"] == "aoa-session-memory"

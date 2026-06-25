@@ -49087,6 +49087,7 @@ def atlas_entry_markdown(entry: dict[str, Any]) -> str:
         "",
         f"- session: `{entry.get('session')}`",
         f"- session_id: `{entry.get('session_id', '')}`",
+        f"- session_date: `{entry.get('session_date', '')}`",
         f"- work_context: `{entry.get('work_context', '')}`",
         f"- work_family: `{entry.get('work_family', '')}`",
         f"- confidence: `{entry.get('confidence')}`",
@@ -49140,6 +49141,10 @@ def add_atlas_candidate(
     display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
     work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else {}
     label = str(display.get("label") or record.get("session_label") or session_dir.name)
+    session_date = str(display.get("date") or record.get("date") or record.get("session_date") or "")
+    if not session_date:
+        match = re.match(r"(20\d{2}-[01]\d-[0-3]\d)", label)
+        session_date = match.group(1) if match else ""
     normalized_key = route_key_slug(route_key, fallback="route")
     evidence: dict[str, str] | None = None
     if evidence_cache:
@@ -49171,6 +49176,7 @@ def add_atlas_candidate(
             "truth_status": "route_signal_not_reviewed_truth",
             "session": label,
             "session_id": str(manifest.get("session_id") or record.get("session_id") or ""),
+            "session_date": session_date,
             "work_context": str(work_context.get("work_name") or ""),
             "work_family": str(work_context.get("work_family") or ""),
             "authority_surface": "",
@@ -49300,6 +49306,7 @@ def atlas_compact_entry(
         "route_key": entry.get("route_key"),
         "session": entry.get("session"),
         "session_id": entry.get("session_id"),
+        "session_date": entry.get("session_date"),
         "confidence": entry.get("confidence"),
         "json": json_text,
         "markdown": markdown_text,
@@ -49543,6 +49550,7 @@ def build_agent_atlas(
                 "route_key": entry.get("route_key"),
                 "session": entry.get("session"),
                 "session_id": entry.get("session_id"),
+                "session_date": entry.get("session_date"),
                 "confidence": entry.get("confidence"),
                 "json": str(json_path),
                 "markdown": str(md_path),
