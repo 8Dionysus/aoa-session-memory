@@ -114,7 +114,10 @@ SEARCH_FTS_QUERY_TIMEOUT_MS = 8000
 SEARCH_FTS_QUERY_PROGRESS_OPCODES = 10000
 SEARCH_FTS_QUERY_TIMEOUT_STATUS = "sqlite_query_timeout"
 SEARCH_BODY_PREVIEW_CHARS = 700
+SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS = 240
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
+SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_preview_v1"
+SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v1"
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
@@ -122,6 +125,11 @@ SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY = 0
 SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY = 50
 SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 512
 SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
+SEARCH_STRUCTURED_SHARD_ROUTE_LAYERS_PREVIEW_CHARS = 160
+SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS = 360
+SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS = 180
+SEARCH_TAGS_STORAGE_POLICY_FULL = "full"
+SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD = "drop_route_signal_tokens_v1"
 SEARCH_ROUTE_POSTING_POLICY_MODE = "aggregate_high_fanout_layer_caps_v1"
 SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES = frozenset({"session", "segment", "task_episode", "incident"})
 SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT = 16
@@ -24302,6 +24310,17 @@ def search_projection_storage_mode_from_metadata(metadata: dict[str, Any]) -> st
     return ""
 
 
+def search_document_storage_profile_from_metadata(metadata: dict[str, Any]) -> str:
+    return str(metadata.get("search_document_storage_profile") or "").strip()
+
+
+def expected_search_document_storage_profile_from_metadata(metadata: dict[str, Any]) -> str:
+    raw_support = search_raw_text_query_support_from_metadata(metadata)
+    if raw_support == SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL:
+        return SEARCH_DOCUMENT_STORAGE_PROFILE_FULL
+    return SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+
+
 def search_db_metadata_at_path(db_path: Path) -> dict[str, Any]:
     if not db_path.exists():
         return {}
@@ -24480,6 +24499,9 @@ def build_search_catalog(
         shard_metadata = shard_metadata_cache[str(shard_path)]
         shard_storage_mode = search_projection_storage_mode_from_metadata(shard_metadata) if shard_metadata else ""
         shard_raw_text_query_support = search_raw_text_query_support_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_storage_profile = search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else ""
+        expected_shard_storage_profile = expected_search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+        shard_storage_profile_current = bool(shard_storage_profile) and shard_storage_profile == expected_shard_storage_profile
         shard_status = "missing"
         if shard_path.exists():
             shard_status = "stale"
@@ -24488,6 +24510,7 @@ def build_search_catalog(
                 and str(shard_session_state.get("source_fingerprint") or "") == expected_fingerprint
                 and str(shard_session_state.get("search_schema_version") or "") == expected_search_schema_version
                 and int_value(shard_session_state.get("route_signal_classifier_version")) == expected_route_signal_classifier_version
+                and shard_storage_profile_current
             ):
                 shard_status = "current"
         item = {
@@ -24506,6 +24529,8 @@ def build_search_catalog(
             "shard_status": shard_status,
             "shard_storage_mode": shard_storage_mode,
             "shard_raw_text_query_support": shard_raw_text_query_support,
+            "shard_storage_profile": shard_storage_profile,
+            "expected_shard_storage_profile": expected_shard_storage_profile,
             "monolith_db_path": str(db_path),
             "monolith_status": monolith_status,
             "catalog_state_basis": live_state_basis,
@@ -24546,12 +24571,18 @@ def build_search_catalog(
                 "freshness_counts": {},
                 "storage_mode": shard_storage_mode,
                 "raw_text_query_support": shard_raw_text_query_support,
+                "storage_profile": shard_storage_profile,
+                "expected_storage_profile": expected_shard_storage_profile,
             },
         )
         if shard_storage_mode and not shard_item.get("storage_mode"):
             shard_item["storage_mode"] = shard_storage_mode
         if shard_raw_text_query_support and not shard_item.get("raw_text_query_support"):
             shard_item["raw_text_query_support"] = shard_raw_text_query_support
+        if shard_storage_profile and not shard_item.get("storage_profile"):
+            shard_item["storage_profile"] = shard_storage_profile
+        if expected_shard_storage_profile and not shard_item.get("expected_storage_profile"):
+            shard_item["expected_storage_profile"] = expected_shard_storage_profile
         shard_item["session_count"] += 1
         if shard_status == "current":
             shard_item["current_session_count"] += 1
@@ -24565,7 +24596,8 @@ def build_search_catalog(
     shards = sorted(shard_payloads.values(), key=lambda item: str(item.get("shard") or ""))
     for shard in shards:
         shard["materialized"] = int_value(shard.get("session_count")) > 0 and int_value(shard.get("current_session_count")) == int_value(shard.get("session_count"))
-        shard["status"] = "current" if shard["materialized"] else ("missing" if int_value(shard.get("current_session_count")) == 0 else "stale")
+        shard_path = Path(str(shard.get("shard_db_path") or ""))
+        shard["status"] = "current" if shard["materialized"] else ("stale" if shard_path.exists() else "missing")
     materialized_shard_count = sum(1 for shard in shards if shard.get("materialized"))
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -24652,15 +24684,16 @@ def search_catalog_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Shards",
         "",
-        "| shard | sessions | documents | materialized | storage | raw text |",
-        "| --- | ---: | ---: | --- | --- | --- |",
+        "| shard | sessions | documents | materialized | storage | profile | raw text |",
+        "| --- | ---: | ---: | --- | --- | --- | --- |",
     ]
     for shard in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
         if isinstance(shard, dict):
             lines.append(
                 f"| `{shard.get('shard')}` | `{shard.get('session_count')}` | "
                 f"`{shard.get('document_count')}` | `{shard.get('materialized')}` | "
-                f"`{shard.get('storage_mode') or ''}` | `{shard.get('raw_text_query_support') or ''}` |"
+                f"`{shard.get('storage_mode') or ''}` | `{shard.get('storage_profile') or ''}` | "
+                f"`{shard.get('raw_text_query_support') or ''}` |"
             )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
@@ -24702,6 +24735,9 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- shard_storage_mode: `{payload.get('shard_storage_mode')}`",
         f"- search_fts_storage_mode: `{payload.get('search_fts_storage_mode')}`",
         f"- raw_text_query_support: `{payload.get('raw_text_query_support')}`",
+        f"- search_document_storage_profile: `{payload.get('search_document_storage_profile')}`",
+        f"- search_body_preview_chars: `{payload.get('search_body_preview_chars')}`",
+        f"- search_tags_storage_policy: `{payload.get('search_tags_storage_policy')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
@@ -24766,6 +24802,7 @@ def materialize_search_shards(
         if structured_only
         else SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
     )
+    storage_profile = search_document_storage_profile(store_raw_text=not structured_only)
     try:
         records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
     except ValueError as exc:
@@ -24872,6 +24909,9 @@ def materialize_search_shards(
                 "shard_storage_mode": result.get("search_body_storage_mode") or shard_storage_mode,
                 "search_fts_storage_mode": result.get("search_fts_storage_mode") or shard_fts_storage_mode,
                 "raw_text_query_support": result.get("raw_text_query_support") or raw_text_query_support,
+                "search_document_storage_profile": result.get("search_document_storage_profile") or storage_profile.get("name"),
+                "search_body_preview_chars": result.get("search_body_preview_chars") or storage_profile.get("body_preview_chars"),
+                "search_tags_storage_policy": result.get("search_tags_storage_policy") or storage_profile.get("tags_storage_policy"),
                 "generated_at": result.get("generated_at"),
                 "diagnostics": shard_diagnostics,
             }
@@ -24904,6 +24944,12 @@ def materialize_search_shards(
         "shard_storage_mode": shard_storage_mode,
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
+        "search_document_storage_profile": storage_profile.get("name"),
+        "search_body_preview_chars": storage_profile.get("body_preview_chars"),
+        "search_route_layers_preview_chars": storage_profile.get("route_layers_preview_chars"),
+        "search_route_signals_preview_chars": storage_profile.get("route_signals_preview_chars"),
+        "search_tags_preview_chars": storage_profile.get("tags_preview_chars"),
+        "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "shard_count": len(shard_results),
         "document_count": document_count,
         "catalog": search_catalog_summary(catalog_refresh),
@@ -24941,8 +24987,12 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- store_raw_text: `{payload.get('store_raw_text')}`",
         f"- include_raw_event_text: `{payload.get('include_raw_event_text')}`",
         f"- search_payload_storage_mode: `{payload.get('search_payload_storage_mode')}`",
+        f"- search_document_storage_profile: `{payload.get('search_document_storage_profile')}`",
+        f"- search_body_preview_chars: `{payload.get('search_body_preview_chars')}`",
         f"- search_route_layers_preview_chars: `{payload.get('search_route_layers_preview_chars')}`",
         f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
+        f"- search_tags_preview_chars: `{payload.get('search_tags_preview_chars')}`",
+        f"- search_tags_storage_policy: `{payload.get('search_tags_storage_policy')}`",
         f"- search_route_posting_policy_mode: `{payload.get('search_route_posting_policy_mode')}`",
         f"- search_aggregate_route_posting_doc_types: `{payload.get('search_aggregate_route_posting_doc_types')}`",
         f"- search_aggregate_route_posting_default_layer_limit: `{payload.get('search_aggregate_route_posting_default_layer_limit')}`",
@@ -26897,6 +26947,42 @@ def bounded_packed_route_values(value: Any, *, max_chars: int) -> str:
     return "|" + "|".join(kept) + "|"
 
 
+def search_document_storage_profile(*, store_raw_text: bool) -> dict[str, Any]:
+    if store_raw_text:
+        return {
+            "name": SEARCH_DOCUMENT_STORAGE_PROFILE_FULL,
+            "body_preview_chars": SEARCH_BODY_PREVIEW_CHARS,
+            "route_layers_preview_chars": SEARCH_ROUTE_LAYERS_PREVIEW_CHARS,
+            "route_signals_preview_chars": SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS,
+            "tags_preview_chars": 0,
+            "tags_storage_policy": SEARCH_TAGS_STORAGE_POLICY_FULL,
+        }
+    return {
+        "name": SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+        "body_preview_chars": SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS,
+        "route_layers_preview_chars": SEARCH_STRUCTURED_SHARD_ROUTE_LAYERS_PREVIEW_CHARS,
+        "route_signals_preview_chars": SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS,
+        "tags_preview_chars": SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS,
+        "tags_storage_policy": SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD,
+    }
+
+
+def compact_search_tags_for_storage(value: Any, *, max_chars: int, policy: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if policy == SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD:
+        kept = [
+            token
+            for token in text.split()
+            if not token.startswith("route_signal:") and not token.startswith("route_layer:")
+        ]
+        text = " ".join(kept).strip()
+    if max_chars <= 0:
+        return text
+    return bounded_storage_text(text, max_chars=max_chars)
+
+
 def route_term_id(conn: sqlite3.Connection, entry: dict[str, str]) -> int:
     layer = str(entry.get("layer") or "")
     key = str(entry.get("key") or "")
@@ -27238,12 +27324,30 @@ def entity_registry_search_sync_current_noop(
     }
 
 
-def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, store_raw_text: bool = True) -> None:
+def insert_search_document(
+    conn: sqlite3.Connection,
+    doc: dict[str, Any],
+    *,
+    store_raw_text: bool = True,
+    storage_profile: dict[str, Any] | None = None,
+) -> None:
+    profile = storage_profile or search_document_storage_profile(store_raw_text=store_raw_text)
     payload = search_doc_payload(doc)
     full_body = str(doc.get("body") or "")
-    body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
-    route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
-    route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
+    body_preview = bounded_storage_text(full_body, max_chars=int_value(profile.get("body_preview_chars"), SEARCH_BODY_PREVIEW_CHARS))
+    route_layers_preview = bounded_packed_route_values(
+        doc.get("route_layers"),
+        max_chars=int_value(profile.get("route_layers_preview_chars"), SEARCH_ROUTE_LAYERS_PREVIEW_CHARS),
+    )
+    route_signals_preview = bounded_packed_route_values(
+        doc.get("route_signals"),
+        max_chars=int_value(profile.get("route_signals_preview_chars"), SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS),
+    )
+    tags_preview = compact_search_tags_for_storage(
+        doc.get("tags"),
+        max_chars=int_value(profile.get("tags_preview_chars")),
+        policy=str(profile.get("tags_storage_policy") or SEARCH_TAGS_STORAGE_POLICY_FULL),
+    )
     route_entries = document_route_entries(
         doc.get("route_layers"),
         doc.get("route_signals"),
@@ -27295,7 +27399,6 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, sto
                 "session_act",
                 "agent_event",
                 "task_episode_id",
-                "tags",
                 "raw_ref",
                 "raw_block_ref",
                 "segment_ref",
@@ -27311,6 +27414,7 @@ def insert_search_document(conn: sqlite3.Connection, doc: dict[str, Any], *, sto
             ]},
             "route_layers": route_layers_preview,
             "route_signals": route_signals_preview,
+            "tags": tags_preview,
             "body": body_preview,
             "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
         },
@@ -27933,6 +28037,7 @@ def search_index_sessions(
     raw_text_query_support = (
         SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL if store_raw_text else SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
     )
+    storage_profile = search_document_storage_profile(store_raw_text=store_raw_text)
     write_db_path = db_path
     temp_db_path: Path | None = None
     if rebuild:
@@ -28051,11 +28156,27 @@ def search_index_sessions(
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            ("search_route_layers_preview_chars", str(SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)),
+            ("search_document_storage_profile", str(storage_profile.get("name") or "")),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            ("search_route_signals_preview_chars", str(SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)),
+            ("search_body_preview_chars", str(storage_profile.get("body_preview_chars") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_route_layers_preview_chars", str(storage_profile.get("route_layers_preview_chars") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_route_signals_preview_chars", str(storage_profile.get("route_signals_preview_chars") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_tags_preview_chars", str(storage_profile.get("tags_preview_chars") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_tags_storage_policy", str(storage_profile.get("tags_storage_policy") or "")),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
@@ -28122,7 +28243,7 @@ def search_index_sessions(
                     session_id=str(record.get("session_id") or ""),
                 )
             for doc in documents:
-                insert_search_document(conn, doc, store_raw_text=store_raw_text)
+                insert_search_document(conn, doc, store_raw_text=store_raw_text, storage_profile=storage_profile)
                 record_counts[str(doc.get("doc_type") or "unknown")] += 1
             upsert_search_session_state(
                 conn,
@@ -28312,8 +28433,12 @@ def search_index_sessions(
         "store_raw_text": store_raw_text,
         "include_raw_event_text": include_raw_event_text,
         "search_payload_storage_mode": SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed",
-        "search_route_layers_preview_chars": SEARCH_ROUTE_LAYERS_PREVIEW_CHARS,
-        "search_route_signals_preview_chars": SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS,
+        "search_document_storage_profile": storage_profile.get("name"),
+        "search_body_preview_chars": storage_profile.get("body_preview_chars"),
+        "search_route_layers_preview_chars": storage_profile.get("route_layers_preview_chars"),
+        "search_route_signals_preview_chars": storage_profile.get("route_signals_preview_chars"),
+        "search_tags_preview_chars": storage_profile.get("tags_preview_chars"),
+        "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "generated_at": now,
         "ok": document_count > 0 and not diagnostics and not (rebuild and budget_exhausted),
         "target": target,
@@ -41315,6 +41440,11 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
         "shard_storage_mode": report.get("shard_storage_mode"),
         "search_fts_storage_mode": report.get("search_fts_storage_mode"),
         "raw_text_query_support": report.get("raw_text_query_support"),
+        "search_document_storage_profile": report.get("search_document_storage_profile"),
+        "search_body_preview_chars": report.get("search_body_preview_chars"),
+        "search_route_signals_preview_chars": report.get("search_route_signals_preview_chars"),
+        "search_tags_preview_chars": report.get("search_tags_preview_chars"),
+        "search_tags_storage_policy": report.get("search_tags_storage_policy"),
         "shards": [
             {
                 key: item.get(key)
@@ -41328,6 +41458,9 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
                     "elapsed_ms",
                     "documents_per_second",
                     "db_path",
+                    "search_document_storage_profile",
+                    "search_body_preview_chars",
+                    "search_tags_storage_policy",
                 )
                 if isinstance(item, dict) and key in item
             }
@@ -41378,6 +41511,8 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
                 "document_count": item.get("document_count"),
                 "storage_mode": item.get("storage_mode"),
                 "raw_text_query_support": item.get("raw_text_query_support"),
+                "storage_profile": item.get("storage_profile"),
+                "expected_storage_profile": item.get("expected_storage_profile"),
                 **maintenance_sqlite_size_brief(size_entry),
             }
         )
@@ -43279,6 +43414,8 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                         "document_count",
                         "total_with_wal_human",
                         "raw_text_query_support",
+                        "storage_profile",
+                        "expected_storage_profile",
                     )
                     if key in item
                 }
@@ -43288,7 +43425,15 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             "noncurrent_shards": [
                 {
                     key: item.get(key)
-                    for key in ("shard", "status", "session_count", "stale_session_count", "missing_session_count")
+                    for key in (
+                        "shard",
+                        "status",
+                        "session_count",
+                        "stale_session_count",
+                        "missing_session_count",
+                        "storage_profile",
+                        "expected_storage_profile",
+                    )
                     if key in item
                 }
                 for item in (search_shards.get("noncurrent_shards") or [])[:4]
@@ -43309,6 +43454,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "documents_per_second",
                     "structured_only",
                     "raw_text_query_support",
+                    "search_document_storage_profile",
+                    "search_body_preview_chars",
+                    "search_tags_storage_policy",
                 )
                 if key in latest_search_shards
             },
@@ -44120,6 +44268,7 @@ ENTITY_USAGE_DIRECT_TRACE_KINDS = {
     "github",
     "goal",
     "graph",
+    "hook",
     "mcp",
     "memory",
     "mechanic",
@@ -44736,7 +44885,7 @@ def entity_usage_audit(
         and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
         and route_fetch_limit < 100
     ):
-        route_usage_retry_fetch_limit = min(100, max(route_fetch_limit * 4, limit * 12))
+        route_usage_retry_fetch_limit = 100
         if route_usage_retry_fetch_limit > route_fetch_limit:
             route_usage_retry_applied = True
             for candidate in lookup_candidates:

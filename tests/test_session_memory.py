@@ -2013,16 +2013,16 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
             "route_signals": "hook_health:userpromptsubmit",
             "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
         }
-        for index in range(1, 7)
+        for index in range(1, 80)
     ]
     usage_hit = {
-        "doc_id": "event:session:001:000007",
+        "doc_id": "event:session:001:000080",
         "event_type": "FILE_READ",
         "conversation_act": "command_inspection_request",
         "session_act": "memory_read",
         "title": "Hook receipt search",
         "route_signals": "hook:userpromptsubmit|hook_health:userpromptsubmit",
-        "refs": {"raw": "raw:line:7", "segment": "001.md", "session": "session.manifest.json"},
+        "refs": {"raw": "raw:line:80", "segment": "001.md", "session": "session.manifest.json"},
     }
     candidate_hits = [*result_hits, usage_hit]
     called_limits: list[int] = []
@@ -2062,10 +2062,12 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     )
 
     assert audit["ok"] is True
-    assert max(called_limits) >= 12
+    assert max(called_limits) == 100
     assert set(called_queries) == {""}
     assert audit["quality"]["text_search_skipped"] is True
     assert audit["quality"]["route_usage_hit_count_before_text_fallback"] == 1
+    assert audit["quality"]["route_usage_retry_applied"] is True
+    assert audit["quality"]["route_usage_retry_fetch_limit"] == 100
     assert called_semantic_preview
     assert all(value is False for value in called_semantic_preview)
     assert called_hydrate_body
@@ -2074,7 +2076,7 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     assert audit["quality"]["route_fetch_limit"] >= 12
     assert audit["event_count"] == 3
     assert audit["usage_event_count"] == 1
-    assert audit["usage_events"][0]["doc_id"] == "event:session:001:000007"
+    assert audit["usage_events"][0]["doc_id"] == "event:session:001:000080"
 
 
 def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: Path, monkeypatch: Any) -> None:
@@ -10250,6 +10252,10 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert shards["ok"] is True
     assert shards["structured_only"] is True
     assert shards["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    assert shards["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+    assert shards["search_body_preview_chars"] == module.SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS
+    assert shards["search_route_signals_preview_chars"] == module.SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert shards["search_tags_storage_policy"] == module.SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD
     assert shards["shard_count"] == 2
     assert shards["elapsed_ms"] >= 0
     assert shards["documents_per_second"] is not None
@@ -10261,15 +10267,36 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     shard_body_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
     shard_fts_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_fts_storage_mode",)).fetchone()[0]
     shard_raw_support = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_text_query_support",)).fetchone()[0]
+    shard_profile_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_document_storage_profile",)).fetchone()[0]
+    shard_body_preview_meta = int(shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_preview_chars",)).fetchone()[0])
+    shard_route_signals_preview_meta = int(shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_route_signals_preview_chars",)).fetchone()[0])
+    shard_tags_preview_meta = int(shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_tags_preview_chars",)).fetchone()[0])
+    shard_tags_policy_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_tags_storage_policy",)).fetchone()[0]
     shard_fts_match_count = shard_conn.execute(
         "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
         (module.fts_query_from_user("may-shard-anchor"),),
     ).fetchone()[0]
     shard_body_count = shard_conn.execute("SELECT COUNT(*) FROM document_bodies").fetchone()[0]
+    max_body_len, max_route_signals_len, max_tags_len = shard_conn.execute(
+        """
+        SELECT COALESCE(MAX(LENGTH(body)), 0),
+               COALESCE(MAX(LENGTH(route_signals)), 0),
+               COALESCE(MAX(LENGTH(tags)), 0)
+        FROM documents
+        """
+    ).fetchone()
     shard_conn.close()
     assert shard_body_meta == module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE
     assert shard_fts_meta == module.SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE
     assert shard_raw_support == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+    assert shard_profile_meta == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+    assert shard_body_preview_meta == module.SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS
+    assert shard_route_signals_preview_meta == module.SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert shard_tags_preview_meta == module.SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS
+    assert shard_tags_policy_meta == module.SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD
+    assert max_body_len <= module.SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS
+    assert max_route_signals_len <= module.SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert max_tags_len <= module.SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS
     assert shard_fts_match_count == 0
     assert shard_body_count == 0
     assert Path(shards["report_json"]).exists()
@@ -10279,6 +10306,8 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert catalog["materialized_shard_count"] == 2
     assert all(item["materialized"] for item in catalog["shards"])
     assert all(item["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK for item in catalog["shards"])
+    assert all(item["storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD for item in catalog["shards"])
+    assert all(item["expected_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD for item in catalog["shards"])
     ops = module.session_memory_operations_summary(
         aoa_root=aoa_root,
         search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
@@ -10289,7 +10318,9 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     )
     assert ops["search_shards"]["status"] == "current"
     assert ops["search_shards"]["materialized_shard_count"] == 2
+    assert ops["search_shards"]["largest_shards"][0]["storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["exists"] is True
+    assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
 
     fanout = module.search_sessions(
@@ -10382,6 +10413,20 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert scoped["ok"] is True
     assert scoped["shard_count"] == 1
     assert scoped["shards"][0]["shard"] == "month/2026-05"
+
+    tampered_conn = sqlite3.connect(str(scoped["shards"][0]["db_path"]))
+    tampered_conn.execute(
+        "UPDATE meta SET value = ? WHERE key = ?",
+        ("legacy_heavy_structured_profile", "search_document_storage_profile"),
+    )
+    tampered_conn.commit()
+    tampered_conn.close()
+    tampered_catalog = module.build_search_catalog(aoa_root, write=True)
+    tampered_may_shard = next(item for item in tampered_catalog["shards"] if item["shard"] == "month/2026-05")
+    assert tampered_may_shard["status"] == "stale"
+    assert tampered_may_shard["materialized"] is False
+    assert tampered_may_shard["storage_profile"] == "legacy_heavy_structured_profile"
+    assert tampered_may_shard["expected_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
 
 
 def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tmp_path: Path) -> None:
@@ -11014,6 +11059,77 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
     assert "route_signals" not in payload
     assert payload == {"raw_text_status": "indexed"}
     assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] == 500
+    assert (
+        conn.execute(
+            """
+            SELECT 1
+            FROM document_routes
+            JOIN route_terms ON route_terms.id = document_routes.route_id
+            WHERE route_terms.route_signal = ?
+            LIMIT 1
+            """,
+            (target_route_signal,),
+        ).fetchone()
+        is not None
+    )
+    conn.close()
+
+
+def test_structured_shard_storage_profile_slims_rows_without_losing_route_postings(tmp_path: Path) -> None:
+    conn = module.init_search_db(tmp_path / "search" / module.SEARCH_DB_NAME, rebuild=True)
+    route_signals = module.packed_route_values(module.route_signal_token("tool", f"live-tool-{index}") for index in range(120))
+    target_route_signal = module.route_signal_token(
+        module.route_key_slug("tool", fallback=""),
+        module.route_key_slug("live-tool-119", fallback=""),
+    )
+    module.insert_search_document(
+        conn,
+        {
+            "id": "structured-stress-doc",
+            "doc_type": "event",
+            "session_id": "session-structured-stress",
+            "session_label": "2026-06-12__001__structured-route-stress",
+            "session_title": "Structured route stress",
+            "session_date": "2026-06-12",
+            "event_id": "000001",
+            "event_type": "TOOL_CALL",
+            "agent_event": "assistant_answer",
+            "route_layers": module.packed_route_values(["tool"]),
+            "route_signals": route_signals,
+            "tags": "agent_event_source:event_msg_stream command route_layer:tool "
+            + " ".join(f"route_signal:tool:live-tool-{index}" for index in range(120)),
+            "title": "huge structured route signal payload",
+            "body": "structured route posting body " * 80,
+            "raw_text_status": "indexed",
+        },
+        store_raw_text=False,
+        storage_profile=module.search_document_storage_profile(store_raw_text=False),
+    )
+    conn.commit()
+
+    stored = conn.execute("SELECT body, route_signals, tags, payload_json FROM documents WHERE id = ?", ("structured-stress-doc",)).fetchone()
+    assert stored is not None
+    stored_route_signals = stored["route_signals"]
+    stored_tags = stored["tags"]
+    payload = json.loads(stored["payload_json"])
+
+    assert len(stored["body"]) <= module.SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS
+    assert len(stored_route_signals) <= module.SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert len(stored_tags) <= module.SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS
+    assert "agent_event_source:event_msg_stream" in stored_tags
+    assert "route_signal:" not in stored_tags
+    assert "route_layer:" not in stored_tags
+    assert target_route_signal not in stored_route_signals
+    assert "route_signals" not in payload
+    assert conn.execute("SELECT COUNT(*) FROM document_bodies").fetchone()[0] == 0
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+            (module.fts_query_from_user("structured route posting body"),),
+        ).fetchone()[0]
+        == 0
+    )
+    assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] == 120
     assert (
         conn.execute(
             """
