@@ -289,7 +289,10 @@ event semantic-text extraction. `search-shards --full-text` is the explicit
 operator route for a heavier shard-level lexical diagnostic. The catalog treats
 a shard as materialized only when the shard `session_index_state` matches the
 live session-index fingerprint and schema state for every session in that
-bucket. The monolith remains a fallback projection and is tracked separately.
+bucket. If the only mismatch is a recently written live transcript deferred by
+the quiet-window gate, the route is `current_with_deferred_live_updates`: the
+live-tail packet owns the wait/catch-up action, while stable shard fan-out stays
+usable. The monolith remains a fallback projection and is tracked separately.
 `search --use-shards` performs bounded fan-out across current materialized
 shards and returns shard refs; when shards are missing, stale, incompatible with
 host overlays, or unable to satisfy a raw-text FTS query locally, the route

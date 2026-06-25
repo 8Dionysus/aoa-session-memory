@@ -1020,6 +1020,12 @@ and compressed body hydration stay in the monolith fallback. Use
 `search-shards --full-text` only for an explicit shard-level lexical benchmark
 or diagnostic rebuild where the extra weight is intentional.
 
+When the only non-current shard rows are recently updated live transcripts, the
+operations route reports `current_with_deferred_live_updates` instead of
+`search_shards_not_current`. The stale-looking row remains visible through
+`live_tail` and `deferred_live_session_count`; agents should wait for the quiet
+window or run the targeted catch-up route rather than rebuilding a whole shard.
+
 ```bash
 python3 scripts/aoa_session_memory.py search-shards all \
   --workspace-root /path/to/workspace \

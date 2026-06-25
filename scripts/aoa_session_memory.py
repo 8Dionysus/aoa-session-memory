@@ -19297,7 +19297,7 @@ def projection_catchup_completeness_check(
     graph_skipped = str(graph_state.get("status") or "") == "deferred_not_checked"
     graph_needs = bool(graph_state.get("needs_maintenance")) or str(graph_state.get("status") or "") == "missing"
     shard_status = str(shards.get("status") or "")
-    shard_needs = bool(shard_status and shard_status not in {"current", "empty"})
+    shard_needs = bool(shard_status and shard_status not in {"current", "empty", "current_with_deferred_live_updates"})
     deferred_live_count = int_value(auto_payload.get("deferred_live_selection_count"))
     search_deferred_count = int_value(search_state.get("deferred_live_session_count"))
     graph_deferred_count = graph_deferred_live_count_from_state(graph_state) if isinstance(graph_state, dict) else 0
@@ -19352,6 +19352,8 @@ def projection_catchup_completeness_check(
             "shard_count": shards.get("shard_count"),
             "materialized_shard_count": shards.get("materialized_shard_count"),
             "noncurrent_shard_count": shards.get("noncurrent_shard_count"),
+            "actionable_noncurrent_shard_count": shards.get("actionable_noncurrent_shard_count"),
+            "deferred_live_session_count": shards.get("deferred_live_session_count"),
             "active_projection": shards.get("active_projection"),
             "fallback_status": shards.get("fallback_status"),
             "raw_text_query_support": (shards.get("raw_text_fallback_dependency") or {}).get("status") if isinstance(shards.get("raw_text_fallback_dependency"), dict) else None,
@@ -19480,6 +19482,23 @@ def projection_catchup_next_route(
     deferred_graph = bool(auto_payload.get("deferred_graph_after"))
     ok = bool(auto_payload.get("ok"))
     if not apply:
+        if ok and status == "nothing_to_do" and not expected_remaining and not deferred_graph:
+            return {
+                "id": "verify_projection_status",
+                "status": "ready",
+                "reason": "dry_run_found_no_projection_work",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "maintenance-status",
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--full",
+                    "--no-timers",
+                ],
+            }
         command = projection_catchup_cli_command(
             workspace_root=workspace_root,
             aoa_root=aoa_root,
@@ -45056,7 +45075,11 @@ def search_shard_fast_path_defaults(
     materialized_shard_count: int,
     shard_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    shard_fanout_ready = status == "current" and shard_count > 0 and materialized_shard_count == shard_count
+    shard_fanout_ready = (
+        status == "current"
+        and shard_count > 0
+        and materialized_shard_count == shard_count
+    ) or status == "current_with_deferred_live_updates"
     raw_text_support = {
         str(item.get("raw_text_query_support") or "")
         for item in shard_rows
@@ -45098,10 +45121,13 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
     current_session_count = 0
     stale_session_count = 0
     missing_session_count = 0
+    deferred_live_session_count = 0
     for raw_item in shards:
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
+        freshness_counts = item.get("freshness_counts") if isinstance(item.get("freshness_counts"), dict) else {}
+        item_deferred_live_count = int_value(freshness_counts.get("deferred_live"))
         shard_key = str(item.get("shard") or "")
         db_path_value = str(item.get("shard_db_path") or "")
         db_path = Path(db_path_value) if db_path_value else search_shard_db_path(aoa_root, shard_key)
@@ -45115,6 +45141,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         current_session_count += int_value(item.get("current_session_count"))
         stale_session_count += int_value(item.get("stale_session_count"))
         missing_session_count += int_value(item.get("missing_session_count"))
+        deferred_live_session_count += item_deferred_live_count
         shard_rows.append(
             {
                 "shard": shard_key,
@@ -45124,6 +45151,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
                 "current_session_count": item.get("current_session_count"),
                 "stale_session_count": item.get("stale_session_count"),
                 "missing_session_count": item.get("missing_session_count"),
+                "deferred_live_session_count": item_deferred_live_count,
                 "document_count": item.get("document_count"),
                 "storage_mode": item.get("storage_mode"),
                 "raw_text_query_support": item.get("raw_text_query_support"),
@@ -45140,6 +45168,16 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
     missing_shard_count = int_value(status_counts.get("missing"))
     stale_shard_count = int_value(status_counts.get("stale"))
     noncurrent_shards = [item for item in shard_rows if item.get("status") != "current"]
+    actionable_noncurrent_shards = [
+        item
+        for item in noncurrent_shards
+        if not (
+            item.get("status") == "stale"
+            and int_value(item.get("missing_session_count")) == 0
+            and int_value(item.get("stale_session_count")) > 0
+            and int_value(item.get("stale_session_count")) == int_value(item.get("deferred_live_session_count"))
+        )
+    ]
     monolith_entry = maintenance_light_sqlite_size(search_db_path(aoa_root))
     monolith_total_bytes = int_value(monolith_entry.get("total_with_wal_bytes"), int_value(monolith_entry.get("size_bytes")))
     latest_reports = diagnostic_json_payloads(aoa_root, "*__search-shards.json", limit=1)
@@ -45148,8 +45186,10 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         status = "catalog_not_current"
     elif shard_count <= 0:
         status = "empty"
-    elif noncurrent_shards:
+    elif actionable_noncurrent_shards:
         status = "incomplete"
+    elif noncurrent_shards:
+        status = "current_with_deferred_live_updates"
     else:
         status = "current"
     combined_bytes = monolith_total_bytes + total_shard_bytes
@@ -45192,6 +45232,8 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         "current_session_count": current_session_count,
         "stale_session_count": stale_session_count,
         "missing_session_count": missing_session_count,
+        "deferred_live_session_count": deferred_live_session_count,
+        "actionable_noncurrent_shard_count": len(actionable_noncurrent_shards),
         "document_count": total_document_count,
         "shard_db_total_bytes": total_shard_bytes,
         "shard_db_total_human": human_size(total_shard_bytes),
@@ -45201,6 +45243,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         "combined_search_projection_total_human": human_size(combined_bytes),
         "largest_shards": sorted(shard_rows, key=lambda item: int_value(item.get("total_with_wal_bytes")), reverse=True)[:8],
         "noncurrent_shards": noncurrent_shards[:8],
+        "actionable_noncurrent_shards": actionable_noncurrent_shards[:8],
         "latest_materialization": latest_materialization,
         "fast_path_defaults": fast_path_defaults,
         "raw_text_fallback_dependency": raw_text_fallback_dependency,
@@ -45702,7 +45745,7 @@ def session_memory_ops_warnings(
                 "actionable_dirty_session_count": search.get("actionable_dirty_session_count"),
             }
         )
-    if search_shards.get("status") not in {"current", "empty"}:
+    if search_shards.get("status") not in {"current", "empty", "current_with_deferred_live_updates"}:
         warnings.append(
             {
                 "code": "search_shards_not_current",
@@ -45711,6 +45754,7 @@ def session_memory_ops_warnings(
                 "shard_count": search_shards.get("shard_count"),
                 "materialized_shard_count": search_shards.get("materialized_shard_count"),
                 "noncurrent_shard_count": search_shards.get("noncurrent_shard_count"),
+                "actionable_noncurrent_shard_count": search_shards.get("actionable_noncurrent_shard_count"),
             }
         )
     combined_search_bytes = int_value(search_shards.get("combined_search_projection_total_bytes"))
@@ -47062,6 +47106,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "shard_count",
                     "materialized_shard_count",
                     "noncurrent_shard_count",
+                    "actionable_noncurrent_shard_count",
                 )
                 if key in warning
             }
@@ -47169,6 +47214,8 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "stale_shard_count",
                 "missing_shard_count",
                 "noncurrent_shard_count",
+                "actionable_noncurrent_shard_count",
+                "deferred_live_session_count",
                 "document_count",
                 "shard_db_total_human",
                 "monolith_db_total_human",
@@ -47210,6 +47257,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                         "session_count",
                         "stale_session_count",
                         "missing_session_count",
+                        "deferred_live_session_count",
                         "storage_profile",
                         "expected_storage_profile",
                     )

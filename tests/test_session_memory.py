@@ -10238,6 +10238,106 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
 
 
+def test_search_shards_deferred_live_tail_is_not_actionable_ops_warning(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_db.parent.mkdir(parents=True)
+    shard_db.write_bytes(b"placeholder")
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "generated_at": "2026-06-25T00:00:00Z",
+            "ok": True,
+            "status": "current",
+            "mutates": False,
+            "aoa_root": str(aoa_root),
+            "catalog_path": str(module.search_catalog_path(aoa_root)),
+            "source_db_path": str(module.search_db_path(aoa_root)),
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "fallback": {"status": "active"},
+            "session_count": 3,
+            "shard_count": 1,
+            "materialized_shard_count": 0,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": "month/2026-06",
+                    "shard_db_path": str(shard_db),
+                    "materialized": False,
+                    "status": "stale",
+                    "session_count": 3,
+                    "current_session_count": 2,
+                    "stale_session_count": 1,
+                    "missing_session_count": 0,
+                    "document_count": 42,
+                    "freshness_counts": {"current": 2, "deferred_live": 1},
+                    "storage_mode": module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "expected_storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+
+    summary = module.session_memory_search_shard_projection_summary(aoa_root)
+    assert summary["status"] == "current_with_deferred_live_updates"
+    assert summary["deferred_live_session_count"] == 1
+    assert summary["noncurrent_shard_count"] == 1
+    assert summary["actionable_noncurrent_shard_count"] == 0
+    assert summary["fast_path_defaults"]["agent_event_routes"]["shard_fanout_ready"] is True
+    assert summary["fast_path_defaults"]["agent_event_routes"]["default_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+
+    ops = module.session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 1},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+        entity_registry={"status": "current", "needs_maintenance": False, "entity_count": 7},
+        coordinator={"active": False},
+        storage=module.maintenance_storage_status(aoa_root),
+    )
+    warning_codes = {item["code"] for item in ops["warnings"]}
+    assert "search_shards_not_current" not in warning_codes
+
+    completeness = module.projection_catchup_completeness_check(
+        auto_payload={
+            "ok": True,
+            "apply": False,
+            "expected_catchup_remaining": False,
+            "deferred_graph_after": False,
+            "deferred_live_selection_count": 1,
+            "maintenance": {
+                "route_drift_count": 0,
+                "search_dirty_session_count": 0,
+                "search_repair_remaining_count": 0,
+                "atlas_dirty_session_count": 0,
+                "atlas_repair_remaining_count": 0,
+                "token_backfill": {"counts": {"planned": 0}},
+                "final_search_index": {
+                    "status": "current_with_deferred_live_updates",
+                    "needs_refresh": False,
+                    "deferred_live_session_count": 1,
+                },
+                "final_atlas_index": {"status": "current", "needs_refresh": False},
+                "final_entity_registry": {"status": "current", "needs_maintenance": False, "entity_count": 7},
+                "final_graph_store": {"status": "current", "needs_maintenance": False, "ledger": {}, "queue": {}},
+                "actions": [],
+            },
+        },
+        search_shards=summary,
+    )
+    assert completeness["surfaces"]["search_shards"]["status"] == "current_with_deferred_live_updates"
+    assert completeness["surfaces"]["search_shards"]["needs_maintenance"] is False
+    assert "search_shards" not in completeness["actionable_surface_ids"]
+    assert "live_tail" in completeness["deferred_surface_ids"]
+
+
 def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
@@ -10951,6 +11051,35 @@ def test_projection_catchup_completeness_exposes_surface_statuses() -> None:
     assert surfaces["route_readiness"]["status"] == "planned"
     assert "search_index" in payload["actionable_surface_ids"]
     assert "graph" in payload["deferred_surface_ids"]
+
+
+def test_projection_catchup_dry_run_without_work_routes_to_verify(tmp_path: Path) -> None:
+    route = module.projection_catchup_next_route(
+        auto_payload={
+            "ok": True,
+            "status": "nothing_to_do",
+            "expected_catchup_remaining": False,
+            "deferred_graph_after": False,
+        },
+        workspace_root=tmp_path,
+        aoa_root=tmp_path / ".aoa",
+        target="all",
+        profile="catchup",
+        apply=False,
+        write_report=True,
+        since=None,
+        since_days=None,
+        until=None,
+        limit=None,
+        repair_limit=None,
+        budget_seconds=None,
+        reason=module.PROJECTION_CATCHUP_DEFAULT_REASON,
+    )
+
+    assert route["id"] == "verify_projection_status"
+    assert route["reason"] == "dry_run_found_no_projection_work"
+    assert "maintenance-status" in route["command"]
+    assert "projection-catchup" not in route["command"]
 
 
 def test_projection_catchup_routes_schema_rebuild_to_deep_projection_route(tmp_path: Path, monkeypatch: Any) -> None:

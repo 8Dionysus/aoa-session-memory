@@ -748,6 +748,20 @@ Last observed result:
   During an active Codex session, `maintenance-status` may still report
   `waiting_for_quiet_window` for recently written live transcripts; that is a
   live-tail deferral, not archive evidence loss.
+- 2026-06-25 live-tail shard route proof: a month shard that was non-current
+  only because of `freshness_counts.deferred_live` now reports
+  `current_with_deferred_live_updates` instead of
+  `search_shards_not_current`; the live-tail route owns the wait/catch-up
+  action, and stable archive graph/search remains usable. After a targeted
+  catch-up of
+  `2026-06-12__001__на-машине-есть-раскиданный-abyss-machine`,
+  `search-shards <session> --no-rebuild --write-report` processed exactly one
+  session in `18.356s`, `maintenance-status --full --no-timers` returned
+  `ok=true`, `recommendation=use_graph_search`, `warnings=[]`, and
+  `projection-catchup all --write-report` returned `status=nothing_to_do`,
+  empty actionable/deferred surfaces, and `next_route=verify_projection_status`.
+  MCP `projection-status` reads that report without running catch-up and
+  returns empty actionable/deferred surfaces.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event
