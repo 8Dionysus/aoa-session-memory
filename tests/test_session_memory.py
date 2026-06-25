@@ -1558,6 +1558,10 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
     assert search_payload["ok"] is True
     assert search_payload["results"][0]["session_act"] == "memory_read"
     assert search_payload["results"][0]["session_label"] == record["session_label"]
+    usage_role_payload = module.search_sessions(aoa_root=aoa_root, doc_type="event", usage_role="usage", limit=5)
+    assert usage_role_payload["ok"] is True
+    assert any(result["usage_role"] == "usage" for result in usage_role_payload["results"])
+    assert any(result["session_act"] == "memory_read" for result in usage_role_payload["results"])
 
 
 def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) -> None:
@@ -2153,6 +2157,78 @@ def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(t
     assert audit["usage_events"][0]["doc_id"] == "event:session:001:000080"
 
 
+def test_entity_usage_audit_uses_usage_role_fast_path_before_wide_retry(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hits = [
+        {
+            "doc_id": f"event:session:001:{index:06d}",
+            "event_type": "FILE_READ",
+            "conversation_act": "command_inspection_request",
+            "session_act": "memory_read",
+            "usage_role": "usage",
+            "title": f"Hook receipt search {index}",
+            "route_signals": "hook:userpromptsubmit|hook_health:userpromptsubmit",
+            "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
+        }
+        for index in range(1, 4)
+    ]
+    noisy_hits = [
+        {
+            "doc_id": f"event:session:001:{index:06d}",
+            "event_type": "COMMAND_OUTPUT",
+            "conversation_act": "tool_output_success",
+            "session_act": "memory_observation",
+            "usage_role": "result",
+            "title": f"Hook result {index}",
+            "route_signals": "hook_health:userpromptsubmit",
+            "refs": {"raw": f"raw:line:{index}", "segment": "001.md", "session": "session.manifest.json"},
+        }
+        for index in range(10, 40)
+    ]
+    called_limits: list[int] = []
+    called_usage_roles: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_limits.append(int(kwargs.get("limit") or 0))
+        called_usage_roles.append(str(kwargs.get("usage_role") or ""))
+        limit = int(kwargs.get("limit") or 0)
+        hits = usage_hits if kwargs.get("usage_role") == "usage" else noisy_hits
+        return {"ok": True, "result_count": min(limit, len(hits)), "results": hits[:limit], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "route_index_count": 1,
+                    "route_term_count": 1,
+                }
+            }
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="userpromptsubmit",
+        kind="hook",
+        limit=3,
+        per_route_limit=3,
+    )
+
+    assert audit["ok"] is True
+    assert set(called_usage_roles) == {"usage"}
+    assert max(called_limits) == 3
+    assert audit["quality"]["usage_role_fast_path_supported"] is True
+    assert audit["quality"]["usage_role_fast_path_applied"] is True
+    assert audit["quality"]["usage_role_fast_path_broad_route_search_skipped"] is True
+    assert audit["quality"]["route_usage_retry_applied"] is False
+    assert audit["quality"]["text_search_skipped"] is True
+    assert audit["usage_event_count"] == 3
+
+
 def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: Path, monkeypatch: Any) -> None:
     result_hits = [
         {
@@ -2371,9 +2447,9 @@ def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tm
             """
             INSERT INTO documents(
               id, doc_type, session_id, session_label, session_date, event_id,
-              event_type, session_act, route_signals, raw_ref, manifest_path, payload_json
+              event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 doc_id,
@@ -2384,6 +2460,7 @@ def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tm
                 doc_id,
                 event_type if doc_type == "event" else None,
                 session_act if doc_type == "event" else None,
+                module.entity_usage_event_role(event_type, session_act=session_act) if doc_type == "event" else None,
                 f"|{route_signal}|",
                 "raw:line:1" if doc_type == "event" else "",
                 "session.manifest.json",
@@ -3178,6 +3255,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert usage_neighborhood["quality"]["usage_neighborhood_present"] is True
     assert usage_neighborhood["quality"]["consequence_present"] is True
     assert usage_neighborhood["quality"]["raw_preview_available"] is True
+    assert usage_neighborhood["quality"]["audit_usage_role_fast_path_supported"] is True
+    assert usage_neighborhood["quality"]["audit_usage_role_fast_path_applied"] is True
+    assert "audit_usage_role_fast_path_broad_route_search_skipped" in usage_neighborhood["quality"]
+    assert usage_neighborhood["source_audit"]["usage_role_fast_path_applied"] is True
+    assert usage_neighborhood["source_audit"]["usage_role_fast_path_broad_route_search_skipped"] == usage_neighborhood["quality"]["audit_usage_role_fast_path_broad_route_search_skipped"]
+    assert "text_search_skipped" in usage_neighborhood["source_audit"]
     first_neighborhood = usage_neighborhood["neighborhoods"][0]
     assert first_neighborhood["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
     assert first_neighborhood["source_usage_event"]["raw_preview"]["status"] == "available"
@@ -12583,9 +12666,100 @@ def test_search_provider_status_detects_structural_schema_drift(tmp_path: Path) 
     assert provider["ok"] is False
     assert provider["status"] == "stale"
     assert "search_schema_missing_column:documents.agent_event" in provider["diagnostics"]
+    assert "search_schema_missing_column:documents.usage_role" in provider["diagnostics"]
     assert "search_schema_missing_column:documents.task_episode_id" in provider["diagnostics"]
     assert "search_schema_missing_column:documents.agent_event" in state["reasons"]
+    assert "search_schema_missing_column:documents.usage_role" in state["reasons"]
     assert state["needs_refresh"] is True
+
+
+def test_search_schema_migrate_backfills_usage_role_without_reindex(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    conn = module.init_search_db(db_path, rebuild=True)
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "12"))
+    docs = [
+        ("doc-command", "event", "COMMAND", "tool_call", "command_request"),
+        ("doc-result", "event", "COMMAND_OUTPUT", "memory_observation", "tool_output_success"),
+        ("doc-answer", "event", "ASSISTANT_MESSAGE", "assistant_message", "assistant_response"),
+        ("doc-entrypoint", "event", "CUSTOM", "memory_request", "command_inspection_request"),
+        ("doc-session", "session", "", "", ""),
+    ]
+    for doc_id, doc_type, event_type, session_act, conversation_act in docs:
+        conn.execute(
+            """
+            INSERT INTO documents (
+                id, doc_type, session_id, session_label, event_type,
+                session_act, conversation_act, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (doc_id, doc_type, "migrate-session", "migrate-session", event_type, session_act, conversation_act, "{}"),
+        )
+    conn.execute(
+        """
+        INSERT INTO session_index_state (
+            session_id, session_label, source_fingerprint, source_latest_mtime,
+            search_schema_version, route_signal_classifier_version, indexed_at,
+            document_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("migrate-session", "migrate-session", "fp", 1.0, "12", module.ROUTE_SIGNAL_CLASSIFIER_VERSION, "2026-06-20T00:00:00Z", 5),
+    )
+    conn.execute(
+        """
+        INSERT INTO search_freshness_state (
+            session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
+            status, reason, last_checked, last_indexed_at, deferred_live_reason,
+            live_transcript_path, live_transcript_mtime, search_schema_version,
+            route_signal_classifier_version, document_count, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "migrate-session",
+            "migrate-session",
+            "",
+            "fp",
+            1.0,
+            "current",
+            "indexed",
+            "2026-06-20T00:00:00Z",
+            "2026-06-20T00:00:00Z",
+            "",
+            "",
+            0.0,
+            "12",
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            5,
+            "2026-06-20T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    payload = module.migrate_search_schema_usage_role(aoa_root=aoa_root)
+
+    assert payload["ok"] is True
+    assert payload["search_schema_version_before"] == "12"
+    assert payload["search_schema_version_after"] == str(module.SEARCH_SCHEMA_VERSION)
+    assert payload["backfilled_event_document_count"] == 4
+    assert payload["role_counts"]["usage"] == 1
+    assert payload["role_counts"]["result"] == 1
+    assert payload["role_counts"]["outcome"] == 1
+    assert payload["role_counts"]["entrypoint"] == 1
+
+    conn = module.connect_existing_search_db(db_path)
+    meta = module.search_index_metadata(conn)
+    state_schema = conn.execute("SELECT search_schema_version FROM session_index_state").fetchone()[0]
+    freshness_schema = conn.execute("SELECT search_schema_version FROM search_freshness_state").fetchone()[0]
+    conn.close()
+
+    assert meta["schema_version"] == str(module.SEARCH_SCHEMA_VERSION)
+    assert meta["search_usage_role_projection_version"] == str(module.SEARCH_USAGE_ROLE_PROJECTION_VERSION)
+    assert state_schema == str(module.SEARCH_SCHEMA_VERSION)
+    assert freshness_schema == str(module.SEARCH_SCHEMA_VERSION)
 
 
 def test_host_search_provider_overlay_never_replaces_aoa_refs(tmp_path: Path, monkeypatch) -> None:

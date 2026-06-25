@@ -98,7 +98,7 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 12
+SEARCH_SCHEMA_VERSION = 13
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
 ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
@@ -119,6 +119,7 @@ SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_slim_preview_v3"
 SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v2"
 SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
+SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
@@ -1922,6 +1923,19 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 def write_markdown(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def json_markdown_report(title: str, payload: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            "```json",
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
 
 
 def reserve_diagnostic_report_paths(diagnostics_dir: Path, stem: str) -> tuple[Path, Path]:
@@ -26609,6 +26623,8 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_documents_session_id ON documents(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_date ON documents(doc_type, session_date DESC, rowid DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_usage_role_date ON documents(usage_role, session_date DESC, rowid DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_usage_role_date ON documents(doc_type, usage_role, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_session_act_date ON documents(session_act, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_session_act_date ON documents(doc_type, session_act, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_agent_event_date ON documents(agent_event, session_date DESC, rowid DESC)",
@@ -26764,6 +26780,7 @@ def init_search_db(
             conversation_act TEXT,
             session_act TEXT,
             agent_event TEXT,
+            usage_role TEXT,
             task_episode_id TEXT,
             route_layers TEXT,
             route_signals TEXT,
@@ -26871,6 +26888,8 @@ def init_search_db(
         conn.execute("ALTER TABLE documents ADD COLUMN session_act TEXT")
     if "agent_event" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN agent_event TEXT")
+    if "usage_role" not in existing_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN usage_role TEXT")
     if "task_episode_id" not in existing_columns:
         conn.execute("ALTER TABLE documents ADD COLUMN task_episode_id TEXT")
     if "route_layers" not in existing_columns:
@@ -26905,6 +26924,204 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM search_freshness_state")
     conn.execute("DELETE FROM meta")
     clear_search_route_term_cache(conn)
+
+
+def migrate_search_schema_usage_role_db(
+    *,
+    db_path: Path,
+    now: str,
+    target_kind: str,
+    shard: str = "",
+) -> dict[str, Any]:
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "target_kind": target_kind,
+            "shard": shard,
+            "db_path": str(db_path),
+            "diagnostics": ["search_index_missing"],
+        }
+    conn: sqlite3.Connection | None = None
+    diagnostics: list[str] = []
+    try:
+        conn = init_search_db(db_path, rebuild=False, create_indexes=False)
+        before_metadata = search_index_metadata(conn)
+        before_schema_version = str(before_metadata.get("schema_version") or "")
+        before_event_missing = int_value(
+            conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE doc_type = 'event' AND COALESCE(usage_role, '') = ''"
+            ).fetchone()[0]
+        )
+        direct_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_DIRECT_TYPES))
+        result_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
+        outcome_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
+        entrypoint_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_ENTRYPOINT_TYPES))
+        goal_placeholders = ",".join("?" for _ in sorted(GOAL_SESSION_ACTS))
+        conn.execute(
+            f"""
+            UPDATE documents
+            SET usage_role = CASE
+                WHEN session_act IN ({goal_placeholders}) THEN 'usage'
+                WHEN event_type IN ({direct_placeholders}) THEN 'usage'
+                WHEN event_type IN ({result_placeholders}) THEN 'result'
+                WHEN event_type IN ({outcome_placeholders}) THEN 'outcome'
+                WHEN event_type IN ({entrypoint_placeholders}) THEN 'entrypoint'
+                WHEN conversation_act LIKE '%request%' OR session_act LIKE '%request%' THEN 'entrypoint'
+                ELSE 'context'
+            END
+            WHERE doc_type = 'event'
+              AND COALESCE(usage_role, '') = ''
+            """,
+            [
+                *sorted(GOAL_SESSION_ACTS),
+                *sorted(ENTITY_USAGE_DIRECT_TYPES),
+                *sorted(ENTITY_USAGE_RESULT_TYPES),
+                *sorted(ENTITY_USAGE_OUTCOME_TYPES),
+                *sorted(ENTITY_USAGE_ENTRYPOINT_TYPES),
+            ],
+        )
+        conn.execute("UPDATE documents SET usage_role = '' WHERE doc_type <> 'event' AND COALESCE(usage_role, '') <> ''")
+        after_event_missing = int_value(
+            conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE doc_type = 'event' AND COALESCE(usage_role, '') = ''"
+            ).fetchone()[0]
+        )
+        role_counts = {
+            str(row["usage_role"] or ""): int_value(row["count"])
+            for row in conn.execute(
+                "SELECT COALESCE(usage_role, '') AS usage_role, COUNT(*) AS count FROM documents WHERE doc_type = 'event' GROUP BY COALESCE(usage_role, '')"
+            ).fetchall()
+        }
+        conn.executemany(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            [
+                ("schema_version", str(SEARCH_SCHEMA_VERSION)),
+                ("search_usage_role_projection_version", str(SEARCH_USAGE_ROLE_PROJECTION_VERSION)),
+                ("search_schema_migrated_at", now),
+                ("entity_registry_search_schema_version", str(SEARCH_SCHEMA_VERSION)),
+            ],
+        )
+        conn.execute("UPDATE session_index_state SET search_schema_version = ?", (str(SEARCH_SCHEMA_VERSION),))
+        conn.execute(
+            "UPDATE search_freshness_state SET search_schema_version = ?, updated_at = ?",
+            (str(SEARCH_SCHEMA_VERSION), now),
+        )
+        index_timings = create_search_db_indexes(conn)
+        conn.commit()
+        after_metadata = search_index_metadata(conn)
+        payload = {
+            "ok": after_event_missing == 0,
+            "target_kind": target_kind,
+            "shard": shard,
+            "db_path": str(db_path),
+            "search_schema_version_before": before_schema_version,
+            "search_schema_version_after": str(after_metadata.get("schema_version") or ""),
+            "usage_role_projection_version": SEARCH_USAGE_ROLE_PROJECTION_VERSION,
+            "event_missing_usage_role_before": before_event_missing,
+            "event_missing_usage_role_after": after_event_missing,
+            "backfilled_event_document_count": max(0, before_event_missing - after_event_missing),
+            "role_counts": dict(sorted(role_counts.items())),
+            "index_count": len(index_timings),
+            "index_timings": index_timings,
+            "diagnostics": diagnostics if after_event_missing == 0 else [*diagnostics, "usage_role_backfill_incomplete"],
+            "truth_status": "generated_search_projection_migration_not_raw_truth",
+        }
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.rollback()
+        payload = {
+            "ok": False,
+            "target_kind": target_kind,
+            "shard": shard,
+            "db_path": str(db_path),
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+    return payload
+
+
+def migrate_search_schema_usage_role(
+    *,
+    aoa_root: Path,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    monolith_path = search_db_path(aoa_root)
+    targets: list[dict[str, Any]] = [
+        {"target_kind": "monolith", "shard": "", "db_path": monolith_path},
+    ]
+    catalog = read_search_catalog(aoa_root)
+    seen_paths = {str(monolith_path)}
+    for item in catalog.get("shards", []) if isinstance(catalog.get("shards"), list) else []:
+        if not isinstance(item, dict) or not item.get("materialized"):
+            continue
+        shard_path = Path(str(item.get("shard_db_path") or ""))
+        if not shard_path or str(shard_path) in seen_paths:
+            continue
+        seen_paths.add(str(shard_path))
+        targets.append(
+            {
+                "target_kind": "shard",
+                "shard": str(item.get("shard") or ""),
+                "db_path": shard_path,
+            }
+        )
+    target_results = [
+        migrate_search_schema_usage_role_db(
+            db_path=Path(str(target["db_path"])),
+            now=now,
+            target_kind=str(target.get("target_kind") or ""),
+            shard=str(target.get("shard") or ""),
+        )
+        for target in targets
+    ]
+    monolith = next((item for item in target_results if item.get("target_kind") == "monolith"), target_results[0] if target_results else {})
+    shard_role_counts: Counter[str] = Counter()
+    for item in target_results:
+        if item.get("target_kind") != "shard":
+            continue
+        for role, count in (item.get("role_counts") if isinstance(item.get("role_counts"), dict) else {}).items():
+            shard_role_counts[str(role)] += int_value(count)
+    diagnostics = [
+        f"{item.get('target_kind')}:{item.get('shard') or item.get('db_path')}:{diag}"
+        for item in target_results
+        for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+        if diag
+    ]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_schema_migration",
+        "generated_at": now,
+        "ok": bool(target_results) and all(bool(item.get("ok")) for item in target_results),
+        "mutates": True,
+        "db_path": str(monolith_path),
+        "target_count": len(target_results),
+        "target_results": target_results,
+        "search_schema_version_before": monolith.get("search_schema_version_before", ""),
+        "search_schema_version_after": monolith.get("search_schema_version_after", ""),
+        "usage_role_projection_version": SEARCH_USAGE_ROLE_PROJECTION_VERSION,
+        "event_missing_usage_role_before": sum(int_value(item.get("event_missing_usage_role_before")) for item in target_results),
+        "event_missing_usage_role_after": sum(int_value(item.get("event_missing_usage_role_after")) for item in target_results),
+        "backfilled_event_document_count": sum(int_value(item.get("backfilled_event_document_count")) for item in target_results),
+        "role_counts": monolith.get("role_counts", {}) if isinstance(monolith.get("role_counts"), dict) else {},
+        "shard_role_counts": dict(sorted(shard_role_counts.items())),
+        "index_count": sum(int_value(item.get("index_count")) for item in target_results),
+        "diagnostics": diagnostics,
+        "truth_status": "generated_search_projection_migration_not_raw_truth",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__search-schema-migrate"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, json_markdown_report("Search Schema Migration", payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
 
 
 def delete_search_documents_for_session(
@@ -27668,6 +27885,7 @@ SEARCH_DOCUMENT_COLUMN_KEYS = frozenset(
         "conversation_act",
         "session_act",
         "agent_event",
+        "usage_role",
         "task_episode_id",
         "route_layers",
         "route_signals",
@@ -27946,7 +28164,7 @@ def insert_search_document(
             id, doc_type, session_id, session_label, session_title, session_date,
             cwd, archive_status, distillation_status, review_status, segment_id,
             event_id, event_type, family, phase, actor, action, object, outcome,
-            conversation_act, session_act, agent_event, task_episode_id, route_layers, route_signals, tags, raw_ref, raw_block_ref, segment_ref,
+            conversation_act, session_act, agent_event, usage_role, task_episode_id, route_layers, route_signals, tags, raw_ref, raw_block_ref, segment_ref,
             manifest_path, raw_path, segment_index_path, raw_sha256,
             segment_index_sha256, freshness_status, stale_reason, title, body,
             payload_json
@@ -27955,7 +28173,7 @@ def insert_search_document(
             :id, :doc_type, :session_id, :session_label, :session_title, :session_date,
             :cwd, :archive_status, :distillation_status, :review_status, :segment_id,
             :event_id, :event_type, :family, :phase, :actor, :action, :object, :outcome,
-            :conversation_act, :session_act, :agent_event, :task_episode_id, :route_layers, :route_signals, :tags, :raw_ref, :raw_block_ref, :segment_ref,
+            :conversation_act, :session_act, :agent_event, :usage_role, :task_episode_id, :route_layers, :route_signals, :tags, :raw_ref, :raw_block_ref, :segment_ref,
             :manifest_path, :raw_path, :segment_index_path, :raw_sha256,
             :segment_index_sha256, :freshness_status, :stale_reason, :title, :body,
             :payload_json
@@ -27985,6 +28203,7 @@ def insert_search_document(
                 "conversation_act",
                 "session_act",
                 "agent_event",
+                "usage_role",
                 "task_episode_id",
                 "raw_ref",
                 "raw_block_ref",
@@ -28560,6 +28779,11 @@ def search_documents_for_record(
                     "conversation_act": str(conversation_act.get("kind") or ""),
                     "session_act": str(session_act.get("kind") or ""),
                     "agent_event": agent_event_class,
+                    "usage_role": entity_usage_event_role(
+                        event_type,
+                        str(conversation_act.get("kind") or ""),
+                        str(session_act.get("kind") or ""),
+                    ),
                     "task_episode_id": task_episode_id,
                     "route_layers": route_layers,
                     "route_signals": route_signals,
@@ -29447,6 +29671,7 @@ def compact_search_result(
         "conversation_act": row["conversation_act"],
         "session_act": row["session_act"] if "session_act" in row.keys() else None,
         "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+        "usage_role": row["usage_role"] if "usage_role" in row.keys() else None,
         "agent_event_source": agent_event_source_from_tags(row["tags"] if "tags" in row.keys() else ""),
         "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
         "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
@@ -29481,6 +29706,7 @@ def compact_search_result(
                 "conversation_act": row["conversation_act"],
                 "session_act": row["session_act"] if "session_act" in row.keys() else None,
                 "agent_event": row["agent_event"] if "agent_event" in row.keys() else None,
+                "usage_role": row["usage_role"] if "usage_role" in row.keys() else None,
                 "agent_event_source": agent_event_source_from_tags(row["tags"] if "tags" in row.keys() else ""),
                 "task_episode_id": row["task_episode_id"] if "task_episode_id" in row.keys() else None,
                 "route_layers": row["route_layers"] if "route_layers" in row.keys() else "",
@@ -29532,6 +29758,7 @@ REQUIRED_SEARCH_DOCUMENT_COLUMNS = {
     "session_label",
     "session_act",
     "agent_event",
+    "usage_role",
     "task_episode_id",
     "route_layers",
     "route_signals",
@@ -29560,6 +29787,24 @@ def search_schema_diagnostics(conn: sqlite3.Connection) -> list[str]:
         for column in sorted(REQUIRED_SEARCH_DOCUMENT_COLUMNS - columns):
             diagnostics.append(f"search_schema_missing_column:documents.{column}")
     return diagnostics
+
+
+def search_usage_role_filter_supported(aoa_root: Path, *, provider: str = "portable_sqlite") -> bool:
+    if provider != "portable_sqlite":
+        return False
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return False
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        return "usage_role" in columns
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def search_route_storage_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -29633,6 +29878,7 @@ def search_shard_fanout_unavailable_payload(
     conversation_act: str | None,
     session_act: str | None,
     agent_event: str | None,
+    usage_role: str | None,
     task_episode_id: str | None,
     route_layer: str | None,
     route_signal: str | None,
@@ -29665,6 +29911,7 @@ def search_shard_fanout_unavailable_payload(
         conversation_act=conversation_act,
         session_act=session_act,
         agent_event=agent_event,
+        usage_role=usage_role,
         task_episode_id=task_episode_id,
         route_layer=route_layer,
         route_signal=route_signal,
@@ -29709,6 +29956,7 @@ def search_sessions_shard_fanout(
     conversation_act: str | None = None,
     session_act: str | None = None,
     agent_event: str | None = None,
+    usage_role: str | None = None,
     task_episode_id: str | None = None,
     route_layer: str | None = None,
     route_signal: str | None = None,
@@ -29744,6 +29992,7 @@ def search_sessions_shard_fanout(
             conversation_act=conversation_act,
             session_act=session_act,
             agent_event=agent_event,
+            usage_role=usage_role,
             task_episode_id=task_episode_id,
             route_layer=route_layer,
             route_signal=route_signal,
@@ -29752,8 +30001,8 @@ def search_sessions_shard_fanout(
             date_from=date_from,
             date_to=date_to,
             explain=explain,
-            semantic_preview=effective_semantic_preview,
-            hydrate_body=effective_hydrate_body,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             query_timeout_ms=query_timeout_ms,
         )
@@ -29804,6 +30053,7 @@ def search_sessions_shard_fanout(
             conversation_act=conversation_act,
             session_act=session_act,
             agent_event=agent_event,
+            usage_role=usage_role,
             task_episode_id=task_episode_id,
             route_layer=route_layer,
             route_signal=route_signal,
@@ -29849,6 +30099,7 @@ def search_sessions_shard_fanout(
                 conversation_act=conversation_act,
                 session_act=session_act,
                 agent_event=agent_event,
+                usage_role=usage_role,
                 task_episode_id=task_episode_id,
                 route_layer=route_layer,
                 route_signal=route_signal,
@@ -29866,7 +30117,7 @@ def search_sessions_shard_fanout(
             payload.setdefault("search_projection", {})["raw_text_query_support"] = SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
             return payload
     structured_route_filter = bool(
-        any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, task_episode_id, route_layer, route_signal])
+        any([doc_type, event_type, family, outcome, conversation_act, session_act, agent_event, usage_role, task_episode_id, route_layer, route_signal])
     )
     lightweight_route = bool(structured_route_filter and not uses_fts)
     effective_hydrate_body = bool(hydrate_body and not lightweight_route)
@@ -29896,6 +30147,7 @@ def search_sessions_shard_fanout(
             conversation_act=conversation_act,
             session_act=session_act,
             agent_event=agent_event,
+            usage_role=usage_role,
             task_episode_id=task_episode_id,
             route_layer=route_layer,
             route_signal=route_signal,
@@ -29904,8 +30156,8 @@ def search_sessions_shard_fanout(
             date_from=date_from,
             date_to=date_to,
             explain=explain,
-            semantic_preview=semantic_preview,
-            hydrate_body=hydrate_body,
+            semantic_preview=effective_semantic_preview,
+            hydrate_body=effective_hydrate_body,
             exclude_agent_event_stream_copies=exclude_agent_event_stream_copies,
             use_shards=False,
             db_path_override=shard_path,
@@ -30018,6 +30270,7 @@ def search_sessions(
     conversation_act: str | None = None,
     session_act: str | None = None,
     agent_event: str | None = None,
+    usage_role: str | None = None,
     task_episode_id: str | None = None,
     route_layer: str | None = None,
     route_signal: str | None = None,
@@ -30072,6 +30325,7 @@ def search_sessions(
             conversation_act=conversation_act,
             session_act=session_act,
             agent_event=normalized_agent_event,
+            usage_role=usage_role,
             task_episode_id=task_episode_id,
             route_layer=route_layer,
             route_signal=route_signal,
@@ -30126,6 +30380,7 @@ def search_sessions(
         ("documents.conversation_act", conversation_act),
         ("documents.session_act", session_act),
         ("documents.agent_event", normalized_agent_event),
+        ("documents.usage_role", usage_role),
         ("documents.task_episode_id", task_episode_id),
         ("documents.archive_status", archive_status),
     ]:
@@ -30164,6 +30419,7 @@ def search_sessions(
             conversation_act,
             session_act,
             normalized_agent_event,
+            usage_role,
             task_episode_id,
             route_layer,
             route_signal,
@@ -30319,6 +30575,7 @@ def search_sessions(
                     ("--conversation-act", conversation_act),
                     ("--session-act", session_act),
                     ("--agent-event", normalized_agent_event),
+                    ("--usage-role", usage_role),
                     ("--task-episode-id", task_episode_id),
                     ("--route-layer", route_layer),
                     ("--route-signal", route_signal),
@@ -45610,52 +45867,109 @@ def entity_usage_audit(
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
     merged: dict[str, dict[str, Any]] = {}
     route_result_summaries: list[dict[str, Any]] = []
-
-    for candidate in lookup_candidates:
-        route_signal_value = str(candidate.get("route_signal") or "")
-        route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
-        matched_route = route_signal_value or f"{candidate.get('layer')}:*"
-        payload = search_sessions(
-            aoa_root=aoa_root,
-            query="",
-            limit=route_fetch_limit,
-            provider=provider,
-            session=session,
-            doc_type="event",
-            route_layer=route_layer_value,
-            route_signal=route_signal_value or None,
-            explain=True,
-            semantic_preview=False,
-            hydrate_body=False,
-        )
-        route_result_summaries.append(
-            {
-                "candidate": candidate,
-                "ok": payload.get("ok"),
-                "result_count": payload.get("result_count"),
-                "requested_per_route_limit": per_route_limit,
-                "fetch_limit": route_fetch_limit,
-                "diagnostics": payload.get("diagnostics", []),
-            }
-        )
-        if not payload.get("ok"):
-            diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
-            continue
-        for hit in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
-            if isinstance(hit, dict):
-                merge_usage_hit(merged, hit, matched_route)
-
-    route_hit_count = len(merged)
-    route_usage_hit_count = sum(
-        1
-        for hit in merged.values()
-        if compact_usage_event_from_search_hit(hit).get("role") == "usage"
+    usage_role_fast_path_supported = bool(
+        lookup_candidates
+        and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
+        and search_usage_role_filter_supported(aoa_root, provider=provider)
     )
-    route_evidence_hit_count = sum(
-        1
-        for hit in merged.values()
-        if compact_usage_event_from_search_hit(hit).get("role") != "context"
-    )
+    usage_role_fast_path_applied = False
+    usage_role_fast_path_fetch_limit = 0
+    usage_role_fast_path_hit_count = 0
+    usage_role_fast_path_usage_hit_count = 0
+    broad_route_search_skipped = False
+
+    def merged_route_counts() -> tuple[int, int, int]:
+        hit_count = len(merged)
+        usage_count = sum(
+            1
+            for hit in merged.values()
+            if compact_usage_event_from_search_hit(hit).get("role") == "usage"
+        )
+        evidence_count = sum(
+            1
+            for hit in merged.values()
+            if compact_usage_event_from_search_hit(hit).get("role") != "context"
+        )
+        return hit_count, usage_count, evidence_count
+
+    if usage_role_fast_path_supported:
+        usage_role_fast_path_applied = True
+        usage_role_fast_path_fetch_limit = max(1, min(100, max(limit, per_route_limit)))
+        for candidate in lookup_candidates:
+            route_signal_value = str(candidate.get("route_signal") or "")
+            route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
+            matched_route = route_signal_value or f"{candidate.get('layer')}:*"
+            payload = search_sessions(
+                aoa_root=aoa_root,
+                query="",
+                limit=usage_role_fast_path_fetch_limit,
+                provider=provider,
+                session=session,
+                doc_type="event",
+                route_layer=route_layer_value,
+                route_signal=route_signal_value or None,
+                usage_role="usage",
+                explain=True,
+                semantic_preview=False,
+                hydrate_body=False,
+            )
+            route_result_summaries.append(
+                {
+                    "candidate": candidate,
+                    "ok": payload.get("ok"),
+                    "result_count": payload.get("result_count"),
+                    "requested_per_route_limit": per_route_limit,
+                    "fetch_limit": usage_role_fast_path_fetch_limit,
+                    "usage_role_filter": "usage",
+                    "diagnostics": payload.get("diagnostics", []),
+                }
+            )
+            if not payload.get("ok"):
+                diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
+                continue
+            for hit in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+                if isinstance(hit, dict):
+                    merge_usage_hit(merged, hit, matched_route)
+        usage_role_fast_path_hit_count, usage_role_fast_path_usage_hit_count, _usage_role_evidence_count = merged_route_counts()
+
+    if usage_role_fast_path_applied and usage_role_fast_path_usage_hit_count >= limit:
+        broad_route_search_skipped = True
+    else:
+        for candidate in lookup_candidates:
+            route_signal_value = str(candidate.get("route_signal") or "")
+            route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
+            matched_route = route_signal_value or f"{candidate.get('layer')}:*"
+            payload = search_sessions(
+                aoa_root=aoa_root,
+                query="",
+                limit=route_fetch_limit,
+                provider=provider,
+                session=session,
+                doc_type="event",
+                route_layer=route_layer_value,
+                route_signal=route_signal_value or None,
+                explain=True,
+                semantic_preview=False,
+                hydrate_body=False,
+            )
+            route_result_summaries.append(
+                {
+                    "candidate": candidate,
+                    "ok": payload.get("ok"),
+                    "result_count": payload.get("result_count"),
+                    "requested_per_route_limit": per_route_limit,
+                    "fetch_limit": route_fetch_limit,
+                    "diagnostics": payload.get("diagnostics", []),
+                }
+            )
+            if not payload.get("ok"):
+                diagnostics.extend(str(item) for item in payload.get("diagnostics", []))
+                continue
+            for hit in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+                if isinstance(hit, dict):
+                    merge_usage_hit(merged, hit, matched_route)
+
+    route_hit_count, route_usage_hit_count, route_evidence_hit_count = merged_route_counts()
     route_usage_retry_applied = False
     route_usage_retry_fetch_limit = 0
     if (
@@ -45799,6 +46113,12 @@ def entity_usage_audit(
         "route_evidence_hit_count_before_text_fallback": route_evidence_hit_count,
         "route_usage_retry_applied": route_usage_retry_applied,
         "route_usage_retry_fetch_limit": route_usage_retry_fetch_limit,
+        "usage_role_fast_path_supported": usage_role_fast_path_supported,
+        "usage_role_fast_path_applied": usage_role_fast_path_applied,
+        "usage_role_fast_path_fetch_limit": usage_role_fast_path_fetch_limit,
+        "usage_role_fast_path_hit_count": usage_role_fast_path_hit_count,
+        "usage_role_fast_path_usage_hit_count": usage_role_fast_path_usage_hit_count,
+        "usage_role_fast_path_broad_route_search_skipped": broad_route_search_skipped,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
         "search_has_route_index": bool(
@@ -45992,6 +46312,12 @@ def entity_usage_neighborhood(
         "audit_per_route_limit": audit_per_route_limit,
         "audit_candidate_event_count": (audit.get("quality") or {}).get("candidate_event_count") if isinstance(audit.get("quality"), dict) else None,
         "audit_candidate_usage_event_count": (audit.get("quality") or {}).get("candidate_usage_event_count") if isinstance(audit.get("quality"), dict) else None,
+        "audit_text_search_skipped": (audit.get("quality") or {}).get("text_search_skipped") if isinstance(audit.get("quality"), dict) else None,
+        "audit_route_usage_retry_applied": (audit.get("quality") or {}).get("route_usage_retry_applied") if isinstance(audit.get("quality"), dict) else None,
+        "audit_usage_role_fast_path_supported": (audit.get("quality") or {}).get("usage_role_fast_path_supported") if isinstance(audit.get("quality"), dict) else None,
+        "audit_usage_role_fast_path_applied": (audit.get("quality") or {}).get("usage_role_fast_path_applied") if isinstance(audit.get("quality"), dict) else None,
+        "audit_usage_role_fast_path_broad_route_search_skipped": (audit.get("quality") or {}).get("usage_role_fast_path_broad_route_search_skipped") if isinstance(audit.get("quality"), dict) else None,
+        "audit_usage_role_fast_path_usage_hit_count": (audit.get("quality") or {}).get("usage_role_fast_path_usage_hit_count") if isinstance(audit.get("quality"), dict) else None,
     }
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -46017,6 +46343,12 @@ def entity_usage_neighborhood(
             "requested_usage_limit": limit,
             "audit_limit": audit_limit,
             "audit_per_route_limit": audit_per_route_limit,
+            "text_search_skipped": (audit.get("quality") or {}).get("text_search_skipped") if isinstance(audit.get("quality"), dict) else None,
+            "route_usage_retry_applied": (audit.get("quality") or {}).get("route_usage_retry_applied") if isinstance(audit.get("quality"), dict) else None,
+            "usage_role_fast_path_supported": (audit.get("quality") or {}).get("usage_role_fast_path_supported") if isinstance(audit.get("quality"), dict) else None,
+            "usage_role_fast_path_applied": (audit.get("quality") or {}).get("usage_role_fast_path_applied") if isinstance(audit.get("quality"), dict) else None,
+            "usage_role_fast_path_broad_route_search_skipped": (audit.get("quality") or {}).get("usage_role_fast_path_broad_route_search_skipped") if isinstance(audit.get("quality"), dict) else None,
+            "usage_role_fast_path_usage_hit_count": (audit.get("quality") or {}).get("usage_role_fast_path_usage_hit_count") if isinstance(audit.get("quality"), dict) else None,
             "freshness_counts": (audit.get("quality") or {}).get("freshness_counts") if isinstance(audit.get("quality"), dict) else {},
         },
         "quality": quality,
@@ -46212,8 +46544,6 @@ def entity_usage_scenario_candidates(
         selected_layers = [route_key_slug(layer, fallback=layer) for layer in (layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS))]
         selected_layers = [layer for layer in selected_layers if layer]
         placeholders = ",".join("?" for _ in selected_layers)
-        usage_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_DIRECT_TYPES))
-        goal_act_placeholders = ",".join("?" for _ in sorted(GOAL_SESSION_ACTS))
         result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
         outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
         rows = conn.execute(
@@ -46229,10 +46559,7 @@ def entity_usage_scenario_candidates(
               SUM(
                 CASE
                   WHEN documents.doc_type = 'event'
-                    AND (
-                      documents.event_type IN ({usage_type_placeholders})
-                      OR documents.session_act IN ({goal_act_placeholders})
-                    )
+                    AND documents.usage_role = 'usage'
                   THEN 1 ELSE 0
                 END
               ) AS usage_event_count,
@@ -46259,8 +46586,6 @@ def entity_usage_scenario_candidates(
             HAVING event_document_count >= ?
             """,
             [
-                *sorted(ENTITY_USAGE_DIRECT_TYPES),
-                *sorted(GOAL_SESSION_ACTS),
                 *sorted(ENTITY_USAGE_RESULT_TYPES),
                 *sorted(ENTITY_USAGE_OUTCOME_TYPES),
                 *selected_layers,
@@ -48203,6 +48528,27 @@ def command_search_index(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_schema_migrate(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+
+    def run_migration() -> dict[str, Any]:
+        return migrate_search_schema_usage_role(aoa_root=root, write_report=args.write_report)
+
+    payload = run_with_maintenance_lock(
+        root,
+        run_migration,
+        owner_job="search-schema-migrate",
+        mode="manual-light",
+        target="search",
+        reason="operator_requested",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=False),
+        budget_seconds=None,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search_provider_status(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -48299,6 +48645,7 @@ def command_search(args: argparse.Namespace) -> int:
         conversation_act=args.conversation_act,
         session_act=args.session_act,
         agent_event=args.agent_event,
+        usage_role=args.usage_role,
         task_episode_id=args.task_episode_id,
         route_layer=args.route_layer,
         route_signal=args.route_signal,
@@ -53818,6 +54165,16 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")
     search_index.set_defaults(func=command_search_index)
 
+    search_schema_migrate = sub.add_parser(
+        "search-schema-migrate",
+        aliases=["search-migrate"],
+        help="Apply lightweight generated search schema migrations without rebuilding raw/FTS projections.",
+    )
+    search_schema_migrate.add_argument("--workspace-root")
+    search_schema_migrate.add_argument("--aoa-root")
+    search_schema_migrate.add_argument("--write-report", action="store_true", help="Write JSON and Markdown migration reports under .aoa/diagnostics.")
+    search_schema_migrate.set_defaults(func=command_search_schema_migrate)
+
     provider_status = sub.add_parser(
         "search-provider-status",
         help="Inspect portable and optional host search provider capability without changing archive truth.",
@@ -53890,6 +54247,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--conversation-act")
     search.add_argument("--session-act")
     search.add_argument("--agent-event")
+    search.add_argument("--usage-role", choices=["usage", "result", "outcome", "entrypoint", "context"], help="Filter event documents by generated entity-usage role.")
     search.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
     search.add_argument("--route-layer", help="Filter by generated route-signal layer such as scope_contract.")
     search.add_argument("--route-signal", help="Filter by generated route signal in layer:key form.")
