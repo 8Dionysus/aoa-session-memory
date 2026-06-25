@@ -413,6 +413,26 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert open_thread_route["result_count"] == 1
     assert open_thread_route["results"][0]["agent_event"] == "assistant_open_thread"
     assert open_thread_route["results"][0]["event_id"] == open_thread["event_id"]
+    open_thread_alias_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["open_thread"],
+        limit=5,
+    )
+    assert open_thread_alias_route["agent_events"] == ["assistant_open_thread"]
+    assert open_thread_alias_route["requested_agent_events"] == ["open_thread"]
+    assert open_thread_alias_route["result_count"] == 1
+    assert open_thread_alias_route["results"][0]["event_id"] == open_thread["event_id"]
+    open_thread_search_alias = module.search_sessions(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        doc_type="event",
+        agent_event="open_thread",
+        limit=5,
+    )
+    assert open_thread_search_alias["result_count"] == 1
+    assert open_thread_search_alias["results"][0]["agent_event"] == "assistant_open_thread"
+    assert open_thread_search_alias["results"][0]["event_id"] == open_thread["event_id"]
     progress_route = module.agent_event_route_search(
         aoa_root=aoa_root,
         session=session_dir.name,

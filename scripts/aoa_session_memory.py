@@ -29946,6 +29946,7 @@ def search_sessions(
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
+    normalized_agent_event = normalize_agent_event_route_class(agent_event) if agent_event else None
     provider_config = search_provider_config(aoa_root)
     configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
     if provider not in configured_providers:
@@ -29980,7 +29981,7 @@ def search_sessions(
             outcome=outcome,
             conversation_act=conversation_act,
             session_act=session_act,
-            agent_event=agent_event,
+            agent_event=normalized_agent_event,
             task_episode_id=task_episode_id,
             route_layer=route_layer,
             route_signal=route_signal,
@@ -30034,7 +30035,7 @@ def search_sessions(
         ("documents.outcome", outcome),
         ("documents.conversation_act", conversation_act),
         ("documents.session_act", session_act),
-        ("documents.agent_event", agent_event),
+        ("documents.agent_event", normalized_agent_event),
         ("documents.task_episode_id", task_episode_id),
         ("documents.archive_status", archive_status),
     ]:
@@ -30072,7 +30073,7 @@ def search_sessions(
             outcome,
             conversation_act,
             session_act,
-            agent_event,
+            normalized_agent_event,
             task_episode_id,
             route_layer,
             route_signal,
@@ -30227,7 +30228,7 @@ def search_sessions(
                     ("--outcome", outcome),
                     ("--conversation-act", conversation_act),
                     ("--session-act", session_act),
-                    ("--agent-event", agent_event),
+                    ("--agent-event", normalized_agent_event),
                     ("--task-episode-id", task_episode_id),
                     ("--route-layer", route_layer),
                     ("--route-signal", route_signal),
@@ -30390,6 +30391,66 @@ AGENT_RESPONSE_ROUTE_CLASSES = [
     "assistant_handoff_or_resume",
     "assistant_correction_ack",
 ]
+
+AGENT_EVENT_ROUTE_ALIASES = {
+    "answer": "assistant_answer",
+    "assistant_answer": "assistant_answer",
+    "response": "assistant_answer",
+    "assistant_response": "assistant_answer",
+    "open_thread": "assistant_open_thread",
+    "assistant_open_thread": "assistant_open_thread",
+    "thread": "assistant_open_thread",
+    "remaining_gap": "assistant_open_thread",
+    "final": "assistant_final_closeout",
+    "reasoning": "assistant_reasoning_boundary",
+    "reasoning_boundary": "assistant_reasoning_boundary",
+    "reasoning_window": "assistant_reasoning_boundary",
+    "assistant_reasoning_boundary": "assistant_reasoning_boundary",
+    "plan": "assistant_plan",
+    "assistant_plan": "assistant_plan",
+    "progress": "assistant_progress_update",
+    "progress_update": "assistant_progress_update",
+    "assistant_progress_update": "assistant_progress_update",
+    "closeout": "assistant_final_closeout",
+    "final_closeout": "assistant_final_closeout",
+    "assistant_final_closeout": "assistant_final_closeout",
+    "verification": "assistant_verification_report",
+    "verification_report": "assistant_verification_report",
+    "assistant_verification_report": "assistant_verification_report",
+    "decision": "assistant_decision",
+    "assistant_decision": "assistant_decision",
+    "assumption": "assistant_assumption",
+    "assistant_assumption": "assistant_assumption",
+    "checkpoint": "assistant_checkpoint",
+    "assistant_checkpoint": "assistant_checkpoint",
+    "blocker": "assistant_blocker_report",
+    "blocked": "assistant_blocker_report",
+    "assistant_blocker_report": "assistant_blocker_report",
+    "handoff": "assistant_handoff_or_resume",
+    "resume": "assistant_handoff_or_resume",
+    "assistant_handoff_or_resume": "assistant_handoff_or_resume",
+    "correction": "assistant_correction_ack",
+    "correction_ack": "assistant_correction_ack",
+    "assistant_correction_ack": "assistant_correction_ack",
+    "process_lesson": "assistant_process_lesson",
+    "assistant_process_lesson": "assistant_process_lesson",
+}
+
+
+def normalize_agent_event_route_class(value: str | None) -> str:
+    slug = route_key_slug(value or "", fallback="")
+    if not slug:
+        return ""
+    return AGENT_EVENT_ROUTE_ALIASES.get(slug, slug)
+
+
+def normalize_agent_event_route_classes(values: list[str] | None, *, default: list[str]) -> list[str]:
+    classes: list[str] = []
+    for item in values or []:
+        normalized = normalize_agent_event_route_class(item)
+        if normalized and normalized not in classes:
+            classes.append(normalized)
+    return classes or list(default)
 
 
 def merge_search_results_by_doc_id(payloads: list[dict[str, Any]], *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
@@ -30628,9 +30689,7 @@ def search_agent_event_documents(
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
-    classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
-    if not classes:
-        classes = AGENT_RESPONSE_ROUTE_CLASSES
+    classes = normalize_agent_event_route_classes(agent_events, default=AGENT_RESPONSE_ROUTE_CLASSES)
     effective_limit = max(1, limit)
     if use_shards:
         return search_agent_event_documents_with_shards(
@@ -30885,9 +30944,8 @@ def agent_event_route_search(
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
-    classes = [item for item in (agent_events or []) if item]
-    if not classes:
-        classes = AGENT_RESPONSE_ROUTE_CLASSES
+    requested_classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
+    classes = normalize_agent_event_route_classes(requested_classes, default=AGENT_RESPONSE_ROUTE_CLASSES)
     route_payload = search_agent_event_documents(
         aoa_root=aoa_root,
         query=query,
@@ -30914,6 +30972,7 @@ def agent_event_route_search(
         "session": session or "",
         "task_episode_id": task_episode_id or "",
         "agent_events": classes,
+        "requested_agent_events": requested_classes if requested_classes != classes else [],
         "include_stream_copies": include_stream_copies,
         "search_projection": route_payload.get("search_projection") if isinstance(route_payload.get("search_projection"), dict) else {},
         "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
@@ -31017,7 +31076,7 @@ def agent_event_windows(
     max_shards: int = 24,
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
-    classes = [item for item in (agent_events or []) if item]
+    classes = normalize_agent_event_route_classes(agent_events, default=AGENT_RESPONSE_ROUTE_CLASSES)
     payload = agent_event_route_search(
         aoa_root=aoa_root,
         query=query,
@@ -31408,45 +31467,6 @@ TRACE_ROUTE_KIND_ALIASES = {
     "mcp_tool": "tool",
 }
 TRACE_ROUTE_KIND_CHOICES = sorted(TRACE_ROUTE_KINDS | set(TRACE_ROUTE_KIND_ALIASES))
-
-AGENT_EVENT_ROUTE_ALIASES = {
-    "answer": "assistant_answer",
-    "assistant_answer": "assistant_answer",
-    "response": "assistant_answer",
-    "assistant_response": "assistant_answer",
-    "open_thread": "assistant_open_thread",
-    "assistant_open_thread": "assistant_open_thread",
-    "final": "assistant_final_closeout",
-    "closeout": "assistant_final_closeout",
-    "final_closeout": "assistant_final_closeout",
-    "assistant_final_closeout": "assistant_final_closeout",
-    "reasoning": "assistant_reasoning_boundary",
-    "reasoning_boundary": "assistant_reasoning_boundary",
-    "reasoning_window": "assistant_reasoning_boundary",
-    "assistant_reasoning_boundary": "assistant_reasoning_boundary",
-    "plan": "assistant_plan",
-    "assistant_plan": "assistant_plan",
-    "progress": "assistant_progress_update",
-    "assistant_progress_update": "assistant_progress_update",
-    "verification": "assistant_verification_report",
-    "assistant_verification_report": "assistant_verification_report",
-    "decision": "assistant_decision",
-    "assistant_decision": "assistant_decision",
-    "assumption": "assistant_assumption",
-    "assistant_assumption": "assistant_assumption",
-    "checkpoint": "assistant_checkpoint",
-    "assistant_checkpoint": "assistant_checkpoint",
-    "handoff": "assistant_handoff_or_resume",
-    "resume": "assistant_handoff_or_resume",
-    "assistant_handoff_or_resume": "assistant_handoff_or_resume",
-    "correction": "assistant_correction_ack",
-    "assistant_correction_ack": "assistant_correction_ack",
-    "blocker": "assistant_blocker_report",
-    "assistant_blocker_report": "assistant_blocker_report",
-    "process_lesson": "assistant_process_lesson",
-    "assistant_process_lesson": "assistant_process_lesson",
-}
-
 
 def normalize_trace_route_kind(kind: str | None) -> str:
     normalized = str(kind or "auto").strip().lower()
