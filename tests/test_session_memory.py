@@ -1863,6 +1863,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert "entity-registry-search-sync" in planned_refresh["command"]
     assert "search-index" not in planned_refresh["command"]
     assert "--no-rebuild" not in planned_refresh["command"]
+    assert "--budget-seconds" not in planned_refresh["command"]
 
     applied_maintenance = module.maintain_indexes(
         aoa_root=aoa_root,
@@ -1904,6 +1905,10 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert noop_refresh["updated_entity_registry_document_count"] == 0
     assert noop_refresh["removed_entity_registry_document_count"] == 0
     assert noop_refresh["unchanged_entity_registry_document_count"] == refreshed_registry["entity_count"]
+    budgeted_noop_refresh = module.refresh_entity_registry_search_documents_only(aoa_root=aoa_root, budget_seconds=0.001)
+    assert budgeted_noop_refresh["ok"] is True
+    assert budgeted_noop_refresh["budget_policy"] == "soft_observed_atomic_sync_not_interrupted"
+    assert budgeted_noop_refresh["diagnostics"] == []
 
 
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:

@@ -1086,6 +1086,9 @@ python3 scripts/aoa_session_memory.py entity-registry-search-sync \
 `search-index --no-rebuild` should not be used merely to refresh registry
 docs because it also indexes selected session documents. A bare
 `entity-registry --write` is only a generated snapshot refresh.
+The route treats `--budget-seconds` as a soft observed budget because the
+generated snapshot and SQLite registry docs must stay synchronized; it does not
+interrupt the SQLite transaction mid-sync.
 The SQLite sync is delta-based: unchanged registry docs are left in place, new
 docs are inserted, changed docs are replaced by rowid, and missing docs are
 removed. Reports expose `inserted_entity_registry_document_count`,

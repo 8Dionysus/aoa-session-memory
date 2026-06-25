@@ -838,7 +838,9 @@ python3 scripts/aoa_session_memory.py entity-registry-search-sync \
 
 This route updates `maps/entity-registry.json` and the SQLite
 `doc_type=entity_registry` rows under the maintenance lock without reindexing a
-random session as a side effect.
+random session as a side effect. Its wall-clock budget is soft/observed rather
+than an interrupt: the generated snapshot and SQLite registry docs are one
+consistency unit and must not be split by a mid-transaction SQLite abort.
 
 When an agent needs to debug or study one operational thing, use the resolver
 instead of guessing one axis by hand:

@@ -777,7 +777,11 @@ Last observed result:
   `unchanged=3480`, and `removed=0`, under a maintenance coordinator lease that
   touched only `entity_registry` and `search`. The previous fallback route for
   the same class of source-card change took `84.125s`, including `27.019s` of
-  unrelated session bulk indexing and `56.945s` of registry refresh.
+  unrelated session bulk indexing and `56.945s` of registry refresh. A later
+  stale registry sync with a too-small hard SQLite progress budget produced
+  `sqlite_error:interrupted`; the route now treats `--budget-seconds` as a
+  soft observed budget because snapshot and SQLite registry docs are an atomic
+  consistency unit.
 - 2026-06-25 resource live-tail fast-path proof: a timer-driven
   `auto-maintenance-resource catchup all` launched broad
   `auto-maintenance catchup all`, selected `285` sessions, touched

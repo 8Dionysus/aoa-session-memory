@@ -17807,7 +17807,6 @@ def maintain_indexes(
     entity_registry_search_command = (
         base
         + ["entity-registry-search-sync", *root_args]
-        + (["--budget-seconds", budget_seconds_text] if budget_seconds_text else [])
         + ["--write-report"]
     )
     atlas_command = (
@@ -29100,15 +29099,12 @@ def refresh_entity_registry_search_documents_only(
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
-    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     db_path = search_db_path(aoa_root)
     conn: sqlite3.Connection | None = None
     diagnostics: list[str] = []
     registry_state: dict[str, Any] = {}
     try:
-        conn = init_search_db(db_path, rebuild=False, create_indexes=True, budget_deadline=deadline)
-        if deadline is not None:
-            conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 10000)
+        conn = init_search_db(db_path, rebuild=False, create_indexes=True)
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
@@ -29158,6 +29154,8 @@ def refresh_entity_registry_search_documents_only(
             conn.close()
     if not registry_state:
         registry_state = entity_registry_maintenance_status(aoa_root)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    budget_value = float(budget_seconds) if budget_seconds is not None and budget_seconds > 0 else None
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "entity_registry_search_sync",
@@ -29184,7 +29182,9 @@ def refresh_entity_registry_search_documents_only(
         "entity_registry": registry_state,
         "db_path": str(db_path),
         "budget_seconds": budget_seconds,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "budget_exhausted": bool(budget_value is not None and elapsed_ms > int(budget_value * 1000)),
+        "budget_policy": "soft_observed_atomic_sync_not_interrupted",
+        "elapsed_ms": elapsed_ms,
         "diagnostics": diagnostics,
     }
     if write_report:
@@ -58548,7 +58548,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     entity_registry_search_sync_parser.add_argument("--workspace-root")
     entity_registry_search_sync_parser.add_argument("--aoa-root")
-    entity_registry_search_sync_parser.add_argument("--budget-seconds", type=float)
+    entity_registry_search_sync_parser.add_argument("--budget-seconds", type=float, help="Record a soft wall-clock budget; the registry/search sync is atomic and is not interrupted mid-transaction.")
     entity_registry_search_sync_parser.add_argument("--write-report", action="store_true")
     entity_registry_search_sync_parser.set_defaults(func=command_entity_registry_search_sync)
 
