@@ -10824,6 +10824,43 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
 
+    archive_session("june-shard-incremental", "2026-06-25T00:00:00Z", "june-shard-incremental-anchor")
+    incremental_monolith = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="june-shard-incremental",
+        rebuild=False,
+    )
+    assert incremental_monolith["ok"] is True
+    incremental_shard = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="june-shard-incremental",
+        rebuild_shards=False,
+    )
+    assert incremental_shard["ok"] is True
+    assert incremental_shard["rebuild_shards"] is False
+    assert incremental_shard["processed_count"] == 1
+    assert incremental_shard["shards"][0]["shard"] == "month/2026-06"
+    assert incremental_shard["shards"][0]["rebuild"] is False
+    june_shard_after_incremental = module.search_shard_db_path(aoa_root, "month/2026-06")
+    june_conn = sqlite3.connect(str(june_shard_after_incremental))
+    try:
+        june_incremental_doc_count = june_conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE session_id = ?",
+            ("june-shard-incremental",),
+        ).fetchone()[0]
+        june_fts_mode = june_conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            ("search_fts_storage_mode",),
+        ).fetchone()[0]
+    finally:
+        june_conn.close()
+    assert june_incremental_doc_count > 0
+    assert june_fts_mode == module.SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE
+    incremental_catalog = module.read_search_catalog(aoa_root)
+    june_catalog = next(item for item in incremental_catalog["shards"] if item["shard"] == "month/2026-06")
+    assert june_catalog["status"] == "current"
+    assert june_catalog["current_session_count"] == 2
+
     fanout = module.search_sessions(
         aoa_root=aoa_root,
         doc_type="event",

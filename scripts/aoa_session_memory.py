@@ -27733,6 +27733,22 @@ def migrate_search_schema_usage_role(
     return payload
 
 
+def search_fts_delete_enabled(conn: sqlite3.Connection) -> bool:
+    if not sqlite_table_exists(conn, "documents_fts"):
+        return False
+    try:
+        metadata = search_index_metadata(conn)
+    except sqlite3.Error:
+        return True
+    fts_mode = str(metadata.get("search_fts_storage_mode") or "").strip()
+    raw_support = str(metadata.get("search_raw_text_query_support") or "").strip()
+    if fts_mode == SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE:
+        return False
+    if raw_support == SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK:
+        return False
+    return True
+
+
 def delete_search_documents_for_session(
     conn: sqlite3.Connection,
     *,
@@ -27760,7 +27776,8 @@ def delete_search_documents_for_session(
         return 0
     conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
-    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    if search_fts_delete_enabled(conn):
+        conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM search_delete_rowids")
     return count
@@ -27781,7 +27798,8 @@ def delete_search_documents_by_doc_type(conn: sqlite3.Connection, doc_type: str)
         return 0
     conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
-    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    if search_fts_delete_enabled(conn):
+        conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM search_delete_rowids")
     return count
@@ -27799,7 +27817,8 @@ def delete_search_documents_by_rowids(conn: sqlite3.Connection, rowids: Iterable
         return 0
     conn.execute("DELETE FROM document_routes WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM document_bodies WHERE doc_rowid IN (SELECT rowid FROM search_delete_rowids)")
-    conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
+    if search_fts_delete_enabled(conn):
+        conn.execute("DELETE FROM documents_fts WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM documents WHERE rowid IN (SELECT rowid FROM search_delete_rowids)")
     conn.execute("DELETE FROM search_delete_rowids")
     return count
