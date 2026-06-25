@@ -563,7 +563,12 @@ Last observed result:
   `fallback_graph_drip` without marking the full backlog profile as successful.
   The fallback now carries a bounded candidate-pool limit so graph recovery can
   exact-plan more than the small default batch multiplier and select cheaper
-  source repairs under the same node/edge refresh caps.
+  source repairs under the same node/edge refresh caps. Deep resource launches
+  now use the same bounded graph-drip route by profile default, because the
+  unattended heavy class may be capped or blocked by host resource policy; a
+  successful fallback supersedes older blocked diagnostics for the same profile
+  in `operations.recent_problem_jobs` while still keeping the outer deep report
+  `ok=false`.
 - 2026-06-14 search read-availability proof: a live hot maintenance run opened
   a long rollback-journal write window on `search/aoa-search.sqlite3`; during
   that window both `agent-responses` and `search` returned

@@ -584,13 +584,17 @@ directly. The wrapper still uses `abyss-machine resource launch --kind indexing
 `diagnostics/*__auto-maintenance-resource-<profile>.json` when the host resource
 gate blocks or denies the child before `auto-maintenance` starts. This keeps
 heavier work outside hooks and MCP reads without hiding resource-pressure
-deferrals from agents. Backlog timers may also enable `--graph-drip-on-block`:
-when medium backlog is blocked, the wrapper can run a tightly capped
-probe-class `graph-maintenance` batch and record it in the same resource
-diagnostic without claiming the full backlog profile succeeded. Use
-`--graph-drip-candidate-pool-limit` to let the fallback exact-plan a wider
-bounded window before selecting by real node/edge refresh cost; the
-`--graph-drip-max-refresh-*` caps remain the safety boundary.
+deferrals from agents. Resource-blocked backlog and deep runs can fall back to a
+tightly capped probe-class graph drip instead of leaving graph maintenance idle:
+backlog enables this explicitly from its timer/service flags, while the `deep`
+profile enables it by default because unattended heavy indexing is commonly
+capped by the host resource policy. The report keeps the outer maintenance
+profile `ok=false`, records `fallback_graph_drip`, and does not claim the full
+backlog/deep profile succeeded. Use `--graph-drip-candidate-pool-limit` to let
+the fallback exact-plan a wider bounded window before selecting by real
+node/edge refresh cost; the `--graph-drip-max-refresh-*` caps remain the safety
+boundary. Use `--no-graph-drip-on-block` only for an explicit diagnostic run
+that must preserve the raw resource-blocked state.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
 `maintenance-status` also reports `operations.graph_pressure` when graph

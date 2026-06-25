@@ -286,6 +286,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "probe",
         "resource_kind": "indexing",
         "timeout_sec": 900,
+        "graph_drip_on_block": False,
     },
     "backlog": {
         "since_days": 30,
@@ -306,6 +307,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 3600,
+        "graph_drip_on_block": False,
     },
     "catchup": {
         "since_days": None,
@@ -326,6 +328,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 1800,
+        "graph_drip_on_block": False,
     },
     "deep": {
         "since_days": None,
@@ -346,6 +349,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "heavy",
         "resource_kind": "indexing",
         "timeout_sec": 7200,
+        "graph_drip_on_block": True,
     },
 }
 GRAPH_QUALITY_CORPUS_PATH = Path("config/graph-quality-regression-corpus.json")
@@ -19325,6 +19329,7 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- mutates: `{payload.get('mutates')}`",
         f"- reason: `{payload.get('reason')}`",
         f"- graph_drip_on_block: `{payload.get('graph_drip_on_block')}`",
+        f"- graph_drip_on_block_source: `{payload.get('graph_drip_on_block_source')}`",
         f"- resource_class: `{payload.get('resource_class')}`",
         f"- resource_kind: `{payload.get('resource_kind')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
@@ -19466,7 +19471,7 @@ def auto_maintenance_resource_launch(
     fail_on_block: bool = False,
     resource_force: bool = False,
     resource_binary: str = "abyss-machine",
-    graph_drip_on_block: bool = False,
+    graph_drip_on_block: bool | None = None,
     graph_drip_batch_limit: int = 25,
     graph_drip_budget_seconds: float = 180.0,
     graph_drip_refresh_chunk_size: int = 64,
@@ -19493,6 +19498,7 @@ def auto_maintenance_resource_launch(
     progress_every: int | None = None,
 ) -> dict[str, Any]:
     settings = auto_maintenance_profile(profile)
+    effective_graph_drip_on_block = bool(settings.get("graph_drip_on_block")) if graph_drip_on_block is None else bool(graph_drip_on_block)
     extra_args = auto_maintenance_cli_extra_args(
         since=since,
         since_days=since_days,
@@ -19578,7 +19584,7 @@ def auto_maintenance_resource_launch(
         status = "resource_launcher_no_json"
         diagnostics.append("resource_launcher_no_json")
     fallback_graph_drip: dict[str, Any] = {}
-    if status == "resource_blocked" and graph_drip_on_block:
+    if status == "resource_blocked" and effective_graph_drip_on_block:
         fallback_command = [
             resource_binary,
             "resource",
@@ -19716,7 +19722,8 @@ def auto_maintenance_resource_launch(
         "profile": profile,
         "target": target,
         "reason": reason,
-        "graph_drip_on_block": graph_drip_on_block,
+        "graph_drip_on_block": effective_graph_drip_on_block,
+        "graph_drip_on_block_source": "profile_default" if graph_drip_on_block is None else "explicit",
         "fallback_graph_drip": fallback_graph_drip,
         "resource_class": settings.get("resource_class"),
         "resource_kind": settings.get("resource_kind"),
@@ -43438,6 +43445,31 @@ def diagnostic_report_handled_resource_fallback(report: dict[str, Any]) -> bool:
     return fallback.get("ok") is True and "graph_drip_fallback_completed" in {str(item) for item in diagnostics}
 
 
+def diagnostic_report_operational_key(report: dict[str, Any]) -> str:
+    artifact_type = str(report.get("artifact_type") or "")
+    path = str(report.get("_diagnostic_path") or "")
+    stem = Path(path).stem if path else ""
+    profile = str(report.get("profile") or "").strip()
+    target = str(report.get("target") or "").strip()
+    if artifact_type == "auto_maintenance_resource_launch" or "__auto-maintenance-resource-" in path:
+        if not profile and "__auto-maintenance-resource-" in stem:
+            profile = safe_slug(stem.rsplit("__auto-maintenance-resource-", 1)[-1], fallback="unknown")
+        return f"auto_maintenance_resource_launch:{profile or 'unknown'}"
+    if artifact_type == "auto_maintenance" or "__auto-maintenance-" in path:
+        if not profile and "__auto-maintenance-" in stem:
+            profile = safe_slug(stem.rsplit("__auto-maintenance-", 1)[-1], fallback="unknown")
+        return f"auto_maintenance:{profile or 'unknown'}"
+    if artifact_type == "index_maintenance" or "__index-maintenance" in path:
+        return f"index_maintenance:{target or stem or 'unknown'}"
+    if artifact_type == "search_index" or "__search-index" in path:
+        return f"search_index:{target or stem or 'unknown'}"
+    if artifact_type == "graph_maintenance" or "__graph-maintenance" in path:
+        return f"graph_maintenance:{target or stem or 'unknown'}"
+    if artifact_type == "agent_atlas_index":
+        return f"agent_atlas_index:{target or stem or 'unknown'}"
+    return f"{artifact_type}:{stem}" if artifact_type or stem else ""
+
+
 def diagnostic_report_problem(report: dict[str, Any]) -> bool:
     if diagnostic_report_handled_resource_fallback(report):
         return False
@@ -43467,6 +43499,7 @@ def diagnostic_report_problem(report: dict[str, Any]) -> bool:
 
 def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
+    seen_operational_keys: set[str] = set()
     for report in diagnostic_json_payloads(aoa_root, "*.json", limit=OPS_DIAGNOSTIC_SCAN_LIMIT):
         artifact_type = str(report.get("artifact_type") or "")
         path = str(report.get("_diagnostic_path") or "")
@@ -43487,6 +43520,11 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
             or "__graph-maintenance" in path
         ):
             continue
+        operational_key = diagnostic_report_operational_key(report)
+        if operational_key in seen_operational_keys:
+            continue
+        if operational_key:
+            seen_operational_keys.add(operational_key)
         if diagnostic_report_problem(report):
             problems.append(maintenance_report_brief(report))
         if len(problems) >= limit:
@@ -54841,7 +54879,20 @@ def build_parser() -> argparse.ArgumentParser:
     auto_resource_parser.add_argument("--resource-force", action="store_true", help="Pass --force to abyss-machine resource launch.")
     auto_resource_parser.add_argument("--resource-binary", default="abyss-machine", help="Resource launcher binary.")
     auto_resource_parser.add_argument("--fail-on-block", action="store_true", help="Return a non-zero process exit when the resource gate blocks the child.")
-    auto_resource_parser.add_argument("--graph-drip-on-block", action="store_true", help="When the requested auto-maintenance launch is resource-blocked, try a bounded probe-class graph-maintenance fallback.")
+    auto_resource_drip_group = auto_resource_parser.add_mutually_exclusive_group()
+    auto_resource_drip_group.add_argument(
+        "--graph-drip-on-block",
+        dest="graph_drip_on_block",
+        action="store_true",
+        default=None,
+        help="When the requested auto-maintenance launch is resource-blocked, try a bounded probe-class graph-maintenance fallback.",
+    )
+    auto_resource_drip_group.add_argument(
+        "--no-graph-drip-on-block",
+        dest="graph_drip_on_block",
+        action="store_false",
+        help="Disable the profile's resource-blocked graph-maintenance fallback.",
+    )
     auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, default=25, help="Fallback graph-maintenance source batch size.")
     auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, default=180.0, help="Fallback graph-maintenance wall-clock budget.")
     auto_resource_parser.add_argument("--graph-drip-refresh-chunk-size", type=int, default=64, help="Fallback graph-maintenance aggregate refresh chunk size.")

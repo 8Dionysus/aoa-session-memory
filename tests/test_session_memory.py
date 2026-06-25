@@ -9023,6 +9023,99 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "generated_at": "2026-06-25T10:22:26-06:00",
+                    "ok": False,
+                    "blocked_reasons": ["mode_unattended_cap_medium"],
+                    "denied_reasons": [],
+                    "request": {"class": "heavy", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "generated_at": "2026-06-25T10:22:40-06:00",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {"ok": True, "returncode": 0},
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        apply=True,
+        write_report=True,
+        reason="timer_deep",
+    )
+
+    assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["graph_drip_on_block"] is True
+    assert payload["graph_drip_on_block_source"] == "profile_default"
+    assert payload["mutates"] is True
+    assert calls[0][3:5] == ["--class", "heavy"]
+    assert calls[1][3:5] == ["--class", "probe"]
+    assert "graph_drip_fallback_completed" in payload["diagnostics"]
+
+
+def test_deep_auto_maintenance_resource_can_disable_profile_graph_drip(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_plan_v1",
+                "generated_at": "2026-06-25T10:22:26-06:00",
+                "ok": False,
+                "blocked_reasons": ["mode_unattended_cap_medium"],
+                "denied_reasons": [],
+                "request": {"class": "heavy", "kind": "indexing"},
+                "execution": {"ok": None, "returncode": None},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        apply=True,
+        reason="manual_deep_without_fallback",
+        graph_drip_on_block=False,
+    )
+
+    assert payload["status"] == "resource_blocked"
+    assert payload["graph_drip_on_block"] is False
+    assert payload["graph_drip_on_block_source"] == "explicit"
+    assert payload["mutates"] is False
+    assert len(calls) == 1
+
+
 def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     now = 2000.0
     status = module.session_memory_live_tail_status(
@@ -9389,6 +9482,57 @@ def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) 
     )
 
     assert module.diagnostic_report_problem(module.read_json(report, {})) is False
+    assert module.recent_problem_maintenance_reports(aoa_root) == []
+
+
+def test_recent_problem_jobs_ignore_superseded_resource_profile_failures(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    older_report = diagnostics / "20260625T102242Z__auto-maintenance-resource-deep.json"
+    newer_report = diagnostics / "20260625T124000Z__auto-maintenance-resource-deep.json"
+    module.write_json(
+        older_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-06-25T10:22:26Z",
+            "ok": False,
+            "status": "resource_blocked",
+            "profile": "deep",
+            "resource_ok": False,
+            "blocked_reasons": ["mode_unattended_cap_medium"],
+            "diagnostics": ["resource_blocked:mode_unattended_cap_medium"],
+        },
+    )
+    module.write_json(
+        newer_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-06-25T12:40:00Z",
+            "ok": False,
+            "status": "resource_blocked_graph_drip_completed",
+            "profile": "deep",
+            "resource_ok": False,
+            "blocked_reasons": ["mode_unattended_cap_medium"],
+            "fallback_graph_drip": {
+                "ok": True,
+                "status": "completed",
+                "resource_ok": True,
+                "execution": {"ok": True, "returncode": 0},
+            },
+            "diagnostics": [
+                "graph_drip_fallback_completed",
+                "resource_blocked:mode_unattended_cap_medium",
+            ],
+        },
+    )
+    os.utime(older_report, (1_000_000_000, 1_000_000_000))
+    os.utime(newer_report, (1_000_000_100, 1_000_000_100))
+
+    assert module.diagnostic_report_problem(module.read_json(older_report, {})) is True
+    assert module.diagnostic_report_problem(module.read_json(newer_report, {})) is False
     assert module.recent_problem_maintenance_reports(aoa_root) == []
 
 
