@@ -677,7 +677,10 @@ def test_agent_event_windows_resolve_renamed_latest_segment_refs(tmp_path: Path)
     assert route["result_count"] == 1
     hit = route["results"][0]
     assert hit["refs"]["segment_index"] == str(new_index)
-    assert "segment_index_ref_resolved_by_segment_id" in hit["ref_resolution"]["diagnostics"]
+    assert {
+        "segment_index_ref_resolved_by_segment_id",
+        "segment_index_ref_derived_by_segment_id",
+    } & set(hit["ref_resolution"]["diagnostics"])
 
     windows = module.agent_event_windows(
         aoa_root=aoa_root,
@@ -10270,6 +10273,8 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     body_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
     payload_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_payload_storage_mode",)).fetchone()[0]
+    index_profile_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_index_profile",)).fetchone()[0]
+    ref_path_policy_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_ref_path_storage_policy",)).fetchone()[0]
     lexical_policy_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_lexical_policy_mode",)).fetchone()[0]
     lexical_max_meta = conn.execute("SELECT value FROM meta WHERE key = ?", ("search_raw_lexical_max_bytes",)).fetchone()[0]
     preview_len, compressed_count = conn.execute(
@@ -10283,6 +10288,8 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     conn.close()
     assert body_meta == module.SEARCH_BODY_STORAGE_MODE
     assert payload_meta == module.SEARCH_PAYLOAD_STORAGE_MODE
+    assert index_profile_meta == module.SEARCH_INDEX_PROFILE
+    assert ref_path_policy_meta == module.SEARCH_REF_PATH_STORAGE_POLICY_DERIVED
     assert lexical_policy_meta == module.SEARCH_RAW_LEXICAL_POLICY_MODE
     assert lexical_max_meta == str(module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES)
     assert preview_len <= module.SEARCH_BODY_PREVIEW_CHARS
@@ -10298,11 +10305,17 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert hook_hit["doc_type"] == "event"
     assert hook_hit["refs"]["raw"] == "raw:line:5"
     assert hook_hit["refs"]["segment"]
+    assert hook_hit["refs"]["segment_index"]
+    assert Path(hook_hit["refs"]["segment_index"]).exists()
     assert hook_hit["refs"]["raw_block"] == "raw/blocks/000__initial-to-latest.raw.jsonl"
     assert hook_hit["search_catalog"]["shard"] == "month/2026-05"
     assert hook_hit["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
     assert hook_hit["freshness"]["status"] == "fresh"
     assert hook_hit["explain"]["why_this_is_not_authority"]
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    hot_ref_row = conn.execute("SELECT raw_path, segment_index_path FROM documents WHERE id = ?", (hook_hit["doc_id"],)).fetchone()
+    conn.close()
+    assert hot_ref_row == ("", "")
 
     tail_results = module.search_sessions(aoa_root=aoa_root, query="compressed_body_tail_anchor", explain=True)
     assert tail_results["ok"] is True
@@ -11243,22 +11256,38 @@ def test_search_document_storage_compacts_payloads_without_losing_route_postings
             "event_type": "TOOL_CALL",
             "route_layers": module.packed_route_values(["tool"]),
             "route_signals": route_signals,
+            "tags": "agent_event_source:event_msg_stream command route_layer:tool "
+            + " ".join(f"route_signal:tool:live-tool-{index}" for index in range(500)),
             "title": "huge route signal payload",
-            "body": "route posting body",
+            "body": "route posting body " * 120,
             "raw_text_status": "indexed",
         },
     )
     conn.commit()
 
-    stored = conn.execute("SELECT route_signals, payload_json FROM documents WHERE id = ?", ("stress-doc",)).fetchone()
+    stored = conn.execute("SELECT body, route_signals, tags, payload_json FROM documents WHERE id = ?", ("stress-doc",)).fetchone()
     assert stored is not None
     stored_route_signals = stored["route_signals"]
+    stored_tags = stored["tags"]
     payload = json.loads(stored["payload_json"])
 
+    assert len(stored["body"]) <= module.SEARCH_BODY_PREVIEW_CHARS
     assert len(stored_route_signals) <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
+    assert len(stored_tags) <= module.SEARCH_TAGS_PREVIEW_CHARS
+    assert "agent_event_source:event_msg_stream" in stored_tags
+    assert "route_signal:" not in stored_tags
+    assert "route_layer:" not in stored_tags
     assert target_route_signal not in stored_route_signals
     assert "route_signals" not in payload
     assert payload == {"raw_text_status": "indexed"}
+    assert conn.execute("SELECT COUNT(*) FROM document_bodies").fetchone()[0] == 1
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM documents_fts WHERE documents_fts MATCH ?",
+            (module.fts_query_from_user("route posting body"),),
+        ).fetchone()[0]
+        == 1
+    )
     assert conn.execute("SELECT COUNT(*) FROM document_routes").fetchone()[0] == 500
     assert (
         conn.execute(

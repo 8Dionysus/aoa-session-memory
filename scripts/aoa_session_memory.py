@@ -98,13 +98,13 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 10
+SEARCH_SCHEMA_VERSION = 12
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
 ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
-SEARCH_BODY_STORAGE_MODE = "compressed_full_body_preview_hot"
+SEARCH_BODY_STORAGE_MODE = "compressed_full_body_slim_preview_hot"
 SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE = "structured_route_preview_only_no_compressed_body"
 SEARCH_FTS_STORAGE_MODE = "full_text_fts_with_compressed_body_v1"
 SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE = "omitted_for_structured_route_shard_v1"
@@ -113,11 +113,12 @@ SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK = "monolith_fallback_required"
 SEARCH_FTS_QUERY_TIMEOUT_MS = 8000
 SEARCH_FTS_QUERY_PROGRESS_OPCODES = 10000
 SEARCH_FTS_QUERY_TIMEOUT_STATUS = "sqlite_query_timeout"
-SEARCH_BODY_PREVIEW_CHARS = 700
+SEARCH_BODY_PREVIEW_CHARS = 420
 SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS = 240
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
-SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_preview_v1"
-SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v1"
+SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_slim_preview_v3"
+SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v2"
+SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
@@ -128,8 +129,11 @@ SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
 SEARCH_STRUCTURED_SHARD_ROUTE_LAYERS_PREVIEW_CHARS = 160
 SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS = 360
 SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS = 180
-SEARCH_TAGS_STORAGE_POLICY_FULL = "full"
+SEARCH_TAGS_PREVIEW_CHARS = 512
+SEARCH_TAGS_STORAGE_POLICY_DROP_ROUTE_SIGNAL_TOKENS = "drop_route_signal_tokens_v1"
+SEARCH_TAGS_STORAGE_POLICY_FULL = SEARCH_TAGS_STORAGE_POLICY_DROP_ROUTE_SIGNAL_TOKENS
 SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD = "drop_route_signal_tokens_v1"
+SEARCH_REF_PATH_STORAGE_POLICY_DERIVED = "derive_repeated_raw_and_segment_index_paths_v1"
 SEARCH_ROUTE_POSTING_POLICY_MODE = "aggregate_high_fanout_layer_caps_v1"
 SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES = frozenset({"session", "segment", "task_episode", "incident"})
 SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT = 16
@@ -16416,10 +16420,20 @@ def search_projection_documents_freshness(
         return {"ok": False, "status": "unverifiable", "checked_ref_count": 0, "stale_ref_count": 0, "diagnostics": ["projection_identity_missing"]}
     rows = conn.execute(
         f"""
-        SELECT DISTINCT segment_index_path, segment_index_sha256
+        SELECT
+            segment_id,
+            MIN(event_id) AS event_id,
+            MAX(manifest_path) AS manifest_path,
+            MAX(raw_path) AS raw_path,
+            MAX(segment_index_path) AS segment_index_path,
+            segment_index_sha256
         FROM documents
         WHERE ({' OR '.join(clauses)})
-          AND COALESCE(segment_index_path, '') <> ''
+          AND (
+            COALESCE(segment_index_path, '') <> ''
+            OR (COALESCE(segment_id, '') <> '' AND COALESCE(manifest_path, '') <> '')
+          )
+        GROUP BY segment_id, segment_index_sha256
         """,
         values,
     ).fetchall()
@@ -16428,7 +16442,13 @@ def search_projection_documents_freshness(
     checked = 0
     for row in rows:
         checked += 1
-        path = Path(str(row["segment_index_path"] or ""))
+        path_value = str(row["segment_index_path"] or "")
+        path: Path | None = Path(path_value) if path_value else None
+        if path is None:
+            session_dir = search_row_session_dir(row)
+            segment_id = search_row_segment_id(row)
+            if session_dir and segment_id:
+                path, _event = live_segment_index_candidate(session_dir, segment_id, str(search_row_value(row, "event_id", "") or ""))
         expected_sha = str(row["segment_index_sha256"] or "")
         freshness = segment_index_freshness(path, expected_sha)
         if freshness.get("status") == "fresh":
@@ -16437,7 +16457,7 @@ def search_projection_documents_freshness(
         if len(stale_refs) < max(0, sample_limit):
             stale_refs.append(
                 {
-                    "segment_index_path": str(path),
+                    "segment_index_path": str(path or ""),
                     "expected_sha256": expected_sha,
                     "status": freshness.get("status"),
                     "reasons": freshness.get("reasons", []),
@@ -25273,6 +25293,8 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- search_fts_storage_mode: `{payload.get('search_fts_storage_mode')}`",
         f"- raw_text_query_support: `{payload.get('raw_text_query_support')}`",
         f"- search_document_storage_profile: `{payload.get('search_document_storage_profile')}`",
+        f"- search_index_profile: `{payload.get('search_index_profile')}`",
+        f"- search_ref_path_storage_policy: `{payload.get('search_ref_path_storage_policy')}`",
         f"- search_body_preview_chars: `{payload.get('search_body_preview_chars')}`",
         f"- search_tags_storage_policy: `{payload.get('search_tags_storage_policy')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
@@ -25447,6 +25469,8 @@ def materialize_search_shards(
                 "search_fts_storage_mode": result.get("search_fts_storage_mode") or shard_fts_storage_mode,
                 "raw_text_query_support": result.get("raw_text_query_support") or raw_text_query_support,
                 "search_document_storage_profile": result.get("search_document_storage_profile") or storage_profile.get("name"),
+                "search_index_profile": result.get("search_index_profile") or SEARCH_INDEX_PROFILE,
+                "search_ref_path_storage_policy": result.get("search_ref_path_storage_policy") or storage_profile.get("ref_path_storage_policy"),
                 "search_body_preview_chars": result.get("search_body_preview_chars") or storage_profile.get("body_preview_chars"),
                 "search_tags_storage_policy": result.get("search_tags_storage_policy") or storage_profile.get("tags_storage_policy"),
                 "generated_at": result.get("generated_at"),
@@ -25482,6 +25506,8 @@ def materialize_search_shards(
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
         "search_document_storage_profile": storage_profile.get("name"),
+        "search_index_profile": SEARCH_INDEX_PROFILE,
+        "search_ref_path_storage_policy": storage_profile.get("ref_path_storage_policy"),
         "search_body_preview_chars": storage_profile.get("body_preview_chars"),
         "search_route_layers_preview_chars": storage_profile.get("route_layers_preview_chars"),
         "search_route_signals_preview_chars": storage_profile.get("route_signals_preview_chars"),
@@ -25525,6 +25551,8 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- include_raw_event_text: `{payload.get('include_raw_event_text')}`",
         f"- search_payload_storage_mode: `{payload.get('search_payload_storage_mode')}`",
         f"- search_document_storage_profile: `{payload.get('search_document_storage_profile')}`",
+        f"- search_index_profile: `{payload.get('search_index_profile')}`",
+        f"- search_ref_path_storage_policy: `{payload.get('search_ref_path_storage_policy')}`",
         f"- search_body_preview_chars: `{payload.get('search_body_preview_chars')}`",
         f"- search_route_layers_preview_chars: `{payload.get('search_route_layers_preview_chars')}`",
         f"- search_route_signals_preview_chars: `{payload.get('search_route_signals_preview_chars')}`",
@@ -26580,17 +26608,11 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_label)",
     "CREATE INDEX IF NOT EXISTS idx_documents_session_id ON documents(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_session_act ON documents(session_act)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_agent_event ON documents(agent_event)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_task_episode ON documents(task_episode_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_date ON documents(doc_type, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_session_act_date ON documents(session_act, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_session_act_date ON documents(doc_type, session_act, session_date DESC, rowid DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_agent_event_date ON documents(agent_event, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_task_episode_date ON documents(task_episode_id, session_date DESC, rowid DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_session_agent_event ON documents(session_label, agent_event)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_session_task_episode ON documents(session_label, task_episode_id)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_session_doc_type ON documents(session_label, doc_type)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_route_layers ON documents(route_layers)",
     "CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(archive_status, freshness_status)",
     "CREATE INDEX IF NOT EXISTS idx_route_terms_signal ON route_terms(route_signal)",
     "CREATE INDEX IF NOT EXISTS idx_route_terms_layer_key ON route_terms(layer, key)",
@@ -26793,8 +26815,8 @@ def init_search_db(
         CREATE TABLE IF NOT EXISTS document_routes (
             doc_rowid INTEGER NOT NULL,
             route_id INTEGER NOT NULL,
-            UNIQUE(doc_rowid, route_id)
-        )
+            PRIMARY KEY(doc_rowid, route_id)
+        ) WITHOUT ROWID
         """
     )
     conn.execute(
@@ -27491,8 +27513,11 @@ def search_document_storage_profile(*, store_raw_text: bool) -> dict[str, Any]:
             "body_preview_chars": SEARCH_BODY_PREVIEW_CHARS,
             "route_layers_preview_chars": SEARCH_ROUTE_LAYERS_PREVIEW_CHARS,
             "route_signals_preview_chars": SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS,
-            "tags_preview_chars": 0,
+            "tags_preview_chars": SEARCH_TAGS_PREVIEW_CHARS,
             "tags_storage_policy": SEARCH_TAGS_STORAGE_POLICY_FULL,
+            "ref_path_storage_policy": SEARCH_REF_PATH_STORAGE_POLICY_DERIVED,
+            "store_raw_path": False,
+            "store_segment_index_path": False,
         }
     return {
         "name": SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
@@ -27501,6 +27526,9 @@ def search_document_storage_profile(*, store_raw_text: bool) -> dict[str, Any]:
         "route_signals_preview_chars": SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS,
         "tags_preview_chars": SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS,
         "tags_storage_policy": SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD,
+        "ref_path_storage_policy": SEARCH_REF_PATH_STORAGE_POLICY_DERIVED,
+        "store_raw_path": False,
+        "store_segment_index_path": False,
     }
 
 
@@ -27508,7 +27536,7 @@ def compact_search_tags_for_storage(value: Any, *, max_chars: int, policy: str) 
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
         return ""
-    if policy == SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD:
+    if policy in {SEARCH_TAGS_STORAGE_POLICY_DROP_ROUTE_SIGNAL_TOKENS, SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD}:
         kept = [
             token
             for token in text.split()
@@ -27702,15 +27730,35 @@ def search_document_storage_signature_from_parts(
 
 
 def search_document_storage_signature(doc: dict[str, Any]) -> str:
+    profile = search_document_storage_profile(store_raw_text=True)
     payload = search_doc_payload(doc)
     full_body = str(doc.get("body") or "")
-    route_layers_preview = bounded_packed_route_values(doc.get("route_layers"), max_chars=SEARCH_ROUTE_LAYERS_PREVIEW_CHARS)
-    route_signals_preview = bounded_packed_route_values(doc.get("route_signals"), max_chars=SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS)
-    body_preview = bounded_storage_text(full_body, max_chars=SEARCH_BODY_PREVIEW_CHARS)
+    route_layers_preview = bounded_packed_route_values(
+        doc.get("route_layers"),
+        max_chars=int_value(profile.get("route_layers_preview_chars"), SEARCH_ROUTE_LAYERS_PREVIEW_CHARS),
+    )
+    route_signals_preview = bounded_packed_route_values(
+        doc.get("route_signals"),
+        max_chars=int_value(profile.get("route_signals_preview_chars"), SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS),
+    )
+    body_preview = bounded_storage_text(
+        full_body,
+        max_chars=int_value(profile.get("body_preview_chars"), SEARCH_BODY_PREVIEW_CHARS),
+    )
+    tags_preview = compact_search_tags_for_storage(
+        doc.get("tags"),
+        max_chars=int_value(profile.get("tags_preview_chars")),
+        policy=str(profile.get("tags_storage_policy") or SEARCH_TAGS_STORAGE_POLICY_FULL),
+    )
     column_values = {key: doc.get(key) for key in SEARCH_DOCUMENT_COLUMN_KEYS}
     column_values["route_layers"] = route_layers_preview
     column_values["route_signals"] = route_signals_preview
     column_values["body"] = body_preview
+    column_values["tags"] = tags_preview
+    if not profile.get("store_raw_path", True):
+        column_values["raw_path"] = ""
+    if not profile.get("store_segment_index_path", True):
+        column_values["segment_index_path"] = ""
     return search_document_storage_signature_from_parts(
         column_values=column_values,
         payload=payload,
@@ -27885,6 +27933,8 @@ def insert_search_document(
         max_chars=int_value(profile.get("tags_preview_chars")),
         policy=str(profile.get("tags_storage_policy") or SEARCH_TAGS_STORAGE_POLICY_FULL),
     )
+    raw_path_value = doc.get("raw_path") if profile.get("store_raw_path", True) else ""
+    segment_index_path_value = doc.get("segment_index_path") if profile.get("store_segment_index_path", True) else ""
     route_entries = document_route_entries(
         doc.get("route_layers"),
         doc.get("route_signals"),
@@ -27940,8 +27990,6 @@ def insert_search_document(
                 "raw_block_ref",
                 "segment_ref",
                 "manifest_path",
-                "raw_path",
-                "segment_index_path",
                 "raw_sha256",
                 "segment_index_sha256",
                 "freshness_status",
@@ -27953,6 +28001,8 @@ def insert_search_document(
             "route_signals": route_signals_preview,
             "tags": tags_preview,
             "body": body_preview,
+            "raw_path": raw_path_value,
+            "segment_index_path": segment_index_path_value,
             "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
         },
     )
@@ -28697,6 +28747,14 @@ def search_index_sessions(
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_index_profile", SEARCH_INDEX_PROFILE),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_ref_path_storage_policy", str(storage_profile.get("ref_path_storage_policy") or "")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_body_preview_chars", str(storage_profile.get("body_preview_chars") or "")),
         )
         conn.execute(
@@ -28971,6 +29029,8 @@ def search_index_sessions(
         "include_raw_event_text": include_raw_event_text,
         "search_payload_storage_mode": SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed",
         "search_document_storage_profile": storage_profile.get("name"),
+        "search_index_profile": SEARCH_INDEX_PROFILE,
+        "search_ref_path_storage_policy": storage_profile.get("ref_path_storage_policy"),
         "search_body_preview_chars": storage_profile.get("body_preview_chars"),
         "search_route_layers_preview_chars": storage_profile.get("route_layers_preview_chars"),
         "search_route_signals_preview_chars": storage_profile.get("route_signals_preview_chars"),
@@ -29089,6 +29149,21 @@ def search_row_session_dir(row: sqlite3.Row) -> Path | None:
     return None
 
 
+def search_row_raw_path(row: sqlite3.Row) -> Path | None:
+    raw_path_value = str(search_row_value(row, "raw_path", "") or "")
+    if raw_path_value:
+        return Path(raw_path_value)
+    session_dir = search_row_session_dir(row)
+    if not session_dir:
+        return None
+    manifest_path = session_dir / "session.manifest.json"
+    if manifest_path.exists():
+        manifest = read_json(manifest_path, {})
+        if isinstance(manifest, dict):
+            return manifest_raw_path(session_dir, manifest)
+    return session_dir / "raw" / "session.raw.jsonl"
+
+
 def segment_id_from_artifact_ref(value: Any) -> str:
     name = path_without_anchor(value).name
     if "__" in name:
@@ -29175,7 +29250,14 @@ def resolve_search_result_refs(row: sqlite3.Row) -> tuple[dict[str, str], dict[s
     original_segment_index = refs["segment_index"]
     segment_index_path = Path(original_segment_index) if original_segment_index else Path()
     event: dict[str, Any] | None = None
-    if original_segment_index and not segment_index_path.exists():
+    if not original_segment_index:
+        candidate, event = live_segment_index_candidate(session_dir, segment_id, event_id)
+        if candidate:
+            refs["segment_index"] = str(candidate)
+            resolution["resolved"] = True
+            resolution["segment_index"] = str(candidate)
+            resolution["diagnostics"].append("segment_index_ref_derived_by_segment_id")
+    elif not segment_index_path.exists():
         candidate, event = live_segment_index_candidate(session_dir, segment_id, event_id)
         if candidate:
             refs["segment_index"] = str(candidate)
@@ -29184,7 +29266,8 @@ def resolve_search_result_refs(row: sqlite3.Row) -> tuple[dict[str, str], dict[s
             resolution["segment_index"] = str(candidate)
             resolution["diagnostics"].append("segment_index_ref_resolved_by_segment_id")
 
-    segment_ref_path = resolve_evidence_ref_path(refs["segment"], raw_path_value=search_row_value(row, "raw_path", ""))
+    raw_path_value = str(search_row_raw_path(row) or "")
+    segment_ref_path = resolve_evidence_ref_path(refs["segment"], raw_path_value=raw_path_value)
     if refs["segment"] and not segment_ref_path.exists():
         if event is None and refs["segment_index"]:
             event = segment_event_from_index(Path(refs["segment_index"]), event_id)
@@ -29201,7 +29284,7 @@ def resolve_search_result_refs(row: sqlite3.Row) -> tuple[dict[str, str], dict[s
                 resolution["diagnostics"].append("segment_ref_resolved_by_segment_id")
 
     raw_block_ref = refs["raw_block"]
-    raw_block_path = resolve_evidence_ref_path(raw_block_ref, raw_path_value=search_row_value(row, "raw_path", ""))
+    raw_block_path = resolve_evidence_ref_path(raw_block_ref, raw_path_value=raw_path_value)
     if raw_block_ref and not raw_block_path.exists():
         candidate = live_segment_artifact_candidate(session_dir, segment_id, subdir="raw/blocks", suffix=".raw.jsonl")
         if candidate:
@@ -29243,6 +29326,13 @@ def search_result_freshness(
         "live_verification": "not_checked_fast_route",
     }
     segment_path_value = (resolved_refs or {}).get("segment_index") or (row["segment_index_path"] if "segment_index_path" in row.keys() else "")
+    if not segment_path_value:
+        session_dir = search_row_session_dir(row)
+        segment_id = search_row_segment_id(row)
+        if session_dir and segment_id:
+            candidate, _event = live_segment_index_candidate(session_dir, segment_id, str(search_row_value(row, "event_id", "") or ""))
+            if candidate:
+                segment_path_value = str(candidate)
     segment_sha = row["segment_index_sha256"] if "segment_index_sha256" in row.keys() else ""
     if segment_path_value:
         segment_check = segment_index_freshness(Path(str(segment_path_value)), segment_sha)
@@ -41344,12 +41434,12 @@ def evidence_ref_integrity_state(aoa_root: Path, *, sample_limit: int = 200) -> 
             value = ref_values[column]
             if not value:
                 continue
-            path = resolve_evidence_ref_path(value, raw_path_value=row["raw_path"])
+            path = resolve_evidence_ref_path(value, raw_path_value=str(search_row_raw_path(row) or ""))
             if not path.exists():
                 missing.append(column)
         raw_ref = row["raw_ref"]
-        raw_path_value = row["raw_path"]
-        if raw_ref and (not raw_path_value or not raw_ref_is_alive(Path(str(raw_path_value)), raw_ref)):
+        raw_path = search_row_raw_path(row)
+        if raw_ref and (raw_path is None or not raw_ref_is_alive(raw_path, raw_ref)):
             missing.append("raw_ref")
         if missing:
             broken.append({"doc_id": row["id"], "doc_type": row["doc_type"], "missing": missing})
@@ -50800,10 +50890,10 @@ def raw_semantic_preview(raw_path: Path, raw_ref: Any, *, max_chars: int = 420) 
 
 def route_raw_semantic_preview(row: sqlite3.Row, refs: dict[str, Any], *, max_chars: int = 420) -> dict[str, Any]:
     raw_ref = str(refs.get("raw") or "")
-    raw_path_value = str(search_row_value(row, "raw_path", "") or "")
-    if not raw_path_value or not raw_ref:
+    raw_path = search_row_raw_path(row)
+    if not raw_path or not raw_ref:
         return {"status": "missing_raw_path_or_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
-    return raw_semantic_preview(Path(raw_path_value), raw_ref, max_chars=max_chars)
+    return raw_semantic_preview(raw_path, raw_ref, max_chars=max_chars)
 
 
 def route_refs_raw_semantic_preview(refs: dict[str, Any], *, max_chars: int = 420) -> dict[str, Any]:

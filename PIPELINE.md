@@ -365,10 +365,21 @@ evidence and stable refs.
   graph edges, not duplicated inside event-node payloads. Graph packets must
   hydrate bounded refs from contribution rows before an agent relies on them.
 - The monolith search projection may keep full body text in FTS and compressed
-  `document_bodies` while `documents.body` stores only a hot preview. Default
-  monthly shards are structured route projections and intentionally omit local
-  FTS/body hydration; raw-text recall falls back to the monolith unless a shard
-  was explicitly built with `search-shards --full-text`.
+  `document_bodies` while `documents.body` stores only a slim hot preview.
+  `documents.tags` is also a hot routing hint, not the route authority: it may
+  drop `route_signal:*` and `route_layer:*` tokens because full structured
+  route coverage lives in `route_terms` / `document_routes`. Repeated raw and
+  segment-index paths may be omitted from hot `documents` rows when they are
+  derivable from `manifest_path`, `segment_id`, and the live session archive;
+  search results must still return resolved raw/segment/session refs before an
+  agent relies on them. Search DB indexes should follow the lean route/date
+  profile: keep the indexes needed for session, event/date, agent-event,
+  task-episode, freshness, and route-posting filters, but do not materialize
+  broad duplicate session composite indexes when shards and route postings
+  already own that route. Default monthly shards are structured route
+  projections and intentionally omit local FTS/body hydration; raw-text recall
+  falls back to the monolith unless a shard was explicitly built with
+  `search-shards --full-text`.
 - Raw interval blocks are preserved evidence today. Do not remove block payloads
   just because `raw/session.raw.jsonl` also exists. Any cleanup first needs an
   offset/compressed raw-block reader and validation that segment/raw refs still
