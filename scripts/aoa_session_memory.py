@@ -19140,6 +19140,324 @@ def projection_catchup_policy(profile: str) -> dict[str, Any]:
     }
 
 
+def projection_catchup_action_index(auto_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    maintenance = auto_payload.get("maintenance") if isinstance(auto_payload.get("maintenance"), dict) else {}
+    actions = maintenance.get("actions") if isinstance(maintenance.get("actions"), list) else []
+    return {str(action.get("id") or ""): action for action in actions if isinstance(action, dict)}
+
+
+def projection_catchup_action_brief(action: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(action, dict) or not action:
+        return {}
+    result = action.get("result") if isinstance(action.get("result"), dict) else {}
+    return {
+        key: action.get(key)
+        for key in (
+            "id",
+            "needed",
+            "status",
+            "action_kind",
+            "selection_count",
+            "dirty_count",
+            "deferred_count",
+            "reason",
+            "skip_reason",
+            "apply_reason",
+            "command",
+        )
+        if key in action
+    } | (
+        {
+            "result": {
+                key: result.get(key)
+                for key in (
+                    "ok",
+                    "selected_count",
+                    "processed_count",
+                    "remaining_count",
+                    "budget_exhausted",
+                    "document_count",
+                    "entity_registry_document_count",
+                    "updated_count",
+                    "skipped_count",
+                    "report_json",
+                    "report_markdown",
+                    "diagnostics",
+                )
+                if key in result
+            }
+        }
+        if result
+        else {}
+    )
+
+
+def projection_catchup_surface_status(
+    *,
+    needs_maintenance: bool | None,
+    action: dict[str, Any] | None = None,
+    state_status: str = "",
+    deferred: bool = False,
+    skipped: bool = False,
+) -> str:
+    if deferred:
+        return "deferred"
+    if skipped:
+        return "not_checked_by_profile"
+    action_status = str(action.get("status") or "") if isinstance(action, dict) else ""
+    if action_status in {
+        "planned",
+        "applied",
+        "covered_by_search_index",
+        "failed",
+        "remaining",
+        "deferred",
+        "deferred_budget_exhausted",
+        "applied_partial_budget_exhausted",
+    }:
+        return action_status
+    if needs_maintenance is True:
+        return "needs_maintenance"
+    if needs_maintenance is False:
+        return "current"
+    return state_status or "unknown"
+
+
+def projection_catchup_state_brief(state: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    return {
+        key: state.get(key)
+        for key in (
+            "status",
+            "needs_refresh",
+            "needs_maintenance",
+            "needs_full_rebuild",
+            "schema_version",
+            "expected_schema_version",
+            "dirty_session_count",
+            "actionable_dirty_session_count",
+            "deferred_live_session_count",
+            "entity_count",
+            "source_count",
+            "diagnostics",
+            "reasons",
+        )
+        if key in state
+    }
+
+
+def projection_catchup_completeness_check(
+    *,
+    auto_payload: dict[str, Any],
+    search_shards: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    maintenance = auto_payload.get("maintenance") if isinstance(auto_payload.get("maintenance"), dict) else {}
+    before = auto_payload.get("freshness_before") if isinstance(auto_payload.get("freshness_before"), dict) else {}
+    after = auto_payload.get("freshness_after") if isinstance(auto_payload.get("freshness_after"), dict) else before
+    actions = projection_catchup_action_index(auto_payload)
+
+    search_state = (
+        maintenance.get("final_search_index")
+        if isinstance(maintenance.get("final_search_index"), dict)
+        else maintenance.get("search_index")
+    )
+    if not isinstance(search_state, dict):
+        search_state = after.get("search_index") if isinstance(after.get("search_index"), dict) else {}
+    atlas_state = (
+        maintenance.get("final_atlas_index")
+        if isinstance(maintenance.get("final_atlas_index"), dict)
+        else maintenance.get("atlas_index")
+    )
+    if not isinstance(atlas_state, dict):
+        atlas_state = after.get("atlas_index") if isinstance(after.get("atlas_index"), dict) else {}
+    entity_state = (
+        maintenance.get("final_entity_registry")
+        if isinstance(maintenance.get("final_entity_registry"), dict)
+        else maintenance.get("entity_registry")
+    )
+    if not isinstance(entity_state, dict):
+        entity_state = after.get("entity_registry") if isinstance(after.get("entity_registry"), dict) else {}
+    graph_state = (
+        maintenance.get("final_graph_store")
+        if isinstance(maintenance.get("final_graph_store"), dict)
+        else maintenance.get("graph_store")
+    )
+    if not isinstance(graph_state, dict):
+        graph_state = after.get("graph_store") if isinstance(after.get("graph_store"), dict) else {}
+    shards = search_shards or {}
+
+    token_counts = maintenance.get("token_backfill") if isinstance(maintenance.get("token_backfill"), dict) else {}
+    token_counts = token_counts.get("counts") if isinstance(token_counts.get("counts"), dict) else {}
+    route_drift_count = int_value(maintenance.get("route_drift_count"))
+    token_dirty_count = int_value(token_counts.get("planned"))
+    search_needs = bool(search_state.get("needs_refresh")) or int_value(maintenance.get("search_repair_remaining_count")) > 0
+    atlas_needs = bool(atlas_state.get("needs_refresh")) or int_value(maintenance.get("atlas_repair_remaining_count")) > 0
+    entity_needs = bool(entity_state.get("needs_maintenance"))
+    graph_skipped = str(graph_state.get("status") or "") == "deferred_not_checked"
+    graph_needs = bool(graph_state.get("needs_maintenance")) or str(graph_state.get("status") or "") == "missing"
+    shard_status = str(shards.get("status") or "")
+    shard_needs = bool(shard_status and shard_status not in {"current", "empty"})
+    deferred_live_count = int_value(auto_payload.get("deferred_live_selection_count"))
+    search_deferred_count = int_value(search_state.get("deferred_live_session_count"))
+    graph_deferred_count = graph_deferred_live_count_from_state(graph_state) if isinstance(graph_state, dict) else 0
+
+    surfaces = {
+        "raw_authority": {
+            "status": "source_truth_not_projection",
+            "needs_maintenance": False,
+            "checked": False,
+            "truth_boundary": "raw transcripts, raw blocks, manifests, and segment indexes remain authority; catch-up only repairs generated projections",
+        },
+        "route_indexes": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=route_drift_count > 0,
+                action=actions.get("reindex_route_indexes"),
+            ),
+            "needs_maintenance": route_drift_count > 0,
+            "dirty_count": route_drift_count,
+            "action": projection_catchup_action_brief(actions.get("reindex_route_indexes")),
+        },
+        "token_ledgers": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=token_dirty_count > 0,
+                action=actions.get("token_accounting_backfill"),
+            ),
+            "needs_maintenance": token_dirty_count > 0,
+            "dirty_count": token_dirty_count,
+            "counts": token_counts,
+            "action": projection_catchup_action_brief(actions.get("token_accounting_backfill")),
+        },
+        "search_index": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=search_needs,
+                action=actions.get("rebuild_search_index") or actions.get("refresh_search_projection_state"),
+                state_status=str(search_state.get("status") or ""),
+            ),
+            "needs_maintenance": search_needs,
+            "dirty_count": int_value(maintenance.get("search_dirty_session_count")),
+            "repair_remaining_count": int_value(maintenance.get("search_repair_remaining_count")),
+            "state": projection_catchup_state_brief(search_state),
+            "action": projection_catchup_action_brief(actions.get("rebuild_search_index") or actions.get("refresh_search_projection_state")),
+        },
+        "search_catalog": {
+            "status": str(shards.get("catalog_status") or (shards.get("catalog") or {}).get("status") or "unknown"),
+            "needs_maintenance": str(shards.get("catalog_status") or (shards.get("catalog") or {}).get("status") or "") not in {"", "current", "empty"},
+            "catalog_generated_at": shards.get("catalog_generated_at") or (shards.get("catalog") or {}).get("generated_at") if isinstance(shards.get("catalog"), dict) else shards.get("catalog_generated_at"),
+            "active_projection": shards.get("active_projection"),
+        },
+        "search_shards": {
+            "status": shard_status or "unknown",
+            "needs_maintenance": shard_needs,
+            "shard_count": shards.get("shard_count"),
+            "materialized_shard_count": shards.get("materialized_shard_count"),
+            "noncurrent_shard_count": shards.get("noncurrent_shard_count"),
+            "active_projection": shards.get("active_projection"),
+            "fallback_status": shards.get("fallback_status"),
+            "raw_text_query_support": (shards.get("raw_text_fallback_dependency") or {}).get("status") if isinstance(shards.get("raw_text_fallback_dependency"), dict) else None,
+            "next_route": "search-shards" if shard_needs else "",
+        },
+        "atlas": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=atlas_needs,
+                action=actions.get("rebuild_agent_atlas"),
+                state_status=str(atlas_state.get("status") or ""),
+            ),
+            "needs_maintenance": atlas_needs,
+            "dirty_count": int_value(maintenance.get("atlas_dirty_session_count")),
+            "repair_remaining_count": int_value(maintenance.get("atlas_repair_remaining_count")),
+            "state": projection_catchup_state_brief(atlas_state),
+            "action": projection_catchup_action_brief(actions.get("rebuild_agent_atlas")),
+        },
+        "entity_registry": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=entity_needs,
+                action=actions.get("refresh_entity_registry"),
+                state_status=str(entity_state.get("status") or ""),
+            ),
+            "needs_maintenance": entity_needs,
+            "entity_count": entity_state.get("entity_count"),
+            "state": projection_catchup_state_brief(entity_state),
+            "action": projection_catchup_action_brief(actions.get("refresh_entity_registry")),
+        },
+        "graph": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=graph_needs,
+                action=actions.get("graph_maintenance") or actions.get("defer_graph_repair"),
+                state_status=str(graph_state.get("status") or ""),
+                deferred=bool(auto_payload.get("deferred_graph_after")) or str((actions.get("defer_graph_repair") or {}).get("status") or "") == "deferred",
+                skipped=graph_skipped,
+            ),
+            "needs_maintenance": graph_needs,
+            "actionable_count": graph_actionable_count_from_state(graph_state) if isinstance(graph_state, dict) else 0,
+            "deferred_live_source_count": graph_deferred_count,
+            "state": projection_catchup_state_brief(graph_state),
+            "action": projection_catchup_action_brief(actions.get("graph_maintenance") or actions.get("defer_graph_repair")),
+            "next_route": "projection-catchup --profile deep" if bool(auto_payload.get("deferred_graph_after")) else "",
+        },
+        "live_tail": {
+            "status": "deferred_live" if deferred_live_count or search_deferred_count or graph_deferred_count else "current",
+            "needs_maintenance": False,
+            "deferred_live_selection_count": deferred_live_count,
+            "search_deferred_live_session_count": search_deferred_count,
+            "graph_deferred_live_source_count": graph_deferred_count,
+            "next_route": "wait_for_quiet_window_then_projection_catchup" if deferred_live_count or search_deferred_count or graph_deferred_count else "",
+        },
+        "route_readiness": {
+            "status": projection_catchup_surface_status(
+                needs_maintenance=bool(actions.get("route_readiness", {}).get("needed")),
+                action=actions.get("route_readiness"),
+            ),
+            "needs_maintenance": bool(actions.get("route_readiness", {}).get("needed")),
+            "action": projection_catchup_action_brief(actions.get("route_readiness")),
+        },
+    }
+    actionable_surface_ids = [
+        surface_id
+        for surface_id, surface in surfaces.items()
+        if surface_id not in {"raw_authority", "live_tail"}
+        and bool(surface.get("needs_maintenance"))
+        and str(surface.get("status") or "") not in {"deferred", "not_checked_by_profile"}
+    ]
+    deferred_surface_ids = [
+        surface_id
+        for surface_id, surface in surfaces.items()
+        if str(surface.get("status") or "") in {"deferred", "deferred_live", "not_checked_by_profile"}
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_projection_completeness",
+        "status": (
+            "plan_ready"
+            if not bool(auto_payload.get("apply"))
+            else (
+                "remaining_backlog"
+                if bool(auto_payload.get("expected_catchup_remaining"))
+                else ("deferred_graph" if bool(auto_payload.get("deferred_graph_after")) else ("current" if not actionable_surface_ids else "needs_followup"))
+            )
+        ),
+        "plan_only": not bool(auto_payload.get("apply")),
+        "freshness_before_after": True,
+        "schema_classifier_dirty_detection": {
+            "route_indexes": "route_drift_count and stale route-cache classifiers",
+            "token_ledgers": "token_accounting_backfill planned counts",
+            "search": "portable SQLite state, schema version, projection fingerprints, and dirty session ids",
+            "search_catalog_shards": "catalog/shard projection summary",
+            "atlas": "atlas state, schema version, projection fingerprints, and dirty session ids",
+            "entity_registry": "generated entity registry schema/version/source mtime",
+            "graph": "graph store source ledger, queue, sidecars, and deferred-live gates",
+            "live_tail": "quiet-window split and deferred_live counters",
+        },
+        "schema_mismatch_policy": "catchup defers full search rebuild to deep; deep may perform heavy rebuild",
+        "silent_stale_policy": "next_route stays non-empty until maintenance-status verifies clean projections",
+        "selected_count": auto_payload.get("maintenance", {}).get("selected_count") if isinstance(auto_payload.get("maintenance"), dict) else auto_payload.get("target"),
+        "actionable_surface_ids": actionable_surface_ids,
+        "deferred_surface_ids": deferred_surface_ids,
+        "surfaces": surfaces,
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+    }
+
+
 def projection_catchup_next_route(
     *,
     auto_payload: dict[str, Any],
@@ -19379,6 +19697,17 @@ def projection_catchup(
         budget_seconds=budget_seconds,
         progress_every=progress_every,
     )
+    try:
+        search_shards_summary = session_memory_search_shard_projection_summary(aoa_root)
+    except Exception as exc:  # pragma: no cover - defensive diagnostic layer
+        search_shards_summary = {
+            "status": "unavailable",
+            "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+        }
+    completeness_check = projection_catchup_completeness_check(
+        auto_payload=auto_payload,
+        search_shards=search_shards_summary,
+    )
     next_route = projection_catchup_next_route(
         auto_payload=auto_payload,
         workspace_root=workspace_root,
@@ -19420,12 +19749,8 @@ def projection_catchup(
         "search_rebuild_deferred_to_deep": bool(auto_payload.get("search_rebuild_deferred_to_deep")),
         "hard_diagnostics": auto_payload.get("hard_diagnostics", []),
         "projection_policy": projection_catchup_policy(profile),
-        "completeness_check": {
-            "freshness_before_after": True,
-            "schema_classifier_dirty_detection": "route-cache freshness, search state, atlas state, entity registry, and graph store gates",
-            "schema_mismatch_policy": "catchup defers full search rebuild to deep; deep may perform heavy rebuild",
-            "silent_stale_policy": "next_route stays non-empty until maintenance-status verifies clean projections",
-        },
+        "completeness_check": completeness_check,
+        "projection_completeness": completeness_check,
         "covers": {
             "raw_authority": False,
             "route_indexes": True,
@@ -19446,6 +19771,7 @@ def projection_catchup(
             write_report=True,
             reason=reason,
         ),
+        "search_shards": search_shards_summary,
         "next_route": next_route,
         "next_command": next_route.get("command") if isinstance(next_route, dict) else [],
         "auto_maintenance": auto_payload,
@@ -19522,6 +19848,32 @@ def projection_catchup_markdown(payload: dict[str, Any]) -> str:
                 f"- search_rebuild_deferred_to_deep: `{auto_payload.get('search_rebuild_deferred_to_deep')}`",
             ]
         )
+    completeness = payload.get("projection_completeness") if isinstance(payload.get("projection_completeness"), dict) else {}
+    surfaces = completeness.get("surfaces") if isinstance(completeness.get("surfaces"), dict) else {}
+    if surfaces:
+        lines.extend(
+            [
+                "",
+                "## Projection Completeness",
+                "",
+                f"- status: `{completeness.get('status')}`",
+                f"- plan_only: `{completeness.get('plan_only')}`",
+                f"- actionable_surface_ids: `{','.join(str(item) for item in completeness.get('actionable_surface_ids', []) if item)}`",
+                f"- deferred_surface_ids: `{','.join(str(item) for item in completeness.get('deferred_surface_ids', []) if item)}`",
+                "",
+                "| surface | status | needs | dirty | deferred | next_route |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for surface_id, surface in surfaces.items():
+            if not isinstance(surface, dict):
+                continue
+            dirty = surface.get("dirty_count", surface.get("actionable_count", ""))
+            deferred = surface.get("deferred_live_selection_count", surface.get("deferred_live_source_count", ""))
+            lines.append(
+                f"| `{surface_id}` | `{surface.get('status')}` | `{surface.get('needs_maintenance')}` | "
+                f"`{dirty}` | `{deferred}` | `{surface.get('next_route', '')}` |"
+            )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])

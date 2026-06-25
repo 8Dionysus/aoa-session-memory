@@ -1090,6 +1090,9 @@ Maintenance gates:
   maintenance coordinator, keeps generated projections below raw/session
   authority, and returns either a bounded rerun route or
   `projection-catchup --profile deep` when heavy search/graph repair is needed.
+  Its `projection_completeness` block is the compact proof surface for agents:
+  each generated projection surface reports status, dirty/deferred counts, and
+  the next route without forcing an agent to parse the full maintenance tree.
   Use `index-maintenance` directly only for narrower manual repair. Add
   `--sample-audit` when classifier/schema changes require a new manual
   calibration packet; apply `route-sample-review` verdicts explicitly after

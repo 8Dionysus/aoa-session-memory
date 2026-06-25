@@ -504,6 +504,10 @@ atlas, entity, and freshness surfaces while preserving raw/session evidence as
 the authority. If a full search rebuild or graph-heavy repair is required, the
 payload returns a `projection-catchup --profile deep` next command and a heavy
 resource launcher instead of hiding that escalation inside a generic report.
+For agent/MCP routing, read `projection_completeness` first: it gives a
+machine-readable status row for every generated projection surface, including
+which surfaces are actionable, deferred, covered by search/index routes, or
+waiting on live-tail quiet windows.
 
 For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
 maintenance controller with a clean preflight gate, a lock, and bounded graph

@@ -10781,6 +10781,19 @@ def test_projection_catchup_wraps_bounded_catchup_route(tmp_path: Path, monkeypa
         }
 
     monkeypatch.setattr(module, "auto_maintenance", fake_auto_maintenance)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {
+            "status": "incomplete",
+            "catalog_status": "current",
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "shard_count": 2,
+            "materialized_shard_count": 1,
+            "noncurrent_shard_count": 1,
+            "fallback_status": "active",
+        },
+    )
 
     payload = module.projection_catchup(
         workspace_root=workspace,
@@ -10799,6 +10812,9 @@ def test_projection_catchup_wraps_bounded_catchup_route(tmp_path: Path, monkeypa
     assert payload["covers"]["search"] is True
     assert payload["covers"]["atlas"] is True
     assert payload["covers"]["entity_registry"] is True
+    assert payload["projection_completeness"]["status"] == "remaining_backlog"
+    assert payload["projection_completeness"]["surfaces"]["search_shards"]["status"] == "incomplete"
+    assert payload["projection_completeness"]["surfaces"]["search_shards"]["next_route"] == "search-shards"
     assert payload["next_route"]["id"] == "rerun_projection_catchup"
     assert "projection-catchup" in payload["next_command"]
     assert "auto-maintenance" not in payload["next_command"]
@@ -10810,6 +10826,131 @@ def test_projection_catchup_wraps_bounded_catchup_route(tmp_path: Path, monkeypa
     assert calls["auto"]["write_report"] is False
     assert calls["auto"]["repair_limit"] == 7
     assert calls["auto"]["budget_seconds"] == 42.0
+
+
+def test_projection_catchup_completeness_exposes_surface_statuses() -> None:
+    auto_payload = {
+        "ok": True,
+        "apply": False,
+        "expected_catchup_remaining": False,
+        "deferred_graph_after": True,
+        "deferred_live_selection_count": 1,
+        "maintenance": {
+            "selected_count": 3,
+            "route_drift_count": 1,
+            "search_dirty_session_count": 2,
+            "search_repair_remaining_count": 2,
+            "atlas_dirty_session_count": 1,
+            "atlas_repair_remaining_count": 0,
+            "token_backfill": {"counts": {"planned": 4, "current": 9}},
+            "final_search_index": {
+                "status": "stale",
+                "needs_refresh": True,
+                "dirty_session_count": 2,
+                "deferred_live_session_count": 1,
+            },
+            "final_atlas_index": {"status": "current", "needs_refresh": False},
+            "final_entity_registry": {
+                "status": "current",
+                "needs_maintenance": False,
+                "entity_count": 12,
+            },
+            "final_graph_store": {
+                "status": "deferred_not_checked",
+                "needs_maintenance": None,
+                "source_state": {"dirty_count": 0, "missing_count": 0},
+                "ledger": {"deferred_live_source_count": 2},
+            },
+            "actions": [
+                {
+                    "id": "reindex_route_indexes",
+                    "needed": True,
+                    "status": "planned",
+                    "action_kind": "incremental_update",
+                    "selection_count": 1,
+                    "dirty_count": 1,
+                    "reason": "missing_or_stale_session_route_indexes",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "reindex-sessions"],
+                },
+                {
+                    "id": "token_accounting_backfill",
+                    "needed": True,
+                    "status": "planned",
+                    "action_kind": "state_reconcile",
+                    "selection_count": 3,
+                    "dirty_count": 4,
+                    "reason": "missing_or_stale_generated_token_ledgers",
+                },
+                {
+                    "id": "rebuild_search_index",
+                    "needed": True,
+                    "status": "planned",
+                    "action_kind": "incremental_update",
+                    "selection_count": 2,
+                    "dirty_count": 2,
+                    "reason": "portable_sqlite_missing_or_stale",
+                },
+                {
+                    "id": "rebuild_agent_atlas",
+                    "needed": False,
+                    "status": "not_needed",
+                    "action_kind": "incremental_update",
+                    "selection_count": 0,
+                    "dirty_count": 1,
+                    "reason": "atlas_missing_or_stale",
+                },
+                {
+                    "id": "defer_graph_repair",
+                    "needed": True,
+                    "status": "deferred",
+                    "action_kind": "graph_tick",
+                    "selection_count": 0,
+                    "dirty_count": 0,
+                    "deferred_count": 2,
+                    "reason": "profile_delegates_graph_repair_to_backlog_or_deep",
+                },
+                {
+                    "id": "route_readiness",
+                    "needed": True,
+                    "status": "planned",
+                    "action_kind": "state_reconcile",
+                    "selection_count": 3,
+                    "dirty_count": 4,
+                    "reason": "post_maintenance_gate",
+                },
+            ],
+        },
+    }
+
+    payload = module.projection_catchup_completeness_check(
+        auto_payload=auto_payload,
+        search_shards={
+            "status": "incomplete",
+            "catalog_status": "current",
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "fallback_status": "active",
+            "shard_count": 3,
+            "materialized_shard_count": 2,
+            "noncurrent_shard_count": 1,
+        },
+    )
+
+    surfaces = payload["surfaces"]
+    assert payload["artifact_type"] == "session_memory_projection_completeness"
+    assert payload["status"] == "plan_ready"
+    assert surfaces["raw_authority"]["status"] == "source_truth_not_projection"
+    assert surfaces["route_indexes"]["status"] == "planned"
+    assert surfaces["token_ledgers"]["dirty_count"] == 4
+    assert surfaces["search_index"]["repair_remaining_count"] == 2
+    assert surfaces["search_catalog"]["status"] == "current"
+    assert surfaces["search_shards"]["status"] == "incomplete"
+    assert surfaces["atlas"]["state"]["status"] == "current"
+    assert surfaces["entity_registry"]["entity_count"] == 12
+    assert surfaces["graph"]["status"] == "deferred"
+    assert surfaces["live_tail"]["status"] == "deferred_live"
+    assert surfaces["route_readiness"]["status"] == "planned"
+    assert "search_index" in payload["actionable_surface_ids"]
+    assert "graph" in payload["deferred_surface_ids"]
 
 
 def test_projection_catchup_routes_schema_rebuild_to_deep_projection_route(tmp_path: Path, monkeypatch: Any) -> None:
@@ -10841,6 +10982,18 @@ def test_projection_catchup_routes_schema_rebuild_to_deep_projection_route(tmp_p
         }
 
     monkeypatch.setattr(module, "auto_maintenance", fake_auto_maintenance)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {
+            "status": "current",
+            "catalog_status": "current",
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "noncurrent_shard_count": 0,
+        },
+    )
 
     payload = module.projection_catchup(
         workspace_root=workspace,

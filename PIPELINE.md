@@ -580,6 +580,14 @@ schema mismatch requires a full search rebuild, it returns
 bounded profile. Use `--profile deep` when the intended operation is the full
 heavy repair, including graph maintenance.
 
+The payload also exposes `projection_completeness` as the agent-facing contract
+for post-classifier/schema work. It normalizes the nested freshness/action
+state into per-surface rows for route indexes, token ledgers, portable search,
+search catalog/shards, atlas, entity registry, graph, live-tail deferrals, and
+route-readiness. Agents should inspect that block before reading the heavier
+`auto_maintenance` subtree; raw transcript/session evidence remains the
+authority and this block is only a generated projection status.
+
 Full search rewrites are outside the bounded timer profiles. If the freshness
 gate reports a schema mismatch, missing/empty store, corrupt SQLite store, or
 empty route-posting/term tables, `hot`, `backlog`, and `catchup` must return
