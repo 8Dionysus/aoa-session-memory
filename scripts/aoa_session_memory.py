@@ -46546,49 +46546,71 @@ def entity_usage_scenario_candidates(
         placeholders = ",".join("?" for _ in selected_layers)
         result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
         outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
+        # Keep the randomized live scenario cheap: count route postings first,
+        # then touch indexed event buckets only for evidence roles.
         rows = conn.execute(
             f"""
+            WITH candidate_routes AS (
+              SELECT id, layer, key, route_signal
+              FROM route_terms
+              WHERE key <> ''
+                AND layer IN ({placeholders})
+            ),
+            posting_counts AS (
+              SELECT document_routes.route_id, COUNT(*) AS document_count
+              FROM document_routes
+              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
+              GROUP BY document_routes.route_id
+            ),
+            usage_counts AS (
+              SELECT document_routes.route_id, COUNT(*) AS usage_event_count
+              FROM documents INDEXED BY idx_documents_doc_type_usage_role_date
+              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
+              WHERE documents.doc_type = 'event'
+                AND documents.usage_role = 'usage'
+              GROUP BY document_routes.route_id
+            ),
+            result_counts AS (
+              SELECT document_routes.route_id, COUNT(*) AS result_event_count
+              FROM documents INDEXED BY idx_documents_type
+              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
+              WHERE documents.doc_type = 'event'
+                AND documents.event_type IN ({result_type_placeholders})
+              GROUP BY document_routes.route_id
+            ),
+            outcome_counts AS (
+              SELECT document_routes.route_id, COUNT(*) AS outcome_event_count
+              FROM documents INDEXED BY idx_documents_type
+              JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+              JOIN candidate_routes ON candidate_routes.id = document_routes.route_id
+              WHERE documents.doc_type = 'event'
+                AND documents.event_type IN ({outcome_type_placeholders})
+              GROUP BY document_routes.route_id
+            )
             SELECT
-              route_terms.id AS route_id,
-              route_terms.layer AS layer,
-              route_terms.key AS key,
-              route_terms.route_signal AS route_signal,
-              COUNT(document_routes.doc_rowid) AS posting_count,
-              COUNT(DISTINCT document_routes.doc_rowid) AS document_count,
-              SUM(CASE WHEN documents.doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
-              SUM(
-                CASE
-                  WHEN documents.doc_type = 'event'
-                    AND documents.usage_role = 'usage'
-                  THEN 1 ELSE 0
-                END
-              ) AS usage_event_count,
-              SUM(
-                CASE
-                  WHEN documents.doc_type = 'event'
-                    AND documents.event_type IN ({result_type_placeholders})
-                  THEN 1 ELSE 0
-                END
-              ) AS result_event_count,
-              SUM(
-                CASE
-                  WHEN documents.doc_type = 'event'
-                    AND documents.event_type IN ({outcome_type_placeholders})
-                  THEN 1 ELSE 0
-                END
-              ) AS outcome_event_count
-            FROM route_terms
-            JOIN document_routes ON document_routes.route_id = route_terms.id
-            JOIN documents ON documents.rowid = document_routes.doc_rowid
-            WHERE route_terms.key <> ''
-              AND route_terms.layer IN ({placeholders})
-            GROUP BY route_terms.id
-            HAVING event_document_count >= ?
+              candidate_routes.id AS route_id,
+              candidate_routes.layer AS layer,
+              candidate_routes.key AS key,
+              candidate_routes.route_signal AS route_signal,
+              COALESCE(posting_counts.document_count, 0) AS posting_count,
+              COALESCE(posting_counts.document_count, 0) AS document_count,
+              COALESCE(posting_counts.document_count, 0) AS event_document_count,
+              COALESCE(usage_counts.usage_event_count, 0) AS usage_event_count,
+              COALESCE(result_counts.result_event_count, 0) AS result_event_count,
+              COALESCE(outcome_counts.outcome_event_count, 0) AS outcome_event_count
+            FROM candidate_routes
+            JOIN posting_counts ON posting_counts.route_id = candidate_routes.id
+            LEFT JOIN usage_counts ON usage_counts.route_id = candidate_routes.id
+            LEFT JOIN result_counts ON result_counts.route_id = candidate_routes.id
+            LEFT JOIN outcome_counts ON outcome_counts.route_id = candidate_routes.id
+            WHERE COALESCE(posting_counts.document_count, 0) >= ?
             """,
             [
+                *selected_layers,
                 *sorted(ENTITY_USAGE_RESULT_TYPES),
                 *sorted(ENTITY_USAGE_OUTCOME_TYPES),
-                *selected_layers,
                 max(1, int_value(min_postings, 1)),
             ],
         ).fetchall()
@@ -46726,6 +46748,7 @@ def entity_usage_scenario_audit(
 ) -> dict[str, Any]:
     now = utc_now()
     scenario_started = time.monotonic()
+    candidate_started = time.monotonic()
     candidates, diagnostics = entity_usage_scenario_candidates(
         aoa_root=aoa_root,
         layers=layers,
@@ -46733,10 +46756,14 @@ def entity_usage_scenario_audit(
         seed=seed,
         min_postings=min_postings,
     )
+    candidate_selection_elapsed_ms = int((time.monotonic() - candidate_started) * 1000)
     samples: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()
     freshness_counts: Counter[str] = Counter()
     raw_preview_totals: Counter[str] = Counter()
+    sample_total_elapsed_ms = 0
+    audit_total_elapsed_ms = 0
+    raw_preview_total_elapsed_ms = 0
     for candidate in candidates:
         sample_started = time.monotonic()
         audit_started = time.monotonic()
@@ -46795,6 +46822,9 @@ def entity_usage_scenario_audit(
         if full:
             sample["audit"] = audit
         samples.append(sample)
+        sample_total_elapsed_ms += int_value(sample.get("elapsed_ms"))
+        audit_total_elapsed_ms += audit_elapsed_ms
+        raw_preview_total_elapsed_ms += raw_preview_elapsed_ms
     provider_status = search_provider_status(
         aoa_root=aoa_root,
         provider_name="portable_sqlite",
@@ -46808,6 +46838,10 @@ def entity_usage_scenario_audit(
     )
     quality = {
         "elapsed_ms": elapsed_ms,
+        "candidate_selection_elapsed_ms": candidate_selection_elapsed_ms,
+        "sample_total_elapsed_ms": sample_total_elapsed_ms,
+        "audit_total_elapsed_ms": audit_total_elapsed_ms,
+        "raw_preview_total_elapsed_ms": raw_preview_total_elapsed_ms,
         "sample_count": len(samples),
         "passed_count": status_counts.get("passed", 0),
         "warn_count": status_counts.get("warn", 0),
@@ -46869,6 +46903,10 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         f"- seed: `{payload.get('seed')}`",
         f"- ok: `{payload.get('ok')}`",
         f"- elapsed_ms: `{quality.get('elapsed_ms')}`",
+        f"- candidate_selection_elapsed_ms: `{quality.get('candidate_selection_elapsed_ms')}`",
+        f"- sample_total_elapsed_ms: `{quality.get('sample_total_elapsed_ms')}`",
+        f"- audit_total_elapsed_ms: `{quality.get('audit_total_elapsed_ms')}`",
+        f"- raw_preview_total_elapsed_ms: `{quality.get('raw_preview_total_elapsed_ms')}`",
         f"- samples: `{quality.get('sample_count')}`",
         f"- passed: `{quality.get('passed_count')}`",
         f"- warn: `{quality.get('warn_count')}`",

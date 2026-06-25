@@ -2592,6 +2592,11 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["quality"]["passed_count"] == 2
     assert audit["quality"]["warn_count"] == 0
     assert audit["quality"]["failed_count"] == 0
+    assert audit["quality"]["candidate_selection_elapsed_ms"] >= 0
+    assert audit["quality"]["sample_total_elapsed_ms"] >= 0
+    assert audit["quality"]["audit_total_elapsed_ms"] >= 0
+    assert audit["quality"]["raw_preview_total_elapsed_ms"] >= 0
+    assert audit["quality"]["sample_total_elapsed_ms"] >= sum(sample["elapsed_ms"] for sample in audit["samples"])
 
 
 def test_trace_route_supports_agent_event_kind() -> None:

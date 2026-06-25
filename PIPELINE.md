@@ -187,6 +187,13 @@ Usage payloads keep route signals bounded: they include a route-signal sample,
 `segment_index` and raw refs for the full route-signal set or exact evidence.
 This keeps MCP-sized packets fast without making the packet the authority.
 
+Use `entity-usage-scenario-audit` as the live randomized pipeline test for
+operational entities. Its quality block separates
+`candidate_selection_elapsed_ms`, `sample_total_elapsed_ms`,
+`audit_total_elapsed_ms`, and `raw_preview_total_elapsed_ms` so slow runs can
+be attributed to candidate-pool selection, route audit, or raw-preview opening
+instead of becoming a vague "MCP is slow" complaint.
+
 Hooks are a special case. A generic usage audit for a hook often returns
 receipt/result evidence rather than direct "usage" events. For hook health,
 start with hook receipt routes and use entity usage audit as surrounding

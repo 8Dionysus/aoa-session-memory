@@ -619,6 +619,15 @@ Last observed result:
   `0` failures, raw previews available for all samples, `elapsed_ms=6353`, and
   slowest sample `api:graphql` at `843ms` in
   `diagnostics/20260621T124512Z__entity-usage-scenario-audit__20260621.json`.
+- 2026-06-25 usage-scenario candidate-pool proof after search schema 13:
+  the randomized live scenario seed `live-goal-continuation-20260625` returned
+  `8/8` passed with `0` failures and raw previews available. The candidate
+  pool now stages cheap route posting counts before indexed
+  `usage/result/outcome` event buckets, cutting the observed run from about
+  `36.5s` to `5.6s`; the report exposes
+  `candidate_selection_elapsed_ms=3094`, `sample_total_elapsed_ms=2520`, and
+  lives at
+  `diagnostics/20260625T102340Z__entity-usage-scenario-audit__live_goal_continuation_20260625.json`.
 - 2026-06-21 structured agent-route proof: broad
   `agent-responses --limit 10 --explain` initially exceeded `90s` and had to be
   killed because the default SQL ordered by a computed stream-copy rank and
