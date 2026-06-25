@@ -9964,6 +9964,20 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
                     ],
                 },
             ],
+            "slow_sessions": [
+                {
+                    "session_id": "slow-search-session",
+                    "session_label": "2026-06-21__001__slow-search-session",
+                    "status": "indexed",
+                    "raw_text_status": "stored",
+                    "document_count": 42000,
+                    "elapsed_ms": module.OPS_SEARCH_SESSION_WARNING_MS + 1000,
+                    "documents_per_second": 1350.0,
+                    "warning": True,
+                }
+            ],
+            "slow_session_warning_count": 1,
+            "slow_session_threshold_ms": module.OPS_SEARCH_SESSION_WARNING_MS,
             "diagnostics": [],
         },
     )
@@ -10078,6 +10092,21 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
                     "db_path": str(module.search_shard_db_path(aoa_root, "month/2026-05")),
                 }
             ],
+            "slow_sessions": [
+                {
+                    "shard": "month/2026-05",
+                    "session_id": "slow-shard-session",
+                    "session_label": "2026-06-21__002__slow-shard-session",
+                    "status": "indexed",
+                    "raw_text_status": "stored",
+                    "document_count": 21000,
+                    "elapsed_ms": module.OPS_SEARCH_SESSION_WARNING_MS + 2000,
+                    "documents_per_second": 700.0,
+                    "warning": True,
+                }
+            ],
+            "slow_session_warning_count": 1,
+            "slow_session_threshold_ms": module.OPS_SEARCH_SESSION_WARNING_MS,
             "diagnostics": [],
         },
     )
@@ -10171,6 +10200,8 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["latest_search_index"]["documents_per_second"] == 123.46
     assert ops["latest_search_index"]["slow_phases"][0]["phase"] == "session_bulk_index"
     assert ops["latest_search_index"]["slow_indexes"][0]["index"] == "idx_document_routes_route"
+    assert ops["latest_search_index"]["slow_sessions"][0]["session_label"] == "2026-06-21__001__slow-search-session"
+    assert ops["latest_search_index"]["slow_session_warning_count"] == 1
     assert ops["last_successful_auto_maintenance"]["hot"]["coordinator"]["elapsed_ms"] == 2300
     assert ops["last_successful_auto_maintenance"]["catchup"]["status"] == "nothing_to_do"
     assert ops["last_auto_maintenance_resource_launch"]["backlog"]["status"] == "resource_blocked"
@@ -10181,6 +10212,8 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["search_shards"]["materialized_shard_count"] == 1
     assert ops["search_shards"]["noncurrent_shards"][0]["shard"] == "month/2026-06"
     assert ops["search_shards"]["latest_materialization"]["documents_per_second"] == 500.0
+    assert ops["search_shards"]["latest_materialization"]["slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
+    assert ops["search_shards"]["latest_materialization"]["slow_session_warning_count"] == 1
     warning_codes = {item["code"] for item in ops["warnings"]}
     assert {
         "search_db_large",
@@ -10192,7 +10225,14 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
         "recent_problem_jobs",
     } <= warning_codes
     reason_kinds = {item["reason"] for item in ops["why_maintenance_long"]}
-    assert {"search_index_phase", "sqlite_index_build", "large_sqlite_projection", "large_search_projection_stack"} <= reason_kinds
+    assert {
+        "search_index_phase",
+        "sqlite_index_build",
+        "search_index_slow_session",
+        "search_shard_slow_session",
+        "large_sqlite_projection",
+        "large_search_projection_stack",
+    } <= reason_kinds
     assert ops["graph_pressure"]["status"] == "large_cardinality_unknown"
     assert ops["graph_pressure"]["projection_status"] == "missing"
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
@@ -11813,9 +11853,14 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert shards["shard_count"] == 2
     assert shards["elapsed_ms"] >= 0
     assert shards["documents_per_second"] is not None
+    assert shards["slow_session_warning_count"] == 0
+    assert shards["slow_session_threshold_ms"] == module.OPS_SEARCH_SESSION_WARNING_MS
+    assert {item["shard"] for item in shards["slow_sessions"]} == {"month/2026-05", "month/2026-06"}
+    assert all("elapsed_ms" in item for item in shards["slow_sessions"])
     assert {item["shard"] for item in shards["shards"]} == {"month/2026-05", "month/2026-06"}
     assert all(Path(item["db_path"]).exists() for item in shards["shards"])
     assert all("elapsed_ms" in item for item in shards["shards"])
+    assert all(item["slow_sessions"] for item in shards["shards"])
     may_shard = next(item for item in shards["shards"] if item["shard"] == "month/2026-05")
     shard_conn = sqlite3.connect(str(may_shard["db_path"]))
     shard_body_meta = shard_conn.execute("SELECT value FROM meta WHERE key = ?", ("search_body_storage_mode",)).fetchone()[0]
@@ -11889,6 +11934,15 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert ops["search_shards"]["latest_materialization"]["exists"] is True
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
+    assert ops["search_shards"]["latest_materialization"]["slow_sessions"]
+    compact = module.compact_maintenance_status_payload(
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "operations": ops,
+        }
+    )
+    assert compact["operations"]["search_shards"]["latest_materialization"]["slow_sessions"]
 
     archive_session("june-shard-incremental", "2026-06-25T00:00:00Z", "june-shard-incremental-anchor")
     incremental_monolith = module.search_index_sessions(

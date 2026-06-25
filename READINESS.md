@@ -735,6 +735,19 @@ Last observed result:
   `catalog_state_basis=selected_records_with_catalog_fallback`. This proves the
   scoped hot path no longer cold-refreshes the whole entity registry or rescans
   all session indexes just to refresh the catalog.
+- 2026-06-25 operations telemetry proof: `search-index` and `search-shards`
+  reports now include bounded `slow_sessions` rows with session label,
+  elapsed time, document count, docs/sec, raw-text status, and shard when
+  applicable. Source and standalone bundle test suites both passed
+  `258 passed`; source and bundle `validate` passed, and standalone
+  `audit --portable-bundle` returned `completion_ready=true`. A live scoped
+  incremental `search-shards` pass over
+  `2026-06-01__001__что-сейчас-грузит-процессор` returned `ok=true`,
+  `processed_count=1`, and surfaced the session in `maintenance-status`
+  compact `operations.search_shards.latest_materialization.slow_sessions`.
+  During an active Codex session, `maintenance-status` may still report
+  `waiting_for_quiet_window` for recently written live transcripts; that is a
+  live-tail deferral, not archive evidence loss.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event

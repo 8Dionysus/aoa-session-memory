@@ -595,8 +595,9 @@ start time, deadline, and last result. `hot` treats an active
 start a parallel heavy rewrite. `maintenance-status --full` is the read-only
 entrypoint for checking the current owner, last completed job, DB/WAL sizes,
 operations warnings, last successful auto-maintenance profiles, recent problem
-jobs, and `why_maintenance_long` search-index/storage evidence before starting
-a manual catch-up.
+jobs, bounded slow-session samples from the latest `search-index` /
+`search-shards` reports, and `why_maintenance_long` search-index/storage
+evidence before starting a manual catch-up.
 Graph source hashing has its own generated cache under `graph/source-hash-cache.json`.
 `graph-maintenance --hash-mode cached` may reuse entries whose path size and
 `mtime_ns` still match, while `--hash-mode exact` forces file reads. Updating

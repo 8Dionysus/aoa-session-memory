@@ -265,6 +265,8 @@ OPS_LOCK_WAIT_WARNING_MS = 1000
 MANUAL_MAINTENANCE_LOCK_TIMEOUT_SEC = 5.0
 OPS_SEARCH_PHASE_WARNING_MS = 10 * 60 * 1000
 OPS_SEARCH_INDEX_WARNING_MS = 60 * 1000
+OPS_SEARCH_SESSION_WARNING_MS = 30 * 1000
+OPS_SLOW_SESSION_SAMPLE_LIMIT = 8
 OPS_DIAGNOSTIC_SCAN_LIMIT = 80
 CLASSIFIER_TEXT_HEAD_CHARS = 12000
 CLASSIFIER_TEXT_TAIL_CHARS = 6000
@@ -26111,6 +26113,8 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- sessions_per_second: `{payload.get('sessions_per_second')}`",
         f"- shard_count: `{payload.get('shard_count')}`",
         f"- document_count: `{payload.get('document_count')}`",
+        f"- slow_session_warning_count: `{payload.get('slow_session_warning_count')}`",
+        f"- slow_session_threshold_ms: `{payload.get('slow_session_threshold_ms')}`",
         "",
         "## Materialized Shards",
         "",
@@ -26123,6 +26127,17 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
                 f"| `{shard.get('shard')}` | `{shard.get('session_count')}` | "
                 f"`{shard.get('document_count')}` | `{shard.get('ok')}` | "
                 f"`{shard.get('db_path')}` |"
+            )
+    slow_sessions = payload.get("slow_sessions") if isinstance(payload.get("slow_sessions"), list) else []
+    if slow_sessions:
+        lines.extend(["", "## Slowest Sessions", "", "| shard | session | elapsed_ms | documents | docs/sec |", "| --- | --- | ---: | ---: | ---: |"])
+        for item in slow_sessions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('shard')}` | `{item.get('session_label')}` | "
+                f"`{item.get('elapsed_ms')}` | `{item.get('document_count')}` | "
+                f"`{item.get('documents_per_second')}` |"
             )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
@@ -26227,6 +26242,7 @@ def materialize_search_shards(
             "diagnostics": ["no sessions selected for shard materialization"],
         }
     shard_results: list[dict[str, Any]] = []
+    slow_session_rows: list[dict[str, Any]] = []
     processed_count = 0
     document_count = 0
     for shard_key in sorted(groups):
@@ -26257,6 +26273,12 @@ def materialize_search_shards(
         shard_elapsed_ms = int((time.monotonic() - shard_started) * 1000)
         shard_ok = bool(result.get("ok"))
         shard_diagnostics = [str(item) for item in result.get("diagnostics", []) if item]
+        shard_slow_sessions = [
+            {"shard": shard_key, **item}
+            for item in result.get("slow_sessions", [])
+            if isinstance(item, dict)
+        ]
+        slow_session_rows.extend(shard_slow_sessions)
         diagnostics.extend(f"{shard_key}:{item}" for item in shard_diagnostics)
         processed_count += int_value(result.get("processed_count"))
         document_count += int_value(result.get("document_count"))
@@ -26273,6 +26295,9 @@ def materialize_search_shards(
                 "documents_per_second": round(int_value(result.get("document_count")) / (shard_elapsed_ms / 1000.0), 2)
                 if shard_elapsed_ms > 0 and int_value(result.get("document_count")) > 0
                 else None,
+                "slow_sessions": shard_slow_sessions,
+                "slow_session_warning_count": result.get("slow_session_warning_count"),
+                "slow_session_threshold_ms": result.get("slow_session_threshold_ms"),
                 "search_schema_version": result.get("search_schema_version"),
                 "structured_only": structured_only,
                 "rebuild": rebuild_shards or not shard_path.exists(),
@@ -26327,6 +26352,9 @@ def materialize_search_shards(
         "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "shard_count": len(shard_results),
         "document_count": document_count,
+        "slow_sessions": search_slow_session_rows(slow_session_rows),
+        "slow_session_warning_count": sum(1 for item in slow_session_rows if item.get("warning")),
+        "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
         "catalog": search_catalog_summary(catalog_refresh),
         "shards": shard_results,
         "diagnostics": diagnostics,
@@ -26381,6 +26409,8 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
         f"- raw_text_skipped_session_count: `{payload.get('raw_text_skipped_session_count')}`",
         f"- inline_optimize_policy: `{payload.get('inline_optimize_policy')}`",
         f"- inline_optimize_count: `{payload.get('inline_optimize_count')}`",
+        f"- slow_session_warning_count: `{payload.get('slow_session_warning_count')}`",
+        f"- slow_session_threshold_ms: `{payload.get('slow_session_threshold_ms')}`",
         f"- document_count: `{payload.get('document_count')}`",
         f"- removed_document_count: `{payload.get('removed_document_count')}`",
         f"- session_documents: `{payload.get('session_document_count')}`",
@@ -26407,6 +26437,17 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"| `{item.get('phase')}` | `{item.get('elapsed_ms')}` | `{json.dumps(detail, ensure_ascii=False, sort_keys=True)}` |")
     else:
         lines.append("| none | `0` | `{}` |")
+    slow_sessions = payload.get("slow_sessions") if isinstance(payload.get("slow_sessions"), list) else []
+    if slow_sessions:
+        lines.extend(["", "## Slowest Sessions", "", "| session | elapsed_ms | documents | docs/sec | raw text |", "| --- | ---: | ---: | ---: | --- |"])
+        for item in slow_sessions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('session_label')}` | `{item.get('elapsed_ms')}` | "
+                f"`{item.get('document_count')}` | `{item.get('documents_per_second')}` | "
+                f"`{item.get('raw_text_status')}` |"
+            )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
@@ -29774,6 +29815,39 @@ def search_documents_for_record(
     }
 
 
+def search_slow_session_rows(
+    session_timings: list[dict[str, Any]],
+    *,
+    limit: int = OPS_SLOW_SESSION_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    rows = sorted(
+        (item for item in session_timings if isinstance(item, dict)),
+        key=lambda item: int_value(item.get("elapsed_ms")),
+        reverse=True,
+    )
+    compact_rows: list[dict[str, Any]] = []
+    for item in rows[: max(0, limit)]:
+        compact_rows.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "session_id",
+                    "session_label",
+                    "shard",
+                    "status",
+                    "raw_text_status",
+                    "document_count",
+                    "removed_document_count",
+                    "elapsed_ms",
+                    "documents_per_second",
+                    "warning",
+                )
+                if key in item
+            }
+        )
+    return compact_rows
+
+
 def search_index_sessions(
     *,
     aoa_root: Path,
@@ -29875,6 +29949,7 @@ def search_index_sessions(
     removed_document_count = 0
     diagnostics: list[str] = []
     session_results: list[dict[str, Any]] = []
+    session_timings: list[dict[str, Any]] = []
     raw_text_status_counts: Counter[str] = Counter()
     phase_timings: list[dict[str, Any]] = []
     inline_optimize_count = 0
@@ -30004,6 +30079,7 @@ def search_index_sessions(
             if deadline is not None and record_index > 1 and time.monotonic() >= deadline:
                 budget_exhausted = True
                 break
+            record_started = time.monotonic()
             conn.execute("BEGIN")
             projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
             documents, result = search_documents_for_record(
@@ -30037,6 +30113,24 @@ def search_index_sessions(
             counts.update(record_counts)
             removed_document_count += record_removed_document_count
             committed_count += 1
+            record_elapsed_ms = int((time.monotonic() - record_started) * 1000)
+            record_document_count = len(documents)
+            record_elapsed_seconds = record_elapsed_ms / 1000.0 if record_elapsed_ms > 0 else 0.0
+            session_timings.append(
+                {
+                    "session_id": str(result.get("session_id") or record.get("session_id") or ""),
+                    "session_label": str(result.get("session_label") or record.get("session_label") or ""),
+                    "status": result.get("status"),
+                    "raw_text_status": result.get("raw_text_status"),
+                    "document_count": record_document_count,
+                    "removed_document_count": record_removed_document_count,
+                    "elapsed_ms": record_elapsed_ms,
+                    "documents_per_second": round(record_document_count / record_elapsed_seconds, 2)
+                    if record_elapsed_seconds > 0 and record_document_count > 0
+                    else None,
+                    "warning": record_elapsed_ms >= OPS_SEARCH_SESSION_WARNING_MS,
+                }
+            )
             if progress_every > 0 and record_index % progress_every == 0:
                 progress_event(
                     "search_index_progress",
@@ -30154,6 +30248,10 @@ def search_index_sessions(
                 "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
                 "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
                 "phase_timings": phase_timings,
+                "session_timings": session_timings,
+                "slow_sessions": search_slow_session_rows(session_timings),
+                "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
+                "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
                 "inline_optimize_policy": {
                     "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
                     "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
@@ -30196,6 +30294,10 @@ def search_index_sessions(
             "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
             "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
             "phase_timings": phase_timings,
+            "session_timings": session_timings,
+            "slow_sessions": search_slow_session_rows(session_timings),
+            "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
+            "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
             "inline_optimize_policy": {
                 "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
                 "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
@@ -30247,6 +30349,10 @@ def search_index_sessions(
         "search_aggregate_route_posting_doc_types": sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES),
         "search_aggregate_route_posting_default_layer_limit": SEARCH_AGGREGATE_ROUTE_POSTING_DEFAULT_LAYER_LIMIT,
         "phase_timings": phase_timings,
+        "session_timings": session_timings,
+        "slow_sessions": search_slow_session_rows(session_timings),
+        "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
+        "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
         "inline_optimize_policy": {
             "rebuild_every": SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY,
             "incremental_every": SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY,
@@ -44530,6 +44636,10 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
     processed_count = int_value(report.get("processed_count"))
     elapsed_seconds = elapsed_ms / 1000.0 if elapsed_ms > 0 else 0.0
     shards = report.get("shards") if isinstance(report.get("shards"), list) else []
+    slow_sessions = report.get("slow_sessions") if isinstance(report.get("slow_sessions"), list) else []
+    slow_session_warning_count = report.get("slow_session_warning_count")
+    if slow_session_warning_count is None:
+        slow_session_warning_count = sum(1 for item in slow_sessions if isinstance(item, dict) and item.get("warning"))
     return {
         "exists": True,
         "source": diagnostic_report_source(report),
@@ -44548,6 +44658,9 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
         "sessions_per_second": round(processed_count / elapsed_seconds, 3)
         if elapsed_seconds > 0 and processed_count > 0
         else report.get("sessions_per_second"),
+        "slow_sessions": search_slow_session_rows(slow_sessions),
+        "slow_session_warning_count": slow_session_warning_count,
+        "slow_session_threshold_ms": report.get("slow_session_threshold_ms"),
         "structured_only": report.get("structured_only"),
         "shard_storage_mode": report.get("shard_storage_mode"),
         "search_fts_storage_mode": report.get("search_fts_storage_mode"),
@@ -44569,6 +44682,7 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
                     "document_count",
                     "elapsed_ms",
                     "documents_per_second",
+                    "slow_session_warning_count",
                     "db_path",
                     "search_document_storage_profile",
                     "search_body_preview_chars",
@@ -44929,6 +45043,15 @@ def search_index_ops_summary(report: dict[str, Any] | None) -> dict[str, Any]:
         elapsed_ms = sum(int_value(item.get("elapsed_ms")) for item in phase_rows)
     document_count = int_value(report.get("document_count"))
     processed_count = int_value(report.get("processed_count"))
+    session_timings = report.get("session_timings") if isinstance(report.get("session_timings"), list) else []
+    slow_sessions = (
+        report.get("slow_sessions")
+        if isinstance(report.get("slow_sessions"), list)
+        else search_slow_session_rows(session_timings)
+    )
+    slow_session_warning_count = report.get("slow_session_warning_count")
+    if slow_session_warning_count is None:
+        slow_session_warning_count = sum(1 for item in session_timings if isinstance(item, dict) and item.get("warning"))
     elapsed_seconds = elapsed_ms / 1000.0 if elapsed_ms > 0 else 0.0
     slow_phases = sorted(phase_rows, key=lambda item: int_value(item.get("elapsed_ms")), reverse=True)[:5]
     slow_indexes = sorted(
@@ -44953,6 +45076,9 @@ def search_index_ops_summary(report: dict[str, Any] | None) -> dict[str, Any]:
         "sessions_per_second": round(processed_count / elapsed_seconds, 3) if elapsed_seconds > 0 and processed_count > 0 else None,
         "inline_optimize_count": report.get("inline_optimize_count"),
         "raw_text_skipped_session_count": report.get("raw_text_skipped_session_count"),
+        "slow_sessions": search_slow_session_rows(slow_sessions),
+        "slow_session_warning_count": slow_session_warning_count,
+        "slow_session_threshold_ms": report.get("slow_session_threshold_ms"),
         "document_counts": {
             "session": report.get("session_document_count"),
             "segment": report.get("segment_document_count"),
@@ -45307,6 +45433,18 @@ def session_memory_ops_long_maintenance_reasons(
                 "elapsed_ms": index_item.get("elapsed_ms"),
             }
         )
+    for session_item in latest_search_index.get("slow_sessions", []) if isinstance(latest_search_index.get("slow_sessions"), list) else []:
+        if not isinstance(session_item, dict) or not session_item.get("warning"):
+            continue
+        reasons.append(
+            {
+                "reason": "search_index_slow_session",
+                "session_label": session_item.get("session_label"),
+                "elapsed_ms": session_item.get("elapsed_ms"),
+                "document_count": session_item.get("document_count"),
+                "documents_per_second": session_item.get("documents_per_second"),
+            }
+        )
     last_job = writer.get("last_job") if isinstance(writer.get("last_job"), dict) else {}
     if int_value(last_job.get("elapsed_ms")) >= OPS_WRITER_WARNING_MS:
         reasons.append(
@@ -45343,6 +45481,19 @@ def session_memory_ops_long_maintenance_reasons(
                 "elapsed_ms": latest_shard_elapsed,
                 "document_count": latest_shard_materialization.get("document_count"),
                 "documents_per_second": latest_shard_materialization.get("documents_per_second"),
+            }
+        )
+    for session_item in latest_shard_materialization.get("slow_sessions", []) if isinstance(latest_shard_materialization.get("slow_sessions"), list) else []:
+        if not isinstance(session_item, dict) or not session_item.get("warning"):
+            continue
+        reasons.append(
+            {
+                "reason": "search_shard_slow_session",
+                "shard": session_item.get("shard"),
+                "session_label": session_item.get("session_label"),
+                "elapsed_ms": session_item.get("elapsed_ms"),
+                "document_count": session_item.get("document_count"),
+                "documents_per_second": session_item.get("documents_per_second"),
             }
         )
     shard_total_bytes = int_value(search_shards.get("shard_db_total_bytes"))
@@ -46589,8 +46740,30 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "documents_per_second",
                 "sessions_per_second",
                 "budget_exhausted",
+                "slow_session_warning_count",
+                "slow_session_threshold_ms",
             )
             if key in latest_search_index
+        }
+        | {
+            "slow_sessions": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "session_id",
+                        "session_label",
+                        "status",
+                        "raw_text_status",
+                        "document_count",
+                        "elapsed_ms",
+                        "documents_per_second",
+                        "warning",
+                    )
+                    if isinstance(item, dict) and key in item
+                }
+                for item in (latest_search_index.get("slow_sessions") or [])[:4]
+                if isinstance(item, dict)
+            ]
         },
         "graph_pressure": {
             key: graph_pressure.get(key)
@@ -46706,6 +46879,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "document_count",
                     "elapsed_ms",
                     "documents_per_second",
+                    "sessions_per_second",
+                    "slow_session_warning_count",
+                    "slow_session_threshold_ms",
                     "structured_only",
                     "raw_text_query_support",
                     "search_document_storage_profile",
@@ -46713,6 +46889,27 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "search_tags_storage_policy",
                 )
                 if key in latest_search_shards
+            }
+            | {
+                "slow_sessions": [
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "shard",
+                            "session_id",
+                            "session_label",
+                            "status",
+                            "raw_text_status",
+                            "document_count",
+                            "elapsed_ms",
+                            "documents_per_second",
+                            "warning",
+                        )
+                        if isinstance(item, dict) and key in item
+                    }
+                    for item in (latest_search_shards.get("slow_sessions") or [])[:4]
+                    if isinstance(item, dict)
+                ]
             },
         },
         "slow_phases": latest_search_index.get("slow_phases", [])[:4] if isinstance(latest_search_index.get("slow_phases"), list) else [],
@@ -46881,8 +47078,31 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         for item in reasons[:12]:
             if not isinstance(item, dict):
                 continue
-            label = item.get("phase") or item.get("index") or item.get("label") or item.get("owner_job") or item.get("reason")
+            label = (
+                item.get("session_label")
+                or item.get("phase")
+                or item.get("index")
+                or item.get("label")
+                or item.get("owner_job")
+                or item.get("reason")
+            )
             lines.append(f"- `{item.get('reason')}` `{label}` elapsed_ms=`{item.get('elapsed_ms', '')}` size=`{item.get('size_human', '')}`")
+    latest_search_slow_sessions = latest_search_index.get("slow_sessions") if isinstance(latest_search_index.get("slow_sessions"), list) else []
+    latest_shard_slow_sessions = latest_search_shards.get("slow_sessions") if isinstance(latest_search_shards.get("slow_sessions"), list) else []
+    if latest_search_slow_sessions or latest_shard_slow_sessions:
+        lines.extend(["", "## Slowest Sessions", "", "| source | shard | session | elapsed_ms | documents | docs/sec |", "| --- | --- | --- | ---: | ---: | ---: |"])
+        for source, rows in (
+            ("search_index", latest_search_slow_sessions[:6]),
+            ("search_shards", latest_shard_slow_sessions[:6]),
+        ):
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f"| `{source}` | `{item.get('shard', '')}` | `{item.get('session_label')}` | "
+                    f"`{item.get('elapsed_ms')}` | `{item.get('document_count')}` | "
+                    f"`{item.get('documents_per_second')}` |"
+                )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])

@@ -562,8 +562,13 @@ active owner job, mode (`hot`, `catchup`, `backlog`, `deep`, or
 `manual-bulk`), touched projection surfaces, lock wait, deadline, last job, and
 search/graph DB plus WAL sizes. Its read-only operations summary also reports
 size/lock/writer warnings, recent problem jobs, the latest search-index phase
-timings, slow SQLite indexes, last successful auto-maintenance profiles, and
-`why_maintenance_long` evidence from diagnostics. If `hot` finds a
+timings, slow SQLite indexes, bounded slow-session samples, last successful
+auto-maintenance profiles, and `why_maintenance_long` evidence from
+diagnostics. `search-index` and `search-shards` reports carry top
+`slow_sessions` with session label, elapsed time, document count, docs/sec,
+raw-text storage status, and shard when applicable, so agents can diagnose a
+long maintenance pass without opening raw transcripts or running deep dbstat.
+If `hot` finds a
 bulk/catchup/deep/manual writer already holding the lease, it defers instead of
 starting a competing rewrite.
 Manual maintenance writers use the same shared lock but must not wait
