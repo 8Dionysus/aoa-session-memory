@@ -315,6 +315,12 @@ refresh budgets.
 `--budget-seconds` bounds live wall-clock work; if the deadline expires before
 or during a mutation pass, the command records `deferred_time_budget` sources
 and rolls back the in-flight mutation instead of leaving a half-refreshed graph.
+Deep graph source scans can reuse `graph/source-hash-cache.json` with
+`--hash-mode cached` when file size and `mtime_ns` still match; use
+`--hash-mode exact --write-hash-cache` as an explicit maintenance pass to
+rehash source files and refresh that generated cache, or `--hash-mode exact`
+without cache writes when the operator needs a full file-read audit. The cache
+stores only path/stat/hash metadata and is not raw evidence or graph authority.
 `index-maintenance` and `auto-maintenance` also use
 `graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; individually
 oversized sources are reported under `oversized_sources`, while sources that

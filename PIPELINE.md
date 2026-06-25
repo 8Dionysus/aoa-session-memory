@@ -597,6 +597,12 @@ entrypoint for checking the current owner, last completed job, DB/WAL sizes,
 operations warnings, last successful auto-maintenance profiles, recent problem
 jobs, and `why_maintenance_long` search-index/storage evidence before starting
 a manual catch-up.
+Graph source hashing has its own generated cache under `graph/source-hash-cache.json`.
+`graph-maintenance --hash-mode cached` may reuse entries whose path size and
+`mtime_ns` still match, while `--hash-mode exact` forces file reads. Updating
+the cache requires `--write-hash-cache`; that path is a maintenance writer and
+must use the shared lock, but ordinary read-only deep checks may consume an
+existing cache without mutating archive state.
 Manual-bulk commands use the same shared lock but must not block indefinitely
 behind an unattended timer. When the lock is still held after the bounded wait,
 they return a `session_memory_maintenance_lock_conflict` packet with

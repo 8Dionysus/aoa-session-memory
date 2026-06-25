@@ -170,8 +170,10 @@ GRAPH_INDEX_JSON = "index.json"
 GRAPH_STORE_SQLITE = "graph.sqlite3"
 GRAPH_SOURCE_STATE_LEDGER_JSON = "source-state-ledger.json"
 GRAPH_MAINTENANCE_QUEUE_JSON = "maintenance-queue.json"
+GRAPH_SOURCE_HASH_CACHE_JSON = "source-hash-cache.json"
 GRAPH_SOURCE_STATE_LEDGER_SCHEMA_VERSION = 1
 GRAPH_MAINTENANCE_QUEUE_SCHEMA_VERSION = 1
+GRAPH_SOURCE_HASH_CACHE_SCHEMA_VERSION = 1
 GRAPH_HOT_LIVE_DEFER_SECONDS = 600.0
 GRAPH_STORE_SCHEMA_VERSION = 2
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
@@ -1979,6 +1981,137 @@ def sha256_file(path: Path) -> str:
     value = digest.hexdigest()
     SHA256_FILE_CACHE[key] = value
     return value
+
+
+def normalize_graph_source_hash_mode(value: str | None) -> str:
+    mode = str(value or "cached").strip().lower()
+    return mode if mode in {"cached", "exact"} else "cached"
+
+
+def empty_graph_source_hash_cache() -> dict[str, Any]:
+    return {
+        "schema_version": GRAPH_SOURCE_HASH_CACHE_SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_source_hash_cache",
+        "generated_at": utc_now(),
+        "updated_at": utc_now(),
+        "entries": {},
+    }
+
+
+def read_graph_source_hash_cache(aoa_root: Path) -> dict[str, Any]:
+    payload = read_json(graph_paths(aoa_root)["source_hash_cache"], {})
+    if not isinstance(payload, dict):
+        payload = {}
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    return {
+        **empty_graph_source_hash_cache(),
+        **payload,
+        "entries": {
+            str(key): value
+            for key, value in entries.items()
+            if key and isinstance(value, dict)
+        },
+    }
+
+
+def write_graph_source_hash_cache(
+    aoa_root: Path,
+    cache_payload: dict[str, Any],
+    updates: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    existing_entries = cache_payload.get("entries") if isinstance(cache_payload.get("entries"), dict) else {}
+    entries = {
+        str(key): value
+        for key, value in existing_entries.items()
+        if key and isinstance(value, dict)
+    }
+    now = utc_now()
+    for key, value in updates.items():
+        if key and isinstance(value, dict):
+            entries[str(key)] = {**value, "cached_at": now}
+    payload = {
+        **empty_graph_source_hash_cache(),
+        **cache_payload,
+        "schema_version": GRAPH_SOURCE_HASH_CACHE_SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_source_hash_cache",
+        "updated_at": now,
+        "entries": dict(sorted(entries.items())),
+    }
+    write_json(graph_paths(aoa_root)["source_hash_cache"], payload)
+    return {
+        "path": str(graph_paths(aoa_root)["source_hash_cache"]),
+        "entry_count": len(payload["entries"]),
+        "updated_count": len(updates),
+        "updated_at": now,
+    }
+
+
+def graph_source_hash_stat_item(
+    path: Path,
+    *,
+    cache_entries: dict[str, dict[str, Any]] | None = None,
+    cache_updates: dict[str, dict[str, Any]] | None = None,
+    stats: dict[str, int] | None = None,
+    hash_mode: str = "cached",
+) -> dict[str, Any]:
+    path_text = str(path)
+
+    def bump(key: str) -> None:
+        if stats is not None:
+            stats[key] = int_value(stats.get(key)) + 1
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        bump("missing")
+        return {
+            "path": path_text,
+            "exists": False,
+            "mtime": 0.0,
+            "sha256": "",
+        }
+    exists = True
+    is_file = path.is_file()
+    mtime = float(stat_result.st_mtime)
+    size = int(stat_result.st_size)
+    mtime_ns = int(stat_result.st_mtime_ns)
+    mode = normalize_graph_source_hash_mode(hash_mode)
+    cached = (cache_entries or {}).get(path_text) if mode == "cached" else None
+    if (
+        isinstance(cached, dict)
+        and bool(cached.get("exists", True)) is True
+        and bool(cached.get("is_file", True)) == is_file
+        and int_value(cached.get("size")) == size
+        and int_value(cached.get("mtime_ns")) == mtime_ns
+        and str(cached.get("sha256") or "")
+    ):
+        bump("persistent_hit")
+        return {
+            "path": path_text,
+            "exists": exists,
+            "mtime": mtime,
+            "sha256": str(cached.get("sha256") or ""),
+        }
+    if mode == "cached":
+        bump("persistent_miss")
+    sha = sha256_file(path) if is_file else ""
+    bump("computed")
+    if cache_updates is not None:
+        cache_updates[path_text] = {
+            "path": path_text,
+            "exists": exists,
+            "is_file": is_file,
+            "size": size,
+            "mtime": mtime,
+            "mtime_ns": mtime_ns,
+            "sha256": sha,
+        }
+    return {
+        "path": path_text,
+        "exists": exists,
+        "mtime": mtime,
+        "sha256": sha,
+    }
 
 
 def short_text(value: Any, *, max_chars: int = 120) -> str:
@@ -33077,6 +33210,7 @@ def graph_paths(aoa_root: Path) -> dict[str, Path]:
         "store": root / GRAPH_STORE_SQLITE,
         "source_state_ledger": root / GRAPH_SOURCE_STATE_LEDGER_JSON,
         "maintenance_queue": root / GRAPH_MAINTENANCE_QUEUE_JSON,
+        "source_hash_cache": root / GRAPH_SOURCE_HASH_CACHE_JSON,
     }
 
 
@@ -33970,18 +34104,23 @@ def graph_source_metadata(
     segment_id: str = "",
     source_paths: list[Path],
     identity: dict[str, Any] | None = None,
+    source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
+    source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
+    source_hash_stats: dict[str, int] | None = None,
+    source_hash_mode: str = "cached",
 ) -> dict[str, Any]:
     path_items: list[dict[str, Any]] = []
     diagnostics: list[str] = []
     max_mtime = 0.0
     for path in source_paths:
-        exists = path.exists()
-        item = {
-            "path": str(path),
-            "exists": exists,
-            "mtime": path_mtime(path),
-            "sha256": sha256_file(path) if exists and path.is_file() else "",
-        }
+        item = graph_source_hash_stat_item(
+            path,
+            cache_entries=source_hash_cache_entries,
+            cache_updates=source_hash_cache_updates,
+            stats=source_hash_stats,
+            hash_mode=source_hash_mode,
+        )
+        exists = bool(item.get("exists"))
         max_mtime = max(max_mtime, float(item["mtime"] or 0.0))
         if not exists:
             diagnostics.append(f"missing_graph_source_path:{path}")
@@ -36714,7 +36853,14 @@ def raw_unavailable_recovery_audit_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def graph_source_candidates_for_record(record: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def graph_source_candidates_for_record(
+    record: dict[str, Any],
+    *,
+    source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
+    source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
+    source_hash_stats: dict[str, int] | None = None,
+    source_hash_mode: str = "cached",
+) -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -36744,6 +36890,10 @@ def graph_source_candidates_for_record(record: dict[str, Any]) -> tuple[list[dic
                     "route_signal_counts": route_signal_counts,
                     "goal_lifecycle_counts": session_index.get("goal_lifecycle_counts"),
                 },
+                source_hash_cache_entries=source_hash_cache_entries,
+                source_hash_cache_updates=source_hash_cache_updates,
+                source_hash_stats=source_hash_stats,
+                source_hash_mode=source_hash_mode,
             ),
             "session_dir": str(session_dir),
         }
@@ -36765,6 +36915,10 @@ def graph_source_candidates_for_record(record: dict[str, Any]) -> tuple[list[dic
                     segment_id=segment_id,
                     source_paths=[manifest_path, session_index_path, segment_index_path],
                     identity={"session_title": session_title, "segment": segment},
+                    source_hash_cache_entries=source_hash_cache_entries,
+                    source_hash_cache_updates=source_hash_cache_updates,
+                    source_hash_stats=source_hash_stats,
+                    source_hash_mode=source_hash_mode,
                 ),
                 "session_dir": str(session_dir),
             }
@@ -36780,6 +36934,10 @@ def graph_source_candidates(
     until: str | None = None,
     limit: int | None = None,
     selected_records: list[dict[str, Any]] | None = None,
+    source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
+    source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
+    source_hash_stats: dict[str, int] | None = None,
+    source_hash_mode: str = "cached",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     if selected_records is not None:
         records = selected_records
@@ -36788,7 +36946,13 @@ def graph_source_candidates(
         records, diagnostics = graph_session_records(aoa_root, target=target, since=since, until=until, limit=limit)
     candidates: list[dict[str, Any]] = []
     for record in records:
-        record_candidates, record_diagnostics = graph_source_candidates_for_record(record)
+        record_candidates, record_diagnostics = graph_source_candidates_for_record(
+            record,
+            source_hash_cache_entries=source_hash_cache_entries,
+            source_hash_cache_updates=source_hash_cache_updates,
+            source_hash_stats=source_hash_stats,
+            source_hash_mode=source_hash_mode,
+        )
         candidates.extend(record_candidates)
         diagnostics.extend(record_diagnostics)
     return records, candidates, diagnostics
@@ -37220,6 +37384,10 @@ def graph_source_states(
     limit: int | None = None,
     selected_records: list[dict[str, Any]] | None = None,
     selected_records_global: bool | None = None,
+    source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
+    source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
+    source_hash_stats: dict[str, int] | None = None,
+    source_hash_mode: str = "cached",
 ) -> dict[str, Any]:
     records, candidates, diagnostics = graph_source_candidates(
         aoa_root,
@@ -37228,6 +37396,10 @@ def graph_source_states(
         until=until,
         limit=limit,
         selected_records=selected_records,
+        source_hash_cache_entries=source_hash_cache_entries,
+        source_hash_cache_updates=source_hash_cache_updates,
+        source_hash_stats=source_hash_stats,
+        source_hash_mode=source_hash_mode,
     )
     existing, existing_diagnostics = graph_store_existing_sources(aoa_root)
     ledger = read_graph_source_state_ledger(aoa_root)
@@ -37356,6 +37528,8 @@ def graph_source_states(
         "orphan_scope": "global" if global_selection else "selected_sessions",
         **reason_summary,
         "maintenance_recommendation": recommendation,
+        "source_hash_mode": normalize_graph_source_hash_mode(source_hash_mode),
+        "source_hash_cache": dict(source_hash_stats or {}),
         "states": states,
         "diagnostics": diagnostics,
     }
@@ -37849,6 +38023,8 @@ def graph_maintenance(
     budget_seconds: float | None = None,
     plan_refresh_costs: bool = False,
     mode: str = "hot",
+    hash_mode: str = "cached",
+    write_hash_cache: bool = False,
     export_sidecar: bool = False,
     write_report: bool = False,
     use_queue: bool = False,
@@ -37869,6 +38045,7 @@ def graph_maintenance(
     mode = str(mode or "hot").strip().lower()
     if mode not in {"hot", "deep"}:
         mode = "hot"
+    hash_mode = normalize_graph_source_hash_mode(hash_mode)
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
     queue_payload: dict[str, Any] | None = None
     queue_selected_source_keys: list[str] = []
@@ -37934,6 +38111,7 @@ def graph_maintenance(
         and not export_sidecar
         and not write_queue
         and not write_ledger
+        and not write_hash_cache
     )
     if hot_noop_eligible:
         graph_hot_state = graph_store_hot_state(aoa_root)
@@ -37983,6 +38161,20 @@ def graph_maintenance(
                 next_route="Cached hot state shows no actionable graph maintenance; use graph-maintenance all --mode deep for a full source audit.",
                 write_report=write_report,
             )
+    source_hash_cache_payload = read_graph_source_hash_cache(aoa_root) if hash_mode == "cached" or write_hash_cache else empty_graph_source_hash_cache()
+    source_hash_cache_entries = (
+        source_hash_cache_payload.get("entries")
+        if isinstance(source_hash_cache_payload.get("entries"), dict)
+        else {}
+    )
+    source_hash_cache_updates: dict[str, dict[str, Any]] = {}
+    source_hash_stats: dict[str, int] = {
+        "cache_entry_count": len(source_hash_cache_entries),
+        "persistent_hit": 0,
+        "persistent_miss": 0,
+        "computed": 0,
+        "missing": 0,
+    }
     states_payload = graph_source_states(
         aoa_root=aoa_root,
         target=target,
@@ -37991,6 +38183,10 @@ def graph_maintenance(
         limit=limit,
         selected_records=selected_records,
         selected_records_global=selected_records_global,
+        source_hash_cache_entries=source_hash_cache_entries if hash_mode == "cached" else None,
+        source_hash_cache_updates=source_hash_cache_updates if write_hash_cache else None,
+        source_hash_stats=source_hash_stats,
+        source_hash_mode=hash_mode,
     )
     states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
     missing_requested_source_keys: list[str] = []
@@ -38340,6 +38536,9 @@ def graph_maintenance(
             "elapsed_ms": elapsed_ms,
             "budget_exhausted": budget_exhausted,
             "mutation_rolled_back": mutation_rolled_back,
+            "hash_mode": hash_mode,
+            "write_hash_cache": bool(write_hash_cache),
+            "source_hash_cache": dict(source_hash_stats),
             "time_budget_deferred_source_count": len(time_budget_deferred_source_keys),
             "time_budget_deferred_sources": time_budget_deferred_source_keys[:40],
             "time_budget_deferred_plan": time_budget_deferred_plan[:40],
@@ -38376,6 +38575,10 @@ def graph_maintenance(
             limit=limit,
             selected_records=selected_records,
             selected_records_global=selected_records_global,
+            source_hash_cache_entries=source_hash_cache_entries if hash_mode == "cached" else None,
+            source_hash_cache_updates=source_hash_cache_updates if write_hash_cache else None,
+            source_hash_stats=source_hash_stats,
+            source_hash_mode=hash_mode,
         )
         post_states_all = (
             post_states_payload.get("states")
@@ -38421,6 +38624,7 @@ def graph_maintenance(
     state_rows_for_persistence = post_states_all if mutation_applied else states
     ledger_update: dict[str, Any] = {}
     queue_update: dict[str, Any] = {}
+    source_hash_cache_update: dict[str, Any] = {}
     if write_ledger:
         ledger_update = update_graph_source_state_ledger_from_states(
             aoa_root,
@@ -38433,6 +38637,12 @@ def graph_maintenance(
             state_rows_for_persistence,
             reason=f"graph_maintenance:{reason}",
         )
+    if write_hash_cache:
+        source_hash_cache_update = write_graph_source_hash_cache(
+            aoa_root,
+            source_hash_cache_payload,
+            source_hash_cache_updates,
+        )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_maintenance",
@@ -38440,7 +38650,7 @@ def graph_maintenance(
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
         "generated_at": now,
         "ok": not diagnostics and not any(item.get("status") == "blocked" for item in results),
-        "mutates": bool(apply or write_ledger or write_queue),
+        "mutates": bool(apply or write_ledger or write_queue or write_hash_cache),
         "apply": apply,
         "use_queue": bool(use_queue),
         "write_queue": bool(write_queue),
@@ -38458,6 +38668,8 @@ def graph_maintenance(
         "budget_seconds": budget_seconds,
         "plan_refresh_costs": bool(plan_refresh_costs),
         "mode": mode,
+        "hash_mode": hash_mode,
+        "write_hash_cache": bool(write_hash_cache),
         "source_scan": True,
         "elapsed_ms": elapsed_ms,
         "budget_exhausted": budget_exhausted,
@@ -38485,6 +38697,8 @@ def graph_maintenance(
         "maintenance_detail": maintenance_detail,
         "ledger_update": ledger_update,
         "queue_update": queue_update,
+        "source_hash_cache": source_hash_stats,
+        "source_hash_cache_update": source_hash_cache_update,
         "sidecar": sidecar,
         "diagnostics": diagnostics,
         "next_route": "Run again while remaining_count is nonzero; use graph-build --write --force-large-export for full rebuild or schema/corruption recovery.",
@@ -38520,6 +38734,8 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- plan_refresh_costs: `{payload.get('plan_refresh_costs')}`",
         f"- mode: `{payload.get('mode')}`",
+        f"- hash_mode: `{payload.get('hash_mode')}`",
+        f"- write_hash_cache: `{payload.get('write_hash_cache')}`",
         f"- source_scan: `{payload.get('source_scan')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- budget_exhausted: `{payload.get('budget_exhausted')}`",
@@ -38538,6 +38754,8 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- status_counts: `{state.get('status_counts')}`",
         f"- reason_group_counts: `{state.get('reason_group_counts')}`",
         f"- maintenance_recommendation: `{json.dumps(state.get('maintenance_recommendation', {}), ensure_ascii=False)}`",
+        f"- source_hash_cache: `{json.dumps(payload.get('source_hash_cache', {}), ensure_ascii=False)}`",
+        f"- source_hash_cache_update: `{json.dumps(payload.get('source_hash_cache_update', {}), ensure_ascii=False)}`",
         f"- queue_update: `{json.dumps(payload.get('queue_update', {}), ensure_ascii=False)}`",
         f"- ledger_update: `{json.dumps(payload.get('ledger_update', {}), ensure_ascii=False)}`",
         "",
@@ -38573,8 +38791,11 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- post_remaining_count: `{detail.get('post_remaining_count')}`",
                 f"- selection_strategy: `{detail.get('selection_strategy')}`",
                 f"- mode: `{detail.get('mode')}`",
+                f"- hash_mode: `{detail.get('hash_mode')}`",
+                f"- write_hash_cache: `{detail.get('write_hash_cache')}`",
                 f"- source_scan: `{detail.get('source_scan')}`",
                 f"- truth_status: `{detail.get('truth_status')}`",
+                f"- source_hash_cache: `{json.dumps(detail.get('source_hash_cache', {}), ensure_ascii=False)}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_key_count: `{detail.get('matched_source_key_count')}`",
                 f"- matched_source_key_sample: `{json.dumps(detail.get('matched_source_key_sample', []), ensure_ascii=False)}`",
@@ -50616,6 +50837,8 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             budget_seconds=getattr(args, "budget_seconds", None),
             plan_refresh_costs=getattr(args, "plan_refresh_costs", False),
             mode=getattr(args, "mode", "hot"),
+            hash_mode=getattr(args, "hash_mode", "cached"),
+            write_hash_cache=getattr(args, "write_hash_cache", False),
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             use_queue=getattr(args, "use_queue", False),
@@ -50635,7 +50858,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
             budget_seconds=getattr(args, "budget_seconds", None),
         )
-        if args.apply or args.export_sidecar or args.write_queue or args.write_ledger
+        if args.apply or args.export_sidecar or args.write_queue or args.write_ledger or getattr(args, "write_hash_cache", False)
         else run_maintenance()
     )
     stdout_payload = payload if getattr(args, "full", False) else compact_graph_maintenance_stdout_payload(payload)
@@ -50662,7 +50885,11 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
         "candidate_pool_limit",
         "budget_seconds",
         "mode",
+        "hash_mode",
+        "write_hash_cache",
         "source_scan",
+        "source_hash_cache",
+        "source_hash_cache_update",
         "elapsed_ms",
         "budget_exhausted",
         "state_window",
@@ -50712,7 +50939,10 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
             for key in (
                 "selection_strategy",
                 "mode",
+                "hash_mode",
+                "write_hash_cache",
                 "source_scan",
+                "source_hash_cache",
                 "truth_status",
                 "use_queue",
                 "queue_selected_source_count",
@@ -56198,6 +56428,8 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--budget-seconds", type=float, help="Stop planning or roll back the current mutation pass once this wall-clock budget is exhausted.")
     graph_maintenance_parser.add_argument("--plan-refresh-costs", action="store_true", help="In dry-run mode, compute exact old-plus-new aggregate refresh costs for the candidate pool without mutating the graph store.")
     graph_maintenance_parser.add_argument("--mode", choices=["hot", "deep"], default="hot", help="hot may use cached no-op state; deep always scans graph sources.")
+    graph_maintenance_parser.add_argument("--hash-mode", choices=["cached", "exact"], default="cached", help="cached reuses graph/source-hash-cache.json entries whose path size and mtime_ns still match; exact rehashes source files.")
+    graph_maintenance_parser.add_argument("--write-hash-cache", action="store_true", help="Update graph/source-hash-cache.json during the source scan. This is a maintenance mutation and uses the shared maintenance lock.")
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--use-queue", action="store_true", help="Use graph/maintenance-queue.json as a bounded source-key selector before scanning the full source graph.")

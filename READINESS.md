@@ -165,6 +165,15 @@ Build the `.aoa` session-memory mechanism end to end:
   `graph-maintenance` report's non-zero `remaining_count` as
   `latest_graph_maintenance_remaining_sources` so stale ledgers or exhausted
   queues cannot make graph search look current
+- Graph deep source scans have an explicit hash-cache contract:
+  `graph-maintenance --mode deep --hash-mode exact --write-hash-cache` refreshes
+  `graph/source-hash-cache.json` under the shared maintenance lock, while
+  read-only `--hash-mode cached` consumes stat-matched entries and reports
+  `source_hash_cache` hit/miss/compute counts. 2026-06-25 live proof: exact
+  cache write took `21.677s` internal / `22.59s` wall, stored `5249` unique
+  file hashes, then cached deep took `5.166s` internal / `6.06s` wall with
+  `persistent_hit=14753`, `computed=0`, `remaining_count=0`. Regression proof:
+  `test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses`.
 - Optional search provider gates: `config/search-providers.json`,
   `search-provider-status`, local embedding semantic context, and local
   reranker ordering metadata

@@ -6551,6 +6551,71 @@ def test_graph_maintenance_deep_mode_scans_sources_even_when_hot_state_is_clean(
     assert payload["maintenance_detail"]["selection_strategy"] == "cheap_first_stored_counts"
 
 
+def test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_a = tmp_path / "session.manifest.json"
+    source_b = tmp_path / "session.index.json"
+    source_a.write_text(json.dumps({"session_id": "hash-cache"}, ensure_ascii=False), encoding="utf-8")
+    source_b.write_text(json.dumps({"events": []}, ensure_ascii=False), encoding="utf-8")
+    cache_payload = module.read_graph_source_hash_cache(aoa_root)
+    updates: dict[str, dict[str, Any]] = {}
+    stats = {"persistent_hit": 0, "persistent_miss": 0, "computed": 0, "missing": 0}
+
+    first = module.graph_source_metadata(
+        source_type="session",
+        session_id="hash-cache",
+        session_label="hash-cache",
+        source_paths=[source_a, source_b],
+        identity={"purpose": "warm-cache"},
+        source_hash_cache_entries=cache_payload["entries"],
+        source_hash_cache_updates=updates,
+        source_hash_stats=stats,
+        source_hash_mode="cached",
+    )
+    assert stats["persistent_miss"] == 2
+    assert stats["computed"] == 2
+    assert len(updates) == 2
+    update = module.write_graph_source_hash_cache(aoa_root, cache_payload, updates)
+    assert update["updated_count"] == 2
+
+    warmed = module.read_graph_source_hash_cache(aoa_root)
+
+    def fail_sha256_file(_path: Path) -> str:
+        raise AssertionError("stat-matched graph source hash cache must avoid file rehash")
+
+    monkeypatch.setattr(module, "sha256_file", fail_sha256_file)
+    cached_stats = {"persistent_hit": 0, "persistent_miss": 0, "computed": 0, "missing": 0}
+    cached = module.graph_source_metadata(
+        source_type="session",
+        session_id="hash-cache",
+        session_label="hash-cache",
+        source_paths=[source_a, source_b],
+        identity={"purpose": "warm-cache"},
+        source_hash_cache_entries=warmed["entries"],
+        source_hash_stats=cached_stats,
+        source_hash_mode="cached",
+    )
+    assert cached["source_sha"] == first["source_sha"]
+    assert cached_stats["persistent_hit"] == 2
+    assert cached_stats["computed"] == 0
+
+    monkeypatch.setattr(module, "sha256_file", lambda path: f"exact-{path.name}")
+    exact_stats = {"persistent_hit": 0, "persistent_miss": 0, "computed": 0, "missing": 0}
+    exact = module.graph_source_metadata(
+        source_type="session",
+        session_id="hash-cache",
+        session_label="hash-cache",
+        source_paths=[source_a, source_b],
+        identity={"purpose": "warm-cache"},
+        source_hash_cache_entries=warmed["entries"],
+        source_hash_stats=exact_stats,
+        source_hash_mode="exact",
+    )
+    assert exact["source_sha"] != first["source_sha"]
+    assert exact_stats["persistent_hit"] == 0
+    assert exact_stats["computed"] == 2
+
+
 def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / "graph"
