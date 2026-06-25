@@ -43478,7 +43478,6 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
                 "search_index",
                 "graph_maintenance",
                 "agent_atlas_index",
-                "performance_baseline",
                 "auto_maintenance_resource_launch",
             }
             or "__auto-maintenance-" in path
@@ -43486,7 +43485,6 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
             or "__index-maintenance" in path
             or "__search-index" in path
             or "__graph-maintenance" in path
-            or "__performance-baseline" in path
         ):
             continue
         if diagnostic_report_problem(report):

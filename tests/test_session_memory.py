@@ -9392,6 +9392,33 @@ def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) 
     assert module.recent_problem_maintenance_reports(aoa_root) == []
 
 
+def test_recent_problem_jobs_ignore_performance_baseline_reports(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    report = diagnostics / "20260625T124036Z__performance-baseline__aoa_decision.json"
+    module.write_json(
+        report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_performance_baseline",
+            "generated_at": "2026-06-25T12:40:26Z",
+            "ok": False,
+            "diagnostics": ["answer_rule_gate:weak_route"],
+            "steps": [
+                {
+                    "id": "graphrag_packet",
+                    "ok": True,
+                    "diagnostics": ["answer_rule_gate:weak_route"],
+                }
+            ],
+        },
+    )
+
+    assert module.diagnostic_report_problem(module.read_json(report, {})) is True
+    assert module.recent_problem_maintenance_reports(aoa_root) == []
+
+
 def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
