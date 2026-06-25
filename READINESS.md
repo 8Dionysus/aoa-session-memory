@@ -711,6 +711,16 @@ Last observed result:
   removed. `maintenance-status --full` then reported `ok=true`, search
   `current`, graph `current_with_retired_sources`, entity registry `current`,
   `warning_count=0`, and no `slow_phases`.
+- 2026-06-25 scoped search-index hot-path proof: after the entity-registry
+  projection was current, a live
+  `search-index 2026-06-20__003__codex-in-dionysus --no-rebuild` completed via
+  the maintenance coordinator in `139ms`. `session_bulk_index` took `23ms`,
+  `entity_registry_refresh` took `65ms` with `skipped=true` and
+  `skip_reason=entity_registry_search_sync_current`, and
+  `search_catalog_refresh` took `14ms` with
+  `catalog_state_basis=selected_records_with_catalog_fallback`. This proves the
+  scoped hot path no longer cold-refreshes the whole entity registry or rescans
+  all session indexes just to refresh the catalog.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event

@@ -2796,6 +2796,16 @@ def test_search_index_incremental_replaces_selected_session_documents(tmp_path: 
     incremental = module.search_index_sessions(aoa_root=aoa_root, target=record["session_label"], rebuild=False)
     assert incremental["ok"] is True
     assert incremental["removed_document_count"] == before_count
+    registry_phase = next(item for item in incremental["phase_timings"] if item["phase"] == "entity_registry_refresh")
+    assert registry_phase["skipped"] is True
+    assert registry_phase["skip_reason"] == "entity_registry_search_sync_current"
+    assert incremental["inserted_entity_registry_document_count"] == 0
+    assert incremental["updated_entity_registry_document_count"] == 0
+    assert incremental["removed_entity_registry_document_count"] == 0
+    assert incremental["unchanged_entity_registry_document_count"] == incremental["entity_registry_document_count"]
+    catalog_phase = next(item for item in incremental["phase_timings"] if item["phase"] == "search_catalog_refresh")
+    assert catalog_phase["catalog_state_basis"] == "selected_records"
+    assert incremental["search_catalog"]["catalog_state_basis"] == "selected_records"
 
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = 'obsolete-doc'").fetchone()[0] == 0

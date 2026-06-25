@@ -263,9 +263,10 @@ class filters. MCP may expose these read-only packets, but maintenance,
 reindex, repair, and promotion stay outside MCP.
 
 Full `search-index` rebuilds keep raw lexical text bounded by default and do
-not run inline SQLite `PRAGMA optimize` inside the session loop. Rebuild
-reports carry phase timings for bulk session indexing, SQLite index build, and
-entity-registry refresh so a slow rebuild has an observable stage boundary.
+not run inline SQLite `PRAGMA optimize` inside the session loop. Reports carry
+phase timings for bulk session indexing, SQLite index build,
+entity-registry refresh, and search-catalog refresh so a slow path has an
+observable stage boundary.
 Search schema 10 additionally caps route postings for aggregate documents
 (`session`, `segment`, `task_episode`, `incident`) while leaving event-level
 route postings uncapped. Aggregate route fields are ordered by route-signal
@@ -273,8 +274,11 @@ frequency before capping, so the retained aggregate postings are the strongest
 signals rather than alphabetic noise.
 Every successful `search-index` run refreshes `search/catalog.json`. The
 catalog records `session_id`, label, date, freshness, schema versions,
-document count, active projection, and monthly shard key. While shard DBs are
-not materialized, `active_projection=monolith_fallback` must remain explicit.
+document count, active projection, and monthly shard key. Scoped or incremental
+search-index runs use selected records plus existing catalog state for
+unaffected sessions; if that does not cover the indexed rows, the catalog route
+falls back to a full live session-index scan. While shard DBs are not
+materialized, `active_projection=monolith_fallback` must remain explicit.
 Future shard fan-out should start from this catalog instead of rediscovering
 session buckets through broad monolith scans.
 `search-shards` materializes monthly shard DBs from the same raw/session-index

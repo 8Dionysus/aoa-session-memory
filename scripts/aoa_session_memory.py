@@ -24822,6 +24822,7 @@ def search_catalog_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "materialized_shard_count": payload.get("materialized_shard_count"),
         "shard_strategy": payload.get("shard_strategy"),
         "active_projection": payload.get("active_projection"),
+        "catalog_state_basis": payload.get("catalog_state_basis"),
         "generated_at": payload.get("generated_at"),
         "diagnostics": payload.get("diagnostics", []),
     }
@@ -24911,6 +24912,7 @@ def build_search_catalog(
     *,
     write: bool = False,
     write_report: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     db_path = search_db_path(aoa_root)
@@ -25024,14 +25026,54 @@ def build_search_catalog(
     shard_metadata_cache: dict[str, dict[str, Any]] = {}
     live_state_by_session: dict[str, dict[str, Any]] = {}
     live_state_basis = "live_session_indexes"
-    try:
-        for record in chronological_session_records(aoa_root):
+    selected_state_key_count = 0
+    if selected_records is not None:
+        for record in selected_records:
             state = session_projection_fingerprint(record, include_rendered_markdown=False)
             for key in (state.get("session_id"), state.get("session_label")):
                 if key:
                     live_state_by_session[str(key)] = state
-    except Exception:
-        live_state_basis = "monolith_session_index_state_fallback"
+                    selected_state_key_count += 1
+        live_state_basis = "selected_records"
+        rows_missing_selected_state = [
+            row
+            for row in rows
+            if str(row["session_id"] or "") not in live_state_by_session
+            and str(row["session_label"] or "") not in live_state_by_session
+        ]
+        if rows_missing_selected_state:
+            existing_catalog = read_json(catalog_path, {})
+            existing_sessions = existing_catalog.get("sessions") if isinstance(existing_catalog, dict) else None
+            if isinstance(existing_sessions, list):
+                for item in existing_sessions:
+                    if not isinstance(item, dict):
+                        continue
+                    state = {
+                        "fingerprint": str(item.get("source_fingerprint") or ""),
+                        "latest_source_mtime": ops_float_value(item.get("source_latest_mtime")),
+                    }
+                    for key in (item.get("session_id"), item.get("session_label")):
+                        if key and str(key) not in live_state_by_session:
+                            live_state_by_session[str(key)] = state
+                live_state_basis = "selected_records_with_catalog_fallback"
+            rows_missing_catalog_state = [
+                row
+                for row in rows
+                if str(row["session_id"] or "") not in live_state_by_session
+                and str(row["session_label"] or "") not in live_state_by_session
+            ]
+            if rows_missing_catalog_state:
+                live_state_by_session = {}
+                live_state_basis = "live_session_indexes"
+    if not live_state_by_session:
+        try:
+            for record in chronological_session_records(aoa_root):
+                state = session_projection_fingerprint(record, include_rendered_markdown=False)
+                for key in (state.get("session_id"), state.get("session_label")):
+                    if key:
+                        live_state_by_session[str(key)] = state
+        except Exception:
+            live_state_basis = "monolith_session_index_state_fallback"
     for row in rows:
         session_id = str(row["session_id"] or "")
         session_label = str(row["session_label"] or "")
@@ -25183,6 +25225,7 @@ def build_search_catalog(
         "source_db_mtime": path_mtime(db_path),
         "search_metadata": metadata,
         "catalog_state_basis": live_state_basis,
+        "selected_state_key_count": selected_state_key_count,
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
         "fallback": {
@@ -29243,11 +29286,18 @@ def search_index_sessions(
         if include_entity_registry and not budget_exhausted and (deadline is None or time.monotonic() < deadline):
             registry_started = time.monotonic()
             progress_event("search_index_phase_start", {"phase": "entity_registry_refresh"})
-            registry_refresh = refresh_search_entity_registry_documents(
+            registry_state = entity_registry_maintenance_status(aoa_root)
+            registry_refresh = entity_registry_search_sync_current_noop(
                 conn,
                 aoa_root=aoa_root,
-                route_terms_db_path=write_db_path,
+                registry_state=registry_state,
             )
+            if registry_refresh is None:
+                registry_refresh = refresh_search_entity_registry_documents(
+                    conn,
+                    aoa_root=aoa_root,
+                    route_terms_db_path=write_db_path,
+                )
             entity_registry_document_count = int_value(registry_refresh.get("target_count"))
             inserted_entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
             updated_entity_registry_document_count = int_value(registry_refresh.get("updated_count"))
@@ -29262,6 +29312,8 @@ def search_index_sessions(
                 updated_count=updated_entity_registry_document_count,
                 unchanged_count=unchanged_entity_registry_document_count,
                 removed_count=removed_entity_registry_document_count,
+                skipped=bool(registry_refresh.get("skipped")),
+                skip_reason=str(registry_refresh.get("skip_reason") or ""),
             )
         elif not include_entity_registry:
             record_phase("entity_registry_refresh", time.monotonic(), inserted_count=0, removed_count=0, skipped=True)
@@ -29442,7 +29494,16 @@ def search_index_sessions(
             cleanup_search_rebuild_temp(temp_db_path)
             payload["discarded_build_db_path"] = str(temp_db_path)
     if payload["ok"] and refresh_catalog:
-        catalog_refresh = build_search_catalog(aoa_root, write=True)
+        catalog_started = time.monotonic()
+        catalog_refresh = build_search_catalog(aoa_root, write=True, selected_records=records)
+        record_phase(
+            "search_catalog_refresh",
+            catalog_started,
+            status=catalog_refresh.get("status"),
+            session_count=int_value(catalog_refresh.get("session_count")),
+            shard_count=int_value(catalog_refresh.get("shard_count")),
+            catalog_state_basis=str(catalog_refresh.get("catalog_state_basis") or ""),
+        )
         payload["search_catalog"] = search_catalog_summary(catalog_refresh)
         if not catalog_refresh.get("ok"):
             payload["ok"] = False

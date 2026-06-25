@@ -979,7 +979,10 @@ maps each indexed session to its current freshness, schema versions, active
 projection, and future monthly shard key. Until monthly shard DBs are
 materialized, the active projection is `monolith_fallback`; the catalog is the
 route map for sharding, not a replacement for raw/session indexes or the search
-DB.
+DB. Scoped or incremental `search-index` runs refresh the catalog from selected
+records plus existing catalog state for unaffected sessions, and fall back to a
+full live session-index scan only when that state does not cover the indexed
+rows.
 
 ```bash
 python3 scripts/aoa_session_memory.py search-catalog \
@@ -1022,7 +1025,8 @@ so canonical response items are not crowded out by progress stream noise.
 Full rebuilds do not run inline SQLite `PRAGMA optimize` inside the session
 loop; rebuild quality comes from the normalized route tables and explicit index
 build phase. Reports include phase timings for bulk session indexing, SQLite
-index build, and entity-registry refresh so long rebuilds are diagnosable.
+index build, entity-registry refresh, and search-catalog refresh so long paths
+are diagnosable.
 
 Build or inspect the generated entity registry for skills, MCPs, hooks, tools,
 APIs, scripts, validators, tests, evals, graph, and memory surfaces:
