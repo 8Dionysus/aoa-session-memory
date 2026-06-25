@@ -5996,9 +5996,9 @@ def test_sqlite_search_index_state_scoped_uses_session_state_without_global_coun
         INSERT INTO session_index_state (
             session_id, session_label, source_fingerprint, source_latest_mtime,
             search_schema_version, route_signal_classifier_version, indexed_at,
-            document_count
+            document_count, projection_fingerprint_mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "scoped-session",
@@ -6009,6 +6009,7 @@ def test_sqlite_search_index_state_scoped_uses_session_state_without_global_coun
             module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
             "2026-06-20T00:00:00Z",
             7,
+            module.SEARCH_PROJECTION_FINGERPRINT_MODE,
         ),
     )
     conn.commit()
@@ -11937,6 +11938,131 @@ def test_search_provider_status_hot_route_uses_persisted_state_without_archive_s
     assert freshness["freshness_state_status_counts"] == {"current": 1}
 
 
+def test_search_provider_status_hot_route_detects_projection_fingerprint_contract_drift(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-provider-contract-drift.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "provider-contract-drift", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Find hot contract evidence"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "provider-contract-drift",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    record = module.resolve_session_record(aoa_root, "provider-contract-drift")
+    shards = module.materialize_search_shards(aoa_root=aoa_root, target="all")
+    assert shards["ok"] is True
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=False)
+    try:
+        conn.execute("UPDATE session_index_state SET projection_fingerprint_mode = 'legacy_contract'")
+        conn.execute("UPDATE search_freshness_state SET projection_fingerprint_mode = 'legacy_contract'")
+        conn.commit()
+    finally:
+        conn.close()
+    shard_db = module.search_shard_db_path(aoa_root, module.search_shard_key_for_record(record))
+    shard_conn = module.init_search_db(shard_db, rebuild=False)
+    try:
+        shard_conn.execute("UPDATE session_index_state SET projection_fingerprint_mode = 'legacy_contract'")
+        shard_conn.execute("UPDATE search_freshness_state SET projection_fingerprint_mode = 'legacy_contract'")
+        shard_conn.commit()
+    finally:
+        shard_conn.close()
+    stale_catalog = module.build_search_catalog(aoa_root, write=True, selected_records=[record])
+    assert stale_catalog["sessions"][0]["monolith_status"] == "stale"
+    assert stale_catalog["sessions"][0]["shard_status"] == "stale"
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("archive scan should not run")),
+    )
+
+    stale = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider = stale["providers"]["portable_sqlite"]
+    freshness = provider["freshness"]
+
+    assert stale["ok"] is False
+    assert provider["status"] == "stale"
+    assert freshness["source_scan"] is False
+    assert freshness["projection_fingerprint_mode_mismatch_count"] == 1
+    assert "projection_fingerprint_mode_changed" in freshness["reasons"]
+
+    monkeypatch.undo()
+    maintained = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="provider-contract-drift",
+        apply=True,
+        repair_graph=False,
+        repair_token_accounting=False,
+    )
+    actions = {action["id"]: action for action in maintained["actions"]}
+    assert actions["refresh_search_projection_state"]["status"] == "applied"
+    assert actions["refresh_search_projection_state"]["result"]["shard_state_refresh"]["updated_count"] == 1
+    assert actions["refresh_search_projection_state"]["result"]["search_catalog_refresh"]["materialized_shard_count"] == 1
+    current = module.search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    assert current["ok"] is True
+    assert current["providers"]["portable_sqlite"]["freshness"]["projection_fingerprint_mode_mismatch_count"] == 0
+    current_catalog = module.build_search_catalog(aoa_root, write=True, selected_records=[record])
+    assert current_catalog["sessions"][0]["monolith_status"] == "current"
+    assert current_catalog["sessions"][0]["shard_status"] == "current"
+
+
+def test_index_maintenance_can_skip_token_accounting_planning(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-13T00-00-00-skip-token-planning.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "skip-token-planning", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep search maintenance light"}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "skip-token-planning",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    module.search_index_sessions(aoa_root=aoa_root, target="all")
+    monkeypatch.setattr(
+        module,
+        "token_accounting_backfill",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("token accounting should not be planned")),
+    )
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        repair_token_accounting=False,
+    )
+    actions = {action["id"]: action for action in payload["actions"]}
+
+    assert payload["ok"] is True
+    assert payload["repair_token_accounting"] is False
+    assert payload["token_backfill"]["skipped"] is True
+    assert payload["token_backfill"]["skip_reason"] == "token_accounting_backfill_skipped_by_profile"
+    assert actions.get("token_accounting_backfill", {}).get("needed", False) is False
+
+
 def test_search_provider_status_hot_route_reports_missing_freshness_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -12373,6 +12499,7 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert before["next_actions"][0]["id"] == "wait_live_catchup"
     assert before["next_actions"][0]["command"][2] == "index-maintenance"
     assert "--skip-graph-repair" in before["next_actions"][0]["command"]
+    assert "--skip-token-accounting" in before["next_actions"][0]["command"]
     assert before["live_tail"]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
     assert before["live_tail"]["catchup_ready_to_run"] is False
 

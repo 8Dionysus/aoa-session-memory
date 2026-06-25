@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,7 +104,8 @@ ENTITY_REGISTRY_SCHEMA_VERSION = 1
 ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
-SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 1
+SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 2
+SEARCH_PROJECTION_FINGERPRINT_MODE = "search_sources_without_rendered_markdown_v1"
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_slim_preview_hot"
 SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE = "structured_route_preview_only_no_compressed_body"
 SEARCH_FTS_STORAGE_MODE = "full_text_fts_with_compressed_body_v1"
@@ -125,6 +127,7 @@ SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
 SEARCH_REBUILD_INLINE_OPTIMIZE_EVERY = 0
 SEARCH_INCREMENTAL_INLINE_OPTIMIZE_EVERY = 50
+SESSION_PROJECTION_FINGERPRINT_WORKERS = 8
 SEARCH_ROUTE_LAYERS_PREVIEW_CHARS = 512
 SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
 SEARCH_STRUCTURED_SHARD_ROUTE_LAYERS_PREVIEW_CHARS = 160
@@ -15511,6 +15514,7 @@ def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_m
     return {
         "session_id": payload["session_id"],
         "session_label": payload["session_label"],
+        "session_date": str(display.get("date") or session_record_date({**record, "session_label": payload["session_label"]})),
         "session_dir": str(session_dir),
         "fingerprint": digest,
         "latest_source_mtime": latest_mtime,
@@ -15548,12 +15552,35 @@ def session_projection_activity_state(record: dict[str, Any], *, include_rendere
     }
 
 
+def session_projection_fingerprints_for_records(
+    records: list[dict[str, Any]],
+    *,
+    include_rendered_markdown: bool,
+) -> list[dict[str, Any]]:
+    if len(records) < 8 or SESSION_PROJECTION_FINGERPRINT_WORKERS <= 1:
+        return [
+            session_projection_fingerprint(record, include_rendered_markdown=include_rendered_markdown)
+            for record in records
+        ]
+    worker_count = max(1, min(SESSION_PROJECTION_FINGERPRINT_WORKERS, len(records)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        return list(
+            executor.map(
+                lambda record: session_projection_fingerprint(
+                    record,
+                    include_rendered_markdown=include_rendered_markdown,
+                ),
+                records,
+            )
+        )
+
+
 def projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [session_projection_fingerprint(record) for record in records]
+    return session_projection_fingerprints_for_records(records, include_rendered_markdown=True)
 
 
 def search_projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [session_projection_fingerprint(record, include_rendered_markdown=False) for record in records]
+    return session_projection_fingerprints_for_records(records, include_rendered_markdown=False)
 
 
 def projection_quiescence_split(
@@ -15758,11 +15785,13 @@ def route_index_drift_records(records: list[dict[str, Any]]) -> list[dict[str, A
 def sqlite_search_session_states(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     if not sqlite_table_exists(conn, "session_index_state"):
         return {}
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
+    projection_mode_expr = "projection_fingerprint_mode" if "projection_fingerprint_mode" in columns else "'' AS projection_fingerprint_mode"
     rows = conn.execute(
-        """
+        f"""
         SELECT session_id, session_label, source_fingerprint, source_latest_mtime,
                search_schema_version, route_signal_classifier_version, indexed_at,
-               document_count
+               document_count, {projection_mode_expr}
         FROM session_index_state
         """
     ).fetchall()
@@ -15776,6 +15805,7 @@ def sqlite_search_session_states(conn: sqlite3.Connection) -> dict[str, dict[str
             "route_signal_classifier_version": row["route_signal_classifier_version"],
             "indexed_at": row["indexed_at"],
             "document_count": row["document_count"],
+            "projection_fingerprint_mode": row["projection_fingerprint_mode"],
         }
         for row in rows
     }
@@ -15784,12 +15814,14 @@ def sqlite_search_session_states(conn: sqlite3.Connection) -> dict[str, dict[str
 def sqlite_search_freshness_states(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     if not sqlite_table_exists(conn, "search_freshness_state"):
         return {}
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(search_freshness_state)").fetchall()}
+    projection_mode_expr = "projection_fingerprint_mode" if "projection_fingerprint_mode" in columns else "'' AS projection_fingerprint_mode"
     rows = conn.execute(
-        """
+        f"""
         SELECT session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
                status, reason, last_checked, last_indexed_at, deferred_live_reason,
                live_transcript_path, live_transcript_mtime, search_schema_version,
-               route_signal_classifier_version, document_count, updated_at
+               route_signal_classifier_version, document_count, updated_at, {projection_mode_expr}
         FROM search_freshness_state
         """
     ).fetchall()
@@ -15811,6 +15843,7 @@ def sqlite_search_freshness_states(conn: sqlite3.Connection) -> dict[str, dict[s
             "route_signal_classifier_version": row["route_signal_classifier_version"],
             "document_count": row["document_count"],
             "updated_at": row["updated_at"],
+            "projection_fingerprint_mode": row["projection_fingerprint_mode"],
         }
         for row in rows
     }
@@ -15853,6 +15886,8 @@ def search_dirty_projection_states(
                 reasons.append("search_schema_version_changed")
             if int_value(indexed.get("route_signal_classifier_version")) != ROUTE_SIGNAL_CLASSIFIER_VERSION:
                 reasons.append("route_signal_classifier_version_changed")
+            if str(indexed.get("projection_fingerprint_mode") or "") != SEARCH_PROJECTION_FINGERPRINT_MODE:
+                reasons.append("projection_fingerprint_mode_changed")
         if reasons:
             dirty.append({**item, "reasons": reasons})
     return dirty
@@ -15953,9 +15988,9 @@ def upsert_search_session_state(
         INSERT OR REPLACE INTO session_index_state (
             session_id, session_label, source_fingerprint, source_latest_mtime,
             search_schema_version, route_signal_classifier_version, indexed_at,
-            document_count
+            document_count, projection_fingerprint_mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(projection_state.get("session_id") or ""),
@@ -15966,6 +16001,7 @@ def upsert_search_session_state(
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             indexed_at,
             int_value(document_count),
+            SEARCH_PROJECTION_FINGERPRINT_MODE,
         ),
     )
     upsert_search_freshness_state(
@@ -15998,9 +16034,10 @@ def upsert_search_freshness_state(
             session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
             status, reason, last_checked, last_indexed_at, deferred_live_reason,
             live_transcript_path, live_transcript_mtime, search_schema_version,
-            route_signal_classifier_version, document_count, updated_at
+            route_signal_classifier_version, document_count, updated_at,
+            projection_fingerprint_mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(projection_state.get("session_id") or ""),
@@ -16019,6 +16056,7 @@ def upsert_search_freshness_state(
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             int_value(document_count),
             checked_at,
+            SEARCH_PROJECTION_FINGERPRINT_MODE,
         ),
     )
 
@@ -16046,16 +16084,19 @@ def compact_search_freshness_state_row(row: sqlite3.Row | dict[str, Any]) -> dic
         "route_signal_classifier_version": int_value(get("route_signal_classifier_version")),
         "document_count": int_value(get("document_count")),
         "updated_at": str(get("updated_at") or ""),
+        "projection_fingerprint_mode": str(get("projection_fingerprint_mode") or ""),
     }
 
 
 def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) -> dict[str, Any]:
     indexed_session_state_count = 0
+    session_state_columns: set[str] = set()
     if sqlite_table_exists(conn, "session_index_state"):
+        session_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
         indexed_session_state_count = int(conn.execute("SELECT COUNT(*) FROM session_index_state").fetchone()[0] or 0)
     if not sqlite_table_exists(conn, "search_freshness_state"):
         return {
-            "status": "current" if indexed_session_state_count > 0 else "unknown",
+            "status": "stale" if indexed_session_state_count > 0 else "unknown",
             "checked": True,
             "mode": "hot_persisted_state",
             "scope": "cached_session_index_compat",
@@ -16064,8 +16105,10 @@ def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) 
             "freshness_state_present": False,
             "indexed_session_state_count": indexed_session_state_count,
             "freshness_state_count": 0,
-            "dirty_session_count": 0,
-            "actionable_dirty_session_count": 0,
+            "projection_fingerprint_mode": SEARCH_PROJECTION_FINGERPRINT_MODE,
+            "projection_fingerprint_mode_mismatch_count": indexed_session_state_count,
+            "dirty_session_count": indexed_session_state_count,
+            "actionable_dirty_session_count": indexed_session_state_count,
             "deferred_live_session_count": 0,
             "dirty_session_ids": [],
             "actionable_dirty_session_ids": [],
@@ -16073,14 +16116,105 @@ def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) 
             "actionable_dirty_sessions": [],
             "deferred_live_sessions": [],
             "db_mtime": path_mtime(db_path),
-            "reasons": [] if indexed_session_state_count > 0 else ["search_freshness_state_missing"],
-            "truth_status": "hot_compat_session_index_state_no_source_scan",
+            "reasons": ["search_freshness_state_missing"] if indexed_session_state_count > 0 else ["search_freshness_state_missing"],
+            "truth_status": "hot_compat_session_index_state_missing_freshness_no_source_scan",
         }
+    freshness_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(search_freshness_state)").fetchall()}
     status_rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM search_freshness_state GROUP BY status"
     ).fetchall()
     status_counts = {str(row["status"] or "unknown"): int(row["count"] or 0) for row in status_rows}
     freshness_state_count = sum(status_counts.values())
+    session_mode_mismatch_count = 0
+    session_mode_rows: list[dict[str, Any]] = []
+    if indexed_session_state_count > 0:
+        if "projection_fingerprint_mode" not in session_state_columns:
+            session_mode_mismatch_count = indexed_session_state_count
+            session_mode_query = """
+                SELECT session_id, session_label, '' AS session_dir, source_fingerprint,
+                       source_latest_mtime, 'stale' AS status,
+                       'projection_fingerprint_mode_missing' AS reason,
+                       indexed_at AS last_checked, indexed_at AS last_indexed_at,
+                       '' AS deferred_live_reason, '' AS live_transcript_path,
+                       0 AS live_transcript_mtime, search_schema_version,
+                       route_signal_classifier_version, document_count, indexed_at AS updated_at,
+                       '' AS projection_fingerprint_mode
+                FROM session_index_state
+                ORDER BY session_label
+                LIMIT 8
+            """
+            session_mode_rows = [compact_search_freshness_state_row(row) for row in conn.execute(session_mode_query).fetchall()]
+        else:
+            session_mode_mismatch_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM session_index_state WHERE COALESCE(projection_fingerprint_mode, '') <> ?",
+                    (SEARCH_PROJECTION_FINGERPRINT_MODE,),
+                ).fetchone()[0]
+                or 0
+            )
+            session_mode_query = """
+                SELECT session_id, session_label, '' AS session_dir, source_fingerprint,
+                       source_latest_mtime, 'stale' AS status,
+                       'projection_fingerprint_mode_changed' AS reason,
+                       indexed_at AS last_checked, indexed_at AS last_indexed_at,
+                       '' AS deferred_live_reason, '' AS live_transcript_path,
+                       0 AS live_transcript_mtime, search_schema_version,
+                       route_signal_classifier_version, document_count, indexed_at AS updated_at,
+                       projection_fingerprint_mode
+                FROM session_index_state
+                WHERE COALESCE(projection_fingerprint_mode, '') <> ?
+                ORDER BY session_label
+                LIMIT 8
+            """
+            session_mode_rows = [
+                compact_search_freshness_state_row(row)
+                for row in conn.execute(session_mode_query, (SEARCH_PROJECTION_FINGERPRINT_MODE,)).fetchall()
+            ]
+    freshness_mode_mismatch_count = 0
+    freshness_mode_rows: list[dict[str, Any]] = []
+    if freshness_state_count > 0:
+        if "projection_fingerprint_mode" not in freshness_state_columns:
+            freshness_mode_mismatch_count = freshness_state_count
+            freshness_mode_query = """
+                SELECT session_id, session_label, session_dir, source_fingerprint,
+                       source_latest_mtime, 'stale' AS status,
+                       'projection_fingerprint_mode_missing' AS reason,
+                       last_checked, last_indexed_at,
+                       deferred_live_reason, live_transcript_path,
+                       live_transcript_mtime, search_schema_version,
+                       route_signal_classifier_version, document_count, updated_at,
+                       '' AS projection_fingerprint_mode
+                FROM search_freshness_state
+                ORDER BY updated_at DESC, session_label
+                LIMIT 8
+            """
+            freshness_mode_rows = [compact_search_freshness_state_row(row) for row in conn.execute(freshness_mode_query).fetchall()]
+        else:
+            freshness_mode_mismatch_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM search_freshness_state WHERE COALESCE(projection_fingerprint_mode, '') <> ?",
+                    (SEARCH_PROJECTION_FINGERPRINT_MODE,),
+                ).fetchone()[0]
+                or 0
+            )
+            freshness_mode_query = """
+                SELECT session_id, session_label, session_dir, source_fingerprint,
+                       source_latest_mtime, 'stale' AS status,
+                       'projection_fingerprint_mode_changed' AS reason,
+                       last_checked, last_indexed_at,
+                       deferred_live_reason, live_transcript_path,
+                       live_transcript_mtime, search_schema_version,
+                       route_signal_classifier_version, document_count, updated_at,
+                       projection_fingerprint_mode
+                FROM search_freshness_state
+                WHERE COALESCE(projection_fingerprint_mode, '') <> ?
+                ORDER BY updated_at DESC, session_label
+                LIMIT 8
+            """
+            freshness_mode_rows = [
+                compact_search_freshness_state_row(row)
+                for row in conn.execute(freshness_mode_query, (SEARCH_PROJECTION_FINGERPRINT_MODE,)).fetchall()
+            ]
     missing_state_count = 0
     missing_rows: list[dict[str, Any]] = []
     if indexed_session_state_count > 0:
@@ -16139,17 +16273,24 @@ def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) 
         LIMIT 8
         """
     ).fetchall()
-    actionable_sessions = [compact_search_freshness_state_row(row) for row in actionable_rows] + missing_rows
+    contract_rows = session_mode_rows or freshness_mode_rows
+    actionable_sessions = [compact_search_freshness_state_row(row) for row in actionable_rows] + missing_rows + contract_rows
     deferred_sessions = [compact_search_freshness_state_row(row) for row in deferred_rows]
-    dirty_sessions = [compact_search_freshness_state_row(row) for row in dirty_rows] + missing_rows
-    actionable_count = sum(count for status, count in status_counts.items() if status not in {"current", "deferred_live"}) + missing_state_count
+    dirty_sessions = [compact_search_freshness_state_row(row) for row in dirty_rows] + missing_rows + contract_rows
+    contract_mismatch_count = max(session_mode_mismatch_count, freshness_mode_mismatch_count)
+    actionable_count = max(
+        sum(count for status, count in status_counts.items() if status not in {"current", "deferred_live"}) + missing_state_count,
+        contract_mismatch_count,
+    )
     deferred_count = status_counts.get("deferred_live", 0)
-    dirty_count = freshness_state_count - status_counts.get("current", 0) + missing_state_count
+    dirty_count = max(freshness_state_count - status_counts.get("current", 0) + missing_state_count, contract_mismatch_count)
     reasons: list[str] = []
     if actionable_count > 0:
         reasons.append("session_projection_dirty")
     if missing_state_count > 0:
         reasons.append("search_freshness_state_missing")
+    if contract_mismatch_count > 0:
+        reasons.append("projection_fingerprint_mode_changed")
     if deferred_count > 0:
         reasons.append("recent_live_projection_updates_deferred")
     freshness_status = "current"
@@ -16168,6 +16309,10 @@ def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) 
         "indexed_session_state_count": indexed_session_state_count,
         "freshness_state_count": freshness_state_count,
         "freshness_state_status_counts": dict(sorted(status_counts.items())),
+        "projection_fingerprint_mode": SEARCH_PROJECTION_FINGERPRINT_MODE,
+        "session_state_projection_fingerprint_mode_mismatch_count": session_mode_mismatch_count,
+        "freshness_state_projection_fingerprint_mode_mismatch_count": freshness_mode_mismatch_count,
+        "projection_fingerprint_mode_mismatch_count": contract_mismatch_count,
         "missing_freshness_state_count": missing_state_count,
         "dirty_session_count": dirty_count,
         "actionable_dirty_session_count": actionable_count,
@@ -16494,8 +16639,9 @@ def refresh_search_projection_states(
     *,
     indexed_at: str,
     budget_deadline: float | None = None,
+    db_path_override: Path | None = None,
 ) -> dict[str, Any]:
-    db_path = search_db_path(aoa_root)
+    db_path = db_path_override or search_db_path(aoa_root)
     if not db_path.exists():
         return {"ok": False, "updated_count": 0, "skipped_count": 0, "budget_exhausted": False, "diagnostics": ["search_index_missing"], "sessions": []}
     updated = 0
@@ -16507,6 +16653,8 @@ def refresh_search_projection_states(
     try:
         conn = init_search_db(db_path, rebuild=False, budget_deadline=budget_deadline)
         prefetched_counts = search_document_counts_for_projections(conn, projections)
+        indexed_states = sqlite_search_session_states(conn)
+        db_mtime = path_mtime(db_path)
         conn.execute("BEGIN")
         for projection in projections:
             if budget_deadline is not None and time.monotonic() >= budget_deadline:
@@ -16523,11 +16671,27 @@ def refresh_search_projection_states(
                 item["status"] = "skipped_missing_documents"
                 sessions.append(item)
                 continue
-            document_freshness = search_projection_documents_freshness(conn, projection)
+            indexed = indexed_states.get(str(projection.get("session_id") or ""), {})
+            fast_contract_refresh = search_projection_contract_state_refreshable(
+                projection,
+                indexed_state=indexed,
+                db_mtime=db_mtime,
+            )
+            if fast_contract_refresh:
+                document_freshness = {
+                    "ok": True,
+                    "status": "trusted_by_projection_fingerprint_mode_mtime",
+                    "checked_ref_count": 0,
+                    "stale_ref_count": 0,
+                    "diagnostics": [],
+                }
+            else:
+                document_freshness = search_projection_documents_freshness(conn, projection)
             item["document_freshness"] = {
                 key: document_freshness.get(key)
                 for key in ("status", "checked_ref_count", "stale_ref_count", "diagnostics")
             }
+            item["fast_contract_refresh"] = fast_contract_refresh
             if not document_freshness.get("ok"):
                 skipped += 1
                 item["status"] = "skipped_stale_documents"
@@ -16550,10 +16714,116 @@ def refresh_search_projection_states(
                 pass
     return {
         "ok": not diagnostics and not budget_exhausted,
+        "db_path": str(db_path),
         "updated_count": updated,
         "skipped_count": skipped,
         "budget_exhausted": budget_exhausted,
         "sessions": sessions,
+        "diagnostics": diagnostics,
+    }
+
+
+def search_projection_contract_state_refreshable(
+    projection: dict[str, Any],
+    *,
+    indexed_state: dict[str, Any],
+    db_mtime: float,
+) -> bool:
+    if not indexed_state:
+        return False
+    if str(indexed_state.get("projection_fingerprint_mode") or "") == SEARCH_PROJECTION_FINGERPRINT_MODE:
+        return False
+    if str(indexed_state.get("search_schema_version") or "") != str(SEARCH_SCHEMA_VERSION):
+        return False
+    if int_value(indexed_state.get("route_signal_classifier_version")) != ROUTE_SIGNAL_CLASSIFIER_VERSION:
+        return False
+    if int_value(indexed_state.get("document_count")) <= 0:
+        return False
+    projection_mtime = float(projection.get("latest_source_mtime") or 0.0)
+    indexed_mtime = float(indexed_state.get("source_latest_mtime") or 0.0)
+    if projection_mtime <= 0 or indexed_mtime <= 0:
+        return False
+    if abs(projection_mtime - indexed_mtime) > 0.001:
+        return False
+    if db_mtime > 0 and projection_mtime > db_mtime + 0.001:
+        return False
+    return True
+
+
+def search_projection_shard_key(projection: dict[str, Any]) -> str:
+    session_label = str(projection.get("session_label") or "")
+    session_date = str(projection.get("session_date") or "")
+    if not session_date:
+        session_dir_text = str(projection.get("session_dir") or "")
+        if session_dir_text:
+            session_date = session_record_date({"path": session_dir_text, "session_label": session_label})
+    return search_shard_key_for_session(session_label, session_date)
+
+
+def refresh_search_projection_states_for_materialized_shards(
+    aoa_root: Path,
+    projections: list[dict[str, Any]],
+    *,
+    indexed_at: str,
+    budget_deadline: float | None = None,
+) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for projection in projections:
+        shard_key = search_projection_shard_key(projection)
+        if shard_key:
+            grouped[shard_key].append(projection)
+    shard_results: list[dict[str, Any]] = []
+    updated_count = 0
+    skipped_count = 0
+    missing_count = 0
+    budget_exhausted = False
+    diagnostics: list[str] = []
+    for shard_key in sorted(grouped):
+        if budget_deadline is not None and time.monotonic() >= budget_deadline:
+            budget_exhausted = True
+            break
+        shard_path = search_shard_db_path(aoa_root, shard_key)
+        if not shard_path.exists():
+            missing_count += 1
+            shard_results.append(
+                {
+                    "shard": shard_key,
+                    "db_path": str(shard_path),
+                    "status": "skipped_missing_shard",
+                    "updated_count": 0,
+                    "skipped_count": len(grouped[shard_key]),
+                    "diagnostics": ["search_shard_missing"],
+                }
+            )
+            continue
+        result = refresh_search_projection_states(
+            aoa_root,
+            grouped[shard_key],
+            indexed_at=indexed_at,
+            budget_deadline=budget_deadline,
+            db_path_override=shard_path,
+        )
+        shard_result = {
+            "shard": shard_key,
+            "db_path": str(shard_path),
+            "status": "updated" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "remaining"),
+            "updated_count": int_value(result.get("updated_count")),
+            "skipped_count": int_value(result.get("skipped_count")),
+            "budget_exhausted": bool(result.get("budget_exhausted")),
+            "diagnostics": result.get("diagnostics", []) if isinstance(result.get("diagnostics"), list) else [],
+        }
+        shard_results.append(shard_result)
+        updated_count += int_value(result.get("updated_count"))
+        skipped_count += int_value(result.get("skipped_count"))
+        budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
+        diagnostics.extend(f"{shard_key}:{item}" for item in shard_result["diagnostics"] if item)
+    return {
+        "ok": not diagnostics and not budget_exhausted,
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+        "missing_shard_count": missing_count,
+        "budget_exhausted": budget_exhausted,
+        "shards": shard_results,
         "diagnostics": diagnostics,
     }
 
@@ -16580,11 +16850,17 @@ def refreshable_search_projection_records(
     refreshable: list[dict[str, Any]] = []
     remaining: list[dict[str, Any]] = []
     conn: sqlite3.Connection | None = None
+    indexed_states: dict[str, dict[str, Any]] = {}
 
     def documents_are_current(projection: dict[str, Any]) -> bool:
-        nonlocal conn
+        nonlocal conn, indexed_states
         if conn is None:
             conn = init_search_db(search_db_path(aoa_root), rebuild=False, budget_deadline=budget_deadline)
+        if not indexed_states:
+            indexed_states = sqlite_search_session_states(conn)
+        indexed = indexed_states.get(str(projection.get("session_id") or ""), {})
+        if search_projection_contract_state_refreshable(projection, indexed_state=indexed, db_mtime=db_mtime):
+            return True
         return bool(search_projection_documents_freshness(conn, projection).get("ok"))
 
     for session_id in sorted(dirty_ids):
@@ -17069,6 +17345,7 @@ def maintain_indexes(
     graph_max_refresh_nodes: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES,
     graph_max_refresh_edges: int | None = GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES,
     repair_indexes: bool = True,
+    repair_token_accounting: bool = True,
     repair_graph: bool = True,
     write_report: bool = False,
     reason: str = "operator_requested",
@@ -17104,18 +17381,29 @@ def maintain_indexes(
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
     route_drift = route_index_drift_records(records)
     effective_token_max_raw_bytes = token_max_raw_bytes if token_max_raw_bytes is not None else max_raw_bytes
-    token_backfill_state = token_accounting_backfill(
-        aoa_root=aoa_root,
-        target=target,
-        since=since,
-        until=until,
-        limit=limit,
-        apply=False,
-        max_raw_bytes=effective_token_max_raw_bytes,
-        selected_records=records,
-    )
+    if repair_token_accounting:
+        token_backfill_state = token_accounting_backfill(
+            aoa_root=aoa_root,
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+            apply=False,
+            max_raw_bytes=effective_token_max_raw_bytes,
+            selected_records=records,
+        )
+    else:
+        token_backfill_state = {
+            "ok": True,
+            "selected_count": len(records),
+            "counts": {"planned": 0, "backfilled": 0, "current": 0, "skipped": 0},
+            "diagnostics": [],
+            "resource_limits": {"skipped_by_profile": True},
+            "skipped": True,
+            "skip_reason": "token_accounting_backfill_skipped_by_profile",
+        }
     token_backfill_counts = token_backfill_state.get("counts") if isinstance(token_backfill_state.get("counts"), dict) else {}
-    token_backfill_needed = int(token_accounting_int(token_backfill_counts.get("planned")) or 0) > 0
+    token_backfill_needed = repair_token_accounting and int(token_accounting_int(token_backfill_counts.get("planned")) or 0) > 0
     deferred_sessions = [
         {
             "session": str(record.get("session_label") or record.get("session_id") or session_dir_from_record(record).name),
@@ -17126,9 +17414,15 @@ def maintain_indexes(
         if str(read_json(session_dir_from_record(record) / "session.manifest.json", {}).get("archive_status") or record.get("archive_status") or "") == "raw_mirrored_index_deferred"
     ]
     search_projection_fingerprints = search_projection_fingerprints_for_records(records)
-    atlas_projection_fingerprints = projection_fingerprints_for_records(records)
     search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=search_projection_fingerprints)
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=atlas_projection_fingerprints)
+    atlas_projection_fingerprints: list[dict[str, Any]] = []
+    atlas_state = atlas_index_hot_state(aoa_root)
+    search_session_projection_dirty = "session_projection_dirty" in {
+        str(reason) for reason in search_state.get("reasons", []) if reason
+    }
+    if repair_indexes and (bool(atlas_state.get("needs_refresh")) or search_session_projection_dirty):
+        atlas_projection_fingerprints = projection_fingerprints_for_records(records)
+        atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=atlas_projection_fingerprints)
     stable_selected_records_global = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
     if repair_graph:
         graph_state = graph_store_state(
@@ -17274,7 +17568,7 @@ def maintain_indexes(
         maintenance_action(
             "token_accounting_backfill",
             reason="missing_or_stale_generated_token_ledgers",
-            needed=repair_indexes and token_backfill_needed,
+            needed=repair_indexes and repair_token_accounting and token_backfill_needed,
             command=base
             + ["token-accounting-backfill", target, *root_args]
             + (["--max-raw-mb", token_max_raw_mb_text] if token_max_raw_mb_text else [])
@@ -17293,7 +17587,7 @@ def maintain_indexes(
             "refresh_search_projection_state",
             reason="search_documents_current_but_projection_state_stale",
             needed=repair_indexes and bool(search_state_refresh_records),
-            command=base + ["index-maintenance", target, *root_args] + selection_args + ["--apply", "--skip-graph-repair", "--write-report"],
+            command=base + ["index-maintenance", target, *root_args] + selection_args + ["--apply", "--skip-graph-repair", "--skip-token-accounting", "--write-report"],
         ),
         maintenance_action(
             "rebuild_search_index",
@@ -17530,12 +17824,36 @@ def maintain_indexes(
                     indexed_at=now,
                     budget_deadline=deadline,
                 )
+                shard_result = refresh_search_projection_states_for_materialized_shards(
+                    aoa_root,
+                    search_state_refresh_fingerprints,
+                    indexed_at=now,
+                    budget_deadline=deadline,
+                )
+                result["shard_state_refresh"] = {
+                    key: shard_result.get(key)
+                    for key in ("ok", "updated_count", "skipped_count", "missing_shard_count", "budget_exhausted", "diagnostics", "shards")
+                }
+                if shard_result.get("diagnostics"):
+                    result.setdefault("diagnostics", []).extend(str(item) for item in shard_result.get("diagnostics", []) if item)
+                result["ok"] = bool(result.get("ok")) and bool(shard_result.get("ok"))
+                result["budget_exhausted"] = bool(result.get("budget_exhausted") or shard_result.get("budget_exhausted"))
+                catalog_refresh = build_search_catalog(
+                    aoa_root,
+                    write=True,
+                    selected_records=records,
+                    selected_projection_fingerprints=search_projection_fingerprints,
+                )
+                result["search_catalog_refresh"] = search_catalog_summary(catalog_refresh)
+                if not catalog_refresh.get("ok"):
+                    result.setdefault("diagnostics", []).append(f"search_catalog_refresh_failed:{catalog_refresh.get('status')}")
+                    result["ok"] = False
                 search_state_refresh_action["status"] = (
                     "applied"
                     if result.get("ok")
                     else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
                 )
-                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "budget_exhausted", "diagnostics")}
+                search_state_refresh_action["result"] = {key: result.get(key) for key in ("ok", "updated_count", "skipped_count", "budget_exhausted", "shard_state_refresh", "search_catalog_refresh", "diagnostics")}
                 action_results.append(search_state_refresh_action)
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
@@ -17954,6 +18272,7 @@ def maintain_indexes(
         "selection_scope": selection_scope or {},
         "reason": reason,
         "repair_indexes": repair_indexes,
+        "repair_token_accounting": repair_token_accounting,
         "repair_graph": repair_graph,
         "index_repair_needed": index_repair_needed,
         "graph_repair_needed": graph_repair_needed,
@@ -17979,6 +18298,8 @@ def maintain_indexes(
             "counts": token_backfill_state.get("counts"),
             "diagnostics": token_backfill_state.get("diagnostics", []),
             "resource_limits": token_backfill_state.get("resource_limits", {}),
+            "skipped": bool(token_backfill_state.get("skipped")),
+            "skip_reason": token_backfill_state.get("skip_reason"),
         },
         "route_drift_count": len(route_drift),
         "route_drift": route_drift,
@@ -18048,6 +18369,7 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- reason: `{payload.get('reason')}`",
         f"- repair_indexes: `{payload.get('repair_indexes')}`",
+        f"- repair_token_accounting: `{payload.get('repair_token_accounting')}`",
         f"- repair_graph: `{payload.get('repair_graph')}`",
         f"- index_repair_needed: `{payload.get('index_repair_needed')}`",
         f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
@@ -18117,11 +18439,68 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
 def index_maintenance_print_payload(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
     if full:
         return payload
-    return {
+    compact = {
         key: value
         for key, value in payload.items()
         if key not in {"route_drift", "deferred_sessions", "search_dirty_sessions", "atlas_dirty_sessions"}
     }
+    bulky_state_keys = {
+        "dirty_session_ids",
+        "dirty_sessions",
+        "actionable_dirty_session_ids",
+        "actionable_dirty_sessions",
+        "deferred_live_sessions",
+        "source_paths",
+        "latest_source_paths",
+        "final_latest_source_paths",
+    }
+
+    def compact_state(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in bulky_state_keys:
+                continue
+            if key == "freshness" and isinstance(item, dict):
+                result[key] = compact_state(item)
+            else:
+                result[key] = item
+        return result
+
+    for key in (
+        "search_index",
+        "atlas_index",
+        "final_search_index",
+        "final_atlas_index",
+        "entity_registry",
+        "final_entity_registry",
+        "graph_store",
+        "final_graph_store",
+    ):
+        if isinstance(compact.get(key), dict):
+            compact[key] = compact_state(compact[key])
+    post_states = compact.get("post_maintenance_states")
+    if isinstance(post_states, dict):
+        compact["post_maintenance_states"] = {key: compact_state(value) for key, value in post_states.items()}
+    actions = compact.get("actions")
+    if isinstance(actions, list):
+        compact_actions: list[dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            item = dict(action)
+            result = item.get("result")
+            if isinstance(result, dict):
+                result = dict(result)
+                result.pop("sessions", None)
+                shard_state = result.get("shard_state_refresh")
+                if isinstance(shard_state, dict):
+                    result["shard_state_refresh"] = {key: value for key, value in shard_state.items() if key != "shards"}
+                item["result"] = result
+            compact_actions.append(item)
+        compact["actions"] = compact_actions
+    return compact
 
 
 def auto_maintenance_profile(profile: str) -> dict[str, Any]:
@@ -19410,6 +19789,7 @@ def compact_argv(argv: list[str], *, max_chars: int = 2000) -> str:
 def maintenance_surfaces(
     *,
     repair_indexes: bool = True,
+    repair_token_accounting: bool = True,
     repair_graph: bool = True,
     search: bool = False,
     atlas: bool = False,
@@ -19420,7 +19800,9 @@ def maintenance_surfaces(
 ) -> list[str]:
     surfaces: set[str] = set()
     if repair_indexes:
-        surfaces.update({"search", "atlas", "entity_registry", "route_indexes", "token_accounting"})
+        surfaces.update({"search", "atlas", "entity_registry", "route_indexes"})
+        if repair_token_accounting:
+            surfaces.add("token_accounting")
     if repair_graph:
         surfaces.add("graph")
     if search:
@@ -24836,10 +25218,13 @@ def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
         conn = connect_existing_search_db(db_path)
         if not sqlite_table_exists(conn, "session_index_state"):
             return {}
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
+        projection_mode_expr = "projection_fingerprint_mode" if "projection_fingerprint_mode" in columns else "'' AS projection_fingerprint_mode"
         rows = conn.execute(
-            """
+            f"""
             SELECT session_id, source_fingerprint, search_schema_version,
-                   route_signal_classifier_version, document_count
+                   route_signal_classifier_version, document_count,
+                   source_latest_mtime, {projection_mode_expr}
             FROM session_index_state
             """
         ).fetchall()
@@ -24849,6 +25234,8 @@ def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
                 "search_schema_version": str(row["search_schema_version"] or ""),
                 "route_signal_classifier_version": int_value(row["route_signal_classifier_version"]),
                 "document_count": int_value(row["document_count"]),
+                "source_latest_mtime": float(row["source_latest_mtime"] or 0.0),
+                "projection_fingerprint_mode": str(row["projection_fingerprint_mode"] or ""),
             }
             for row in rows
             if str(row["session_id"] or "")
@@ -24913,6 +25300,7 @@ def build_search_catalog(
     write: bool = False,
     write_report: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
+    selected_projection_fingerprints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     db_path = search_db_path(aoa_root)
@@ -24946,6 +25334,12 @@ def build_search_catalog(
         metadata = search_index_metadata(conn)
         if not sqlite_table_exists(conn, "session_index_state"):
             raise sqlite3.OperationalError("session_index_state missing")
+        session_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
+        session_projection_mode_expr = (
+            "projection_fingerprint_mode"
+            if "projection_fingerprint_mode" in session_state_columns
+            else "'' AS projection_fingerprint_mode"
+        )
         session_doc_by_key: dict[str, dict[str, Any]] = {}
         if sqlite_table_exists(conn, "documents"):
             for row in conn.execute(
@@ -24970,11 +25364,18 @@ def build_search_catalog(
                         session_doc_by_key[key] = item
         freshness_by_session: dict[str, dict[str, Any]] = {}
         if sqlite_table_exists(conn, "search_freshness_state"):
+            freshness_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(search_freshness_state)").fetchall()}
+            freshness_projection_mode_expr = (
+                "projection_fingerprint_mode"
+                if "projection_fingerprint_mode" in freshness_state_columns
+                else "'' AS projection_fingerprint_mode"
+            )
             for row in conn.execute(
-                """
+                f"""
                 SELECT session_id, session_label, status, reason, last_checked,
                        last_indexed_at, deferred_live_reason, search_schema_version,
-                       route_signal_classifier_version, document_count, updated_at
+                       route_signal_classifier_version, document_count, updated_at,
+                       {freshness_projection_mode_expr}
                 FROM search_freshness_state
                 """
             ).fetchall():
@@ -24988,12 +25389,14 @@ def build_search_catalog(
                     "route_signal_classifier_version": int_value(row["route_signal_classifier_version"]),
                     "document_count": int_value(row["document_count"]),
                     "updated_at": str(row["updated_at"] or ""),
+                    "projection_fingerprint_mode": str(row["projection_fingerprint_mode"] or ""),
                 }
         rows = conn.execute(
-            """
+            f"""
             SELECT session_id, session_label, source_fingerprint,
                    source_latest_mtime, search_schema_version,
-                   route_signal_classifier_version, indexed_at, document_count
+                   route_signal_classifier_version, indexed_at, document_count,
+                   {session_projection_mode_expr}
             FROM session_index_state
             ORDER BY session_label, session_id
             """
@@ -25028,8 +25431,12 @@ def build_search_catalog(
     live_state_basis = "live_session_indexes"
     selected_state_key_count = 0
     if selected_records is not None:
-        for record in selected_records:
-            state = session_projection_fingerprint(record, include_rendered_markdown=False)
+        selected_states = (
+            selected_projection_fingerprints
+            if selected_projection_fingerprints is not None
+            else search_projection_fingerprints_for_records(selected_records)
+        )
+        for state in selected_states:
             for key in (state.get("session_id"), state.get("session_label")):
                 if key:
                     live_state_by_session[str(key)] = state
@@ -25082,11 +25489,13 @@ def build_search_catalog(
         expected_latest_mtime = float(live_state.get("latest_source_mtime") or row["source_latest_mtime"] or 0.0)
         expected_search_schema_version = str(SEARCH_SCHEMA_VERSION)
         expected_route_signal_classifier_version = ROUTE_SIGNAL_CLASSIFIER_VERSION
+        expected_projection_fingerprint_mode = SEARCH_PROJECTION_FINGERPRINT_MODE
         monolith_status = "current"
         if (
             expected_fingerprint != str(row["source_fingerprint"] or "")
             or expected_search_schema_version != str(row["search_schema_version"] or "")
             or expected_route_signal_classifier_version != int_value(row["route_signal_classifier_version"])
+            or expected_projection_fingerprint_mode != str(row["projection_fingerprint_mode"] or "")
         ):
             monolith_status = "stale"
         doc = session_doc_by_key.get(session_id) or session_doc_by_key.get(session_label) or {}
@@ -25100,6 +25509,7 @@ def build_search_catalog(
             "route_signal_classifier_version": int_value(row["route_signal_classifier_version"]),
             "document_count": int_value(row["document_count"]),
             "updated_at": "",
+            "projection_fingerprint_mode": "",
         }
         session_date = str(doc.get("session_date") or search_session_date_from_label(session_label))
         shard = search_shard_key_for_session(session_label, session_date)
@@ -25123,6 +25533,7 @@ def build_search_catalog(
                 and str(shard_session_state.get("source_fingerprint") or "") == expected_fingerprint
                 and str(shard_session_state.get("search_schema_version") or "") == expected_search_schema_version
                 and int_value(shard_session_state.get("route_signal_classifier_version")) == expected_route_signal_classifier_version
+                and str(shard_session_state.get("projection_fingerprint_mode") or "") == expected_projection_fingerprint_mode
                 and shard_storage_profile_current
             ):
                 shard_status = "current"
@@ -25161,12 +25572,16 @@ def build_search_catalog(
                     freshness.get("route_signal_classifier_version"),
                     int_value(row["route_signal_classifier_version"]),
                 ),
+                "projection_fingerprint_mode": str(freshness.get("projection_fingerprint_mode") or row["projection_fingerprint_mode"] or ""),
+                "expected_projection_fingerprint_mode": expected_projection_fingerprint_mode,
             },
             "document_count": int_value(freshness.get("document_count"), int_value(row["document_count"])),
             "source_fingerprint": expected_fingerprint,
             "source_latest_mtime": expected_latest_mtime,
             "monolith_source_fingerprint": str(row["source_fingerprint"] or ""),
             "monolith_source_latest_mtime": float(row["source_latest_mtime"] or 0.0),
+            "monolith_projection_fingerprint_mode": str(row["projection_fingerprint_mode"] or ""),
+            "shard_projection_fingerprint_mode": str(shard_session_state.get("projection_fingerprint_mode") or ""),
             "indexed_at": str(row["indexed_at"] or ""),
         }
         sessions.append(item)
@@ -25398,6 +25813,7 @@ def materialize_search_shards(
     budget_seconds: float | None = None,
     progress_every: int = 0,
     structured_only: bool = True,
+    rebuild_shards: bool = True,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -25434,6 +25850,7 @@ def materialize_search_shards(
             "processed_count": 0,
             "shard_strategy": SEARCH_SHARD_STRATEGY,
             "structured_only": structured_only,
+            "rebuild_shards": rebuild_shards,
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
@@ -25465,6 +25882,7 @@ def materialize_search_shards(
             "processed_count": 0,
             "shard_strategy": SEARCH_SHARD_STRATEGY,
             "structured_only": structured_only,
+            "rebuild_shards": rebuild_shards,
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
@@ -25490,7 +25908,7 @@ def materialize_search_shards(
             selected_records=shard_records,
             max_raw_bytes=max_raw_bytes,
             use_default_raw_lexical_budget=use_default_raw_lexical_budget,
-            rebuild=True,
+            rebuild=rebuild_shards or not shard_path.exists(),
             write_report=False,
             db_path_override=shard_path,
             refresh_catalog=False,
@@ -25522,6 +25940,7 @@ def materialize_search_shards(
                 else None,
                 "search_schema_version": result.get("search_schema_version"),
                 "structured_only": structured_only,
+                "rebuild": rebuild_shards or not shard_path.exists(),
                 "shard_storage_mode": result.get("search_body_storage_mode") or shard_storage_mode,
                 "search_fts_storage_mode": result.get("search_fts_storage_mode") or shard_fts_storage_mode,
                 "raw_text_query_support": result.get("raw_text_query_support") or raw_text_query_support,
@@ -25559,6 +25978,7 @@ def materialize_search_shards(
         else None,
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "structured_only": structured_only,
+        "rebuild_shards": rebuild_shards,
         "shard_storage_mode": shard_storage_mode,
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
@@ -26876,18 +27296,26 @@ def seed_search_freshness_state_from_session_index(conn: sqlite3.Connection, *, 
     )
     if not has_session_state or not has_freshness_state:
         return
+    session_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
+    projection_mode_expr = (
+        "COALESCE(projection_fingerprint_mode, '')"
+        if "projection_fingerprint_mode" in session_state_columns
+        else "''"
+    )
     conn.execute(
-        """
+        f"""
         INSERT OR IGNORE INTO search_freshness_state (
             session_id, session_label, session_dir, source_fingerprint, source_latest_mtime,
             status, reason, last_checked, last_indexed_at, deferred_live_reason,
             live_transcript_path, live_transcript_mtime, search_schema_version,
-            route_signal_classifier_version, document_count, updated_at
+            route_signal_classifier_version, document_count, updated_at,
+            projection_fingerprint_mode
         )
         SELECT
             session_id, session_label, '', source_fingerprint, source_latest_mtime,
             'current', 'seeded_from_session_index_state', COALESCE(indexed_at, ?), indexed_at, '',
-            '', 0, search_schema_version, route_signal_classifier_version, document_count, ?
+            '', 0, search_schema_version, route_signal_classifier_version, document_count, ?,
+            {projection_mode_expr}
         FROM session_index_state
         WHERE COALESCE(session_id, '') <> ''
         """,
@@ -27029,7 +27457,8 @@ def init_search_db(
             search_schema_version TEXT,
             route_signal_classifier_version INTEGER,
             indexed_at TEXT,
-            document_count INTEGER
+            document_count INTEGER,
+            projection_fingerprint_mode TEXT
         )
         """
     )
@@ -27051,10 +27480,17 @@ def init_search_db(
             search_schema_version TEXT,
             route_signal_classifier_version INTEGER,
             document_count INTEGER,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            projection_fingerprint_mode TEXT
         )
         """
     )
+    existing_session_state_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_index_state)").fetchall()}
+    if "projection_fingerprint_mode" not in existing_session_state_columns:
+        conn.execute("ALTER TABLE session_index_state ADD COLUMN projection_fingerprint_mode TEXT")
+    existing_freshness_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(search_freshness_state)").fetchall()}
+    if "projection_fingerprint_mode" not in existing_freshness_columns:
+        conn.execute("ALTER TABLE search_freshness_state ADD COLUMN projection_fingerprint_mode TEXT")
     seed_search_freshness_state_from_session_index(conn, updated_at=utc_now())
     existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
     if "session_act" not in existing_columns:
@@ -43574,6 +44010,7 @@ def session_memory_live_tail_catchup_route(
             *root_args,
             "--apply",
             "--skip-graph-repair",
+            "--skip-token-accounting",
             "--write-report",
         ]
         return {
@@ -43598,6 +44035,7 @@ def session_memory_live_tail_catchup_route(
             "1",
             "--apply",
             "--skip-graph-repair",
+            "--skip-token-accounting",
             "--write-report",
         ]
         return {
@@ -43713,6 +44151,12 @@ def session_memory_maintenance_next_actions(
         or bool(route_search.get("needs_refresh"))
         or bool(route_atlas.get("needs_refresh"))
     )
+    search_reasons = {str(item) for item in search.get("reasons", []) if item}
+    search_contract_state_drift = (
+        "projection_fingerprint_mode_changed" in search_reasons
+        or int_value(search.get("projection_fingerprint_mode_mismatch_count")) > 0
+        or int_value((search.get("freshness") or {}).get("projection_fingerprint_mode_mismatch_count") if isinstance(search.get("freshness"), dict) else 0) > 0
+    )
     if search_needs_storage_policy_rebuild:
         actions.append(
             {
@@ -43726,9 +44170,13 @@ def session_memory_maintenance_next_actions(
         first = actionable_sessions[0] if actionable_sessions else {}
         target = str(first.get("session_label") or first.get("session_id") or "all") if isinstance(first, dict) else "all"
         command = (
-            ["python3", "scripts/aoa_session_memory.py", "search-index", target, *root_args, "--no-rebuild", "--write-report"]
-            if target != "all"
-            else ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--write-report"]
+            ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-graph-repair", "--skip-token-accounting", "--write-report"]
+            if search_contract_state_drift
+            else (
+                ["python3", "scripts/aoa_session_memory.py", "search-index", target, *root_args, "--no-rebuild", "--write-report"]
+                if target != "all"
+                else ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"]
+            )
         )
         actions.append({"id": "repair_search_actionable", "reason": "search_actionable_dirty_sessions", "command": command})
     if entity_registry_needs and not route_or_cache_index_needs and int_value(search.get("actionable_dirty_session_count")) <= 0:
@@ -43755,7 +44203,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_index_read_models",
                 "reason": "route_or_search_or_atlas_index_maintenance_needed",
-                "command": ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--write-report"],
+                "command": ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"],
             }
         )
     if graph.get("needs_full_rebuild"):
@@ -48495,6 +48943,7 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
     token_max_raw_bytes = int(args.token_max_raw_mb * 1024 * 1024) if args.token_max_raw_mb is not None else None
+    skip_token_accounting = bool(getattr(args, "skip_token_accounting", False))
 
     def run_maintenance() -> dict[str, Any]:
         return maintain_indexes(
@@ -48515,6 +48964,7 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             graph_max_refresh_nodes=getattr(args, "graph_max_refresh_nodes", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES),
             graph_max_refresh_edges=getattr(args, "graph_max_refresh_edges", GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES),
             repair_indexes=not args.skip_index_repair,
+            repair_token_accounting=not skip_token_accounting,
             repair_graph=not args.skip_graph_repair,
             write_report=args.write_report,
             reason=args.reason,
@@ -48528,12 +48978,13 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             run_maintenance,
             owner_job="index-maintenance",
             mode="manual-bulk",
-            target=args.session,
-            reason=args.reason,
-            touched_surfaces=maintenance_surfaces(
-                repair_indexes=not args.skip_index_repair,
-                repair_graph=not args.skip_graph_repair,
-            ),
+                target=args.session,
+                reason=args.reason,
+                touched_surfaces=maintenance_surfaces(
+                    repair_indexes=not args.skip_index_repair,
+                    repair_token_accounting=not skip_token_accounting,
+                    repair_graph=not args.skip_graph_repair,
+                ),
             budget_seconds=args.budget_seconds,
         )
         if args.apply
@@ -48820,7 +49271,8 @@ def command_search_catalog(args: argparse.Namespace) -> int:
         if args.refresh
         else read_search_catalog(root)
     )
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key != "sessions"}
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -48848,6 +49300,7 @@ def command_search_shards(args: argparse.Namespace) -> int:
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
             structured_only=not getattr(args, "full_text", False),
+            rebuild_shards=not args.no_rebuild,
         )
 
     payload = run_with_maintenance_lock(
@@ -48860,7 +49313,11 @@ def command_search_shards(args: argparse.Namespace) -> int:
         touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=False),
         budget_seconds=args.budget_seconds,
     )
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {key: value for key, value in payload.items() if key != "sessions"}
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -54230,6 +54687,7 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--graph-max-refresh-nodes", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES, help="Defer graph source replacements that would refresh more aggregate nodes than this; <=0 disables the guard.")
     index_maintenance.add_argument("--graph-max-refresh-edges", type=int, default=GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES, help="Defer graph source replacements that would refresh more aggregate edges than this; <=0 disables the guard.")
     index_maintenance.add_argument("--skip-index-repair", action="store_true", help="Only run graph maintenance and defer search/atlas/route-index repair to a heavier profile.")
+    index_maintenance.add_argument("--skip-token-accounting", action="store_true", help="Skip token-accounting backfill planning/repair when only search, atlas, or graph projection state is being reconciled.")
     index_maintenance.add_argument("--skip-graph-repair", action="store_true", help="Repair route/search/atlas indexes but defer graph maintenance to a graph/backlog profile.")
     index_maintenance.add_argument("--budget-seconds", type=float, help="Stop applying maintenance after this wall-clock budget; never interrupts a session transaction.")
     index_maintenance.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
@@ -54442,6 +54900,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_catalog.add_argument("--aoa-root")
     search_catalog.add_argument("--refresh", action="store_true", help="Regenerate search/catalog.json from the current portable SQLite search state.")
     search_catalog.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-catalog reports under .aoa/diagnostics.")
+    search_catalog.add_argument("--full", action="store_true", help="Print complete catalog including all session rows.")
     search_catalog.set_defaults(func=command_search_catalog)
 
     search_shards = sub.add_parser(
@@ -54459,9 +54918,11 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
     search_shards.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text shard rebuild.")
     search_shards.add_argument("--full-text", action="store_true", help="Store FTS and compressed bodies in shard DBs; default shards are structured route projections and use the monolith for raw-text queries.")
+    search_shards.add_argument("--no-rebuild", action="store_true", help="Incrementally update selected sessions in existing shard DBs instead of rebuilding each shard.")
     search_shards.add_argument("--budget-seconds", type=float, help="Stop after the current shard when this wall-clock budget is exhausted.")
     search_shards.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
     search_shards.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-shards reports under .aoa/diagnostics.")
+    search_shards.add_argument("--full", action="store_true", help="Print complete shard materialization payload including all per-session rows.")
     search_shards.set_defaults(func=command_search_shards)
 
     search = sub.add_parser(
