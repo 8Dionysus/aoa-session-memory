@@ -9312,6 +9312,149 @@ def test_catchup_auto_maintenance_defers_full_search_rebuild_to_deep(tmp_path: P
     assert len(calls["freshness"]) == 1
 
 
+def test_projection_catchup_wraps_bounded_catchup_route(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_auto_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["auto"] = kwargs
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_auto_maintenance",
+            "generated_at": module.utc_now(),
+            "ok": True,
+            "status": "applied_with_remaining_backlog",
+            "mutates": kwargs["apply"],
+            "apply": kwargs["apply"],
+            "profile": kwargs["profile"],
+            "target": kwargs["target"],
+            "resource_class": "medium",
+            "resource_kind": "indexing",
+            "budget_seconds": kwargs["budget_seconds"],
+            "expected_catchup_remaining": True,
+            "deferred_graph_after": False,
+            "maintenance": {"action_counts": {"applied": 1, "remaining": 1}},
+            "diagnostics": ["index_maintenance_needed"],
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance", fake_auto_maintenance)
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_limit=7,
+        budget_seconds=42.0,
+    )
+
+    assert payload["artifact_type"] == "session_memory_projection_catchup"
+    assert payload["profile"] == "catchup"
+    assert payload["projection_policy"]["authority_boundary"] == module.PROJECTION_CATCHUP_AUTHORITY_BOUNDARY
+    assert payload["expected_catchup_remaining"] is True
+    assert payload["deferred_graph_after"] is False
+    assert payload["covers"]["search"] is True
+    assert payload["covers"]["atlas"] is True
+    assert payload["covers"]["entity_registry"] is True
+    assert payload["next_route"]["id"] == "rerun_projection_catchup"
+    assert "projection-catchup" in payload["next_command"]
+    assert "auto-maintenance" not in payload["next_command"]
+    assert "projection-catchup" in payload["resource_launcher"]
+    assert calls["auto"]["profile"] == "catchup"
+    assert calls["auto"]["reason"] == module.PROJECTION_CATCHUP_DEFAULT_REASON
+    assert calls["auto"]["repair_indexes"] is True
+    assert calls["auto"]["repair_graph"] is None
+    assert calls["auto"]["write_report"] is False
+    assert calls["auto"]["repair_limit"] == 7
+    assert calls["auto"]["budget_seconds"] == 42.0
+
+
+def test_projection_catchup_routes_schema_rebuild_to_deep_projection_route(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_auto_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_auto_maintenance",
+            "generated_at": module.utc_now(),
+            "ok": True,
+            "status": "deferred_full_search_rebuild_to_deep",
+            "mutates": False,
+            "apply": kwargs["apply"],
+            "profile": kwargs["profile"],
+            "target": kwargs["target"],
+            "resource_class": "medium",
+            "resource_kind": "indexing",
+            "budget_seconds": kwargs["budget_seconds"],
+            "expected_catchup_remaining": False,
+            "deferred_graph_after": False,
+            "search_rebuild_deferred_to_deep": True,
+            "deep_next_command": ["python3", "scripts/aoa_session_memory.py", "auto-maintenance", "deep"],
+            "deep_resource_launcher": ["abyss-machine", "resource", "launch", "--class", "heavy"],
+            "maintenance": {"status": "deferred_full_search_rebuild_to_deep", "action_counts": {"deferred": 1}},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance", fake_auto_maintenance)
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "deferred_full_search_rebuild_to_deep"
+    assert payload["search_rebuild_deferred_to_deep"] is True
+    assert payload["next_route"]["id"] == "run_deep_projection_catchup"
+    assert payload["next_route"]["reason"] == "full_search_rebuild_requires_deep_profile"
+    assert "projection-catchup" in payload["next_route"]["command"]
+    assert "--profile" in payload["next_route"]["command"]
+    assert "deep" in payload["next_route"]["command"]
+    assert payload["next_route"]["auto_maintenance_deep_command"][:4] == [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "auto-maintenance",
+        "deep",
+    ]
+    assert "projection-catchup" in payload["next_route"]["resource_launcher"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_projection_catchup_parser_routes_to_command(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    parser = module.build_parser()
+
+    args = parser.parse_args(
+        [
+            "projection-catchup",
+            "all",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--profile",
+            "deep",
+            "--apply",
+            "--write-report",
+        ]
+    )
+
+    assert args.func is module.command_projection_catchup
+    assert args.session == "all"
+    assert args.profile == "deep"
+    assert args.apply is True
+    assert args.write_report is True
+
+
 def test_catchup_auto_maintenance_does_not_hide_hard_failures(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

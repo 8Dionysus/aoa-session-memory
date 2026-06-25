@@ -531,6 +531,26 @@ route/search/atlas/graph work to `index-maintenance`. Its profiles are:
 - `deep`: full archive, heavy resource route, full repair and
   calibration-capable batch with larger aggregate refresh chunks.
 
+For deliberate post-classifier, post-schema, or generated-projection catch-up,
+use the named projection route:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-catchup all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --apply \
+  --write-report
+```
+
+This route is an agent/operator wrapper over the same maintenance coordinator.
+It makes the purpose explicit, keeps raw/session evidence as authority, and
+returns the next route in the same vocabulary. The default `catchup` profile is
+bounded and may report `rerun_projection_catchup` while backlog remains. If a
+schema mismatch requires a full search rebuild, it returns
+`run_deep_projection_catchup` instead of starting an unsafe heavy rewrite from a
+bounded profile. Use `--profile deep` when the intended operation is the full
+heavy repair, including graph maintenance.
+
 Full search rewrites are outside the bounded timer profiles. If the freshness
 gate reports a schema mismatch, missing/empty store, corrupt SQLite store, or
 empty route-posting/term tables, `hot`, `backlog`, and `catchup` must return

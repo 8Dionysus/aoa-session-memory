@@ -481,6 +481,24 @@ search/atlas drift, and deferred raw mirrors. `name-session --apply` queues
 this maintenance route so semantic name changes do not leave search or atlas
 surfaces behind the `session_id` bridge.
 
+After classifier, schema, route-signal, or generated-projection changes, use
+the named projection catch-up route so agents can see the purpose, boundary, and
+next step in one packet:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-catchup all \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --apply \
+  --write-report
+```
+
+The default `catchup` profile runs bounded batches over generated route/search,
+atlas, entity, and freshness surfaces while preserving raw/session evidence as
+the authority. If a full search rebuild or graph-heavy repair is required, the
+payload returns a `projection-catchup --profile deep` next command and a heavy
+resource launcher instead of hiding that escalation inside a generic report.
+
 For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
 maintenance controller with a clean preflight gate, a lock, and bounded graph
 batches:

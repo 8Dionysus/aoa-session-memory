@@ -50,12 +50,28 @@ python3 scripts/aoa_session_memory.py reindex-sessions <session-label-or-id> \
   --write-report
 ```
 
+After a classifier or schema reindex, refresh generated projections through the
+named catch-up route:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-catchup all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --apply \
+  --write-report
+```
+
+Use `--profile deep` only when the catch-up payload reports that a heavy full
+search rebuild or graph repair is required.
+
 ## Verification
 
 - `counts.diagnostic` is absent or zero.
 - Segment indexes contain `by_family`, `by_phase`, `by_actor`,
   `by_action`, `by_outcome`, and `by_correlation`.
 - Event records contain universal facets and relationship refs where available.
+- `projection-catchup` reports no remaining projection backlog, or returns the
+  explicit next route needed to finish it.
 - Run `doctor`, `audit`, and tests after broad reindexing.
 
 ## Stop Line

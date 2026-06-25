@@ -1034,9 +1034,14 @@ Completion-blocking gates in the current local proof surface:
 Maintenance gates:
 
 - After route schema, classifier, semantic-name, or generated-cache changes,
-  run `index-maintenance --apply --write-report`. Add `--sample-audit` when
-  classifier/schema changes require a new manual calibration packet; apply
-  `route-sample-review` verdicts explicitly after human/agent review.
+  run `projection-catchup all --apply --write-report`. The route wraps the
+  maintenance coordinator, keeps generated projections below raw/session
+  authority, and returns either a bounded rerun route or
+  `projection-catchup --profile deep` when heavy search/graph repair is needed.
+  Use `index-maintenance` directly only for narrower manual repair. Add
+  `--sample-audit` when classifier/schema changes require a new manual
+  calibration packet; apply `route-sample-review` verdicts explicitly after
+  human/agent review.
 - After search-provider or local accelerator changes, run
   `search-provider-status --include-host --write-report` and a bounded
   `search --include-semantic-context --rerank-local --allow-host-warnings

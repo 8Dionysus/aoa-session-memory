@@ -18361,6 +18361,543 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
     return compact
 
 
+PROJECTION_CATCHUP_PROFILES = {"catchup", "deep"}
+PROJECTION_CATCHUP_DEFAULT_REASON = "post_classifier_or_schema_change"
+PROJECTION_CATCHUP_AUTHORITY_BOUNDARY = (
+    "Raw transcripts, raw blocks, session manifests, and segment indexes remain authority; "
+    "search, atlas, graph, catalog, and entity registry are generated projections."
+)
+PROJECTION_CATCHUP_MCP_BOUNDARY = (
+    "aoa_session_memory MCP may report freshness and route packets, but projection catch-up is a writer route and runs outside MCP."
+)
+
+
+def projection_catchup_cli_command(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    target: str,
+    profile: str,
+    apply: bool,
+    write_report: bool,
+    since: str | None = None,
+    since_days: int | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    repair_limit: int | None = None,
+    budget_seconds: float | None = None,
+    reason: str | None = None,
+) -> list[str]:
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "projection-catchup",
+        target,
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--profile",
+        profile,
+    ]
+    if since:
+        command.extend(["--since", since])
+    elif since_days is not None:
+        command.extend(["--since-days", str(since_days)])
+    if until:
+        command.extend(["--until", until])
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
+    if repair_limit is not None:
+        command.extend(["--repair-limit", str(repair_limit)])
+    if budget_seconds is not None:
+        command.extend(["--budget-seconds", str(budget_seconds)])
+    if reason:
+        command.extend(["--reason", reason])
+    if apply:
+        command.append("--apply")
+    if write_report:
+        command.append("--write-report")
+    return command
+
+
+def projection_catchup_resource_launcher(
+    *,
+    profile: str,
+    target: str,
+    workspace_root: Path,
+    aoa_root: Path,
+    apply: bool,
+    write_report: bool,
+    reason: str | None = None,
+    extra_args: Iterable[str] | None = None,
+    resource_force: bool = False,
+    resource_binary: str = "abyss-machine",
+) -> list[str]:
+    settings = auto_maintenance_profile(profile)
+    command = [
+        resource_binary,
+        "resource",
+        "launch",
+        "--class",
+        str(settings["resource_class"]),
+        "--kind",
+        str(settings["resource_kind"]),
+        "--unattended",
+    ]
+    if resource_force:
+        command.append("--force")
+    command.extend(
+        [
+            "--timeout",
+            str(settings["timeout_sec"]),
+            "--success-on-block",
+            "--json",
+            "--",
+            "python3",
+            str(Path(__file__).resolve()),
+            "projection-catchup",
+            target,
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--profile",
+            profile,
+        ]
+    )
+    if apply:
+        command.append("--apply")
+    if write_report:
+        command.append("--write-report")
+    if reason:
+        command.extend(["--reason", reason])
+    if extra_args:
+        command.extend(str(item) for item in extra_args)
+    return command
+
+
+def projection_catchup_policy(profile: str) -> dict[str, Any]:
+    return {
+        "route": "projection-catchup",
+        "profile": profile,
+        "default_profile": "catchup",
+        "full_profile": "deep",
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+        "generated_projection_surfaces": [
+            "route indexes",
+            "token ledgers",
+            "portable SQLite search",
+            "search catalog and monthly shards",
+            "agent atlas",
+            "entity registry",
+            "graph store",
+        ],
+        "catchup_policy": "bounded full-archive search/atlas/entity catch-up; graph freshness is surfaced and deferred to deep/backlog when needed",
+        "deep_policy": "heavy full-archive projection repair including graph maintenance and calibration-capable sampling",
+        "mcp_boundary": PROJECTION_CATCHUP_MCP_BOUNDARY,
+    }
+
+
+def projection_catchup_next_route(
+    *,
+    auto_payload: dict[str, Any],
+    workspace_root: Path,
+    aoa_root: Path,
+    target: str,
+    profile: str,
+    apply: bool,
+    write_report: bool,
+    since: str | None,
+    since_days: int | None,
+    until: str | None,
+    limit: int | None,
+    repair_limit: int | None,
+    budget_seconds: float | None,
+    reason: str,
+) -> dict[str, Any]:
+    status = str(auto_payload.get("status") or "")
+    expected_remaining = bool(auto_payload.get("expected_catchup_remaining"))
+    deferred_graph = bool(auto_payload.get("deferred_graph_after"))
+    ok = bool(auto_payload.get("ok"))
+    if not apply:
+        command = projection_catchup_cli_command(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target=target,
+            profile=profile,
+            apply=True,
+            write_report=write_report,
+            since=since,
+            since_days=since_days,
+            until=until,
+            limit=limit,
+            repair_limit=repair_limit,
+            budget_seconds=budget_seconds,
+            reason=reason,
+        )
+        return {
+            "id": "apply_projection_catchup",
+            "status": "ready",
+            "reason": "dry_run_completed",
+            "command": command,
+            "resource_launcher": projection_catchup_resource_launcher(
+                profile=profile,
+                target=target,
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                apply=True,
+                write_report=write_report,
+                reason=reason,
+            ),
+        }
+    if status == "deferred_full_search_rebuild_to_deep":
+        command = projection_catchup_cli_command(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target=target,
+            profile="deep",
+            apply=True,
+            write_report=True,
+            since=since,
+            since_days=since_days,
+            until=until,
+            limit=limit,
+            repair_limit=None,
+            budget_seconds=None,
+            reason=reason,
+        )
+        return {
+            "id": "run_deep_projection_catchup",
+            "status": "deferred",
+            "reason": "full_search_rebuild_requires_deep_profile",
+            "command": command,
+            "resource_launcher": projection_catchup_resource_launcher(
+                profile="deep",
+                target=target,
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                apply=True,
+                write_report=True,
+                reason=reason,
+            ),
+            "auto_maintenance_deep_command": auto_payload.get("deep_next_command") or [],
+            "auto_maintenance_deep_resource_launcher": auto_payload.get("deep_resource_launcher") or [],
+        }
+    if expected_remaining:
+        command = projection_catchup_cli_command(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target=target,
+            profile=profile,
+            apply=True,
+            write_report=write_report,
+            since=since,
+            since_days=since_days,
+            until=until,
+            limit=limit,
+            repair_limit=repair_limit,
+            budget_seconds=budget_seconds,
+            reason=reason,
+        )
+        return {
+            "id": "rerun_projection_catchup",
+            "status": "remaining_backlog",
+            "reason": "bounded_batch_landed_with_remaining_dirty_projection_backlog",
+            "command": command,
+            "resource_launcher": projection_catchup_resource_launcher(
+                profile=profile,
+                target=target,
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                apply=True,
+                write_report=write_report,
+                reason=reason,
+            ),
+        }
+    if deferred_graph and profile != "deep":
+        command = projection_catchup_cli_command(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target=target,
+            profile="deep",
+            apply=True,
+            write_report=True,
+            since=since,
+            since_days=since_days,
+            until=until,
+            limit=limit,
+            repair_limit=None,
+            budget_seconds=None,
+            reason=reason,
+        )
+        return {
+            "id": "run_deep_projection_catchup_for_graph",
+            "status": "deferred_graph",
+            "reason": "catchup_profile_defers_graph_repair",
+            "command": command,
+            "resource_launcher": projection_catchup_resource_launcher(
+                profile="deep",
+                target=target,
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                apply=True,
+                write_report=True,
+                reason=reason,
+            ),
+        }
+    if not ok:
+        return {
+            "id": "inspect_projection_catchup_diagnostics",
+            "status": "needs_attention",
+            "reason": "projection_catchup_finished_red",
+            "command": [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "maintenance-status",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--full",
+                "--no-timers",
+            ],
+        }
+    return {
+        "id": "verify_projection_status",
+        "status": "ready",
+        "reason": "projection_catchup_finished_without_remaining_backlog",
+        "command": [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "maintenance-status",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--full",
+            "--no-timers",
+        ],
+    }
+
+
+def projection_catchup(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    target: str = "all",
+    profile: str = "catchup",
+    since: str | None = None,
+    since_days: int | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    repair_limit: int | None = None,
+    apply: bool = False,
+    max_raw_mb: float | None = None,
+    token_max_raw_mb: float | None = None,
+    graph_batch_limit: int | None = None,
+    graph_refresh_chunk_size: int | None = None,
+    graph_max_refresh_nodes: int | None = None,
+    graph_max_refresh_edges: int | None = None,
+    ref_sample_limit: int | None = None,
+    sample_audit: bool | None = None,
+    write_report: bool = False,
+    lock_timeout_sec: float = 0.0,
+    reason: str = PROJECTION_CATCHUP_DEFAULT_REASON,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
+) -> dict[str, Any]:
+    if profile not in PROJECTION_CATCHUP_PROFILES:
+        raise ValueError(f"projection-catchup profile must be one of {sorted(PROJECTION_CATCHUP_PROFILES)}")
+    max_raw_bytes = int(max_raw_mb * 1024 * 1024) if max_raw_mb is not None else None
+    token_max_raw_bytes = int(token_max_raw_mb * 1024 * 1024) if token_max_raw_mb is not None else None
+    auto_payload = auto_maintenance(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        profile=profile,
+        target=target,
+        since=since,
+        since_days=since_days,
+        until=until,
+        limit=limit,
+        repair_limit=repair_limit,
+        apply=apply,
+        max_raw_bytes=max_raw_bytes,
+        token_max_raw_bytes=token_max_raw_bytes,
+        graph_batch_limit=graph_batch_limit,
+        graph_refresh_chunk_size=graph_refresh_chunk_size,
+        graph_max_refresh_nodes=graph_max_refresh_nodes,
+        graph_max_refresh_edges=graph_max_refresh_edges,
+        ref_sample_limit=ref_sample_limit,
+        sample_audit=sample_audit,
+        repair_indexes=True,
+        repair_graph=None,
+        write_report=False,
+        lock_timeout_sec=lock_timeout_sec,
+        reason=reason,
+        budget_seconds=budget_seconds,
+        progress_every=progress_every,
+    )
+    next_route = projection_catchup_next_route(
+        auto_payload=auto_payload,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        target=target,
+        profile=profile,
+        apply=apply,
+        write_report=write_report,
+        since=since,
+        since_days=since_days,
+        until=until,
+        limit=limit,
+        repair_limit=repair_limit,
+        budget_seconds=budget_seconds,
+        reason=reason,
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_projection_catchup",
+        "generated_at": utc_now(),
+        "ok": bool(auto_payload.get("ok")),
+        "status": auto_payload.get("status"),
+        "mutates": bool(auto_payload.get("mutates")),
+        "apply": apply,
+        "profile": profile,
+        "target": target,
+        "since": since,
+        "since_days": since_days,
+        "until": until,
+        "limit": limit,
+        "repair_limit": repair_limit,
+        "reason": reason,
+        "bounded": True,
+        "resource_class": auto_payload.get("resource_class"),
+        "resource_kind": auto_payload.get("resource_kind"),
+        "budget_seconds": auto_payload.get("budget_seconds"),
+        "expected_catchup_remaining": bool(auto_payload.get("expected_catchup_remaining")),
+        "deferred_graph_after": bool(auto_payload.get("deferred_graph_after")),
+        "search_rebuild_deferred_to_deep": bool(auto_payload.get("search_rebuild_deferred_to_deep")),
+        "hard_diagnostics": auto_payload.get("hard_diagnostics", []),
+        "projection_policy": projection_catchup_policy(profile),
+        "completeness_check": {
+            "freshness_before_after": True,
+            "schema_classifier_dirty_detection": "route-cache freshness, search state, atlas state, entity registry, and graph store gates",
+            "schema_mismatch_policy": "catchup defers full search rebuild to deep; deep may perform heavy rebuild",
+            "silent_stale_policy": "next_route stays non-empty until maintenance-status verifies clean projections",
+        },
+        "covers": {
+            "raw_authority": False,
+            "route_indexes": True,
+            "token_ledgers": True,
+            "search": True,
+            "search_catalog": True,
+            "search_shards": "freshness surfaced through search/catalog status; shard materialization remains the search-shards route",
+            "atlas": True,
+            "entity_registry": True,
+            "graph": "checked and repaired by deep; catchup surfaces deferred graph follow-up",
+        },
+        "resource_launcher": projection_catchup_resource_launcher(
+            profile=profile,
+            target=target,
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            apply=True,
+            write_report=True,
+            reason=reason,
+        ),
+        "next_route": next_route,
+        "next_command": next_route.get("command") if isinstance(next_route, dict) else [],
+        "auto_maintenance": auto_payload,
+        "diagnostics": auto_payload.get("diagnostics", []),
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+        "mcp_boundary": PROJECTION_CATCHUP_MCP_BOUNDARY,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__projection-catchup-{profile}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, projection_catchup_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def projection_catchup_markdown(payload: dict[str, Any]) -> str:
+    auto_payload = payload.get("auto_maintenance") if isinstance(payload.get("auto_maintenance"), dict) else {}
+    next_route = payload.get("next_route") if isinstance(payload.get("next_route"), dict) else {}
+    lines = [
+        "# Projection Catchup",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- profile: `{payload.get('profile')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- target: `{payload.get('target')}`",
+        f"- reason: `{payload.get('reason')}`",
+        f"- resource_class: `{payload.get('resource_class')}`",
+        f"- budget_seconds: `{payload.get('budget_seconds')}`",
+        f"- next_route: `{next_route.get('id')}`",
+        f"- next_route_status: `{next_route.get('status')}`",
+        f"- next_route_reason: `{next_route.get('reason')}`",
+        "",
+        "## Boundary",
+        "",
+        f"- authority_boundary: `{payload.get('authority_boundary')}`",
+        f"- mcp_boundary: `{payload.get('mcp_boundary')}`",
+        "",
+        "## Resource Launcher",
+        "",
+        "```bash",
+        shlex.join(str(part) for part in payload.get("resource_launcher", [])),
+        "```",
+    ]
+    command = next_route.get("command") if isinstance(next_route.get("command"), list) else []
+    if command:
+        lines.extend(
+            [
+                "",
+                "## Next Command",
+                "",
+                "```bash",
+                shlex.join(str(part) for part in command),
+                "```",
+            ]
+        )
+    if auto_payload:
+        lines.extend(
+            [
+                "",
+                "## Auto Maintenance",
+                "",
+                f"- status: `{auto_payload.get('status')}`",
+                f"- profile: `{auto_payload.get('profile')}`",
+                f"- expected_catchup_remaining: `{auto_payload.get('expected_catchup_remaining')}`",
+                f"- deferred_graph_after: `{auto_payload.get('deferred_graph_after')}`",
+                f"- search_rebuild_deferred_to_deep: `{auto_payload.get('search_rebuild_deferred_to_deep')}`",
+            ]
+        )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def projection_catchup_print_payload(payload: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
+    if full:
+        return payload
+    compact = dict(payload)
+    auto_payload = compact.get("auto_maintenance")
+    if isinstance(auto_payload, dict):
+        compact["auto_maintenance"] = auto_maintenance_print_payload(auto_payload, full=False)
+    return compact
+
+
 def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
     execution = payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
     lines = [
@@ -47217,6 +47754,40 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_projection_catchup(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
+    payload = projection_catchup(
+        workspace_root=workspace,
+        aoa_root=root,
+        target=args.session,
+        profile=args.profile,
+        since=since,
+        since_days=None if args.since is not None else args.since_days,
+        until=args.until,
+        limit=args.limit,
+        repair_limit=getattr(args, "repair_limit", None),
+        apply=args.apply,
+        max_raw_mb=args.max_raw_mb,
+        token_max_raw_mb=args.token_max_raw_mb,
+        graph_batch_limit=args.graph_batch_limit,
+        graph_refresh_chunk_size=args.graph_refresh_chunk_size,
+        graph_max_refresh_nodes=getattr(args, "graph_max_refresh_nodes", None),
+        graph_max_refresh_edges=getattr(args, "graph_max_refresh_edges", None),
+        ref_sample_limit=args.ref_sample_limit,
+        sample_audit=False if args.no_sample_audit else (True if args.sample_audit else None),
+        write_report=args.write_report,
+        lock_timeout_sec=args.lock_timeout_sec,
+        reason=args.reason,
+        budget_seconds=args.budget_seconds,
+        progress_every=args.progress_every,
+    )
+    print(json.dumps(projection_catchup_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -52809,6 +53380,38 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--write-report", action="store_true", help="Write JSON and Markdown maintenance reports under .aoa/diagnostics.")
     index_maintenance.add_argument("--full", action="store_true", help="Print complete maintenance payload to stdout.")
     index_maintenance.set_defaults(func=command_index_maintenance)
+
+    projection_catchup_parser = sub.add_parser(
+        "projection-catchup",
+        help="Run the named post-classifier/schema projection catch-up route over generated search, atlas, entity, and graph surfaces.",
+    )
+    projection_catchup_parser.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    projection_catchup_parser.add_argument("--workspace-root")
+    projection_catchup_parser.add_argument("--aoa-root")
+    projection_catchup_parser.add_argument("--profile", choices=sorted(PROJECTION_CATCHUP_PROFILES), default="catchup", help="Use catchup for bounded batches or deep for full heavy projection repair.")
+    projection_catchup_parser.add_argument("--since", help="Select sessions with archive dates on or after YYYY-MM-DD when session=all.")
+    projection_catchup_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all.")
+    projection_catchup_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
+    projection_catchup_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    projection_catchup_parser.add_argument("--repair-limit", type=int, help="Limit dirty projection repairs after full freshness detection.")
+    projection_catchup_parser.add_argument("--apply", action="store_true", help="Apply projection catch-up actions. Default plans and reports only.")
+    projection_catchup_parser.add_argument("--max-raw-mb", type=float, help="Override profile raw-text extraction limit for search/route reindexing.")
+    projection_catchup_parser.add_argument("--token-max-raw-mb", type=float, help="Override profile raw limit for token-ledger backfill.")
+    projection_catchup_parser.add_argument("--graph-batch-limit", type=int, help="Override profile dirty graph source batch size.")
+    projection_catchup_parser.add_argument("--graph-refresh-chunk-size", type=int, help="Override profile aggregate refresh chunk size for graph maintenance.")
+    projection_catchup_parser.add_argument("--graph-max-refresh-nodes", type=int, help="Override profile graph aggregate node refresh guard; <=0 disables the guard.")
+    projection_catchup_parser.add_argument("--graph-max-refresh-edges", type=int, help="Override profile graph aggregate edge refresh guard; <=0 disables the guard.")
+    projection_catchup_parser.add_argument("--ref-sample-limit", type=int, help="Override profile freshness ref sample limit.")
+    projection_catchup_audit_group = projection_catchup_parser.add_mutually_exclusive_group()
+    projection_catchup_audit_group.add_argument("--sample-audit", action="store_true", help="Force route-sample-audit when route indexes are refreshed.")
+    projection_catchup_audit_group.add_argument("--no-sample-audit", action="store_true", help="Disable profile route-sample-audit.")
+    projection_catchup_parser.add_argument("--lock-timeout-sec", type=float, default=0.0, help="Wait for an existing maintenance lock before skipping.")
+    projection_catchup_parser.add_argument("--budget-seconds", type=float, help="Override the profile wall-clock maintenance budget.")
+    projection_catchup_parser.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
+    projection_catchup_parser.add_argument("--reason", default=PROJECTION_CATCHUP_DEFAULT_REASON)
+    projection_catchup_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown projection catch-up reports under .aoa/diagnostics.")
+    projection_catchup_parser.add_argument("--full", action="store_true", help="Print complete projection catch-up payload to stdout.")
+    projection_catchup_parser.set_defaults(func=command_projection_catchup)
 
     auto_maintenance_parser = sub.add_parser(
         "auto-maintenance",
