@@ -45976,6 +45976,9 @@ def diagnostic_report_operational_key(report: dict[str, Any]) -> str:
         return f"index_maintenance:{target or stem or 'unknown'}"
     if artifact_type == "search_index" or "__search-index" in path:
         return f"search_index:{target or stem or 'unknown'}"
+    if artifact_type == "search_shard_materialization" or "__search-shards" in path:
+        requested_shard = str(report.get("requested_shard") or "").strip()
+        return f"search_shards:{requested_shard or target or stem or 'unknown'}"
     if artifact_type == "graph_maintenance" or "__graph-maintenance" in path:
         return f"graph_maintenance:{target or stem or 'unknown'}"
     if artifact_type == "agent_atlas_index":
@@ -46010,10 +46013,55 @@ def diagnostic_report_problem(report: dict[str, Any]) -> bool:
     )
 
 
+def diagnostic_report_repaired_search_shards(report: dict[str, Any]) -> set[str]:
+    artifact_type = str(report.get("artifact_type") or "")
+    path = str(report.get("_diagnostic_path") or "")
+    if artifact_type != "search_shard_materialization" and "__search-shards" not in path:
+        return set()
+    if report.get("ok") is not True:
+        return set()
+    repaired: set[str] = set()
+    for item in report.get("shards", []) if isinstance(report.get("shards"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "") != "current":
+            continue
+        shard = str(item.get("shard") or "").strip()
+        if shard:
+            repaired.add(shard)
+    requested = str(report.get("requested_shard") or "").strip()
+    if requested and str(report.get("status") or "") == "current":
+        repaired.add(requested)
+    return repaired
+
+
+def diagnostic_report_stale_segment_ref_shards(report: dict[str, Any]) -> set[str]:
+    diagnostics: list[str] = []
+    for key in ("diagnostics", "hard_diagnostics"):
+        value = report.get(key)
+        if isinstance(value, list):
+            diagnostics.extend(str(item) for item in value)
+    shards: set[str] = set()
+    for item in diagnostics:
+        shard, sep, reason = item.partition(":")
+        if sep and reason == "search_documents_stale_segment_refs" and shard:
+            shards.add(shard)
+    return shards
+
+
+def diagnostic_report_handled_stale_segment_refs(report: dict[str, Any], repaired_search_shards: set[str]) -> bool:
+    if str(report.get("artifact_type") or "") != "index_maintenance":
+        return False
+    stale_shards = diagnostic_report_stale_segment_ref_shards(report)
+    return bool(stale_shards) and stale_shards.issubset(repaired_search_shards)
+
+
 def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
     problems: list[dict[str, Any]] = []
     seen_operational_keys: set[str] = set()
+    repaired_search_shards: set[str] = set()
     for report in diagnostic_json_payloads(aoa_root, "*.json", limit=OPS_DIAGNOSTIC_SCAN_LIMIT):
+        repaired_search_shards.update(diagnostic_report_repaired_search_shards(report))
         artifact_type = str(report.get("artifact_type") or "")
         path = str(report.get("_diagnostic_path") or "")
         if not (
@@ -46022,6 +46070,7 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
                 "auto_maintenance",
                 "index_maintenance",
                 "search_index",
+                "search_shard_materialization",
                 "graph_maintenance",
                 "agent_atlas_index",
                 "auto_maintenance_resource_launch",
@@ -46030,6 +46079,7 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
             or "__auto-maintenance-resource-" in path
             or "__index-maintenance" in path
             or "__search-index" in path
+            or "__search-shards" in path
             or "__graph-maintenance" in path
         ):
             continue
@@ -46038,6 +46088,8 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
             continue
         if operational_key:
             seen_operational_keys.add(operational_key)
+        if diagnostic_report_handled_stale_segment_refs(report, repaired_search_shards):
+            continue
         if diagnostic_report_problem(report):
             problems.append(maintenance_report_brief(report))
         if len(problems) >= limit:

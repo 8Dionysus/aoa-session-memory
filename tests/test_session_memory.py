@@ -10624,6 +10624,49 @@ def test_recent_problem_jobs_ignore_superseded_resource_profile_failures(tmp_pat
     assert module.recent_problem_maintenance_reports(aoa_root) == []
 
 
+def test_recent_problem_jobs_ignore_stale_segment_refs_after_shard_repair(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    failed_index = diagnostics / "20260625T205653Z__index-maintenance.json"
+    repaired_shard = diagnostics / "20260625T212354Z__search-shards.json"
+    module.write_json(
+        failed_index,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "index_maintenance",
+            "generated_at": "2026-06-25T20:56:40Z",
+            "ok": False,
+            "target": "2026-06-12__001__demo",
+            "diagnostics": ["month/2026-06:search_documents_stale_segment_refs"],
+        },
+    )
+    module.write_json(
+        repaired_shard,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "generated_at": "2026-06-25T21:23:54Z",
+            "ok": True,
+            "status": "current",
+            "requested_shard": "month/2026-06",
+            "shards": [
+                {
+                    "shard": "month/2026-06",
+                    "status": "current",
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    os.utime(failed_index, (1_000_000_000, 1_000_000_000))
+    os.utime(repaired_shard, (1_000_000_100, 1_000_000_100))
+
+    assert module.diagnostic_report_problem(module.read_json(failed_index, {})) is True
+    assert module.diagnostic_report_repaired_search_shards(module.read_json(repaired_shard, {})) == {"month/2026-06"}
+    assert module.recent_problem_maintenance_reports(aoa_root) == []
+
+
 def test_recent_problem_jobs_ignore_performance_baseline_reports(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics = aoa_root / module.DIAGNOSTICS_ROOT

@@ -168,6 +168,12 @@ Build the `.aoa` session-memory mechanism end to end:
   sessions now update `search/catalog.json` shard freshness counters without a
   heavy raw/session-index scan, so MCP/agent fast-path defaults do not fall
   back to monolith merely because catalog freshness lagged the SQLite state.
+- Operations warnings distinguish current failures from repaired shard
+  freshness failures: an `index-maintenance` report that failed only because a
+  monthly shard had `search_documents_stale_segment_refs` is no longer kept as
+  a recent problem after a newer successful `search-shards` report repairs the
+  same shard. The failed report remains evidence, but `maintenance-status`
+  stops treating it as an active warning.
 - Graph hot-state recovery guards: `maintenance-status` detects empty
   generated graph stores (`graph_store_nodes_empty` / `graph_store_edges_empty`)
   without a full source scan, routes them to bounded incremental
