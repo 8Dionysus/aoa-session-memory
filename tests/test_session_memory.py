@@ -1203,6 +1203,57 @@ def test_raw_block_ref_audit_reads_block_lines_and_detects_mismatch(tmp_path: Pa
     assert "session_not_found" in missing_target["diagnostics"]
 
 
+def test_usage_raw_preview_prefers_raw_block_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-usage-raw-block.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "usage-raw-block", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use raw block preview for usage evidence."}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "turn_context", "payload": {"summary": "compact boundary"}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Raw block preview is bounded."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "usage-raw-block",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__use-raw-block-preview-for-usage-evidence"
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_block = manifest["raw_blocks"]["blocks"][0]
+    raw_path = Path(manifest["raw"]["path"])
+    raw_lines = raw_path.read_text(encoding="utf-8").splitlines()
+    raw_lines[1] = json.dumps({"type": "mutated_full_raw_line"}, ensure_ascii=False)
+    raw_path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+
+    preview = module.raw_preview_for_usage_event(
+        {
+            "refs": {
+                "session": str(manifest_path),
+                "raw": "raw:line:2",
+                "raw_block": first_block["rel"],
+            }
+        },
+        max_chars=1000,
+    )
+
+    assert preview["status"] == "available"
+    assert preview["source"] == "raw_block"
+    assert "Use raw block preview for usage evidence" in preview["text"]
+    assert "mutated_full_raw_line" not in preview["text"]
+
+
 def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

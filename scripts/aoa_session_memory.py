@@ -45143,17 +45143,56 @@ def compact_usage_event_from_segment_event(
     }
 
 
-def raw_preview_for_usage_event(event: dict[str, Any], *, max_chars: int = 600) -> dict[str, Any]:
+def raw_preview_for_usage_event(
+    event: dict[str, Any],
+    *,
+    max_chars: int = 600,
+    manifest_cache: dict[str, dict[str, Any]] | None = None,
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
     raw_ref = str(refs.get("raw") or "")
     manifest_ref = str(refs.get("session") or "")
+    raw_block_ref = str(refs.get("raw_block") or "")
+    cache_key = (manifest_ref, raw_ref, raw_block_ref, max(0, int_value(max_chars, 600)))
+    if raw_preview_cache is not None and cache_key in raw_preview_cache:
+        return dict(raw_preview_cache[cache_key])
     if not raw_ref or not manifest_ref:
         return {"status": "missing_raw_or_session_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
     manifest_path = Path(manifest_ref)
-    manifest = read_json(manifest_path, {})
+    manifest = manifest_cache.get(manifest_ref) if manifest_cache is not None else None
+    if manifest is None:
+        manifest = read_json(manifest_path, {})
+        if manifest_cache is not None and isinstance(manifest, dict):
+            manifest_cache[manifest_ref] = manifest
     if not isinstance(manifest, dict) or not manifest:
         return {"status": "session_manifest_unavailable", "line": line_from_raw_ref(raw_ref), "text": ""}
-    return raw_line_preview(manifest_raw_path(manifest_path.parent, manifest), raw_ref, max_chars=max_chars)
+    block_preview: dict[str, Any] | None = None
+    if raw_block_ref:
+        block_preview = raw_block_line_preview(
+            manifest_path.parent,
+            manifest,
+            raw_ref,
+            raw_block_ref=raw_block_ref,
+            max_chars=max_chars,
+        )
+        if block_preview.get("status") == "available":
+            block_preview = dict(block_preview)
+            block_preview["source"] = "raw_block"
+            if raw_preview_cache is not None:
+                raw_preview_cache[cache_key] = dict(block_preview)
+            return block_preview
+    preview = raw_line_preview(manifest_raw_path(manifest_path.parent, manifest), raw_ref, max_chars=max_chars)
+    preview = dict(preview)
+    preview["source"] = "raw_session_jsonl"
+    if block_preview is not None:
+        preview["raw_block_fallback"] = {
+            "status": block_preview.get("status"),
+            "diagnostics": block_preview.get("diagnostics", []),
+        }
+    if raw_preview_cache is not None:
+        raw_preview_cache[cache_key] = dict(preview)
+    return preview
 
 
 def document_path_mentions(text: Any, *, limit: int = 20) -> list[str]:
@@ -45170,7 +45209,13 @@ def document_path_mentions(text: Any, *, limit: int = 20) -> list[str]:
     return paths
 
 
-def entity_usage_document_refs(events: list[dict[str, Any]], *, limit: int = 60) -> list[dict[str, Any]]:
+def entity_usage_document_refs(
+    events: list[dict[str, Any]],
+    *,
+    limit: int = 60,
+    manifest_cache: dict[str, dict[str, Any]] | None = None,
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -45207,7 +45252,11 @@ def entity_usage_document_refs(events: list[dict[str, Any]], *, limit: int = 60)
             ("raw_line", "raw"),
         ]:
             add(kind, str(event_refs.get(key) or ""), event, role=role)
-        preview = raw_preview_for_usage_event(event)
+        preview = raw_preview_for_usage_event(
+            event,
+            manifest_cache=manifest_cache,
+            raw_preview_cache=raw_preview_cache,
+        )
         search_text = " ".join(
             str(part or "")
             for part in [
@@ -45223,22 +45272,37 @@ def entity_usage_document_refs(events: list[dict[str, Any]], *, limit: int = 60)
     return refs[:limit]
 
 
-def segment_events_for_hit(hit: dict[str, Any]) -> list[dict[str, Any]]:
+def segment_events_for_hit(
+    hit: dict[str, Any],
+    *,
+    segment_cache: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     refs = event_refs_from_hit(hit)
     index_path = Path(str(refs.get("segment_index") or ""))
     if not index_path.exists():
         return []
+    cache_key = str(index_path)
+    if segment_cache is not None and cache_key in segment_cache:
+        return segment_cache[cache_key]
     segment_index = read_json(index_path, {})
     if not isinstance(segment_index, dict):
         return []
-    return [event for event in segment_index.get("events", []) if isinstance(event, dict)]
+    events = [event for event in segment_index.get("events", []) if isinstance(event, dict)]
+    if segment_cache is not None:
+        segment_cache[cache_key] = events
+    return events
 
 
-def consequence_events_for_usage_hit(hit: dict[str, Any], *, window: int = 8) -> list[dict[str, Any]]:
+def consequence_events_for_usage_hit(
+    hit: dict[str, Any],
+    *,
+    window: int = 8,
+    segment_cache: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     usage_event_id = str(hit.get("event_id") or "")
     if not usage_event_id:
         return []
-    events = segment_events_for_hit(hit)
+    events = segment_events_for_hit(hit, segment_cache=segment_cache)
     if not events:
         return []
     index_by_id = {str(event.get("event_id") or ""): idx for idx, event in enumerate(events)}
@@ -45278,9 +45342,20 @@ def consequence_events_for_usage_hit(hit: dict[str, Any], *, window: int = 8) ->
     return selected
 
 
-def usage_event_with_raw_preview(event: dict[str, Any], *, max_chars: int = 600) -> dict[str, Any]:
+def usage_event_with_raw_preview(
+    event: dict[str, Any],
+    *,
+    max_chars: int = 600,
+    manifest_cache: dict[str, dict[str, Any]] | None = None,
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     enriched = dict(event)
-    enriched["raw_preview"] = raw_preview_for_usage_event(enriched, max_chars=max_chars)
+    enriched["raw_preview"] = raw_preview_for_usage_event(
+        enriched,
+        max_chars=max_chars,
+        manifest_cache=manifest_cache,
+        raw_preview_cache=raw_preview_cache,
+    )
     return enriched
 
 
@@ -45290,6 +45365,9 @@ def local_usage_neighborhood_for_hit(
     before: int = 3,
     after: int = 8,
     raw_preview_chars: int = 600,
+    segment_cache: dict[str, list[dict[str, Any]]] | None = None,
+    manifest_cache: dict[str, dict[str, Any]] | None = None,
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     usage_event_id = str(hit.get("event_id") or "")
     if not usage_event_id:
@@ -45299,12 +45377,14 @@ def local_usage_neighborhood_for_hit(
             "source_usage_event": usage_event_with_raw_preview(
                 compact_usage_event_from_search_hit(hit, role="usage"),
                 max_chars=raw_preview_chars,
+                manifest_cache=manifest_cache,
+                raw_preview_cache=raw_preview_cache,
             ),
             "local_events": [],
             "consequence_events": [],
             "document_refs": [],
         }
-    events = segment_events_for_hit(hit)
+    events = segment_events_for_hit(hit, segment_cache=segment_cache)
     if not events:
         return {
             "ok": False,
@@ -45312,6 +45392,8 @@ def local_usage_neighborhood_for_hit(
             "source_usage_event": usage_event_with_raw_preview(
                 compact_usage_event_from_search_hit(hit, role="usage"),
                 max_chars=raw_preview_chars,
+                manifest_cache=manifest_cache,
+                raw_preview_cache=raw_preview_cache,
             ),
             "local_events": [],
             "consequence_events": [],
@@ -45326,6 +45408,8 @@ def local_usage_neighborhood_for_hit(
             "source_usage_event": usage_event_with_raw_preview(
                 compact_usage_event_from_search_hit(hit, role="usage"),
                 max_chars=raw_preview_chars,
+                manifest_cache=manifest_cache,
+                raw_preview_cache=raw_preview_cache,
             ),
             "local_events": [],
             "consequence_events": [],
@@ -45376,7 +45460,12 @@ def local_usage_neighborhood_for_hit(
             )
         compact["offset"] = offset
         compact["relation"] = relation
-        compact["raw_preview"] = raw_preview_for_usage_event(compact, max_chars=raw_preview_chars) if raw_preview_chars else {"status": "not_requested", "line": None, "text": ""}
+        compact["raw_preview"] = raw_preview_for_usage_event(
+            compact,
+            max_chars=raw_preview_chars,
+            manifest_cache=manifest_cache,
+            raw_preview_cache=raw_preview_cache,
+        ) if raw_preview_chars else {"status": "not_requested", "line": None, "text": ""}
         local_events.append(compact)
 
     consequence_events = [
@@ -45388,7 +45477,12 @@ def local_usage_neighborhood_for_hit(
             or str(event.get("role") or "") in {"result", "outcome", "consequence"}
         )
     ]
-    document_refs = entity_usage_document_refs(local_events, limit=80)
+    document_refs = entity_usage_document_refs(
+        local_events,
+        limit=80,
+        manifest_cache=manifest_cache,
+        raw_preview_cache=raw_preview_cache,
+    )
     raw_preview_counts: Counter[str] = Counter()
     for event in local_events:
         preview = event.get("raw_preview") if isinstance(event.get("raw_preview"), dict) else {}
@@ -45400,6 +45494,8 @@ def local_usage_neighborhood_for_hit(
             usage_event_with_raw_preview(
                 compact_usage_event_from_search_hit(hit, role="usage"),
                 max_chars=raw_preview_chars,
+                manifest_cache=manifest_cache,
+                raw_preview_cache=raw_preview_cache,
             ),
         ),
         "before": before,
@@ -45660,12 +45756,15 @@ def entity_usage_audit(
     result_events = [event for event in events if event.get("role") == "result"]
     outcome_events = [event for event in events if event.get("role") == "outcome"]
     context_events = [event for event in events if event.get("role") == "context"]
+    segment_cache: dict[str, list[dict[str, Any]]] = {}
+    manifest_cache: dict[str, dict[str, Any]] = {}
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     consequence_events: list[dict[str, Any]] = []
     seen_consequences: set[str] = set()
     for hit, event in zip(hits, events):
         if event.get("role") != "usage":
             continue
-        for consequence in consequence_events_for_usage_hit(hit, window=consequence_window):
+        for consequence in consequence_events_for_usage_hit(hit, window=consequence_window, segment_cache=segment_cache):
             consequence_id = str(consequence.get("doc_id") or "")
             if consequence_id and consequence_id in seen_consequences:
                 continue
@@ -45674,7 +45773,12 @@ def entity_usage_audit(
             consequence_events.append(consequence)
     all_events_for_docs = [*usage_events, *result_events, *outcome_events, *entrypoint_events, *context_events, *consequence_events]
     freshness_counts = entity_usage_freshness_counts(all_events_for_docs)
-    document_refs = entity_usage_document_refs(all_events_for_docs, limit=document_limit)
+    document_refs = entity_usage_document_refs(
+        all_events_for_docs,
+        limit=document_limit,
+        manifest_cache=manifest_cache,
+        raw_preview_cache=raw_preview_cache,
+    )
     sessions = entity_usage_sessions_summary(all_events_for_docs)
     provider_status = search_provider_status(aoa_root=aoa_root, provider_name=provider)
     provider_payload = provider_status.get("providers", {}).get(provider) if isinstance(provider_status.get("providers"), dict) else {}
@@ -45833,12 +45937,18 @@ def entity_usage_neighborhood(
     diagnostics = list(audit.get("diagnostics", []) if isinstance(audit.get("diagnostics"), list) else [])
     usage_events = audit.get("usage_events") if isinstance(audit.get("usage_events"), list) else []
     selected_usage_events = [event for event in usage_events if isinstance(event, dict)][:limit]
+    segment_cache: dict[str, list[dict[str, Any]]] = {}
+    manifest_cache: dict[str, dict[str, Any]] = {}
+    raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     neighborhoods = [
         local_usage_neighborhood_for_hit(
             event,
             before=before,
             after=after,
             raw_preview_chars=raw_preview_chars,
+            segment_cache=segment_cache,
+            manifest_cache=manifest_cache,
+            raw_preview_cache=raw_preview_cache,
         )
         for event in selected_usage_events
     ]
