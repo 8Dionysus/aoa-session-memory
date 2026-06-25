@@ -455,9 +455,18 @@ only during apply.
 When the generated graph store still needs physical SQLite shrink after a
 projection prune, use `graph-sqlite-compact` as the preflight/staging route.
 The default is read-only and computes conservative headroom for `VACUUM INTO`.
-Apply defaults to a staged compact copy that is integrity-checked and does not
-replace the live `graph.sqlite3`; source-mutating `VACUUM` requires
-`--confirm-source-vacuum`.
+Apply defaults to a staged compact copy that is integrity-checked. Use
+`--promote-copy` only when the operator wants the verified generated copy to
+replace the live `graph.sqlite3` under the maintenance lock. Promotion first
+checkpoints WAL, keeps a backup by default, verifies the promoted live DB, and
+deletes that backup only with `--delete-backup-after-verify`. Source-mutating
+`VACUUM` still requires `--confirm-source-vacuum`.
+
+The same staged/promote route exists for the portable SQLite search store:
+`search-sqlite-compact` is a physical generated-store maintenance route, not a
+raw evidence cleanup route. Search weight should still be reduced first through
+bounded raw lexical policy, structured shards, and route benchmarks; physical
+search compaction is mainly for post-rebuild freelist reclaim.
 
 Use `storage-maintenance` for the current safe live shrink lane. It only runs
 SQLite WAL checkpoint/truncate for the graph and search stores, reports busy

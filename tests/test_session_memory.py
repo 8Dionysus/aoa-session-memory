@@ -4444,6 +4444,31 @@ def test_graph_sqlite_compact_plans_and_stages_vacuum_copy(tmp_path: Path) -> No
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
 
+    promote_target = tmp_path / "graph-promote-copy.sqlite3"
+    promoted = module.graph_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        target_path=promote_target,
+        min_free_after_gb=0,
+        promote_copy=True,
+        delete_backup_after_verify=True,
+        write_report=True,
+    )
+    assert promoted["ok"] is True
+    assert promoted["mutates"] is True
+    assert promoted["status"] == "promoted_backup_deleted"
+    assert promoted["promote_copy"] is True
+    assert promoted["delete_backup_after_verify"] is True
+    assert promoted["action"]["promotion"]["ok"] is True
+    assert promoted["action"]["promotion"]["backup_deleted"] is True
+    assert promoted["action"]["promotion"]["live_integrity_check"]["ok"] is True
+    assert promoted["action"]["promotion"]["final_reclaimed_bytes"] >= 0
+    assert not promote_target.exists()
+    assert db_path.exists()
+    assert module.sqlite_integrity_check(db_path)["ok"] is True
+    assert Path(promoted["report_json"]).exists()
+    assert Path(promoted["report_markdown"]).exists()
+
 
 def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -10479,6 +10504,37 @@ def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) ->
     assert target.exists()
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
+
+    args = parser.parse_args(["search-sqlite-compact", "--promote-copy", "--delete-backup-after-verify"])
+    assert args.promote_copy is True
+    assert args.delete_backup_after_verify is True
+
+    promote_target = tmp_path / "search-promote-copy.sqlite3"
+    backup_path = tmp_path / "search-before-promote.sqlite3"
+    promoted = module.search_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        target_path=promote_target,
+        backup_path=backup_path,
+        promote_copy=True,
+        write_report=True,
+    )
+    assert promoted["ok"] is True
+    assert promoted["mutates"] is True
+    assert promoted["status"] == "promoted_backup_retained"
+    assert promoted["promote_copy"] is True
+    assert promoted["backup_path"] == str(backup_path)
+    assert promoted["action"]["promotion"]["ok"] is True
+    assert promoted["action"]["promotion"]["backup_retained"] is True
+    assert promoted["action"]["promotion"]["live_integrity_check"]["ok"] is True
+    assert backup_path.exists()
+    assert not promote_target.exists()
+    assert db_path.exists()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) -> None:

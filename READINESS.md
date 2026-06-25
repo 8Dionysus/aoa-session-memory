@@ -96,6 +96,13 @@ Build the `.aoa` session-memory mechanism end to end:
   graph aggregate payload reclaim estimates, materialized
   `graph-cardinality` node/edge type counts, and search body storage with
   full-text FTS plus compressed selected-hit hydration
+- SQLite physical compaction promotion: `graph-sqlite-compact` and
+  `search-sqlite-compact` can now promote a verified `VACUUM INTO` copy over
+  the live generated store with `--promote-copy`, keeping a backup by default
+  and deleting it for actual reclaim only with
+  `--delete-backup-after-verify`. The route stays under the manual-bulk
+  maintenance lock, checkpoints WAL before promotion, verifies the promoted
+  live DB, and never mutates raw/session evidence.
 - Pre-GraphRAG trust layer: source-owned
   `config/graph-quality-regression-corpus.json`, `graph-quality-corpus`,
   `graph-freshness-check`, `entity-dossier`, and GraphRAG packet

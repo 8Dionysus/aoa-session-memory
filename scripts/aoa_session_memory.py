@@ -40599,6 +40599,152 @@ def sqlite_vacuum_into(db_path: Path, target_path: Path, *, timeout: float = 120
     }
 
 
+def sqlite_promote_verified_copy(
+    db_path: Path,
+    copy_path: Path,
+    backup_path: Path,
+    *,
+    delete_backup_after_verify: bool = False,
+) -> dict[str, Any]:
+    diagnostics: list[str] = []
+    warnings: list[str] = []
+    if not db_path.exists():
+        diagnostics.append("sqlite_live_db_missing")
+    if not copy_path.exists():
+        diagnostics.append("sqlite_compact_copy_missing")
+    try:
+        if db_path.exists() and copy_path.exists() and db_path.resolve() == copy_path.resolve():
+            diagnostics.append("sqlite_compact_copy_same_as_live_db")
+    except OSError as exc:
+        diagnostics.append(f"sqlite_compact_copy_resolve_failed:{exc}")
+    if backup_path.exists():
+        diagnostics.append("sqlite_compact_backup_path_exists")
+
+    before_live = sqlite_storage_stats(db_path)
+    staged_copy = sqlite_storage_stats(copy_path)
+    copy_integrity = sqlite_integrity_check(copy_path) if copy_path.exists() else {"ok": False, "status": "missing", "diagnostics": ["sqlite_compact_copy_missing"]}
+    if not copy_integrity.get("ok"):
+        diagnostics.extend(str(item) for item in copy_integrity.get("diagnostics", []) if item)
+    checkpoint: dict[str, Any] = {}
+    if not diagnostics:
+        checkpoint = sqlite_wal_checkpoint(db_path)
+        if str(checkpoint.get("status") or "") == "busy_deferred":
+            diagnostics.extend(str(item) for item in checkpoint.get("diagnostics", []) if item)
+        elif not checkpoint.get("ok"):
+            diagnostics.extend(str(item) for item in checkpoint.get("diagnostics", []) if item)
+    if diagnostics:
+        return {
+            "ok": False,
+            "status": "preflight_failed",
+            "mutates": False,
+            "live_path": str(db_path),
+            "copy_path": str(copy_path),
+            "backup_path": str(backup_path),
+            "delete_backup_after_verify": bool(delete_backup_after_verify),
+            "before_live": before_live,
+            "staged_copy": staged_copy,
+            "copy_integrity_check": copy_integrity,
+            "wal_checkpoint": checkpoint,
+            "live_integrity_check": {},
+            "after_live": before_live,
+            "backup_deleted": False,
+            "live_reclaimed_bytes": 0,
+            "live_reclaimed_human": "0 B",
+            "final_reclaimed_bytes": 0,
+            "final_reclaimed_human": "0 B",
+            "diagnostics": diagnostics,
+            "warnings": warnings,
+        }
+
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    source_moved = False
+    live_promoted = False
+    backup_deleted = False
+    failed_live_path = backup_path.with_name(f"{backup_path.name}.failed-promote")
+    try:
+        try:
+            shutil.copymode(db_path, copy_path)
+        except OSError as exc:
+            warnings.append(f"sqlite_compact_copy_copymode_warning:{exc}")
+        os.replace(db_path, backup_path)
+        source_moved = True
+        cleanup_sqlite_sidecars(db_path)
+        cleanup_sqlite_sidecars(copy_path)
+        os.replace(copy_path, db_path)
+        live_promoted = True
+        cleanup_sqlite_sidecars(copy_path)
+    except OSError as exc:
+        diagnostics.append(f"sqlite_compact_copy_promote_failed:{exc}")
+        if source_moved and not db_path.exists() and backup_path.exists():
+            try:
+                os.replace(backup_path, db_path)
+                source_moved = False
+            except OSError as rollback_exc:
+                diagnostics.append(f"sqlite_compact_copy_promote_rollback_failed:{rollback_exc}")
+
+    live_integrity = sqlite_integrity_check(db_path) if live_promoted else {}
+    if live_promoted and not live_integrity.get("ok"):
+        diagnostics.extend(str(item) for item in live_integrity.get("diagnostics", []) if item)
+        try:
+            if db_path.exists():
+                os.replace(db_path, failed_live_path)
+            if backup_path.exists():
+                os.replace(backup_path, db_path)
+                source_moved = False
+                live_promoted = False
+        except OSError as rollback_exc:
+            diagnostics.append(f"sqlite_compact_copy_live_integrity_rollback_failed:{rollback_exc}")
+
+    after_live = sqlite_storage_stats(db_path)
+    if live_promoted and not diagnostics and delete_backup_after_verify and backup_path.exists():
+        try:
+            backup_path.unlink()
+            cleanup_sqlite_sidecars(backup_path)
+            backup_deleted = True
+        except OSError as exc:
+            diagnostics.append(f"sqlite_compact_backup_delete_failed:{exc}")
+
+    before_bytes = int_value(before_live.get("total_with_wal_bytes"))
+    after_bytes = int_value(after_live.get("total_with_wal_bytes"))
+    backup_bytes = path_total_size(backup_path)
+    live_reclaimed = max(0, before_bytes - after_bytes)
+    final_reclaimed = live_reclaimed if backup_deleted else 0
+    if backup_deleted:
+        status = "promoted_backup_deleted"
+    elif live_promoted and not diagnostics:
+        status = "promoted_backup_retained"
+    elif diagnostics:
+        status = "failed"
+    else:
+        status = "skipped"
+    return {
+        "ok": not diagnostics and live_promoted,
+        "status": status,
+        "mutates": source_moved or live_promoted or backup_deleted,
+        "live_path": str(db_path),
+        "copy_path": str(copy_path),
+        "backup_path": str(backup_path),
+        "delete_backup_after_verify": bool(delete_backup_after_verify),
+        "backup_deleted": backup_deleted,
+        "backup_retained": bool(backup_path.exists()),
+        "backup_bytes": backup_bytes,
+        "backup_human": human_size(backup_bytes),
+        "before_live": before_live,
+        "staged_copy": staged_copy,
+        "copy_integrity_check": copy_integrity,
+        "wal_checkpoint": checkpoint,
+        "live_integrity_check": live_integrity,
+        "after_live": after_live,
+        "live_reclaimed_bytes": live_reclaimed,
+        "live_reclaimed_human": human_size(live_reclaimed),
+        "final_reclaimed_bytes": final_reclaimed,
+        "final_reclaimed_human": human_size(final_reclaimed),
+        "failed_live_path": str(failed_live_path) if failed_live_path.exists() else "",
+        "diagnostics": diagnostics,
+        "warnings": warnings,
+    }
+
+
 def sqlite_vacuum_in_place(db_path: Path, *, timeout: float = 120.0) -> dict[str, Any]:
     diagnostics: list[str] = []
     before = sqlite_storage_stats(db_path)
@@ -40635,6 +40781,7 @@ def sqlite_vacuum_in_place(db_path: Path, *, timeout: float = 120.0) -> dict[str
 def graph_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
     action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    promotion = action.get("promotion") if isinstance(action.get("promotion"), dict) else {}
     lines = [
         "# Graph SQLite Compact",
         "",
@@ -40664,6 +40811,19 @@ def graph_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
         f"- target_path: `{action.get('target_path')}`",
         f"- reclaimed: `{action.get('reclaimed_human')}`",
     ]
+    if promotion:
+        lines.extend(
+            [
+                "",
+                "## Promotion",
+                "",
+                f"- status: `{promotion.get('status')}`",
+                f"- backup_path: `{promotion.get('backup_path')}`",
+                f"- backup_deleted: `{promotion.get('backup_deleted')}`",
+                f"- live_reclaimed: `{promotion.get('live_reclaimed_human')}`",
+                f"- final_reclaimed: `{promotion.get('final_reclaimed_human')}`",
+            ]
+        )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
@@ -40682,15 +40842,22 @@ def graph_sqlite_compact(
     allow_low_free: bool = False,
     confirm_source_vacuum: bool = False,
     overwrite_target: bool = False,
+    promote_copy: bool = False,
+    backup_path: Path | None = None,
+    delete_backup_after_verify: bool = False,
     write_report: bool = False,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
+    stamp = compact_stamp()
     graph_store_path = graph_paths(aoa_root)["store"]
     method = method if method in {"vacuum-into", "vacuum"} else "vacuum-into"
     explicit_target_path = target_path is not None
     plan_target_path = target_path
     if plan_target_path is None and method == "vacuum-into":
-        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{compact_stamp()}__graph.sqlite3.vacuum-copy"
+        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__graph.sqlite3.vacuum-copy"
+    plan_backup_path = backup_path
+    if plan_backup_path is None and promote_copy:
+        plan_backup_path = aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__graph.sqlite3.pre-compact-backup"
     plan = sqlite_vacuum_headroom_plan(
         db_path=graph_store_path,
         method=method,
@@ -40707,6 +40874,12 @@ def graph_sqlite_compact(
     if apply and method == "vacuum" and not confirm_source_vacuum:
         diagnostics.append("source_vacuum_requires_confirm_source_vacuum")
         status = "preflight_failed"
+    if apply and promote_copy and method != "vacuum-into":
+        diagnostics.append("promote_copy_requires_vacuum_into")
+        status = "preflight_failed"
+    if apply and delete_backup_after_verify and not promote_copy:
+        diagnostics.append("delete_backup_after_verify_requires_promote_copy")
+        status = "preflight_failed"
     if apply and not plan.get("apply_ready"):
         diagnostics.extend(item for item in plan_diagnostics if item not in diagnostics)
         status = "preflight_failed"
@@ -40717,30 +40890,46 @@ def graph_sqlite_compact(
         if method == "vacuum-into":
             action = sqlite_vacuum_into(graph_store_path, target_path or graph_store_path.with_suffix(".vacuum-copy"), overwrite=overwrite_target)
             status = str(action.get("status") or "applied")
+            if action.get("ok") and promote_copy:
+                promotion = sqlite_promote_verified_copy(
+                    graph_store_path,
+                    Path(str(action.get("target_path") or "")),
+                    plan_backup_path or (aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__graph.sqlite3.pre-compact-backup"),
+                    delete_backup_after_verify=delete_backup_after_verify,
+                )
+                action["promotion"] = promotion
+                status = str(promotion.get("status") or status)
+                diagnostics.extend(str(item) for item in promotion.get("diagnostics", []) if item)
         else:
             action = sqlite_vacuum_in_place(graph_store_path)
             status = str(action.get("status") or "applied")
         diagnostics.extend(str(item) for item in action.get("diagnostics", []) if item)
     ok = not diagnostics and (not apply or bool(action.get("ok")))
     if not apply and plan.get("apply_ready"):
-        next_route = "run graph-sqlite-compact --apply with an explicit target path for a staged compact copy, then verify and plan a separate swap/replace route"
+        next_route = "run graph-sqlite-compact --apply with an explicit target path for a staged compact copy; add --promote-copy to replace the live generated store and --delete-backup-after-verify only when immediate reclaim is intended"
     elif not apply:
         next_route = "do not compact yet; reserve disk headroom or reduce graph cardinality/search pressure first"
+    elif method == "vacuum-into" and promote_copy and action.get("promotion", {}).get("ok"):
+        next_route = "run maintenance-status --full and graph-cardinality to verify graph route health after promoted compaction"
     elif method == "vacuum-into" and action.get("ok"):
-        next_route = "verify the compact copy, then use a separate controlled swap route if the operator chooses to replace graph.sqlite3"
+        next_route = "verify the compact copy; rerun with --promote-copy in a controlled maintenance window if replacing graph.sqlite3 is intended"
     elif method == "vacuum" and action.get("ok"):
         next_route = "run storage-audit --write-report and maintenance-status --full to verify graph size and route health"
     else:
         next_route = "fix diagnostics before retrying graph-sqlite-compact"
+    promotion_action = action.get("promotion") if isinstance(action.get("promotion"), dict) else {}
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_sqlite_compact",
         "generated_at": utc_now(),
         "ok": ok,
-        "mutates": bool(action.get("mutates")),
+        "mutates": bool(action.get("mutates")) or bool(promotion_action.get("mutates")),
         "apply": bool(apply),
         "status": status,
         "method": method,
+        "promote_copy": bool(promote_copy),
+        "backup_path": str(plan_backup_path) if plan_backup_path else "",
+        "delete_backup_after_verify": bool(delete_backup_after_verify),
         "execution_profile": GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE,
         "aoa_root": str(aoa_root),
         "store_path": str(graph_store_path),
@@ -40750,7 +40939,7 @@ def graph_sqlite_compact(
         "action": action,
         "elapsed_ms": int((time.monotonic() - started_at) * 1000),
         "diagnostics": diagnostics,
-        "stop_line": "This route compacts only the generated graph SQLite projection. It does not delete raw/session evidence and does not replace graph.sqlite3 after VACUUM INTO.",
+        "stop_line": "This route compacts only the generated graph SQLite projection. Raw/session evidence is untouched; live replacement is allowed only with --promote-copy after integrity checks.",
         "next_route": next_route,
     }
     if write_report:
@@ -40769,6 +40958,7 @@ def graph_sqlite_compact(
 def search_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
     action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    promotion = action.get("promotion") if isinstance(action.get("promotion"), dict) else {}
     lines = [
         "# Search SQLite Compact",
         "",
@@ -40798,6 +40988,19 @@ def search_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
         f"- target_path: `{action.get('target_path')}`",
         f"- reclaimed: `{action.get('reclaimed_human')}`",
     ]
+    if promotion:
+        lines.extend(
+            [
+                "",
+                "## Promotion",
+                "",
+                f"- status: `{promotion.get('status')}`",
+                f"- backup_path: `{promotion.get('backup_path')}`",
+                f"- backup_deleted: `{promotion.get('backup_deleted')}`",
+                f"- live_reclaimed: `{promotion.get('live_reclaimed_human')}`",
+                f"- final_reclaimed: `{promotion.get('final_reclaimed_human')}`",
+            ]
+        )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
@@ -40816,15 +41019,22 @@ def search_sqlite_compact(
     allow_low_free: bool = False,
     confirm_source_vacuum: bool = False,
     overwrite_target: bool = False,
+    promote_copy: bool = False,
+    backup_path: Path | None = None,
+    delete_backup_after_verify: bool = False,
     write_report: bool = False,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
+    stamp = compact_stamp()
     search_store_path = search_db_path(aoa_root)
     method = method if method in {"vacuum-into", "vacuum"} else "vacuum-into"
     explicit_target_path = target_path is not None
     plan_target_path = target_path
     if plan_target_path is None and method == "vacuum-into":
-        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{compact_stamp()}__aoa-search.sqlite3.vacuum-copy"
+        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__aoa-search.sqlite3.vacuum-copy"
+    plan_backup_path = backup_path
+    if plan_backup_path is None and promote_copy:
+        plan_backup_path = aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__aoa-search.sqlite3.pre-compact-backup"
     plan = sqlite_vacuum_headroom_plan(
         db_path=search_store_path,
         method=method,
@@ -40841,6 +41051,12 @@ def search_sqlite_compact(
     if apply and method == "vacuum" and not confirm_source_vacuum:
         diagnostics.append("source_vacuum_requires_confirm_source_vacuum")
         status = "preflight_failed"
+    if apply and promote_copy and method != "vacuum-into":
+        diagnostics.append("promote_copy_requires_vacuum_into")
+        status = "preflight_failed"
+    if apply and delete_backup_after_verify and not promote_copy:
+        diagnostics.append("delete_backup_after_verify_requires_promote_copy")
+        status = "preflight_failed"
     if apply and not plan.get("apply_ready"):
         diagnostics.extend(item for item in plan_diagnostics if item not in diagnostics)
         status = "preflight_failed"
@@ -40851,30 +41067,46 @@ def search_sqlite_compact(
         if method == "vacuum-into":
             action = sqlite_vacuum_into(search_store_path, target_path or search_store_path.with_suffix(".vacuum-copy"), overwrite=overwrite_target)
             status = str(action.get("status") or "applied")
+            if action.get("ok") and promote_copy:
+                promotion = sqlite_promote_verified_copy(
+                    search_store_path,
+                    Path(str(action.get("target_path") or "")),
+                    plan_backup_path or (aoa_root / DIAGNOSTICS_ROOT / f"{stamp}__aoa-search.sqlite3.pre-compact-backup"),
+                    delete_backup_after_verify=delete_backup_after_verify,
+                )
+                action["promotion"] = promotion
+                status = str(promotion.get("status") or status)
+                diagnostics.extend(str(item) for item in promotion.get("diagnostics", []) if item)
         else:
             action = sqlite_vacuum_in_place(search_store_path)
             status = str(action.get("status") or "applied")
         diagnostics.extend(str(item) for item in action.get("diagnostics", []) if item)
     ok = not diagnostics and (not apply or bool(action.get("ok")))
     if not apply and plan.get("apply_ready"):
-        next_route = "run search-sqlite-compact --apply with an explicit target path for a staged compact copy, then verify live routes before any separate swap/replace"
+        next_route = "run search-sqlite-compact --apply with an explicit target path for a staged compact copy; add --promote-copy to replace the live generated store and --delete-backup-after-verify only when immediate reclaim is intended"
     elif not apply:
         next_route = "do not compact yet; reserve disk headroom or rebuild the generated search projection with the bounded raw lexical policy first"
+    elif method == "vacuum-into" and promote_copy and action.get("promotion", {}).get("ok"):
+        next_route = "run maintenance-status --full and a structured search route to verify search health after promoted compaction"
     elif method == "vacuum-into" and action.get("ok"):
-        next_route = "verify the compact search copy, then use a separate controlled swap route only if the operator chooses to replace aoa-search.sqlite3"
+        next_route = "verify the compact search copy; rerun with --promote-copy in a controlled maintenance window if replacing aoa-search.sqlite3 is intended"
     elif method == "vacuum" and action.get("ok"):
         next_route = "run storage-audit --write-report and maintenance-status --full to verify search size and route health"
     else:
         next_route = "fix diagnostics before retrying search-sqlite-compact"
+    promotion_action = action.get("promotion") if isinstance(action.get("promotion"), dict) else {}
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_sqlite_compact",
         "generated_at": utc_now(),
         "ok": ok,
-        "mutates": bool(action.get("mutates")),
+        "mutates": bool(action.get("mutates")) or bool(promotion_action.get("mutates")),
         "apply": bool(apply),
         "status": status,
         "method": method,
+        "promote_copy": bool(promote_copy),
+        "backup_path": str(plan_backup_path) if plan_backup_path else "",
+        "delete_backup_after_verify": bool(delete_backup_after_verify),
         "execution_profile": SEARCH_SQLITE_COMPACT_EXECUTION_PROFILE,
         "aoa_root": str(aoa_root),
         "store_path": str(search_store_path),
@@ -40884,7 +41116,7 @@ def search_sqlite_compact(
         "action": action,
         "elapsed_ms": int((time.monotonic() - started_at) * 1000),
         "diagnostics": diagnostics,
-        "stop_line": "This route compacts only the generated portable SQLite search projection. It does not delete raw/session evidence and does not replace aoa-search.sqlite3 after VACUUM INTO.",
+        "stop_line": "This route compacts only the generated portable SQLite search projection. Raw/session evidence is untouched; live replacement is allowed only with --promote-copy after integrity checks.",
         "next_route": next_route,
     }
     if write_report:
@@ -41502,12 +41734,12 @@ def search_sqlite_physical_compaction_recommendation(plan: dict[str, Any]) -> di
         status = "low_reclaim_not_primary"
         next_route = "prefer search-index bounded raw lexical policy, shard policy, and route benchmarks before physical SQLite compaction; current freelist reclaim is small"
     elif plan.get("apply_ready"):
-        next_route = "run search-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient"
+        next_route = "run search-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path with optional --promote-copy and --delete-backup-after-verify only when disk headroom is sufficient"
     else:
         next_route = "fix search SQLite compaction preflight diagnostics before using physical compaction as a pressure route"
     return {
         "status": status,
-        "quality_tradeoff": "none_expected_for_vacuum_into_copy; source aoa-search.sqlite3 is not replaced by the staged route and raw/session evidence is untouched",
+        "quality_tradeoff": "none_expected_for_vacuum_into_copy; raw/session evidence is untouched and live replacement requires --promote-copy integrity checks",
         "speed_tradeoff": "manual-bulk SQLite copy/rewrite; not an interactive query path",
         "estimated_reclaimable_bytes": reclaimable,
         "estimated_reclaimable_human": plan.get("conservative_reclaimable_human"),
@@ -41688,7 +41920,7 @@ def storage_audit(
             {
                 "id": "graph_sqlite_physical_compaction",
                 "status": graph_sqlite_plan["status"],
-                "quality_tradeoff": "none_expected_for_vacuum_into_copy; source graph.sqlite3 is not replaced by the staged route",
+                "quality_tradeoff": "none_expected_for_vacuum_into_copy; raw/session evidence is untouched and live replacement requires --promote-copy integrity checks",
                 "speed_tradeoff": "manual-bulk SQLite copy/rewrite; not an interactive query path",
                 "estimated_reclaimable_bytes": graph_sqlite_plan["conservative_reclaimable_bytes"],
                 "estimated_reclaimable_human": graph_sqlite_plan["conservative_reclaimable_human"],
@@ -41696,7 +41928,7 @@ def storage_audit(
                 "free_human": graph_sqlite_plan["free_human"],
                 "min_free_after_human": graph_sqlite_plan["min_free_after_human"],
                 "apply_ready": graph_sqlite_plan["apply_ready"],
-                "next_route": "run graph-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient",
+                "next_route": "run graph-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path with optional --promote-copy and --delete-backup-after-verify only when disk headroom is sufficient",
             },
             {"id": "search_sqlite_physical_compaction", **search_sqlite_physical_compaction_recommendation(search_sqlite_plan)},
             {
@@ -52354,6 +52586,7 @@ def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     target_path = Path(args.target_path) if args.target_path else None
+    backup_path = Path(args.backup_path) if args.backup_path else None
 
     def run_compact() -> dict[str, Any]:
         return graph_sqlite_compact(
@@ -52365,6 +52598,9 @@ def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
             allow_low_free=args.allow_low_free,
             confirm_source_vacuum=args.confirm_source_vacuum,
             overwrite_target=args.overwrite_target,
+            promote_copy=args.promote_copy,
+            backup_path=backup_path,
+            delete_backup_after_verify=args.delete_backup_after_verify,
             write_report=args.write_report,
         )
 
@@ -52389,6 +52625,7 @@ def command_search_sqlite_compact(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     target_path = Path(args.target_path) if args.target_path else None
+    backup_path = Path(args.backup_path) if args.backup_path else None
 
     def run_compact() -> dict[str, Any]:
         return search_sqlite_compact(
@@ -52400,6 +52637,9 @@ def command_search_sqlite_compact(args: argparse.Namespace) -> int:
             allow_low_free=args.allow_low_free,
             confirm_source_vacuum=args.confirm_source_vacuum,
             overwrite_target=args.overwrite_target,
+            promote_copy=args.promote_copy,
+            backup_path=backup_path,
+            delete_backup_after_verify=args.delete_backup_after_verify,
             write_report=args.write_report,
         )
 
@@ -58067,6 +58307,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph_sqlite_compact_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom guard when the operator has reserved capacity another way.")
     graph_sqlite_compact_parser.add_argument("--confirm-source-vacuum", action="store_true", help="Allow --method vacuum to mutate graph.sqlite3 after preflight.")
     graph_sqlite_compact_parser.add_argument("--overwrite-target", action="store_true", help="Allow --method vacuum-into to replace an existing target path.")
+    graph_sqlite_compact_parser.add_argument("--promote-copy", action="store_true", help="After a successful VACUUM INTO, promote the verified copy over the live generated graph store with a backup.")
+    graph_sqlite_compact_parser.add_argument("--backup-path", help="Backup path for the original live graph.sqlite3 when --promote-copy is used. Default is a timestamped diagnostics backup.")
+    graph_sqlite_compact_parser.add_argument("--delete-backup-after-verify", action="store_true", help="After --promote-copy and live integrity verification, delete the generated-store backup to realize physical reclaim.")
     graph_sqlite_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown graph compaction reports under .aoa/diagnostics.")
     graph_sqlite_compact_parser.set_defaults(func=command_graph_sqlite_compact)
 
@@ -58084,6 +58327,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_sqlite_compact_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom guard when the operator has reserved capacity another way.")
     search_sqlite_compact_parser.add_argument("--confirm-source-vacuum", action="store_true", help="Allow --method vacuum to mutate aoa-search.sqlite3 after preflight.")
     search_sqlite_compact_parser.add_argument("--overwrite-target", action="store_true", help="Allow --method vacuum-into to replace an existing target path.")
+    search_sqlite_compact_parser.add_argument("--promote-copy", action="store_true", help="After a successful VACUUM INTO, promote the verified copy over the live generated search store with a backup.")
+    search_sqlite_compact_parser.add_argument("--backup-path", help="Backup path for the original live aoa-search.sqlite3 when --promote-copy is used. Default is a timestamped diagnostics backup.")
+    search_sqlite_compact_parser.add_argument("--delete-backup-after-verify", action="store_true", help="After --promote-copy and live integrity verification, delete the generated-store backup to realize physical reclaim.")
     search_sqlite_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search compaction reports under .aoa/diagnostics.")
     search_sqlite_compact_parser.set_defaults(func=command_search_sqlite_compact)
 
