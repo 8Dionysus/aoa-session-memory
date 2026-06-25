@@ -1775,8 +1775,12 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
 
     skill_candidates = module.trace_route_candidates("aoa-live-skill", kind="skill")
     mcp_candidates = module.trace_route_candidates("aoa-kag-mcp", kind="mcp")
+    skill_lookup_candidates = module.trace_route_lookup_candidates(skill_candidates)
+    mcp_lookup_candidates = module.trace_route_lookup_candidates(mcp_candidates)
     assert any(candidate["route_signal"] == "skill:aoa_live_skill" for candidate in skill_candidates)
     assert any(candidate["route_signal"] == "mcp:aoa_kag_mcp" for candidate in mcp_candidates)
+    assert skill_lookup_candidates[0]["route_signal"] == "skill:aoa_live_skill"
+    assert mcp_lookup_candidates[0]["route_signal"] == "mcp:aoa_kag_mcp"
 
     registry_search = module.search_sessions(aoa_root=aoa_root, query="aoa-live-skill", doc_type="entity_registry", limit=5)
     assert registry_search["ok"] is True
@@ -2310,6 +2314,141 @@ def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: 
     assert max(called_limits) > 12
     assert set(called_queries) == {""}
     assert audit["quality"]["text_search_skipped"] is True
+
+
+def test_entity_usage_audit_routes_explicit_non_aoa_mcp_service_names(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hit = {
+        "doc_id": "event:session:001:000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "usage_role": "usage",
+        "title": "Tool call: tos_corpus_lookup",
+        "route_signals": "mcp:tos_corpus_mcp",
+        "refs": {"raw": "raw:line:1", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    called_route_signals: list[str] = []
+    called_queries: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        route_signal = str(kwargs.get("route_signal") or "")
+        query = str(kwargs.get("query") or "")
+        called_route_signals.append(route_signal)
+        called_queries.append(query)
+        if route_signal in {"entity:tos", "entity:mcp"}:
+            raise AssertionError(f"fragment entity route should be suppressed for precise MCP service anchor: {route_signal}")
+        if query:
+            raise AssertionError("precise MCP service route should not fall back to broad text search")
+        if route_signal == "mcp:tos_corpus_mcp":
+            return {"ok": True, "result_count": 1, "results": [usage_hit], "diagnostics": []}
+        return {"ok": True, "result_count": 0, "results": [], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            }
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: False)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="tos-corpus-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    candidate_routes = {
+        candidate.get("route_signal")
+        for candidate in audit.get("route_candidates", [])
+        if isinstance(candidate, dict)
+    }
+    assert audit["ok"] is True
+    assert "mcp:tos_corpus_mcp" in candidate_routes
+    assert "entity:tos_corpus_mcp" in candidate_routes
+    assert "entity:tos" not in candidate_routes
+    assert "entity:mcp" not in candidate_routes
+    assert audit["usage_event_count"] == 1
+    assert audit["usage_events"][0]["matched_routes"] == ["mcp:tos_corpus_mcp"]
+    assert audit["quality"]["direct_usage_present"] is True
+    assert audit["quality"]["text_search_skipped"] is True
+    assert set(called_queries) == {""}
+    assert "mcp:tos_corpus_mcp" in called_route_signals
+
+
+def test_entity_usage_audit_routes_canonical_api_provider_names(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hit = {
+        "doc_id": "event:session:001:000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "usage_role": "usage",
+        "title": "OpenAI API call",
+        "route_signals": "api:openai",
+        "refs": {"raw": "raw:line:1", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    called_route_signals: list[str] = []
+    called_queries: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        route_signal = str(kwargs.get("route_signal") or "")
+        query = str(kwargs.get("query") or "")
+        called_route_signals.append(route_signal)
+        called_queries.append(query)
+        if route_signal == "api:openai_api_openai":
+            raise AssertionError("OpenAI API should canonicalize to api:openai")
+        if query:
+            raise AssertionError("canonical API provider route should not fall back to broad text search")
+        if route_signal == "api:openai":
+            return {"ok": True, "result_count": 1, "results": [usage_hit], "diagnostics": []}
+        return {"ok": True, "result_count": 0, "results": [], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            }
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: False)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="OpenAI API",
+        kind="api",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    candidate_routes = {
+        candidate.get("route_signal")
+        for candidate in audit.get("route_candidates", [])
+        if isinstance(candidate, dict)
+    }
+    assert audit["ok"] is True
+    assert "api:openai" in candidate_routes
+    assert "entity:openai" in candidate_routes
+    assert "api:openai_api_openai" not in candidate_routes
+    assert audit["usage_event_count"] == 1
+    assert audit["usage_events"][0]["matched_routes"] == ["api:openai"]
+    assert audit["quality"]["direct_usage_present"] is True
+    assert audit["quality"]["text_search_skipped"] is True
+    assert set(called_queries) == {""}
+    assert "api:openai" in called_route_signals
 
 
 def test_entity_usage_audit_skips_text_fallback_for_agent_event_route_evidence(tmp_path: Path, monkeypatch: Any) -> None:

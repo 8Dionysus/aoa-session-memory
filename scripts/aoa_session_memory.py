@@ -2931,7 +2931,7 @@ SKILL_PATH_ENTITY_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 MCP_SERVICE_ENTITY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])((?:aoa|abyss)[-_][a-z0-9]+(?:[-_][a-z0-9]+){0,3}[-_]mcp)(?![A-Za-z0-9_])",
+    r"(?<![A-Za-z0-9_])([a-z0-9]+(?:[-_][a-z0-9]+){1,5}[-_]mcp)(?![A-Za-z0-9_])",
     flags=re.IGNORECASE,
 )
 MCP_SERVICE_PATH_PATTERN = re.compile(
@@ -2983,6 +2983,50 @@ API_ENTITY_PATTERN = re.compile(
     r"\b((?:openai|responses|assistants|agents|github|gmail|google[-_ ]?drive|google[-_ ]?calendar|hugging[-_ ]?face|notion|canva|mcp|rest|graphql|http|websocket)(?:[-_ ]+[a-z0-9]+){0,3})[-_ ]+api\b",
     flags=re.IGNORECASE,
 )
+API_PROVIDER_KEYS = {
+    "openai",
+    "openai_platform",
+    "openai_responses",
+    "responses",
+    "github",
+    "gmail",
+    "google_drive",
+    "google_calendar",
+    "hugging_face",
+    "hugging_face_inference",
+    "notion",
+    "canva",
+    "mcp",
+    "rest",
+    "graphql",
+    "http",
+    "websocket",
+}
+API_ENTITY_ALIASES = {
+    "api_openai": "openai",
+    "openai_api": "openai",
+    "openai_api_openai": "openai",
+    "api_openai_platform": "openai_platform",
+    "openai_platform_api": "openai_platform",
+    "api_responses": "responses",
+    "responses_api": "responses",
+    "api_openai_responses": "openai_responses",
+    "openai_responses_api": "openai_responses",
+    "responses_api_openai": "openai_responses",
+    "github_api": "github",
+    "gmail_api": "gmail",
+    "google_drive_api": "google_drive",
+    "google_calendar_api": "google_calendar",
+    "hugging_face_api": "hugging_face",
+    "hugging_face_inference_api": "hugging_face_inference",
+    "notion_api": "notion",
+    "canva_api": "canva",
+    "mcp_api": "mcp",
+    "graphql_api": "graphql",
+    "rest_api": "rest",
+    "http_api": "http",
+    "websocket_api": "websocket",
+}
 PLUGIN_ENTITY_PATTERN = re.compile(
     r"plugin://([A-Za-z0-9_.@/-]+)|(?:^|[\/\s])plugins[\/]([a-z0-9][a-z0-9_.-]+)(?=[\/\s]|$)",
     flags=re.IGNORECASE,
@@ -3000,6 +3044,7 @@ CANONICAL_MCP_SERVICE_KEYS = frozenset(
         "aoa_session_memory_mcp",
     }
 )
+MCP_SERVICE_TEXT_NOISE_PREFIXES = ("test_", "tests_", "validate_", "validator_", "smoke_", "mock_", "fake_")
 
 
 def named_entity_candidates_from_text(text: str) -> set[str]:
@@ -3023,12 +3068,21 @@ def mcp_service_shape_key(value: str, *, path_source: bool = False) -> str | Non
         return key if len(parts) <= 5 else None
     if parts[0] == "abyss":
         return key if len(parts) <= 4 else None
-    return None
+    return key if len(parts) <= 6 else None
 
 
 def canonical_mcp_service_key(value: str, *, path_source: bool = False) -> str | None:
     key = mcp_service_shape_key(value, path_source=path_source)
     if not key:
+        return None
+    return key
+
+
+def mcp_service_text_mention_key(value: str) -> str | None:
+    key = canonical_mcp_service_key(value, path_source=False)
+    if not key:
+        return None
+    if key.startswith(MCP_SERVICE_TEXT_NOISE_PREFIXES):
         return None
     return key
 
@@ -3063,7 +3117,7 @@ def mcp_route_candidates_from_texts(texts: list[str]) -> set[str]:
     source = " ".join(str(text or "") for text in texts)
     candidates: set[str] = set()
     for match in MCP_SERVICE_ENTITY_PATTERN.finditer(source):
-        key = canonical_mcp_service_key(match.group(1), path_source=False)
+        key = mcp_service_text_mention_key(match.group(1))
         if key:
             candidates.add(key)
     for match in MCP_SERVICE_PATH_PATTERN.finditer(source):
@@ -3239,10 +3293,40 @@ def api_entity_candidates_from_texts(texts: list[str]) -> set[str]:
     ):
         return set()
     candidates: set[str] = set()
-    for match in API_ENTITY_PATTERN.finditer(source):
-        key = operational_entity_key(match.group(1), allow_plain=True)
-        if key:
+
+    def add_api_candidate(value: str) -> None:
+        key = operational_entity_key(value, allow_plain=True)
+        if not key:
+            return
+        parts = [part for part in key.split("_") if part]
+        if key in API_ENTITY_ALIASES:
+            candidates.add(API_ENTITY_ALIASES[key])
+            return
+        if key in API_PROVIDER_KEYS:
             candidates.add(key)
+            return
+        if key.endswith("_api"):
+            provider = key[: -len("_api")].strip("_")
+            if provider in API_PROVIDER_KEYS:
+                candidates.add(provider)
+                return
+        if key.startswith("api_"):
+            provider = key[len("api_") :].strip("_")
+            if provider in API_PROVIDER_KEYS:
+                candidates.add(provider)
+                return
+        if "openai" in parts and "api" in parts:
+            if "platform" in parts:
+                candidates.add("openai_platform")
+            elif "responses" in parts:
+                candidates.add("openai_responses")
+            else:
+                candidates.add("openai")
+
+    for text in texts:
+        add_api_candidate(str(text or ""))
+    for match in API_ENTITY_PATTERN.finditer(source):
+        add_api_candidate(match.group(1))
     if "openai_api_key" in lowered or "api.openai.com" in lowered:
         candidates.add("openai")
     if "responses api" in lowered and "openai" in lowered:
@@ -32817,10 +32901,13 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
 
     if any(item in kinds for item in {"skill", "entity", "mcp"}):
         for alias in aliases:
-            for entity in named_entity_candidates_from_text(alias):
-                add_candidate("entity", entity, source="named_entity_alias", detail=alias)
+            mcp_service_key = canonical_mcp_service_key(alias, path_source="/" in alias) if "mcp" in kinds else None
+            skill_key = skill_entity_key(alias, explicit=True, path_source="/" in alias) if "skill" in kinds else None
+            if not mcp_service_key and not skill_key:
+                for entity in named_entity_candidates_from_text(alias):
+                    add_candidate("entity", entity, source="named_entity_alias", detail=alias)
             slug = route_key_slug(alias, fallback="")
-            if slug and (slug.startswith("aoa_") or slug.startswith("abyss_") or "skill" in kinds):
+            if not mcp_service_key and not skill_key and slug and (slug.startswith("aoa_") or slug.startswith("abyss_") or "skill" in kinds):
                 add_candidate("entity", slug, source="canonical_alias", detail=alias)
 
     if "skill" in kinds:
