@@ -1684,6 +1684,10 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert lifecycle_route["ok"] is True
     assert lifecycle_route["results"][0]["goal_id"] == "goal-0001"
     assert lifecycle_route["results"][0]["refs"]["completed"]["raw_ref"] == "raw:line:7"
+    assert lifecycle_route["provider"]["selected_provider"] == "portable_sqlite"
+    assert lifecycle_route["provider"]["response_compacted"] is True
+    assert "portable_sqlite" in lifecycle_route["provider"]["providers"]
+    assert "freshness" in lifecycle_route["provider"]["providers"]["portable_sqlite"]
 
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
@@ -2262,7 +2266,24 @@ def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: 
         return {"ok": True, "result_count": min(limit, len(candidate_hits)), "results": candidate_hits[:limit], "diagnostics": []}
 
     def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
-        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "authority_law": "portable sqlite remains authoritative",
+            "selected_provider": "portable_sqlite",
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
 
     monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
     monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
@@ -2304,7 +2325,24 @@ def test_entity_usage_audit_skips_text_fallback_for_agent_event_route_evidence(t
         return {"ok": True, "result_count": len(outcome_hits), "results": outcome_hits, "diagnostics": []}
 
     def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
-        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "authority_law": "portable sqlite remains authoritative",
+            "selected_provider": "portable_sqlite",
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
 
     monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
     monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
@@ -2579,7 +2617,24 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
         }
 
     def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
-        return {"providers": {"portable_sqlite": {"has_route_index": True, "has_route_terms": True}}}
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "authority_law": "portable sqlite remains authoritative",
+            "selected_provider": "portable_sqlite",
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
 
     monkeypatch.setattr(module, "entity_usage_scenario_candidates", fake_candidates)
     monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
@@ -2597,6 +2652,84 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["quality"]["audit_total_elapsed_ms"] >= 0
     assert audit["quality"]["raw_preview_total_elapsed_ms"] >= 0
     assert audit["quality"]["sample_total_elapsed_ms"] >= sum(sample["elapsed_ms"] for sample in audit["samples"])
+    assert audit["quality"]["provider_status"] == "ready"
+    assert audit["quality"]["provider_freshness_status"] == "current"
+    assert audit["provider_summary"]["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
+
+
+def test_entity_usage_scenario_audit_compact_cli_keeps_provider_summary(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    def fake_audit(**_kwargs: Any) -> dict[str, Any]:
+        provider_summary = {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "selected_provider": "portable_sqlite",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "freshness": {
+                        "status": "current",
+                        "checked": True,
+                        "dirty_session_count": 2,
+                        "omitted_fields": ["dirty_session_ids", "dirty_sessions"],
+                    },
+                }
+            },
+            "response_compacted": True,
+        }
+        return {
+            "schema_version": 1,
+            "artifact_type": "session_memory_entity_usage_scenario_audit",
+            "ok": True,
+            "quality": {"failed_count": 0},
+            "samples": [],
+            "provider": {
+                "providers": {
+                    "portable_sqlite": {
+                        "freshness": {
+                            "status": "current",
+                            "dirty_session_ids": ["session-a", "session-b"],
+                            "dirty_sessions": [{"session_id": "session-a"}, {"session_id": "session-b"}],
+                        }
+                    }
+                }
+            },
+            "provider_summary": provider_summary,
+        }
+
+    monkeypatch.setattr(module, "entity_usage_scenario_audit", fake_audit)
+    args = module.argparse.Namespace(
+        workspace_root=None,
+        aoa_root=str(tmp_path / ".aoa"),
+        sample_size=1,
+        seed="compact-provider",
+        layer=None,
+        min_postings=1,
+        limit=1,
+        per_route_limit=1,
+        consequence_window=1,
+        document_limit=1,
+        raw_preview_limit=1,
+        write_report=False,
+        full=False,
+    )
+
+    rc = module.command_entity_usage_scenario_audit(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["provider"]["response_compacted"] is True
+    freshness = payload["provider"]["providers"]["portable_sqlite"]["freshness"]
+    assert freshness["status"] == "current"
+    assert "dirty_session_ids" not in freshness
+    assert "dirty_sessions" not in freshness
+    assert "provider_summary" not in payload
 
 
 def test_trace_route_supports_agent_event_kind() -> None:

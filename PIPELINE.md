@@ -193,6 +193,10 @@ operational entities. Its quality block separates
 `audit_total_elapsed_ms`, and `raw_preview_total_elapsed_ms` so slow runs can
 be attributed to candidate-pool selection, route audit, or raw-preview opening
 instead of becoming a vague "MCP is slow" complaint.
+Compact route output keeps a bounded `provider` summary with portable SQLite
+status, schema, route-index presence, and freshness status. The full provider
+diagnostic remains behind `search-provider-status --provider portable_sqlite`
+or the command `--full` route.
 
 Hooks are a special case. A generic usage audit for a hook often returns
 receipt/result evidence rather than direct "usage" events. For hook health,
@@ -245,6 +249,9 @@ When monthly shards are materialized, these agent-event routes accept
 `--use-shards` and return their `search_projection`; this is the preferred
 archive-wide route for MCP/agent answer, closeout, progress, and reasoning
 queries that do not need broad raw-text FTS.
+Goal lifecycle navigation also returns the same compact provider/freshness
+summary, so an MCP caller can judge projection currency before opening
+generated refs or raw transcript authority.
 
 `agent-event-audit --order longest` is the Stage-1 classification route for
 real long sessions. It records selected sessions, generated shape counts,

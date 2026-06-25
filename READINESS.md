@@ -628,6 +628,12 @@ Last observed result:
   `candidate_selection_elapsed_ms=3094`, `sample_total_elapsed_ms=2520`, and
   lives at
   `diagnostics/20260625T102340Z__entity-usage-scenario-audit__live_goal_continuation_20260625.json`.
+- 2026-06-25 compact MCP/CLI provider proof: `goal-lifecycles all --limit 1`
+  and `entity-usage-scenario-audit --sample-size 1 --seed
+  live-provider-summary-smoke` both return a bounded `provider` summary with
+  `portable_sqlite` ready, search schema `13`, route-index presence, and
+  `freshness.status=current`; compact scenario output no longer drops provider
+  freshness before MCP sees it.
 - 2026-06-21 structured agent-route proof: broad
   `agent-responses --limit 10 --explain` initially exceeded `90s` and had to be
   killed because the default SQL ordered by a computed stream-copy rank and

@@ -26378,6 +26378,136 @@ def search_provider_status(
     return payload
 
 
+def compact_search_provider_session_sample(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"value": str(item)}
+    keys = (
+        "session_id",
+        "session_label",
+        "session_dir",
+        "latest_source_mtime",
+        "indexed_mtime",
+        "reason",
+    )
+    return {key: item.get(key) for key in keys if item.get(key) is not None}
+
+
+def compact_search_provider_freshness_for_route(
+    freshness: Any,
+    *,
+    sample_limit: int = 3,
+) -> dict[str, Any]:
+    if not isinstance(freshness, dict):
+        return {"status": "unknown", "checked": False}
+    keys = (
+        "status",
+        "checked",
+        "mode",
+        "scope",
+        "source_scan",
+        "selected_session_state_count",
+        "indexed_session_state_count",
+        "dirty_session_count",
+        "actionable_dirty_session_count",
+        "deferred_live_session_count",
+        "live_defer_quiet_seconds",
+        "latest_source_mtime",
+        "db_mtime",
+        "reasons",
+    )
+    compact = {key: freshness.get(key) for key in keys if key in freshness}
+    dirty_sessions = freshness.get("dirty_sessions")
+    if isinstance(dirty_sessions, list) and dirty_sessions:
+        compact["dirty_session_samples"] = [
+            compact_search_provider_session_sample(item)
+            for item in dirty_sessions[:sample_limit]
+        ]
+        compact["dirty_session_sample_count"] = min(len(dirty_sessions), sample_limit)
+        compact["omitted_dirty_session_count"] = max(0, int_value(freshness.get("dirty_session_count") or len(dirty_sessions)) - sample_limit)
+    actionable_sessions = freshness.get("actionable_dirty_sessions")
+    if isinstance(actionable_sessions, list) and actionable_sessions:
+        compact["actionable_dirty_session_samples"] = [
+            compact_search_provider_session_sample(item)
+            for item in actionable_sessions[:sample_limit]
+        ]
+        compact["actionable_dirty_session_sample_count"] = min(len(actionable_sessions), sample_limit)
+    deferred_sessions = freshness.get("deferred_live_sessions")
+    if isinstance(deferred_sessions, list) and deferred_sessions:
+        compact["deferred_live_session_samples"] = [
+            compact_search_provider_session_sample(item)
+            for item in deferred_sessions[:sample_limit]
+        ]
+        compact["deferred_live_session_sample_count"] = min(len(deferred_sessions), sample_limit)
+    omitted_fields = [
+        key
+        for key in (
+            "dirty_session_ids",
+            "dirty_sessions",
+            "actionable_dirty_session_ids",
+            "actionable_dirty_sessions",
+            "deferred_live_sessions",
+        )
+        if key in freshness
+    ]
+    if omitted_fields:
+        compact["omitted_fields"] = omitted_fields
+    return compact
+
+
+def compact_search_provider_status_for_route(
+    provider_status: dict[str, Any],
+    *,
+    provider_name: str = "portable_sqlite",
+) -> dict[str, Any]:
+    top_keys = (
+        "schema_version",
+        "artifact_type",
+        "provider_schema_version",
+        "generated_at",
+        "ok",
+        "aoa_root",
+        "default_provider",
+        "authority_law",
+        "selected_provider",
+        "freshness_mode",
+        "status_mode",
+        "diagnostics",
+    )
+    provider_keys = (
+        "provider",
+        "ok",
+        "status",
+        "db_path",
+        "index_generated_at",
+        "search_schema_version",
+        "expected_search_schema_version",
+        "document_count",
+        "route_index_count",
+        "route_term_count",
+        "has_documents",
+        "has_route_index",
+        "has_route_terms",
+        "count_mode",
+        "diagnostics",
+    )
+    compact = {key: provider_status.get(key) for key in top_keys if key in provider_status}
+    providers = provider_status.get("providers") if isinstance(provider_status.get("providers"), dict) else {}
+    compact_providers: dict[str, Any] = {}
+    selected_names = [provider_name] if provider_name in providers else list(providers)
+    for name in selected_names:
+        value = providers.get(name)
+        if not isinstance(value, dict):
+            compact_providers[str(name)] = value
+            continue
+        compact_provider = {key: value.get(key) for key in provider_keys if key in value}
+        compact_provider["freshness"] = compact_search_provider_freshness_for_route(value.get("freshness"))
+        compact_providers[str(name)] = compact_provider
+    compact["providers"] = compact_providers
+    compact["full_status_route"] = f"search-provider-status --provider {provider_name}"
+    compact["response_compacted"] = True
+    return compact
+
+
 def search_provider_status_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Search Provider Status",
@@ -31761,6 +31891,8 @@ def goal_lifecycle_route_search(
                 break
         if len(results) >= max(1, limit):
             break
+    provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
+    provider_summary = compact_search_provider_status_for_route(provider_status, provider_name="portable_sqlite")
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "goal_lifecycle_route_results",
@@ -31776,6 +31908,7 @@ def goal_lifecycle_route_search(
         "selected_goal_lifecycle_count": selected_count,
         "result_count": len(results),
         "results": results,
+        "provider": provider_summary,
         "diagnostics": [],
         "next_route": "Use refs, graph_refs, raw_refs, and segment_refs for authority; lifecycle packets are generated navigation.",
     }
@@ -46830,6 +46963,8 @@ def entity_usage_scenario_audit(
         provider_name="portable_sqlite",
     )
     provider_payload = provider_status.get("providers", {}).get("portable_sqlite") if isinstance(provider_status.get("providers"), dict) else {}
+    provider_summary = compact_search_provider_status_for_route(provider_status, provider_name="portable_sqlite")
+    provider_freshness = provider_payload.get("freshness") if isinstance(provider_payload, dict) and isinstance(provider_payload.get("freshness"), dict) else {}
     elapsed_ms = int((time.monotonic() - scenario_started) * 1000)
     slowest_sample = max(
         (sample for sample in samples if isinstance(sample, dict)),
@@ -46850,6 +46985,9 @@ def entity_usage_scenario_audit(
         "slowest_sample_route": (slowest_sample.get("candidate") or {}).get("route_signal") if isinstance(slowest_sample.get("candidate"), dict) else None,
         "freshness_counts": dict(sorted(freshness_counts.items())),
         "raw_preview_counts": dict(sorted(raw_preview_totals.items())),
+        "provider_ok": provider_payload.get("ok") if isinstance(provider_payload, dict) else None,
+        "provider_status": provider_payload.get("status") if isinstance(provider_payload, dict) else None,
+        "provider_freshness_status": provider_freshness.get("status") if isinstance(provider_freshness, dict) else None,
         "search_schema_version": provider_payload.get("search_schema_version") if isinstance(provider_payload, dict) else None,
         "search_route_index_count": provider_payload.get("route_index_count") if isinstance(provider_payload, dict) else None,
         "search_route_term_count": provider_payload.get("route_term_count") if isinstance(provider_payload, dict) else None,
@@ -46877,6 +47015,7 @@ def entity_usage_scenario_audit(
         "min_postings": min_postings,
         "quality": quality,
         "samples": samples,
+        "provider_summary": provider_summary,
         "provider": provider_status,
         "diagnostics": diagnostics,
         "next_route": "Open failed or warning sample raw/segment refs before trusting retrieval quality; rerun with the same seed for reproduction.",
@@ -47604,7 +47743,11 @@ def command_entity_usage_scenario_audit(args: argparse.Namespace) -> int:
         write_report=args.write_report,
         full=args.full,
     )
-    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"provider"}}
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"provider", "provider_summary"}}
+    if not args.full:
+        summary = payload.get("provider_summary")
+        if isinstance(summary, dict):
+            stdout_payload["provider"] = summary
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
