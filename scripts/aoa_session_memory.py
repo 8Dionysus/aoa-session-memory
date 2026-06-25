@@ -47794,13 +47794,26 @@ def entity_usage_audit(
                 if compact_usage_event_from_search_hit(hit).get("role") != "context"
             )
     text_search_skipped = False
+    text_search_skip_reason = ""
     skip_text_search = bool(diagnostics) and not lookup_candidates
+    if skip_text_search:
+        text_search_skip_reason = "identity_diagnostic_without_route_candidates"
     route_evidence_satisfies_kind = route_usage_hit_count > 0 or (
         normalized_kind not in ENTITY_USAGE_DIRECT_TRACE_KINDS and route_evidence_hit_count > 0
     )
-    if not skip_text_search and lookup_candidates and route_hit_count >= limit and route_evidence_satisfies_kind:
+    if (
+        not skip_text_search
+        and lookup_candidates
+        and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
+        and route_usage_hit_count > 0
+    ):
         skip_text_search = True
         text_search_skipped = True
+        text_search_skip_reason = "direct_usage_route_sufficient"
+    elif not skip_text_search and lookup_candidates and route_hit_count >= limit and route_evidence_satisfies_kind:
+        skip_text_search = True
+        text_search_skipped = True
+        text_search_skip_reason = "route_evidence_window_sufficient"
     text_result_count = 0
     if not skip_text_search:
         text_payload = search_sessions(
@@ -47874,6 +47887,7 @@ def entity_usage_audit(
         "candidate_usage_event_count": sum(1 for _hit, event, _original_index in ranked_pairs if event.get("role") == "usage"),
         "text_result_count": text_result_count,
         "text_search_skipped": text_search_skipped,
+        "text_search_skip_reason": text_search_skip_reason,
         "route_hit_count_before_text_fallback": route_hit_count,
         "route_usage_hit_count_before_text_fallback": route_usage_hit_count,
         "route_evidence_hit_count_before_text_fallback": route_evidence_hit_count,

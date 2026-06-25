@@ -2362,6 +2362,64 @@ def test_entity_usage_audit_skips_text_fallback_for_agent_event_route_evidence(t
     assert set(called_queries) == {""}
 
 
+def test_entity_usage_audit_skips_text_fallback_for_sparse_direct_usage(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hit = {
+        "doc_id": "event:session:001:000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "title": "Tool call: aoa_session_graph_quality_audit",
+        "route_signals": "tool:aoa_session_graph_quality_audit",
+        "refs": {"raw": "raw:line:1", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    called_queries: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_queries.append(str(kwargs.get("query") or ""))
+        if kwargs.get("query"):
+            raise AssertionError("sparse direct usage route should not use broad text fallback")
+        return {"ok": True, "result_count": 1, "results": [usage_hit], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "authority_law": "portable sqlite remains authoritative",
+            "selected_provider": "portable_sqlite",
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: False)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-graph-quality-audit",
+        kind="tool",
+        limit=8,
+        per_route_limit=8,
+    )
+
+    assert audit["ok"] is True
+    assert audit["usage_event_count"] == 1
+    assert audit["quality"]["text_search_skipped"] is True
+    assert audit["quality"]["text_search_skip_reason"] == "direct_usage_route_sufficient"
+    assert audit["quality"]["route_usage_hit_count_before_text_fallback"] == 1
+    assert set(called_queries) == {""}
+
+
 def test_entity_usage_neighborhood_quality_uses_source_audit_consequences(tmp_path: Path, monkeypatch: Any) -> None:
     usage_event = {
         "doc_id": "event:session:001:000001",
