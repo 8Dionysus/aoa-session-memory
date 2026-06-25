@@ -46500,6 +46500,45 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
     latest_search_shards = (
         search_shards.get("latest_materialization") if isinstance(search_shards.get("latest_materialization"), dict) else {}
     )
+    raw_text_fallback = (
+        search_shards.get("raw_text_fallback_dependency")
+        if isinstance(search_shards.get("raw_text_fallback_dependency"), dict)
+        else {}
+    )
+    compact_raw_text_fallback = {
+        key: raw_text_fallback.get(key)
+        for key in (
+            "status",
+            "raw_text_query_support",
+            "monolith_fallback_db_path",
+            "candidate_shard_count",
+            "queried_shard_count",
+            "materialized_shard_count",
+            "full_text_shard_count",
+            "structured_only_shard_count",
+            "unsupported_shard_count",
+            "nonmaterialized_shard_count",
+            "route_blocked_shard_count",
+            "global_full_text_next_command",
+            "quality_tradeoff",
+            "weight_tradeoff",
+            "authority_boundary",
+            "next_route",
+        )
+        if key in raw_text_fallback
+    }
+    if isinstance(raw_text_fallback.get("route_blocked_shards"), list):
+        compact_raw_text_fallback["route_blocked_shards"] = raw_text_fallback["route_blocked_shards"][:8]
+    if isinstance(raw_text_fallback.get("scoped_full_text_next_commands"), list):
+        compact_raw_text_fallback["scoped_full_text_next_commands"] = [
+            {
+                key: item.get(key)
+                for key in ("shard", "command")
+                if isinstance(item, dict) and key in item
+            }
+            for item in raw_text_fallback["scoped_full_text_next_commands"][:3]
+            if isinstance(item, dict)
+        ]
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     compact_operations = {
         "warning_count": operations.get("warning_count"),
@@ -46611,12 +46650,14 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "combined_search_projection_total_human",
                 "fast_path_defaults",
                 "raw_text_query_route",
+                "raw_text_fallback_dependency",
                 "exact_materialize_command",
                 "truth_status",
             )
             if key in search_shards
         }
         | {
+            "raw_text_fallback_dependency": compact_raw_text_fallback,
             "largest_shards": [
                 {
                     key: item.get(key)

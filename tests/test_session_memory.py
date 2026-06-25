@@ -9564,6 +9564,48 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
     monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 1, "timers": [], "diagnostics": []})
     monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {
+            "status": "current",
+            "shard_count": 2,
+            "materialized_shard_count": 2,
+            "fast_path_defaults": {
+                "agent_event_routes": {
+                    "default_use_shards": True,
+                    "default_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+                    "rollback_flag": "--no-shards",
+                    "raw_text_query_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+                    "raw_text_fallback_dependency_status": "monolith_required_for_raw_text_query",
+                    "raw_text_fallback_dependency_next_route": "use the scoped full-text command for repeated literal raw-text queries in the affected shard",
+                }
+            },
+            "raw_text_fallback_dependency": {
+                "status": "monolith_required_for_raw_text_query",
+                "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                "monolith_fallback_db_path": str(module.search_db_path(aoa_root)),
+                "candidate_shard_count": 2,
+                "queried_shard_count": 2,
+                "materialized_shard_count": 2,
+                "full_text_shard_count": 0,
+                "structured_only_shard_count": 2,
+                "unsupported_shard_count": 2,
+                "nonmaterialized_shard_count": 0,
+                "route_blocked_shard_count": 2,
+                "route_blocked_shards": ["month/2026-05", "month/2026-06"],
+                "scoped_full_text_next_commands": [
+                    {"shard": "month/2026-05", "command": "python3 scripts/aoa_session_memory.py search-shards all --aoa-root /tmp/.aoa --shard month/2026-05 --full-text --write-report"},
+                    {"shard": "month/2026-06", "command": "python3 scripts/aoa_session_memory.py search-shards all --aoa-root /tmp/.aoa --shard month/2026-06 --full-text --write-report"},
+                ],
+                "global_full_text_next_command": "python3 scripts/aoa_session_memory.py search-shards all --aoa-root /tmp/.aoa --full-text --write-report",
+                "quality_tradeoff": "raw-text recall is preserved by monolith fallback until a scoped full-text shard is explicitly materialized.",
+                "weight_tradeoff": "structured shards stay slim; full-text shards add FTS and compressed-body weight.",
+                "authority_boundary": "monolith and shards are generated search projections; raw transcript and session indexes remain the evidence authority.",
+                "next_route": "use the scoped full-text command for repeated literal raw-text queries in the affected shard",
+            },
+        },
+    )
 
     payload = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root)
     compact = module.compact_maintenance_status_payload(payload)
@@ -9602,6 +9644,11 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["live_tail"]["catchup_target"] == "2026-06-18__001__live-session"
     assert compact["live_tail"]["samples"][0]["quiet_remaining_seconds"] == 0
     assert compact["operations"]["dirty_counts"]["search_deferred_live_session_count"] == 2
+    assert compact["operations"]["search_shards"]["raw_text_fallback_dependency"]["status"] == "monolith_required_for_raw_text_query"
+    assert compact["operations"]["search_shards"]["raw_text_fallback_dependency"]["route_blocked_shards"] == ["month/2026-05", "month/2026-06"]
+    assert compact["operations"]["search_shards"]["raw_text_fallback_dependency"]["scoped_full_text_next_commands"][0]["shard"] == "month/2026-05"
+    assert "--full-text" in compact["operations"]["search_shards"]["raw_text_fallback_dependency"]["scoped_full_text_next_commands"][0]["command"]
+    assert compact["operations"]["search_shards"]["raw_text_fallback_dependency"]["authority_boundary"].startswith("monolith and shards")
     assert compact["next_actions"][0]["id"] == "run_live_catchup"
     assert compact["next_actions"][0]["reason"] == "deferred_live_ready_for_bounded_catchup"
     assert compact["next_actions"][0]["live_tail_status"] == "ready_for_catchup"
