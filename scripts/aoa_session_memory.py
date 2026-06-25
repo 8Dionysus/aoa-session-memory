@@ -240,6 +240,8 @@ GRAPH_EVENT_SEQUENCE_PRUNE_EXECUTION_PROFILE = "manual_bulk_sequence_edge_delete
 GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
 GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
 GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB = 25.0
+SEARCH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
+SEARCH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB = 25.0
 GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
@@ -39958,6 +39960,140 @@ def graph_sqlite_compact(
     return payload
 
 
+def search_sqlite_compact_markdown(payload: dict[str, Any]) -> str:
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    lines = [
+        "# Search SQLite Compact",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- method: `{payload.get('method')}`",
+        f"- execution_profile: `{payload.get('execution_profile')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Plan",
+        "",
+        f"- db: `{plan.get('db_human')}`",
+        f"- freelist: `{plan.get('freelist_human')}`",
+        f"- conservative_output: `{plan.get('conservative_output_human')}`",
+        f"- conservative_reclaimable: `{plan.get('conservative_reclaimable_human')}`",
+        f"- required_free: `{plan.get('required_free_human')}`",
+        f"- free: `{plan.get('free_human')}`",
+        f"- min_free_after: `{plan.get('min_free_after_human')}`",
+        f"- apply_ready: `{plan.get('apply_ready')}`",
+        "",
+        "## Action",
+        "",
+        f"- status: `{action.get('status')}`",
+        f"- target_path: `{action.get('target_path')}`",
+        f"- reclaimed: `{action.get('reclaimed_human')}`",
+    ]
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- `{item}`" for item in diagnostics)
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def search_sqlite_compact(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    method: str = "vacuum-into",
+    target_path: Path | None = None,
+    min_free_after_gb: float = SEARCH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    allow_low_free: bool = False,
+    confirm_source_vacuum: bool = False,
+    overwrite_target: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    search_store_path = search_db_path(aoa_root)
+    method = method if method in {"vacuum-into", "vacuum"} else "vacuum-into"
+    explicit_target_path = target_path is not None
+    plan_target_path = target_path
+    if plan_target_path is None and method == "vacuum-into":
+        plan_target_path = aoa_root / DIAGNOSTICS_ROOT / f"{compact_stamp()}__aoa-search.sqlite3.vacuum-copy"
+    plan = sqlite_vacuum_headroom_plan(
+        db_path=search_store_path,
+        method=method,
+        target_path=plan_target_path,
+        min_free_after_gb=min_free_after_gb,
+        allow_low_free=allow_low_free,
+    )
+    plan_diagnostics = [str(item) for item in plan.get("diagnostics", []) if item]
+    diagnostics: list[str] = []
+    if not plan.get("ok"):
+        diagnostics.extend(plan_diagnostics)
+    action: dict[str, Any] = {}
+    status = "dry_run_ready" if plan.get("apply_ready") else str(plan.get("status") or "dry_run")
+    if apply and method == "vacuum" and not confirm_source_vacuum:
+        diagnostics.append("source_vacuum_requires_confirm_source_vacuum")
+        status = "preflight_failed"
+    if apply and not plan.get("apply_ready"):
+        diagnostics.extend(item for item in plan_diagnostics if item not in diagnostics)
+        status = "preflight_failed"
+    if apply and method == "vacuum-into" and not explicit_target_path:
+        diagnostics.append("vacuum_into_target_path_required")
+        status = "preflight_failed"
+    if apply and not diagnostics:
+        if method == "vacuum-into":
+            action = sqlite_vacuum_into(search_store_path, target_path or search_store_path.with_suffix(".vacuum-copy"), overwrite=overwrite_target)
+            status = str(action.get("status") or "applied")
+        else:
+            action = sqlite_vacuum_in_place(search_store_path)
+            status = str(action.get("status") or "applied")
+        diagnostics.extend(str(item) for item in action.get("diagnostics", []) if item)
+    ok = not diagnostics and (not apply or bool(action.get("ok")))
+    if not apply and plan.get("apply_ready"):
+        next_route = "run search-sqlite-compact --apply with an explicit target path for a staged compact copy, then verify live routes before any separate swap/replace"
+    elif not apply:
+        next_route = "do not compact yet; reserve disk headroom or rebuild the generated search projection with the bounded raw lexical policy first"
+    elif method == "vacuum-into" and action.get("ok"):
+        next_route = "verify the compact search copy, then use a separate controlled swap route only if the operator chooses to replace aoa-search.sqlite3"
+    elif method == "vacuum" and action.get("ok"):
+        next_route = "run storage-audit --write-report and maintenance-status --full to verify search size and route health"
+    else:
+        next_route = "fix diagnostics before retrying search-sqlite-compact"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_sqlite_compact",
+        "generated_at": utc_now(),
+        "ok": ok,
+        "mutates": bool(action.get("mutates")),
+        "apply": bool(apply),
+        "status": status,
+        "method": method,
+        "execution_profile": SEARCH_SQLITE_COMPACT_EXECUTION_PROFILE,
+        "aoa_root": str(aoa_root),
+        "store_path": str(search_store_path),
+        "target_path": str(plan_target_path) if plan_target_path else "",
+        "target_path_explicit": explicit_target_path,
+        "plan": plan,
+        "action": action,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+        "stop_line": "This route compacts only the generated portable SQLite search projection. It does not delete raw/session evidence and does not replace aoa-search.sqlite3 after VACUUM INTO.",
+        "next_route": next_route,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__search-sqlite-compact"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, search_sqlite_compact_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
 def path_total_size(path: Path) -> int:
     if not path.exists() and not path.is_symlink():
         return 0
@@ -40548,6 +40684,36 @@ def graph_event_sequence_projection_recommendation(
     }
 
 
+def search_sqlite_physical_compaction_recommendation(plan: dict[str, Any]) -> dict[str, Any]:
+    reclaimable = int_value(plan.get("conservative_reclaimable_bytes"))
+    db_bytes = int_value(plan.get("db_bytes"))
+    reclaim_ratio = round(reclaimable / db_bytes, 6) if db_bytes > 0 else 0.0
+    status = str(plan.get("status") or "unknown")
+    if plan.get("ok") and reclaimable <= 128 * 1024 * 1024:
+        status = "low_reclaim_not_primary"
+        next_route = "keep search-sqlite-compact as a safe route after large generated-store rewrites; current reclaim is too small to treat physical compaction as the search weight fix"
+    elif plan.get("ok") and reclaim_ratio < 0.05:
+        status = "low_reclaim_not_primary"
+        next_route = "prefer search-index bounded raw lexical policy, shard policy, and route benchmarks before physical SQLite compaction; current freelist reclaim is small"
+    elif plan.get("apply_ready"):
+        next_route = "run search-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient"
+    else:
+        next_route = "fix search SQLite compaction preflight diagnostics before using physical compaction as a pressure route"
+    return {
+        "status": status,
+        "quality_tradeoff": "none_expected_for_vacuum_into_copy; source aoa-search.sqlite3 is not replaced by the staged route and raw/session evidence is untouched",
+        "speed_tradeoff": "manual-bulk SQLite copy/rewrite; not an interactive query path",
+        "estimated_reclaimable_bytes": reclaimable,
+        "estimated_reclaimable_human": plan.get("conservative_reclaimable_human"),
+        "reclaim_ratio": reclaim_ratio,
+        "required_free_human": plan.get("required_free_human"),
+        "free_human": plan.get("free_human"),
+        "min_free_after_human": plan.get("min_free_after_human"),
+        "apply_ready": plan.get("apply_ready"),
+        "next_route": next_route,
+    }
+
+
 def storage_audit(
     *,
     aoa_root: Path,
@@ -40594,6 +40760,12 @@ def storage_audit(
         method="vacuum-into",
         target_path=aoa_root / DIAGNOSTICS_ROOT / "graph.sqlite3.vacuum-copy",
         min_free_after_gb=GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
+    )
+    search_sqlite_plan = sqlite_vacuum_headroom_plan(
+        db_path=search_path,
+        method="vacuum-into",
+        target_path=aoa_root / DIAGNOSTICS_ROOT / "aoa-search.sqlite3.vacuum-copy",
+        min_free_after_gb=SEARCH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB,
     )
     sqlite_wal_reclaimable = int_value(graph_store.get("wal", {}).get("size_bytes") if isinstance(graph_store.get("wal"), dict) else 0) + int_value(
         search_store.get("wal", {}).get("size_bytes") if isinstance(search_store.get("wal"), dict) else 0
@@ -40682,6 +40854,7 @@ def storage_audit(
                 "apply_ready": graph_sqlite_plan["apply_ready"],
                 "next_route": "run graph-sqlite-compact --write-report for a read-only plan; use --apply --method vacuum-into --target-path only when disk headroom is sufficient",
             },
+            {"id": "search_sqlite_physical_compaction", **search_sqlite_physical_compaction_recommendation(search_sqlite_plan)},
             {
                 "id": "raw_block_offset_or_compressed_store",
                 "status": "current_no_plain_duplicates" if raw_block_reclaim_bytes == 0 else "planned_safe_route",
@@ -51171,6 +51344,41 @@ def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_sqlite_compact(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    target_path = Path(args.target_path) if args.target_path else None
+
+    def run_compact() -> dict[str, Any]:
+        return search_sqlite_compact(
+            aoa_root=root,
+            apply=args.apply,
+            method=args.method,
+            target_path=target_path,
+            min_free_after_gb=args.min_free_after_gb,
+            allow_low_free=args.allow_low_free,
+            confirm_source_vacuum=args.confirm_source_vacuum,
+            overwrite_target=args.overwrite_target,
+            write_report=args.write_report,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_compact,
+            owner_job="search-sqlite-compact",
+            mode="manual-bulk",
+            target="search/sqlite_compaction",
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True),
+        )
+        if args.apply
+        else run_compact()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_build(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -56820,6 +57028,23 @@ def build_parser() -> argparse.ArgumentParser:
     graph_sqlite_compact_parser.add_argument("--overwrite-target", action="store_true", help="Allow --method vacuum-into to replace an existing target path.")
     graph_sqlite_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown graph compaction reports under .aoa/diagnostics.")
     graph_sqlite_compact_parser.set_defaults(func=command_graph_sqlite_compact)
+
+    search_sqlite_compact_parser = sub.add_parser(
+        "search-sqlite-compact",
+        aliases=["search-compact-plan"],
+        help="Plan or stage SQLite compaction for the generated portable search store with disk-headroom guards.",
+    )
+    search_sqlite_compact_parser.add_argument("--workspace-root")
+    search_sqlite_compact_parser.add_argument("--aoa-root")
+    search_sqlite_compact_parser.add_argument("--apply", action="store_true", help="Run the selected compaction method after preflight. Default is read-only plan.")
+    search_sqlite_compact_parser.add_argument("--method", choices=["vacuum-into", "vacuum"], default="vacuum-into", help="Compaction method. vacuum-into creates a verified copy; vacuum mutates aoa-search.sqlite3 and requires --confirm-source-vacuum.")
+    search_sqlite_compact_parser.add_argument("--target-path", help="Target SQLite path for --method vacuum-into. Dry-run suggests a timestamped diagnostics path; apply requires an explicit target.")
+    search_sqlite_compact_parser.add_argument("--min-free-after-gb", type=float, default=SEARCH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB, help="Minimum free disk space to keep after expected compaction work. Default: 25 GiB.")
+    search_sqlite_compact_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom guard when the operator has reserved capacity another way.")
+    search_sqlite_compact_parser.add_argument("--confirm-source-vacuum", action="store_true", help="Allow --method vacuum to mutate aoa-search.sqlite3 after preflight.")
+    search_sqlite_compact_parser.add_argument("--overwrite-target", action="store_true", help="Allow --method vacuum-into to replace an existing target path.")
+    search_sqlite_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search compaction reports under .aoa/diagnostics.")
+    search_sqlite_compact_parser.set_defaults(func=command_search_sqlite_compact)
 
     graph_build = sub.add_parser(
         "graph-build",

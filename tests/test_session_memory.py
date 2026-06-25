@@ -10151,6 +10151,50 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
 
 
+def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO documents (body) VALUES (?)", ("search body",))
+    conn.commit()
+    conn.close()
+
+    parser = module.build_parser()
+    args = parser.parse_args(["search-sqlite-compact", "--method", "vacuum-into"])
+    assert args.func is module.command_search_sqlite_compact
+
+    dry_run = module.search_sqlite_compact(aoa_root=aoa_root)
+    assert dry_run["artifact_type"] == "session_memory_search_sqlite_compact"
+    assert dry_run["ok"] is True
+    assert dry_run["mutates"] is False
+    assert dry_run["method"] == "vacuum-into"
+    assert dry_run["execution_profile"] == module.SEARCH_SQLITE_COMPACT_EXECUTION_PROFILE
+    assert dry_run["store_path"] == str(db_path)
+    assert dry_run["target_path_explicit"] is False
+    assert "generated portable SQLite search projection" in dry_run["stop_line"]
+
+    missing_target = module.search_sqlite_compact(aoa_root=aoa_root, apply=True)
+    assert missing_target["ok"] is False
+    assert "vacuum_into_target_path_required" in missing_target["diagnostics"]
+    assert missing_target["mutates"] is False
+
+    target = tmp_path / "search-compact.sqlite3"
+    applied = module.search_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        target_path=target,
+        write_report=True,
+    )
+    assert applied["ok"] is True
+    assert applied["mutates"] is True
+    assert applied["action"]["integrity_check"]["ok"] is True
+    assert target.exists()
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+
+
 def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
@@ -10368,9 +10412,10 @@ def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Pa
     monkeypatch.setattr(
         module,
         "sqlite_vacuum_headroom_plan",
-        lambda **_kwargs: {
-            "status": "ready",
-            "apply_ready": True,
+            lambda **_kwargs: {
+                "ok": True,
+                "status": "ready",
+                "apply_ready": True,
             "freelist_bytes": 0,
             "freelist_human": "0 B",
             "conservative_reclaimable_bytes": 0,
@@ -10385,12 +10430,18 @@ def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Pa
     audit = module.storage_audit(aoa_root=aoa_root, deep_dbstat=False, row_counts=True)
     recommendations = {item["id"]: item for item in audit["recommendations"]}
     sequence = recommendations["graph_event_sequence_edge_projection"]
+    search_compaction = recommendations["search_sqlite_physical_compaction"]
 
     assert sequence["status"] == "policy_applied_after_rebuild_existing_store_mixed"
     assert sequence["omitted_edge_types"] == ["next_event", "previous_event"]
     assert sequence["sequence_edge_count"] == 6
     assert sequence["estimated_reclaimable_bytes"] == 18000
     assert "raw/session evidence" in sequence["quality_tradeoff"]
+    assert search_compaction["status"] == "low_reclaim_not_primary"
+    assert search_compaction["apply_ready"] is True
+    assert "search-sqlite-compact" in search_compaction["next_route"]
+    assert search_compaction["reclaim_ratio"] == 0.0
+    assert "raw/session evidence is untouched" in search_compaction["quality_tradeoff"]
 
 
 def test_graph_pressure_summary_does_not_mark_missing_projection_normal(tmp_path: Path, monkeypatch: Any) -> None:
