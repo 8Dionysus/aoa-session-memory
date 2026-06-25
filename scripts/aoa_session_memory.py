@@ -40948,6 +40948,7 @@ def graph_rag_packet(
     aoa_root: Path,
     query: str,
     anchor: str = "",
+    kind: str = "auto",
     mode: str = "hybrid",
     limit: int = 8,
     include_semantic_context: bool = False,
@@ -40955,6 +40956,7 @@ def graph_rag_packet(
 ) -> dict[str, Any]:
     text = str(query or anchor or "").strip()
     if not text:
+        normalized_kind = normalize_trace_route_kind(kind)
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_graphrag_packet",
@@ -40962,10 +40964,13 @@ def graph_rag_packet(
             "generated_at": utc_now(),
             "ok": False,
             "query": query,
+            **trace_kind_payload_fields(kind, normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"),
             "diagnostics": ["query or anchor is required"],
         }
     limit = max(1, min(int_value(limit, 8), 50))
     anchor_text = str(anchor or text)
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     lexical = search_sessions(
         aoa_root=aoa_root,
         query=text,
@@ -40974,11 +40979,12 @@ def graph_rag_packet(
         rerank_local=rerank_local,
         explain=True,
     )
-    neighborhood = graph_neighborhood(aoa_root=aoa_root, anchor=anchor_text, depth=2, limit=max(limit * 8, 40))
+    neighborhood = graph_neighborhood(aoa_root=aoa_root, anchor=anchor_text, kind=route_kind, depth=2, limit=max(limit * 8, 40))
     cooccurrence = graph_cooccurrence_from_packet(
         aoa_root=aoa_root,
         packet=neighborhood,
         anchor=anchor_text,
+        kind=route_kind,
         limit=min(limit * 4, 40),
         source="shared_graphrag_neighborhood",
     )
@@ -41001,6 +41007,7 @@ def graph_rag_packet(
         "truth_status": "rag_graphrag_evidence_packet_not_reviewed_truth",
         "query": text,
         "anchor": anchor_text,
+        **trace_kind_payload_fields(kind, route_kind),
         "mode": mode,
         "retrieval_modes": {
             "lexical": "portable_sqlite_fts",
@@ -41060,13 +41067,17 @@ def graph_explain_packet(
     intent: str,
     anchor: str = "",
     query: str = "",
+    kind: str = "auto",
     limit: int = 8,
 ) -> dict[str, Any]:
     intent_text = str(intent or query or anchor or "").strip()
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     packet = graph_rag_packet(
         aoa_root=aoa_root,
         query=query or intent_text,
         anchor=anchor or intent_text,
+        kind=route_kind,
         mode="explain",
         limit=limit,
     )
@@ -41081,6 +41092,7 @@ def graph_explain_packet(
         "intent": intent_text,
         "anchor": anchor or intent_text,
         "query": query or intent_text,
+        **trace_kind_payload_fields(kind, route_kind),
         "explanation": {
             "entrypoints": "portable lexical search plus route-candidate graph expansion",
             "graph_expansion": (
@@ -41154,6 +41166,7 @@ def graph_eval(
             aoa_root=aoa_root,
             query=query,
             anchor=anchor,
+            kind=kind,
             mode="eval",
             limit=limit,
             include_semantic_context=include_semantic_context,
@@ -41478,6 +41491,7 @@ def graph_quality_audit(
                 aoa_root=aoa_root,
                 query=anchor,
                 anchor=anchor,
+                kind=kind,
                 mode="quality_audit",
                 limit=limit,
             )
@@ -45686,7 +45700,7 @@ def entity_dossier(
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     limit = max(1, min(int_value(limit, 8), 30))
     trace = trace_route(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=max(limit * 3, 12), per_route_limit=limit, doc_type="event", explain=True)
-    packet = graph_rag_packet(aoa_root=aoa_root, query=anchor, anchor=anchor, limit=limit)
+    packet = graph_rag_packet(aoa_root=aoa_root, query=anchor, anchor=anchor, kind=route_kind, limit=limit)
     timeline = graph_timeline(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=limit)
     cooccurrence = graph_cooccurrence(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=limit)
     quality = graph_quality_audit(
@@ -47639,6 +47653,8 @@ def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "budget_seconds",
         "budget_exhausted",
         "partial",
+        "kind",
+        "requested_kind",
         "node_count",
         "edge_count",
         "diagnostics",
@@ -47965,6 +47981,7 @@ def performance_baseline(
                 aoa_root=aoa_root,
                 query=anchor_text,
                 anchor=anchor_text,
+                kind=trace_kind,
                 limit=min(limit, 8),
             ),
         ),
@@ -49972,6 +49989,7 @@ def command_graphrag_packet(args: argparse.Namespace) -> int:
         aoa_root=root,
         query=query,
         anchor=args.anchor or "",
+        kind=args.kind,
         mode=args.mode,
         limit=args.limit,
         include_semantic_context=args.include_semantic_context,
@@ -49989,6 +50007,7 @@ def command_graph_explain_packet(args: argparse.Namespace) -> int:
         intent=args.intent,
         anchor=args.anchor or "",
         query=args.query or "",
+        kind=args.kind,
         limit=args.limit,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -55364,6 +55383,7 @@ def build_parser() -> argparse.ArgumentParser:
     graphrag.add_argument("--anchor", help="Optional graph anchor; defaults to query.")
     graphrag.add_argument("--workspace-root")
     graphrag.add_argument("--aoa-root")
+    graphrag.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graphrag.add_argument("--mode", default="hybrid")
     graphrag.add_argument("--limit", type=int, default=8)
     graphrag.add_argument("--include-semantic-context", action="store_true", help="Include optional local embedding semantic-search context when configured.")
@@ -55380,6 +55400,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_explain.add_argument("--anchor", help="Optional graph anchor; defaults to intent.")
     graph_explain.add_argument("--workspace-root")
     graph_explain.add_argument("--aoa-root")
+    graph_explain.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_explain.add_argument("--limit", type=int, default=8)
     graph_explain.set_defaults(func=command_graph_explain_packet)
 

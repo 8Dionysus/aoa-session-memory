@@ -2034,6 +2034,7 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     planned_steps = {step["id"]: step for step in planned["steps"]}
     assert planned["ok"] is True
     assert planned["mutates"] is False
+    assert planned_steps["graphrag_packet"]["summary"]["kind"] == "mcp"
     assert planned_steps["narrow_entity_registry_refresh"]["status"] == "skipped"
     assert planned_steps["narrow_search_index_refresh"]["status"] == "skipped"
 
@@ -3338,12 +3339,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         aoa_root=aoa_root,
         query="aoa-session-memory-mcp",
         anchor="aoa-session-memory-mcp",
+        kind="mcp",
         limit=4,
     )
     explain = module.graph_explain_packet(
         aoa_root=aoa_root,
         intent="debug aoa-session-memory-mcp",
         anchor="aoa-session-memory-mcp",
+        kind="mcp",
         limit=4,
     )
     eval_payload = module.graph_eval(aoa_root=aoa_root, limit=3)
@@ -3489,10 +3492,13 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
     assert packet["ok"] is True
     assert packet["truth_status"] == "rag_graphrag_evidence_packet_not_reviewed_truth"
+    assert packet["kind"] == "mcp"
+    assert packet["graph"]["resolved"]["kind"] == "mcp"
     assert packet["evidence_refs"]
     assert packet["answer_rules"]["status"] in {"needs_review", "evidence_ready"}
     assert packet["answer_rules"]["important_claim_allowed"] is True
     assert explain["artifact_type"] == "session_memory_graph_explain_packet"
+    assert explain["kind"] == "mcp"
     assert explain["evidence_refs"]
     assert explain["answer_rules"]["graph_rag_synthesis_allowed"] is True
     assert eval_payload["results"]
