@@ -12431,16 +12431,42 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
         rebuild=False,
     )
     assert incremental_monolith["ok"] is True
+    dirty_catalog_before = module.read_search_catalog(aoa_root)
+    dirty_june_before = next(item for item in dirty_catalog_before["shards"] if item["shard"] == "month/2026-06")
+    assert dirty_june_before["status"] == "stale"
+    assert dirty_june_before["current_session_count"] == 1
+    assert dirty_june_before["stale_session_count"] == 1
+
+    unsafe_dirty_rebuild = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard="month/2026-06",
+        dirty_only=True,
+    )
+    assert unsafe_dirty_rebuild["ok"] is False
+    assert unsafe_dirty_rebuild["status"] == "dirty_only_requires_incremental"
+    assert "dirty_only_requires_no_rebuild" in unsafe_dirty_rebuild["diagnostics"]
+
     incremental_shard = module.materialize_search_shards(
         aoa_root=aoa_root,
-        target="june-shard-incremental",
+        target="all",
+        shard="month/2026-06",
         rebuild_shards=False,
+        dirty_only=True,
     )
     assert incremental_shard["ok"] is True
     assert incremental_shard["rebuild_shards"] is False
+    assert incremental_shard["dirty_only"] is True
+    assert incremental_shard["pre_filter_selected_count"] == 2
+    assert incremental_shard["dirty_candidate_count"] >= 1
+    assert incremental_shard["dirty_selected_count"] == 1
+    assert incremental_shard["skipped_current_count"] == 1
+    assert incremental_shard["deferred_live_skipped_count"] == 0
+    assert incremental_shard["selected_count"] == 1
     assert incremental_shard["processed_count"] == 1
     assert incremental_shard["shards"][0]["shard"] == "month/2026-06"
     assert incremental_shard["shards"][0]["rebuild"] is False
+    assert incremental_shard["shards"][0]["session_count"] == 1
     june_shard_after_incremental = module.search_shard_db_path(aoa_root, "month/2026-06")
     june_conn = sqlite3.connect(str(june_shard_after_incremental))
     try:
@@ -12575,6 +12601,72 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert tampered_may_shard["materialized"] is False
     assert tampered_may_shard["storage_profile"] == "legacy_heavy_structured_profile"
     assert tampered_may_shard["expected_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+
+
+def test_search_shard_dirty_selection_skips_deferred_live_by_default(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "sessions": [
+                {
+                    "session_id": "current-session",
+                    "session_label": "2026-06-01__001__current",
+                    "shard": "month/2026-06",
+                    "shard_status": "current",
+                    "shard_materialized": True,
+                    "freshness": {"status": "current"},
+                },
+                {
+                    "session_id": "deferred-session",
+                    "session_label": "2026-06-02__001__deferred",
+                    "shard": "month/2026-06",
+                    "shard_status": "stale",
+                    "shard_materialized": False,
+                    "freshness": {"status": "deferred_live"},
+                },
+                {
+                    "session_id": "stale-session",
+                    "session_label": "2026-06-03__001__stale",
+                    "shard": "month/2026-06",
+                    "shard_status": "stale",
+                    "shard_materialized": False,
+                    "freshness": {"status": "current"},
+                },
+            ],
+        },
+    )
+    records = [
+        {"session_id": "current-session", "session_label": "2026-06-01__001__current"},
+        {"session_id": "deferred-session", "session_label": "2026-06-02__001__deferred"},
+        {"session_id": "stale-session", "session_label": "2026-06-03__001__stale"},
+    ]
+
+    selected, stats = module.filter_search_records_to_dirty_shard_sessions(
+        aoa_root,
+        records,
+        shard="month/2026-06",
+    )
+
+    assert [item["session_id"] for item in selected] == ["stale-session"]
+    assert stats["dirty_candidate_count"] == 1
+    assert stats["dirty_selected_count"] == 1
+    assert stats["deferred_live_skipped_count"] == 1
+    assert stats["skipped_current_count"] == 1
+
+    selected_with_deferred, stats_with_deferred = module.filter_search_records_to_dirty_shard_sessions(
+        aoa_root,
+        records,
+        shard="month/2026-06",
+        include_deferred_live=True,
+    )
+
+    assert [item["session_id"] for item in selected_with_deferred] == ["deferred-session", "stale-session"]
+    assert stats_with_deferred["dirty_candidate_count"] == 2
+    assert stats_with_deferred["deferred_live_skipped_count"] == 0
 
 
 def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tmp_path: Path) -> None:

@@ -293,6 +293,17 @@ bucket. If the only mismatch is a recently written live transcript deferred by
 the quiet-window gate, the route is `current_with_deferred_live_updates`: the
 live-tail packet owns the wait/catch-up action, while stable shard fan-out stays
 usable. The monolith remains a fallback projection and is tracked separately.
+When the catalog already identifies a small dirty set inside an existing shard,
+use `search-shards all --shard <key> --no-rebuild --dirty-only --write-report`
+instead of rematerializing the full month. `--dirty-only` is intentionally
+incremental-only: it refuses rebuild mode and refuses missing shard DBs because
+a partial rebuild from only dirty sessions would drop current sessions from the
+generated shard projection. Reports expose `pre_filter_selected_count`,
+`dirty_candidate_count`, `dirty_selected_count`, and `skipped_current_count`
+so operators can prove the run touched only the intended stale rows.
+By default dirty selection skips `freshness.status=deferred_live`; the
+live-tail catch-up route must first preserve and index the newer transcript.
+Use `--include-deferred-live` only for a deliberate operator override.
 `search --use-shards` performs bounded fan-out across current materialized
 shards and returns shard refs; when shards are missing, stale, incompatible with
 host overlays, or unable to satisfy a raw-text FTS query locally, the route

@@ -111,6 +111,25 @@ python3 scripts/aoa_session_memory.py search-shards all \
   --write-report
 ```
 
+For live catch-up where the catalog already names only a few stale sessions in
+an existing shard, prefer the dirty incremental route:
+
+```bash
+python3 scripts/aoa_session_memory.py search-shards all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --shard month/2026-06 \
+  --no-rebuild \
+  --dirty-only \
+  --write-report
+```
+
+Do not use `--dirty-only` without `--no-rebuild`. The command refuses that
+combination so a partial dirty selection cannot replace a full shard DB.
+By default this route skips rows still marked `deferred_live`; run the
+live-tail catch-up route first, or pass `--include-deferred-live` only as an
+explicit operator override.
+
 Check optional provider status before using host overlays:
 
 ```bash

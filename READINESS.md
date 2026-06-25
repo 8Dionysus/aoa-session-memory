@@ -168,6 +168,14 @@ Build the `.aoa` session-memory mechanism end to end:
   sessions now update `search/catalog.json` shard freshness counters without a
   heavy raw/session-index scan, so MCP/agent fast-path defaults do not fall
   back to monolith merely because catalog freshness lagged the SQLite state.
+- Dirty-only shard catch-up keeps live-tail repairs bounded: `search-shards`
+  accepts `--dirty-only` only with `--no-rebuild`, selects non-current
+  sessions from `search/catalog.json`, skips `deferred_live` rows by default,
+  refuses missing shard DBs, and reports `pre_filter_selected_count`,
+  `dirty_selected_count`, `skipped_current_count`, and
+  `deferred_live_skipped_count`. This gives operators an automatic route for
+  “repair the few stale sessions in this shard” without rematerializing the
+  whole month or masking live-tail catch-up.
 - Operations warnings distinguish current failures from repaired shard
   freshness failures: an `index-maintenance` report that failed only because a
   monthly shard had `search_documents_stale_segment_refs` is no longer kept as

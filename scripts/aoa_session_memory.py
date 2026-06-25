@@ -26663,6 +26663,79 @@ def search_shard_key_for_record(record: dict[str, Any]) -> str:
     return search_shard_key_for_session(session_label, session_record_date(record))
 
 
+def search_catalog_dirty_shard_session_keys(
+    aoa_root: Path,
+    *,
+    shard: str | None = None,
+    include_deferred_live: bool = False,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
+    catalog = read_search_catalog(aoa_root)
+    sessions = catalog.get("sessions") if isinstance(catalog.get("sessions"), list) else []
+    dirty: dict[str, dict[str, Any]] = {}
+    deferred_live: dict[str, dict[str, Any]] = {}
+    dirty_session_count = 0
+    deferred_live_skipped_count = 0
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        item_shard = str(item.get("shard") or "")
+        if shard and item_shard != shard:
+            continue
+        shard_status = str(item.get("shard_status") or "")
+        if shard_status == "current" and bool(item.get("shard_materialized")):
+            continue
+        freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+        if str(freshness.get("status") or "") == "deferred_live" and not include_deferred_live:
+            deferred_live_skipped_count += 1
+            for key in (item.get("session_id"), item.get("session_label")):
+                if key:
+                    deferred_live[str(key)] = item
+            continue
+        dirty_session_count += 1
+        for key in (item.get("session_id"), item.get("session_label")):
+            if key:
+                dirty[str(key)] = item
+    return dirty, deferred_live, {
+        "dirty_candidate_count": dirty_session_count,
+        "deferred_live_skipped_count": deferred_live_skipped_count,
+    }
+
+
+def filter_search_records_to_dirty_shard_sessions(
+    aoa_root: Path,
+    records: list[dict[str, Any]],
+    *,
+    shard: str | None = None,
+    include_deferred_live: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    dirty_keys, deferred_live_keys, catalog_counts = search_catalog_dirty_shard_session_keys(
+        aoa_root,
+        shard=shard,
+        include_deferred_live=include_deferred_live,
+    )
+    selected: list[dict[str, Any]] = []
+    skipped_current = 0
+    skipped_deferred_live = 0
+    for record in records:
+        keys = [
+            str(record.get("session_id") or ""),
+            str(record.get("session_label") or session_dir_from_record(record).name),
+        ]
+        if any(key and key in dirty_keys for key in keys):
+            selected.append(record)
+        elif any(key and key in deferred_live_keys for key in keys):
+            skipped_deferred_live += 1
+        else:
+            skipped_current += 1
+    return selected, {
+        "dirty_candidate_count": int_value(catalog_counts.get("dirty_candidate_count")),
+        "deferred_live_skipped_count": skipped_deferred_live,
+        "pre_filter_selected_count": len(records),
+        "dirty_selected_count": len(selected),
+        "skipped_current_count": skipped_current,
+    }
+
+
 def search_shards_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Search Shards",
@@ -26680,6 +26753,13 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- search_ref_path_storage_policy: `{payload.get('search_ref_path_storage_policy')}`",
         f"- search_body_preview_chars: `{payload.get('search_body_preview_chars')}`",
         f"- search_tags_storage_policy: `{payload.get('search_tags_storage_policy')}`",
+        f"- dirty_only: `{payload.get('dirty_only')}`",
+        f"- include_deferred_live: `{payload.get('include_deferred_live')}`",
+        f"- pre_filter_selected_count: `{payload.get('pre_filter_selected_count')}`",
+        f"- dirty_candidate_count: `{payload.get('dirty_candidate_count')}`",
+        f"- dirty_selected_count: `{payload.get('dirty_selected_count')}`",
+        f"- skipped_current_count: `{payload.get('skipped_current_count')}`",
+        f"- deferred_live_skipped_count: `{payload.get('deferred_live_skipped_count')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
@@ -26738,11 +26818,47 @@ def materialize_search_shards(
     progress_every: int = 0,
     structured_only: bool = True,
     rebuild_shards: bool = True,
+    dirty_only: bool = False,
+    include_deferred_live: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     diagnostics: list[str] = []
+    dirty_selection: dict[str, Any] = {
+        "dirty_only": dirty_only,
+        "dirty_candidate_count": 0,
+        "pre_filter_selected_count": 0,
+        "dirty_selected_count": 0,
+        "skipped_current_count": 0,
+        "deferred_live_skipped_count": 0,
+    }
+    if dirty_only and rebuild_shards:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "dirty_only_requires_incremental",
+            "target": target,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "requested_shard": shard or "",
+            "selected_count": 0,
+            "processed_count": 0,
+            "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "structured_only": structured_only,
+            "rebuild_shards": rebuild_shards,
+            "dirty_only": True,
+            "include_deferred_live": include_deferred_live,
+            "shard_count": 0,
+            "document_count": 0,
+            "shards": [],
+            "diagnostics": ["dirty_only_requires_no_rebuild"],
+            "exact_next_command": "add --no-rebuild or run a full shard rebuild without --dirty-only",
+        }
     shard_storage_mode = (
         SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE
         if structured_only
@@ -26789,31 +26905,49 @@ def materialize_search_shards(
         if shard and shard_key != shard:
             continue
         groups[shard_key].append(record)
+    pre_dirty_group_count = sum(len(items) for items in groups.values())
+    if dirty_only:
+        filtered_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        flattened_records = [record for shard_records in groups.values() for record in shard_records]
+        dirty_records, dirty_selection = filter_search_records_to_dirty_shard_sessions(
+            aoa_root,
+            flattened_records,
+            shard=shard,
+            include_deferred_live=include_deferred_live,
+        )
+        dirty_selection["dirty_only"] = True
+        dirty_selection["pre_filter_selected_count"] = pre_dirty_group_count
+        for record in dirty_records:
+            filtered_groups[search_shard_key_for_record(record)].append(record)
+        groups = filtered_groups
     if not groups:
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_shard_materialization",
             "search_schema_version": SEARCH_SCHEMA_VERSION,
             "generated_at": now,
-            "ok": False,
-            "status": "no_sessions_selected",
+            "ok": True if dirty_only else False,
+            "status": "no_dirty_sessions" if dirty_only else "no_sessions_selected",
             "target": target,
             "since": since,
             "until": until,
             "limit": limit,
             "requested_shard": shard or "",
-            "selected_count": len(records),
+            "selected_count": int_value(dirty_selection.get("dirty_selected_count")) if dirty_only else len(records),
             "processed_count": 0,
             "shard_strategy": SEARCH_SHARD_STRATEGY,
             "structured_only": structured_only,
             "rebuild_shards": rebuild_shards,
+            "dirty_only": dirty_only,
+            "include_deferred_live": include_deferred_live,
+            **dirty_selection,
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
-            "diagnostics": ["no sessions selected for shard materialization"],
+            "diagnostics": [] if dirty_only else ["no sessions selected for shard materialization"],
         }
     shard_results: list[dict[str, Any]] = []
     slow_session_rows: list[dict[str, Any]] = []
@@ -26825,6 +26959,31 @@ def materialize_search_shards(
             break
         shard_records = groups[shard_key]
         shard_path = search_shard_db_path(aoa_root, shard_key)
+        if dirty_only and not shard_path.exists():
+            diagnostics.append(f"{shard_key}:dirty_only_shard_missing_requires_full_rebuild")
+            shard_results.append(
+                {
+                    "shard": shard_key,
+                    "db_path": str(shard_path),
+                    "ok": False,
+                    "status": "missing_requires_full_rebuild",
+                    "session_count": len(shard_records),
+                    "processed_count": 0,
+                    "document_count": 0,
+                    "elapsed_ms": 0,
+                    "documents_per_second": None,
+                    "slow_sessions": [],
+                    "slow_session_warning_count": 0,
+                    "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
+                    "search_schema_version": str(SEARCH_SCHEMA_VERSION),
+                    "structured_only": structured_only,
+                    "rebuild": False,
+                    "dirty_only": True,
+                    "diagnostics": ["dirty_only_shard_missing_requires_full_rebuild"],
+                    "exact_next_command": f"search-shards all --shard {shard_key} --write-report",
+                }
+            )
+            continue
         remaining_budget = max(0.1, deadline - time.monotonic()) if deadline is not None else None
         shard_started = time.monotonic()
         result = search_index_sessions(
@@ -26884,6 +27043,7 @@ def materialize_search_shards(
                 "search_body_preview_chars": result.get("search_body_preview_chars") or storage_profile.get("body_preview_chars"),
                 "search_tags_storage_policy": result.get("search_tags_storage_policy") or storage_profile.get("tags_storage_policy"),
                 "generated_at": result.get("generated_at"),
+                "dirty_only": dirty_only,
                 "diagnostics": shard_diagnostics,
             }
         )
@@ -26901,7 +27061,8 @@ def materialize_search_shards(
         "until": until,
         "limit": limit,
         "requested_shard": shard or "",
-        "selected_count": len(records),
+        "selected_count": sum(len(items) for items in groups.values()),
+        "pre_filter_selected_count": dirty_selection.get("pre_filter_selected_count", len(records)) if dirty_only else len(records),
         "processed_count": processed_count,
         "elapsed_ms": elapsed_ms,
         "documents_per_second": round(document_count / (elapsed_ms / 1000.0), 2)
@@ -26913,6 +27074,12 @@ def materialize_search_shards(
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "structured_only": structured_only,
         "rebuild_shards": rebuild_shards,
+        "dirty_only": dirty_only,
+        "include_deferred_live": include_deferred_live,
+        "dirty_candidate_count": dirty_selection.get("dirty_candidate_count", 0),
+        "dirty_selected_count": dirty_selection.get("dirty_selected_count", 0),
+        "skipped_current_count": dirty_selection.get("skipped_current_count", 0),
+        "deferred_live_skipped_count": dirty_selection.get("deferred_live_skipped_count", 0),
         "shard_storage_mode": shard_storage_mode,
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
@@ -52347,6 +52514,8 @@ def command_search_shards(args: argparse.Namespace) -> int:
             progress_every=args.progress_every,
             structured_only=not getattr(args, "full_text", False),
             rebuild_shards=not args.no_rebuild,
+            dirty_only=bool(getattr(args, "dirty_only", False)),
+            include_deferred_live=bool(getattr(args, "include_deferred_live", False)),
         )
 
     payload = run_with_maintenance_lock(
@@ -58086,6 +58255,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text shard rebuild.")
     search_shards.add_argument("--full-text", action="store_true", help="Store FTS and compressed bodies in shard DBs; default shards are structured route projections and use the monolith for raw-text queries.")
     search_shards.add_argument("--no-rebuild", action="store_true", help="Incrementally update selected sessions in existing shard DBs instead of rebuilding each shard.")
+    search_shards.add_argument("--dirty-only", action="store_true", help="With --no-rebuild, update only catalog-stale sessions in the selected shard(s).")
+    search_shards.add_argument("--include-deferred-live", action="store_true", help="Allow --dirty-only to process catalog rows still marked deferred_live; default leaves them to live-tail catch-up.")
     search_shards.add_argument("--budget-seconds", type=float, help="Stop after the current shard when this wall-clock budget is exhausted.")
     search_shards.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
     search_shards.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-shards reports under .aoa/diagnostics.")
