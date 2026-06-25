@@ -178,7 +178,9 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_column_evidence_refs_v3"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
-GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_bounded_segment_summary_v2"
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_bounded_segment_summary_no_sequence_v3"
+GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY = "causal_relationship_edges_skip_linear_sequence_v1"
+GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES = frozenset({"next_event", "previous_event"})
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT = 8
 GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT = 8
 GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT = 64
@@ -232,6 +234,7 @@ GRAPH_ROUTE_SIGNAL_EDGE_LAYER_PRIORITY = {
     )
 }
 GRAPH_RAW_REF_PRUNE_EXECUTION_PROFILE = "manual_bulk_single_transaction_delete_v1"
+GRAPH_EVENT_SEQUENCE_PRUNE_EXECUTION_PROFILE = "manual_bulk_sequence_edge_delete_v1"
 GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB = 20.0
 GRAPH_SQLITE_COMPACT_EXECUTION_PROFILE = "manual_bulk_sqlite_vacuum_plan_v1"
 GRAPH_SQLITE_COMPACT_DEFAULT_MIN_FREE_AFTER_GB = 25.0
@@ -33393,11 +33396,20 @@ def graph_should_materialize_event_route_signal_edge(layer: str, key: str = "") 
     return normalized_layer in GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS
 
 
+def graph_should_materialize_event_relationship_edge(rel_type: str) -> bool:
+    normalized_rel_type = route_key_slug(rel_type, fallback="")
+    if not normalized_rel_type:
+        return False
+    return normalized_rel_type not in GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES
+
+
 def graph_route_signal_materialization_limits() -> dict[str, Any]:
     return {
         "event_route_signal_edge_limit": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT,
         "event_registered_entity_edge_limit": GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT,
         "segment_route_signal_edge_limit": GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT,
+        "event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+        "event_relationship_omitted_edge_types": sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES),
         "layer_priority": GRAPH_ROUTE_SIGNAL_EDGE_LAYER_PRIORITY,
         "truth_status": "generated_graph_projection_policy_not_raw_or_search_truth",
     }
@@ -33979,6 +33991,7 @@ def graph_source_metadata(
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
         "graph_store_contrib_payload_mode": GRAPH_STORE_CONTRIB_PAYLOAD_MODE,
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "graph_event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "source_type": source_type,
         "session_id": session_id,
@@ -34425,6 +34438,16 @@ def graph_contributions_for_record(
             event_registered_route_signal_count = sum(
                 1 for signal in route_signals if registry_entry_for_route(signal["layer"], signal["key"]) is not None
             )
+            event_relationship_edges: list[tuple[str, dict[str, Any]]] = []
+            event_relationship_omitted_edge_count = 0
+            for relation in event.get("relationships", []) if isinstance(event.get("relationships"), list) else []:
+                if not isinstance(relation, dict) or not relation.get("event_id"):
+                    continue
+                rel_type = route_key_slug(relation.get("rel"), fallback="related_to")
+                if graph_should_materialize_event_relationship_edge(rel_type):
+                    event_relationship_edges.append((rel_type, relation))
+                else:
+                    event_relationship_omitted_edge_count += 1
             add_segment_node(
                 {
                     "id": event_node_id,
@@ -34452,6 +34475,10 @@ def graph_contributions_for_record(
                     "route_signal_omitted_edge_count": max(0, event_materializable_route_signal_count - len(event_route_signal_edges)),
                     "registered_entity_edge_count": len(event_registered_entity_edges),
                     "registered_entity_omitted_edge_count": max(0, event_registered_route_signal_count - len(event_registered_entity_edges)),
+                    "relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+                    "relationship_count": len(event_relationship_edges) + event_relationship_omitted_edge_count,
+                    "relationship_edge_count": len(event_relationship_edges),
+                    "relationship_omitted_edge_count": event_relationship_omitted_edge_count,
                     "route_signal_materialization_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                     "refs": event_refs,
                     "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
@@ -34541,10 +34568,7 @@ def graph_contributions_for_record(
                         edge_type="event_mentions_registered_entity",
                         extra={"segment_id": segment_id, "event_id": event_id},
                     )
-            for relation in event.get("relationships", []) if isinstance(event.get("relationships"), list) else []:
-                if not isinstance(relation, dict) or not relation.get("event_id"):
-                    continue
-                rel_type = route_key_slug(relation.get("rel"), fallback="related_to")
+            for rel_type, relation in event_relationship_edges:
                 target_event_node_id = f"event:{session_id}:{segment_id}:{relation.get('event_id')}"
                 add_segment_edge(
                     {
@@ -34758,6 +34782,10 @@ class GraphSqliteStore:
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             ("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            ("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY),
         )
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
@@ -35069,6 +35097,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
+        self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -35110,6 +35139,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
+        self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -35150,6 +35180,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
+        self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
         return {"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []}
 
     def remove_source(self, source_key: str) -> dict[str, Any]:
@@ -35179,6 +35210,7 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_aggregate_payload_mode", GRAPH_STORE_AGGREGATE_PAYLOAD_MODE)
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
+        self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
         type_counts_projection = self.refresh_type_counts(commit=False)
         self.conn.commit()
         return {
@@ -35250,6 +35282,179 @@ class GraphSqliteStore:
             "affected_row_count": sum(action_counts.values()),
             "sqlite_freelist_delta_bytes": int_value(after_page_stats.get("freelist_bytes")) - int_value(before_page_stats.get("freelist_bytes")),
             "source_count_summary_status": "graph_sources_counts_not_rewritten",
+        }
+
+    def prune_event_sequence_relationship_edges(
+        self,
+        *,
+        candidates: Iterable[dict[str, Any]],
+        reason: str = "operator_requested",
+    ) -> dict[str, Any]:
+        before_page_stats = self.page_stats()
+        projection_ready = self.type_counts_projection_ready()
+        before_projection = self.type_counts_projection_state(limit=80)
+        now = utc_now()
+        omitted_types = sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES)
+        action_counts: dict[str, int] = {}
+        source_edge_counts: Counter[str] = Counter()
+        source_update_counts: Counter[str] = Counter()
+        skipped_source_samples: list[dict[str, Any]] = []
+        before_counts = before_projection.get("counts") if isinstance(before_projection.get("counts"), dict) else {}
+        before_edge_counts = before_counts.get("edge") if isinstance(before_counts.get("edge"), dict) else {}
+        has_sequence_edge_projection = any(int_value(before_edge_counts.get(edge_type)) > 0 for edge_type in omitted_types)
+
+        def stored_paths(row: sqlite3.Row) -> list[str]:
+            try:
+                payload = json.loads(str(row["source_paths_json"] or "[]"))
+            except json.JSONDecodeError:
+                payload = []
+            return [str(item) for item in payload if item]
+
+        try:
+            self.conn.execute("PRAGMA busy_timeout=120000")
+            placeholders = ",".join("?" for _ in omitted_types)
+            if omitted_types and (has_sequence_edge_projection or not projection_ready):
+                for row in self.conn.execute(
+                    f"SELECT source_key, COUNT(*) AS item_count FROM edge_contribs WHERE edge_type IN ({placeholders}) GROUP BY source_key",
+                    omitted_types,
+                ).fetchall():
+                    source_edge_counts[str(row["source_key"] or "")] = int_value(row["item_count"])
+                edge_type_delete_counts: Counter[str] = Counter()
+                for edge_type in omitted_types:
+                    edge_cursor = self.conn.execute("DELETE FROM edges WHERE edge_type = ?", (edge_type,))
+                    edge_count = max(0, int_value(edge_cursor.rowcount))
+                    edge_type_delete_counts[edge_type] = edge_count
+                    action_counts[f"edges_{edge_type}"] = edge_count
+                    contrib_cursor = self.conn.execute("DELETE FROM edge_contribs WHERE edge_type = ?", (edge_type,))
+                    action_counts[f"edge_contribs_{edge_type}"] = max(0, int_value(contrib_cursor.rowcount))
+                for source_key, deleted_count in source_edge_counts.items():
+                    if not source_key or deleted_count <= 0:
+                        continue
+                    self.conn.execute(
+                        """
+                        UPDATE graph_sources
+                        SET edge_count = CASE WHEN edge_count >= ? THEN edge_count - ? ELSE 0 END
+                        WHERE source_key = ?
+                        """,
+                        (deleted_count, deleted_count, source_key),
+                    )
+                if projection_ready:
+                    self._apply_type_count_delta("edge", edge_type_delete_counts, Counter())
+                    self._upsert_metadata("graph_type_counts_graph_updated_at", now)
+                elif sum(edge_type_delete_counts.values()):
+                    self._upsert_metadata("graph_type_counts_status", "stale_after_event_sequence_prune")
+            elif omitted_types:
+                for edge_type in omitted_types:
+                    action_counts[f"edges_{edge_type}"] = 0
+                    action_counts[f"edge_contribs_{edge_type}"] = 0
+
+            existing_rows = {
+                str(row["source_key"] or ""): row
+                for row in self.conn.execute(
+                    """
+                    SELECT source_key, source_path, source_paths_json, source_sha, source_mtime,
+                           graph_schema_version, graph_store_schema_version,
+                           graph_event_route_signal_edge_policy,
+                           route_signal_classifier_version
+                    FROM graph_sources
+                    """
+                ).fetchall()
+            }
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                source_key = str(candidate.get("source_key") or "")
+                if not source_key:
+                    continue
+                row = existing_rows.get(source_key)
+                if row is None:
+                    source_update_counts["skipped_missing_existing_source"] += 1
+                    continue
+                candidate_paths = [str(item) for item in candidate.get("source_paths", []) if item]
+                paths_match = stored_paths(row) == candidate_paths
+                source_path_match = str(row["source_path"] or "") == str(candidate.get("source_path") or "")
+                row_mtime = float(row["source_mtime"] or 0.0)
+                candidate_mtime = float(candidate.get("source_mtime") or 0.0)
+                mtime_match = abs(row_mtime - candidate_mtime) <= 0.001
+                candidate_status = str(candidate.get("status") or "")
+                if candidate_status not in {"current", "blocked"} or not paths_match or not source_path_match or not mtime_match:
+                    source_update_counts["skipped_source_drift_or_unsupported"] += 1
+                    if len(skipped_source_samples) < 20:
+                        skipped_source_samples.append(
+                            {
+                                "source_key": source_key,
+                                "candidate_status": candidate_status,
+                                "paths_match": paths_match,
+                                "source_path_match": source_path_match,
+                                "mtime_match": mtime_match,
+                            }
+                        )
+                    continue
+                already_current = (
+                    str(row["source_sha"] or "") == str(candidate.get("source_sha") or "")
+                    and int_value(row["graph_schema_version"]) == GRAPH_SCHEMA_VERSION
+                    and int_value(row["graph_store_schema_version"]) == GRAPH_STORE_SCHEMA_VERSION
+                    and str(row["graph_event_route_signal_edge_policy"] or "") == GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                    and int_value(row["route_signal_classifier_version"]) == ROUTE_SIGNAL_CLASSIFIER_VERSION
+                )
+                if already_current:
+                    source_update_counts["already_current"] += 1
+                    continue
+                self.conn.execute(
+                    """
+                    UPDATE graph_sources
+                    SET source_path = ?,
+                        source_paths_json = ?,
+                        source_sha = ?,
+                        source_mtime = ?,
+                        graph_schema_version = ?,
+                        graph_store_schema_version = ?,
+                        graph_event_route_signal_edge_policy = ?,
+                        route_signal_classifier_version = ?,
+                        indexed_at = ?
+                    WHERE source_key = ?
+                    """,
+                    (
+                        candidate.get("source_path") or "",
+                        graph_json(candidate_paths),
+                        candidate.get("source_sha") or "",
+                        candidate_mtime,
+                        GRAPH_SCHEMA_VERSION,
+                        GRAPH_STORE_SCHEMA_VERSION,
+                        GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                        ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                        now,
+                        source_key,
+                    ),
+                )
+                source_update_counts["updated"] += 1
+            self._upsert_metadata("updated_at", now)
+            self._upsert_metadata("graph_event_sequence_pruned_at", now)
+            self._upsert_metadata("graph_event_sequence_prune_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
+            self._upsert_metadata("graph_event_sequence_pruned_row_count", sum(action_counts.values()))
+            self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
+            self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
+            self.conn.commit()
+        except sqlite3.Error:
+            self.conn.rollback()
+            raise
+        after_page_stats = self.page_stats()
+        after_projection = self.type_counts_projection_state(limit=80)
+        return {
+            "status": "applied",
+            "reason": reason,
+            "projection_was_ready": projection_ready,
+            "before_page_stats": before_page_stats,
+            "after_page_stats": after_page_stats,
+            "before_projection": before_projection,
+            "after_projection": after_projection,
+            "omitted_edge_types": omitted_types,
+            "action_counts": action_counts,
+            "affected_row_count": sum(action_counts.values()),
+            "source_edge_prune_count": sum(source_edge_counts.values()),
+            "source_update_counts": dict(source_update_counts),
+            "skipped_source_samples": skipped_source_samples,
+            "sqlite_freelist_delta_bytes": int_value(after_page_stats.get("freelist_bytes")) - int_value(before_page_stats.get("freelist_bytes")),
         }
 
     def source_count(self) -> int:
@@ -36824,6 +37029,12 @@ def graph_source_maintenance_recommendation(
             f"{root_args} --write --store-only --progress-every 10"
         )
 
+    def graph_event_sequence_prune_command() -> str:
+        return (
+            "python3 scripts/aoa_session_memory.py graph-event-sequence-prune "
+            f"{root_args} --apply --write-report"
+        )
+
     mostly_missing_partial_store = (
         source_total >= 500
         and missing_total >= max(500, int(source_total * 0.75))
@@ -36850,6 +37061,15 @@ def graph_source_maintenance_recommendation(
         route = "budgeted_graph_maintenance"
         reason = "route_signal_classifier_drift_budgeted_repair"
         command = graph_maintenance_command(budgeted_batch_limit)
+    elif (
+        source_total
+        and int_value(dirty_count) >= max(20, int(source_total * 0.25))
+        and event_route_policy_mismatch >= max(1, int(int_value(dirty_count) * 0.5))
+        and "no_sequence" in GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    ):
+        route = "graph_event_sequence_prune"
+        reason = "graph_event_sequence_policy_bulk_prune"
+        command = graph_event_sequence_prune_command()
     elif (
         source_total
         and int_value(dirty_count) >= max(20, int(source_total * 0.25))
@@ -36888,6 +37108,9 @@ def graph_source_maintenance_recommendation(
     if route == "store_only_rebuild":
         notes.append("store_only_rebuild_is_manual_resource_gated")
         notes.append("use_in_place_only_when_storage_headroom_is_low")
+    if route == "graph_event_sequence_prune":
+        notes.append("generated_sequence_edges_can_be_pruned_without_full_source_regeneration")
+        notes.append("raw_session_and_segment_order_remain_authoritative")
     if route == "budgeted_graph_maintenance" and actionable_count > 100:
         notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
@@ -38321,6 +38544,7 @@ def graph_raw_ref_prune_disk_preflight(
     *,
     min_free_gb: float = GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB,
     allow_low_free: bool = False,
+    operation_id: str = "graph_raw_ref_prune",
 ) -> dict[str, Any]:
     min_free_bytes = max(0, int(float(min_free_gb) * 1024 * 1024 * 1024))
     usage_path = existing_storage_path(graph_store_path.parent)
@@ -38331,7 +38555,7 @@ def graph_raw_ref_prune_disk_preflight(
         used_bytes = int(usage.used)
         ok = bool(allow_low_free or min_free_bytes <= 0 or free_bytes >= min_free_bytes)
         status = "ok" if ok else "blocked_low_disk_headroom"
-        diagnostics = [] if ok else ["graph_raw_ref_prune_low_disk_headroom"]
+        diagnostics = [] if ok else [f"{operation_id}_low_disk_headroom"]
         return {
             "ok": ok,
             "status": status,
@@ -38347,7 +38571,7 @@ def graph_raw_ref_prune_disk_preflight(
             "min_free_human": human_size(min_free_bytes),
             "allow_low_free": bool(allow_low_free),
             "diagnostics": diagnostics,
-            "note": "Apply is a manual-bulk single-transaction delete and can create a large SQLite WAL before checkpoint.",
+            "note": f"{operation_id} apply is a manual-bulk single-transaction delete and can create a large SQLite WAL before checkpoint.",
         }
     except OSError as exc:
         return {
@@ -38564,6 +38788,195 @@ def graph_raw_ref_prune(
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
         write_markdown(report_md, graph_raw_ref_prune_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def graph_event_sequence_prune_markdown(payload: dict[str, Any]) -> str:
+    before_counts = payload.get("before_counts") if isinstance(payload.get("before_counts"), dict) else {}
+    after_counts = payload.get("after_counts") if isinstance(payload.get("after_counts"), dict) else {}
+    prune_result = payload.get("prune_result") if isinstance(payload.get("prune_result"), dict) else {}
+    action_counts = payload.get("action_counts") if isinstance(payload.get("action_counts"), dict) else {}
+    source_update_counts = prune_result.get("source_update_counts") if isinstance(prune_result.get("source_update_counts"), dict) else {}
+    lines = [
+        "# Graph Event Sequence Prune",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- status: `{payload.get('status')}`",
+        f"- execution_profile: `{payload.get('execution_profile')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- omitted_edge_types: `{json.dumps(payload.get('omitted_edge_types', []), ensure_ascii=False)}`",
+        f"- affected_row_count: `{payload.get('affected_row_count')}`",
+        f"- candidate_sequence_edge_count: `{payload.get('candidate_sequence_edge_count')}`",
+        f"- source_candidate_count: `{payload.get('source_candidate_count')}`",
+        f"- sqlite_freelist_delta: `{payload.get('sqlite_freelist_delta_human')}`",
+        f"- stop_line: `{payload.get('stop_line')}`",
+        "",
+        "## Counts",
+        "",
+        "| type | before | after |",
+        "| --- | ---: | ---: |",
+        f"| `sequence edges` | `{before_counts.get('sequence_edge_count')}` | `{after_counts.get('sequence_edge_count')}` |",
+        "",
+        "## Actions",
+        "",
+        "| action | rows |",
+        "| --- | ---: |",
+    ]
+    for key, value in sorted(action_counts.items()):
+        lines.append(f"| `{key}` | `{value}` |")
+    if source_update_counts:
+        lines.extend(["", "## Source Metadata", "", "| action | count |", "| --- | ---: |"])
+        for key, value in sorted(source_update_counts.items()):
+            lines.append(f"| `{key}` | `{value}` |")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def graph_event_sequence_prune(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    write_report: bool = False,
+    reason: str = "operator_requested",
+    min_free_gb: float = GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB,
+    allow_low_free: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    graph_store_path = graph_paths(aoa_root)["store"]
+    diagnostics: list[str] = []
+    before_store = sqlite_storage_stats(graph_store_path, row_counts=True)
+    table_sizes = {
+        item.get("name"): int_value(item.get("size_bytes"))
+        for item in before_store.get("table_sizes", []) if isinstance(item, dict)
+    }
+    before_counts = graph_event_sequence_projection_recommendation(
+        aoa_root=aoa_root,
+        graph_store=before_store,
+        table_sizes=table_sizes,
+    )
+    records, candidates, candidate_diagnostics = graph_source_candidates(aoa_root, target="all")
+    diagnostics.extend(str(item) for item in candidate_diagnostics if item)
+    disk_preflight = graph_raw_ref_prune_disk_preflight(
+        graph_store_path,
+        min_free_gb=min_free_gb,
+        allow_low_free=allow_low_free,
+        operation_id="graph_event_sequence_prune",
+    )
+    prune_result: dict[str, Any] = {}
+    wal_checkpoint: dict[str, Any] = {}
+    status = "dry_run"
+    action_counts = {
+        f"edges_{edge_type}": 0 for edge_type in sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES)
+    } | {
+        f"edge_contribs_{edge_type}": 0 for edge_type in sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES)
+    }
+    if not before_store.get("ok"):
+        diagnostics.extend(str(item) for item in before_store.get("diagnostics", []) if item)
+    if apply and not graph_store_path.exists():
+        diagnostics.append("graph_store_missing")
+    if apply and not disk_preflight.get("ok"):
+        status = "preflight_failed"
+        diagnostics.extend(str(item) for item in disk_preflight.get("diagnostics", []) if item)
+    if apply and not diagnostics:
+        store = GraphSqliteStore(aoa_root)
+        try:
+            prune_result = store.prune_event_sequence_relationship_edges(candidates=candidates, reason=reason)
+            action_counts = prune_result.get("action_counts") if isinstance(prune_result.get("action_counts"), dict) else action_counts
+            status = "applied"
+        except sqlite3.Error as exc:
+            diagnostics.append(sqlite_error_diagnostic(exc))
+            status = "sqlite_error"
+        finally:
+            store.close()
+        if status == "applied":
+            wal_checkpoint = sqlite_wal_checkpoint(graph_store_path)
+            diagnostics.extend(
+                f"wal_checkpoint:{item}"
+                for item in (wal_checkpoint.get("diagnostics", []) if isinstance(wal_checkpoint.get("diagnostics"), list) else [])
+                if item
+            )
+    after_store = sqlite_storage_stats(graph_store_path, row_counts=True)
+    after_counts = graph_event_sequence_projection_recommendation(
+        aoa_root=aoa_root,
+        graph_store=after_store,
+        table_sizes={
+            item.get("name"): int_value(item.get("size_bytes"))
+            for item in after_store.get("table_sizes", []) if isinstance(item, dict)
+        },
+    )
+    affected_rows = sum(int_value(value) for value in action_counts.values()) if status == "applied" else 0
+    before_freelist = int_value(before_store.get("freelist_bytes"))
+    after_freelist = int_value(after_store.get("freelist_bytes"))
+    freelist_delta = max(0, after_freelist - before_freelist)
+    file_delta = int_value(before_store.get("total_with_wal_bytes")) - int_value(after_store.get("total_with_wal_bytes"))
+    remaining_sequence_edges = int_value(after_counts.get("sequence_edge_count"))
+    ok = not diagnostics and (not apply or status == "applied")
+    if status == "preflight_failed":
+        next_route = "reserve disk headroom or rerun graph-event-sequence-prune --apply --allow-low-free only with an explicit operator decision"
+    elif apply and remaining_sequence_edges:
+        next_route = "sequence graph edges remain; rerun graph-event-sequence-prune --apply --write-report or use controlled graph-maintenance if source metadata was skipped"
+    elif apply:
+        next_route = "run maintenance-status and graph-cardinality --refresh; physical graph.sqlite3 shrink still requires controlled VACUUM or rebuild"
+    elif int_value(before_counts.get("sequence_edge_count")):
+        next_route = "run graph-event-sequence-prune --apply --write-report through the maintenance lane when ready; this prunes generated graph edges without deleting raw/session evidence"
+    else:
+        next_route = "no generated sequence graph edges are visible; use maintenance-status to check remaining graph drift"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_event_sequence_prune",
+        "generated_at": utc_now(),
+        "ok": ok,
+        "mutates": status == "applied",
+        "apply": bool(apply),
+        "status": status,
+        "reason": reason,
+        "aoa_root": str(aoa_root),
+        "store_path": str(graph_store_path),
+        "policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+        "route_signal_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "omitted_edge_types": sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES),
+        "execution_profile": GRAPH_EVENT_SEQUENCE_PRUNE_EXECUTION_PROFILE,
+        "disk_preflight": disk_preflight,
+        "truth_status": "generated_graph_projection_prune_not_memory_truth",
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "before_store": before_store,
+        "after_store": after_store,
+        "prune_result": prune_result,
+        "wal_checkpoint": wal_checkpoint,
+        "action_counts": action_counts,
+        "affected_row_count": affected_rows,
+        "candidate_sequence_edge_count": before_counts.get("sequence_edge_count"),
+        "source_record_count": len(records),
+        "source_candidate_count": len(candidates),
+        "sqlite_freelist_delta_bytes": freelist_delta,
+        "sqlite_freelist_delta_human": human_size(freelist_delta),
+        "physical_file_delta_bytes": file_delta,
+        "physical_file_delta_human": human_size(file_delta) if file_delta >= 0 else f"-{human_size(abs(file_delta))}",
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+        "stop_line": "Only generated graph sequence edges are pruned. Raw transcripts, session indexes, segment indexes, and causal event relationships stay authoritative.",
+        "operator_note": "This is a manual-bulk route. On large live stores it can run for a long time and create a large WAL before checkpoint.",
+        "sqlite_file_size_note": "DELETE usually creates SQLite freelist pages; graph.sqlite3 file size does not shrink until controlled VACUUM or rebuild.",
+        "next_route": next_route,
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__graph-event-sequence-prune"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, graph_event_sequence_prune_markdown(payload))
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
@@ -39439,6 +39852,64 @@ def graph_raw_ref_materialization_recommendation(aoa_root: Path) -> dict[str, An
     }
 
 
+def graph_event_sequence_projection_recommendation(
+    *,
+    aoa_root: Path,
+    graph_store: dict[str, Any],
+    table_sizes: dict[str, int],
+) -> dict[str, Any]:
+    projection = graph_cardinality_projection_read(aoa_root, limit=80)
+    counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+    edge_counts = counts.get("edge") if isinstance(counts.get("edge"), dict) else {}
+    omitted_types = sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES)
+    sequence_edge_count = sum(int_value(edge_counts.get(edge_type)) for edge_type in omitted_types)
+    total_edge_count = sum(int_value(value) for value in edge_counts.values())
+    row_counts = graph_store.get("row_counts") if isinstance(graph_store.get("row_counts"), dict) else {}
+    stored_edge_rows = int_value(row_counts.get("edges"), total_edge_count)
+    stored_edge_contrib_rows = int_value(row_counts.get("edge_contribs"))
+    edge_storage_bytes = sum(
+        int_value(table_sizes.get(name))
+        for name in (
+            "edges",
+            "edge_contribs",
+            "sqlite_autoindex_edges_1",
+            "sqlite_autoindex_edge_contribs_1",
+            "idx_edges_source",
+            "idx_edges_target",
+            "idx_edge_contribs_edge",
+        )
+    )
+    cardinality_denominator = max(total_edge_count, stored_edge_rows, 1)
+    estimated_bytes = int(edge_storage_bytes * (sequence_edge_count / cardinality_denominator)) if sequence_edge_count > 0 and edge_storage_bytes > 0 else 0
+    if str(projection.get("status") or "") != "current":
+        status = "requires_cardinality_projection"
+        next_route = "run graph-cardinality --refresh before estimating sequence-edge pressure"
+    elif sequence_edge_count > 0:
+        status = "policy_applied_after_rebuild_existing_store_mixed"
+        next_route = "run graph-event-sequence-prune --apply --write-report, then maintenance-status and graph-cardinality --refresh; physical shrink still requires rebuild or VACUUM"
+    else:
+        status = "policy_already_applied_no_sequence_edges"
+        next_route = "no sequence-edge graph cardinality action is needed"
+    return {
+        "status": status,
+        "policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+        "omitted_edge_types": omitted_types,
+        "sequence_edge_count": sequence_edge_count,
+        "total_edge_count": total_edge_count,
+        "stored_edge_rows": stored_edge_rows,
+        "stored_edge_contrib_rows": stored_edge_contrib_rows,
+        "edge_storage_bytes": edge_storage_bytes,
+        "edge_storage_human": human_size(edge_storage_bytes),
+        "estimated_reclaimable_bytes": estimated_bytes,
+        "estimated_reclaimable_human": human_size(estimated_bytes) if estimated_bytes else "requires controlled rebuild/prune",
+        "estimate_status": "cardinality_ratio_estimate" if estimated_bytes else "cardinality_only_rebuild_or_vacuum_required",
+        "quality_tradeoff": "none_expected; linear event order remains in segment indexes and raw/session evidence, while graph keeps causal/correlation edges",
+        "speed_tradeoff": "smaller graph neighborhoods and faster graph-store scans after generated rows are rebuilt or pruned",
+        "projection_status": projection.get("status"),
+        "next_route": next_route,
+    }
+
+
 def storage_audit(
     *,
     aoa_root: Path,
@@ -39475,6 +39946,11 @@ def storage_audit(
         sample=graph_store.get("aggregate_payload_compaction_sample") if isinstance(graph_store.get("aggregate_payload_compaction_sample"), dict) else {},
     )
     raw_ref_materialization = graph_raw_ref_materialization_recommendation(aoa_root)
+    event_sequence_projection = graph_event_sequence_projection_recommendation(
+        aoa_root=aoa_root,
+        graph_store=graph_store,
+        table_sizes=table_sizes,
+    )
     graph_sqlite_plan = sqlite_vacuum_headroom_plan(
         db_path=graph_paths_payload["store"],
         method="vacuum-into",
@@ -39520,6 +39996,25 @@ def storage_audit(
                 "aggregate_table_size_human": graph_compaction["aggregate_table_size_human"],
                 "sample_delta_ratio": graph_compaction.get("sample_delta_ratio"),
                 "next_route": graph_compaction["next_route"],
+            },
+            {
+                "id": "graph_event_sequence_edge_projection",
+                "status": event_sequence_projection["status"],
+                "quality_tradeoff": event_sequence_projection["quality_tradeoff"],
+                "speed_tradeoff": event_sequence_projection["speed_tradeoff"],
+                "policy": event_sequence_projection["policy"],
+                "omitted_edge_types": event_sequence_projection["omitted_edge_types"],
+                "sequence_edge_count": event_sequence_projection["sequence_edge_count"],
+                "total_edge_count": event_sequence_projection["total_edge_count"],
+                "stored_edge_rows": event_sequence_projection["stored_edge_rows"],
+                "stored_edge_contrib_rows": event_sequence_projection["stored_edge_contrib_rows"],
+                "edge_storage_bytes": event_sequence_projection["edge_storage_bytes"],
+                "edge_storage_human": event_sequence_projection["edge_storage_human"],
+                "estimated_reclaimable_bytes": event_sequence_projection["estimated_reclaimable_bytes"],
+                "estimated_reclaimable_human": event_sequence_projection["estimated_reclaimable_human"],
+                "estimate_status": event_sequence_projection["estimate_status"],
+                "projection_status": event_sequence_projection["projection_status"],
+                "next_route": event_sequence_projection["next_route"],
             },
             {
                 "id": "graph_raw_ref_materialization_policy",
@@ -43911,6 +44406,8 @@ def session_memory_graph_pressure_summary(
         "top_node_types": top_node_types[:8],
         "top_edge_types": top_edge_types[:8],
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "graph_event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+        "graph_event_relationship_omitted_edge_types": sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES),
         "graph_event_route_signal_edge_layers": sorted(GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS),
         "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
         "physical_compaction": {
@@ -49980,6 +50477,37 @@ def command_graph_raw_ref_prune(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_graph_event_sequence_prune(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+
+    def run_prune() -> dict[str, Any]:
+        return graph_event_sequence_prune(
+            aoa_root=root,
+            apply=args.apply,
+            write_report=args.write_report,
+            reason="operator_requested",
+            min_free_gb=args.min_free_gb,
+            allow_low_free=args.allow_low_free,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_prune,
+            owner_job="graph-event-sequence-prune",
+            mode="manual-bulk",
+            target="graph/event_sequence_edges",
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+        )
+        if args.apply
+        else run_prune()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_cardinality(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -55403,6 +55931,19 @@ def build_parser() -> argparse.ArgumentParser:
     graph_raw_ref_prune_parser.add_argument("--min-free-gb", type=float, default=GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB, help="Minimum free disk headroom required before --apply. Default: 20 GiB.")
     graph_raw_ref_prune_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom apply guard when the operator has reserved capacity another way.")
     graph_raw_ref_prune_parser.set_defaults(func=command_graph_raw_ref_prune)
+
+    graph_event_sequence_prune_parser = sub.add_parser(
+        "graph-event-sequence-prune",
+        aliases=["graph-prune-event-sequence"],
+        help="Prune generated next_event/previous_event graph edges while preserving segment/raw event order.",
+    )
+    graph_event_sequence_prune_parser.add_argument("--workspace-root")
+    graph_event_sequence_prune_parser.add_argument("--aoa-root")
+    graph_event_sequence_prune_parser.add_argument("--apply", action="store_true", help="Delete generated sequence edge rows and update source policy metadata. Default is dry-run.")
+    graph_event_sequence_prune_parser.add_argument("--write-report", action="store_true", help="Write event-sequence prune reports under .aoa/diagnostics.")
+    graph_event_sequence_prune_parser.add_argument("--min-free-gb", type=float, default=GRAPH_RAW_REF_PRUNE_DEFAULT_MIN_FREE_GB, help="Minimum free disk headroom required before --apply. Default: 20 GiB.")
+    graph_event_sequence_prune_parser.add_argument("--allow-low-free", action="store_true", help="Bypass the disk-headroom apply guard when the operator has reserved capacity another way.")
+    graph_event_sequence_prune_parser.set_defaults(func=command_graph_event_sequence_prune)
 
     graph_cardinality_parser = sub.add_parser(
         "graph-cardinality",

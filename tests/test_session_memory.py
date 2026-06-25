@@ -4054,6 +4054,104 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
     assert "has_raw_ref" not in cardinality["projection"]["counts"]["edge"]
 
 
+def test_graph_event_sequence_prune_removes_sequence_edges_and_updates_source_policy(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-21T00-45-00-sequence-prune.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-21T00:45:00Z", "type": "session_meta", "payload": {"id": "sequence-prune", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-06-21T00:45:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Inspect sequence prune."}]}},
+            {"timestamp": "2026-06-21T00:45:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-seq", "arguments": json.dumps({"cmd": "date"})}},
+            {"timestamp": "2026-06-21T00:45:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-seq", "output": "Process exited with code 0\nOutput:\nnow\n"}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "sequence-prune",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    _records, candidates, diagnostics = module.graph_source_candidates(aoa_root, target="all")
+    assert diagnostics == []
+    source = dict(next(candidate for candidate in candidates if candidate["source_type"] == "segment"))
+    source["source_sha"] = "legacy-policy-sha"
+    source["graph_event_route_signal_edge_policy"] = "anchor_event_edges_bounded_segment_summary_v2"
+    session_id = source["session_id"]
+    segment_id = source["segment_id"]
+    event_a = f"event:{session_id}:{segment_id}:000002"
+    event_b = f"event:{session_id}:{segment_id}:000003"
+    contribution = {
+        "source": source,
+        "nodes": [
+            {"id": event_a, "type": "event", "title": "call"},
+            {"id": event_b, "type": "event", "title": "output"},
+        ],
+        "edges": [
+            {"id": module.graph_edge_id(event_a, event_b, "next_event"), "source": event_a, "target": event_b, "type": "next_event"},
+            {"id": module.graph_edge_id(event_b, event_a, "previous_event"), "source": event_b, "target": event_a, "type": "previous_event"},
+            {"id": module.graph_edge_id(event_a, event_b, "answered_by"), "source": event_a, "target": event_b, "type": "answered_by"},
+            {"id": module.graph_edge_id(event_b, event_a, "responds_to"), "source": event_b, "target": event_a, "type": "responds_to"},
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+
+    dry_run = module.graph_event_sequence_prune(aoa_root=aoa_root, write_report=True)
+    assert dry_run["ok"] is True
+    assert dry_run["mutates"] is False
+    assert dry_run["candidate_sequence_edge_count"] == 2
+    assert dry_run["execution_profile"] == module.GRAPH_EVENT_SEQUENCE_PRUNE_EXECUTION_PROFILE
+    assert Path(dry_run["report_json"]).exists()
+
+    apply_payload = module.graph_event_sequence_prune(aoa_root=aoa_root, apply=True, write_report=True, allow_low_free=True)
+    assert apply_payload["ok"] is True
+    assert apply_payload["mutates"] is True
+    assert apply_payload["status"] == "applied"
+    assert apply_payload["action_counts"]["edges_next_event"] == 1
+    assert apply_payload["action_counts"]["edges_previous_event"] == 1
+    assert apply_payload["after_counts"]["sequence_edge_count"] == 0
+    assert apply_payload["prune_result"]["source_update_counts"]["updated"] == 1
+
+    conn = sqlite3.connect(str(module.graph_paths(aoa_root)["store"]))
+    conn.row_factory = sqlite3.Row
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM edges WHERE edge_type IN ('next_event', 'previous_event')").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM edge_contribs WHERE edge_type IN ('next_event', 'previous_event')").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM edges WHERE edge_type = 'answered_by'").fetchone()[0] == 1
+        source_row = conn.execute("SELECT source_sha, graph_event_route_signal_edge_policy FROM graph_sources WHERE source_key = ?", (source["source_key"],)).fetchone()
+        metadata = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM metadata").fetchall()}
+    finally:
+        conn.close()
+    current_source = next(candidate for candidate in candidates if candidate["source_key"] == source["source_key"])
+    assert source_row["source_sha"] == current_source["source_sha"]
+    assert source_row["graph_event_route_signal_edge_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    assert metadata["graph_event_sequence_prune_policy"] == module.GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        assert store.source_version_state()["status"] == "current"
+    finally:
+        store.close()
+
+    second_apply = module.graph_event_sequence_prune(aoa_root=aoa_root, apply=True, allow_low_free=True)
+    assert second_apply["ok"] is True
+    assert second_apply["action_counts"]["edges_next_event"] == 0
+    assert second_apply["action_counts"]["edges_previous_event"] == 0
+    assert second_apply["prune_result"]["source_update_counts"]["already_current"] == 1
+    assert second_apply["prune_result"]["source_update_counts"].get("updated", 0) == 0
+
+
 def test_graph_sqlite_compact_plans_and_stages_vacuum_copy(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_dir = aoa_root / "graph"
@@ -4183,7 +4281,7 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     states = module.graph_source_states(aoa_root=aoa_root)
     assert states["dirty_count"] >= 1
     assert states["reason_group_counts"]["source_sha_mismatch"] >= 1
-    assert states["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance"}
+    assert states["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance", "graph_event_sequence_prune"}
     assert any(item["status"] == "dirty" and item["source_type"] == "segment" for item in states["states"])
 
     dirty_gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
@@ -4412,6 +4510,90 @@ def test_graph_route_signal_materialization_caps_high_fanout_edges(tmp_path: Pat
     assert module.graph_route_node_id("skill", "wide_079") not in {edge["target"] for edge in summary_edges}
 
 
+def test_graph_projection_skips_linear_sequence_edges_but_keeps_causal_relationships(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-21T00-35-00-graph-relationship-policy.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-21T00:35:00Z",
+                "type": "session_meta",
+                "payload": {"id": "graph-relationship-policy", "cwd": str(repo), "model": "gpt-5"},
+            },
+            {
+                "timestamp": "2026-06-21T00:35:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Inspect graph policy."}]},
+            },
+            {
+                "timestamp": "2026-06-21T00:35:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-policy",
+                    "arguments": json.dumps({"cmd": "python3 scripts/aoa_session_memory.py graph-cardinality"}),
+                },
+            },
+            {
+                "timestamp": "2026-06-21T00:35:03Z",
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "call-policy", "output": "Process exited with code 0\nOutput:\nok\n"},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-relationship-policy",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "graph-relationship-policy")
+    session_dir = Path(record["path"])
+    segment_index_path = next((session_dir / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    relationships = [
+        relation.get("rel")
+        for event in segment_index["events"]
+        for relation in event.get("relationships", [])
+        if isinstance(relation, dict)
+    ]
+    assert "next_event" in relationships
+    assert "previous_event" in relationships
+    assert "answered_by" in relationships
+    assert "responds_to" in relationships
+
+    contributions, diagnostics = module.graph_contributions_for_record(record)
+
+    assert diagnostics == []
+    segment_contribution = next(
+        contribution for contribution in contributions
+        if contribution["source"]["source_type"] == "segment"
+    )
+    assert (
+        segment_contribution["source"]["graph_event_route_signal_edge_policy"]
+        == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    )
+    edge_types = {edge["type"] for edge in segment_contribution["edges"]}
+    assert "next_event" not in edge_types
+    assert "previous_event" not in edge_types
+    assert "answered_by" in edge_types
+    assert "responds_to" in edge_types
+    event_nodes = [node for node in segment_contribution["nodes"] if node.get("type") == "event"]
+    assert any(node.get("relationship_omitted_edge_count") for node in event_nodes)
+    assert all(node.get("relationship_edge_policy") == module.GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY for node in event_nodes)
+
+
 def test_graph_source_recommendation_routes_mass_classifier_drift_to_budgeted_repair() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4000,
@@ -4434,7 +4616,7 @@ def test_graph_source_recommendation_routes_mass_classifier_drift_to_budgeted_re
     assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
 
 
-def test_graph_source_recommendation_routes_event_edge_policy_drift_to_budgeted_repair() -> None:
+def test_graph_source_recommendation_routes_event_edge_policy_drift_to_sequence_prune() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=4000,
         dirty_count=3900,
@@ -4447,11 +4629,11 @@ def test_graph_source_recommendation_routes_event_edge_policy_drift_to_budgeted_
         },
     )
 
-    assert recommendation["route"] == "budgeted_graph_maintenance"
-    assert recommendation["reason"] == "graph_event_route_signal_edge_policy_drift_budgeted_repair"
-    assert "graph-maintenance all" in recommendation["command"]
-    assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
-    assert "full_store_only_rebuild_is_manual_heavy_route_after_resource_gate" in recommendation["notes"]
+    assert recommendation["route"] == "graph_event_sequence_prune"
+    assert recommendation["reason"] == "graph_event_sequence_policy_bulk_prune"
+    assert "graph-event-sequence-prune" in recommendation["command"]
+    assert "generated_sequence_edges_can_be_pruned_without_full_source_regeneration" in recommendation["notes"]
+    assert "raw_session_and_segment_order_remain_authoritative" in recommendation["notes"]
 
 
 def test_graph_source_recommendation_routes_mass_missing_sources_to_budgeted_recovery() -> None:
@@ -5310,7 +5492,7 @@ def test_graph_freshness_stable_mode_defers_recent_live_session(tmp_path: Path) 
     assert strict["search_index"]["dirty_session_count"] == 1
     assert strict["graph_store"]["status"] == "dirty"
     assert strict["graph_store"]["source_state"]["reason_group_counts"]["source_sha_mismatch"] >= 1
-    assert strict["graph_store"]["source_state"]["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance"}
+    assert strict["graph_store"]["source_state"]["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance", "graph_event_sequence_prune"}
     assert strict["needs_index_maintenance"] is True
     assert strict["needs_graph_maintenance"] is True
     assert stable["ok"] is True
@@ -9618,6 +9800,77 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert summary["physical_compaction"]["reclaim_ratio"] < 0.1
     assert "cardinality reduction" in summary["next_route"]
     assert "storage-audit" in summary["optional_deep_audit_command"]
+
+
+def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+    (aoa_root / "search").mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=80: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 4},
+                "edge": {"previous_event": 3, "next_event": 3, "answered_by": 1, "responds_to": 1},
+            },
+            "top": {
+                "node": [{"type": "event", "count": 4}],
+                "edge": [{"type": "previous_event", "count": 3}],
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_storage_stats",
+        lambda path, deep=False, row_counts=False: {
+            "label": Path(path).name,
+            "path": str(path),
+            "exists": True,
+            "size_bytes": 4096,
+            "size_human": "4.0 KiB",
+            "kind": "sqlite",
+            "ok": True,
+            "diagnostics": [],
+            "wal": {"exists": False, "size_bytes": 0},
+            "total_with_wal_bytes": 4096,
+            "total_with_wal_human": "4.0 KiB",
+            "row_counts": {"edges": 8, "edge_contribs": 8},
+            "table_sizes": [
+                {"name": "edges", "size_bytes": 8000},
+                {"name": "edge_contribs", "size_bytes": 16000},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_vacuum_headroom_plan",
+        lambda **_kwargs: {
+            "status": "ready",
+            "apply_ready": True,
+            "freelist_bytes": 0,
+            "freelist_human": "0 B",
+            "conservative_reclaimable_bytes": 0,
+            "conservative_reclaimable_human": "0 B",
+            "required_free_human": "1.0 MiB",
+            "free_human": "1.0 GiB",
+            "min_free_after_human": "0 B",
+            "diagnostics": [],
+        },
+    )
+
+    audit = module.storage_audit(aoa_root=aoa_root, deep_dbstat=False, row_counts=True)
+    recommendations = {item["id"]: item for item in audit["recommendations"]}
+    sequence = recommendations["graph_event_sequence_edge_projection"]
+
+    assert sequence["status"] == "policy_applied_after_rebuild_existing_store_mixed"
+    assert sequence["omitted_edge_types"] == ["next_event", "previous_event"]
+    assert sequence["sequence_edge_count"] == 6
+    assert sequence["estimated_reclaimable_bytes"] == 18000
+    assert "raw/session evidence" in sequence["quality_tradeoff"]
 
 
 def test_graph_pressure_summary_does_not_mark_missing_projection_normal(tmp_path: Path, monkeypatch: Any) -> None:
