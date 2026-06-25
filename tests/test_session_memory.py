@@ -2037,6 +2037,12 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     assert planned_steps["graphrag_packet"]["summary"]["kind"] == "mcp"
     assert planned_steps["narrow_entity_registry_refresh"]["status"] == "skipped"
     assert planned_steps["narrow_search_index_refresh"]["status"] == "skipped"
+    assert planned["storage"]["search"]["wal"]["size_bytes"] >= 0
+    assert planned["storage"]["search"]["total_with_wal_bytes"] >= planned["storage"]["search"]["size_bytes"]
+    assert planned["storage"]["graph"]["wal"]["size_bytes"] >= 0
+    assert planned["storage"]["graph"]["total_with_wal_bytes"] >= planned["storage"]["graph"]["size_bytes"]
+    assert planned["storage"]["search_shards"]["status"] in {"current", "empty", "catalog_not_current", "incomplete"}
+    assert "combined_search_projection_total_bytes" in planned["storage"]["search_shards"]
 
     applied = module.performance_baseline(
         aoa_root=aoa_root,

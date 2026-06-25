@@ -49003,18 +49003,18 @@ def skipped_performance_step(step_id: str, *, description: str, reason: str, mut
 def performance_storage_summary(aoa_root: Path) -> dict[str, Any]:
     search_path = search_db_path(aoa_root)
     graph_path = graph_paths(aoa_root)["store"]
+    search_entry = maintenance_light_sqlite_size(search_path)
+    graph_entry = maintenance_light_sqlite_size(graph_path)
     summary: dict[str, Any] = {
         "search": {
+            **search_entry,
             "db_path": str(search_path),
-            "exists": search_path.exists(),
-            "size_bytes": search_path.stat().st_size if search_path.exists() else 0,
-            "diagnostics": [],
+            "diagnostics": search_entry.get("diagnostics", []) if isinstance(search_entry.get("diagnostics"), list) else [],
         },
         "graph": {
+            **graph_entry,
             "db_path": str(graph_path),
-            "exists": graph_path.exists(),
-            "size_bytes": graph_path.stat().st_size if graph_path.exists() else 0,
-            "diagnostics": [],
+            "diagnostics": graph_entry.get("diagnostics", []) if isinstance(graph_entry.get("diagnostics"), list) else [],
         },
     }
     if search_path.exists():
@@ -49048,6 +49048,52 @@ def performance_storage_summary(aoa_root: Path) -> dict[str, Any]:
             "diagnostics": graph_state.get("diagnostics", []) if isinstance(graph_state.get("diagnostics"), list) else [],
         }
     )
+    search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    summary["search_shards"] = {
+        key: search_shards.get(key)
+        for key in (
+            "status",
+            "catalog_status",
+            "shard_strategy",
+            "active_projection",
+            "fallback_status",
+            "session_count",
+            "shard_count",
+            "materialized_shard_count",
+            "current_shard_count",
+            "stale_shard_count",
+            "missing_shard_count",
+            "noncurrent_shard_count",
+            "document_count",
+            "shard_db_total_bytes",
+            "shard_db_total_human",
+            "monolith_db_total_bytes",
+            "monolith_db_total_human",
+            "combined_search_projection_total_bytes",
+            "combined_search_projection_total_human",
+            "raw_text_query_route",
+            "truth_status",
+        )
+        if key in search_shards
+    }
+    summary["search_shards"]["largest_shards"] = [
+        {
+            key: item.get(key)
+            for key in (
+                "shard",
+                "status",
+                "session_count",
+                "document_count",
+                "size_human",
+                "total_with_wal_human",
+                "raw_text_query_support",
+                "storage_profile",
+            )
+            if key in item
+        }
+        for item in (search_shards.get("largest_shards") or [])[:4]
+        if isinstance(item, dict)
+    ]
     return summary
 
 
@@ -49171,17 +49217,23 @@ def performance_baseline_markdown(payload: dict[str, Any]) -> str:
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
     search_storage = storage.get("search") if isinstance(storage.get("search"), dict) else {}
     graph_storage = storage.get("graph") if isinstance(storage.get("graph"), dict) else {}
+    search_shards = storage.get("search_shards") if isinstance(storage.get("search_shards"), dict) else {}
     lines.extend(
         [
             "",
             "## Storage",
             "",
             f"- search_size_bytes: `{search_storage.get('size_bytes')}`",
+            f"- search_total_with_wal: `{search_storage.get('total_with_wal_human')}`",
+            f"- search_wal: `{(search_storage.get('wal') or {}).get('size_human') if isinstance(search_storage.get('wal'), dict) else ''}`",
             f"- search_document_count: `{search_storage.get('document_count')}`",
             f"- search_event_document_count: `{search_storage.get('event_document_count')}`",
             f"- search_route_term_count: `{search_storage.get('route_term_count')}`",
             f"- graph_size_bytes: `{graph_storage.get('size_bytes')}`",
+            f"- graph_total_with_wal: `{graph_storage.get('total_with_wal_human')}`",
+            f"- graph_wal: `{(graph_storage.get('wal') or {}).get('size_human') if isinstance(graph_storage.get('wal'), dict) else ''}`",
             f"- graph_status: `{graph_storage.get('status')}`",
+            f"- search_shards: `{search_shards.get('status')}` materialized=`{search_shards.get('materialized_shard_count')}/{search_shards.get('shard_count')}` shard_total=`{search_shards.get('shard_db_total_human')}` combined=`{search_shards.get('combined_search_projection_total_human')}`",
         ]
     )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
