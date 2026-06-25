@@ -31403,6 +31403,11 @@ TRACE_ROUTE_KINDS = {
     "decision",
     "external",
 }
+TRACE_ROUTE_KIND_ALIASES = {
+    "mcp_service": "mcp",
+    "mcp_tool": "tool",
+}
+TRACE_ROUTE_KIND_CHOICES = sorted(TRACE_ROUTE_KINDS | set(TRACE_ROUTE_KIND_ALIASES))
 
 AGENT_EVENT_ROUTE_ALIASES = {
     "answer": "assistant_answer",
@@ -31441,6 +31446,19 @@ AGENT_EVENT_ROUTE_ALIASES = {
     "process_lesson": "assistant_process_lesson",
     "assistant_process_lesson": "assistant_process_lesson",
 }
+
+
+def normalize_trace_route_kind(kind: str | None) -> str:
+    normalized = str(kind or "auto").strip().lower()
+    return TRACE_ROUTE_KIND_ALIASES.get(normalized, normalized)
+
+
+def trace_kind_payload_fields(requested_kind: str | None, normalized_kind: str) -> dict[str, str]:
+    requested = str(requested_kind or "auto").strip().lower() or "auto"
+    fields = {"kind": normalized_kind}
+    if requested != normalized_kind:
+        fields["requested_kind"] = requested
+    return fields
 
 
 def trace_anchor_aliases(anchor: str) -> list[str]:
@@ -31486,7 +31504,7 @@ def trace_anchor_aliases(anchor: str) -> list[str]:
 
 
 def infer_trace_route_kinds(anchor: str, explicit_kind: str = "auto") -> list[str]:
-    kind = str(explicit_kind or "auto").strip().lower()
+    kind = normalize_trace_route_kind(explicit_kind)
     if kind != "auto":
         return [kind]
     lowered = str(anchor or "").strip().lower()
@@ -31858,7 +31876,7 @@ def trace_route(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
-    normalized_kind = str(kind or "auto").strip().lower()
+    normalized_kind = normalize_trace_route_kind(kind)
     if normalized_kind not in TRACE_ROUTE_KINDS:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -31866,7 +31884,7 @@ def trace_route(
             "generated_at": now,
             "ok": False,
             "anchor": anchor,
-            "kind": kind,
+            **trace_kind_payload_fields(kind, normalized_kind),
             "result_count": 0,
             "results": [],
             "diagnostics": [f"unknown trace kind: {kind}"],
@@ -31965,7 +31983,7 @@ def trace_route(
         "generated_at": now,
         "ok": not diagnostics,
         "anchor": anchor,
-        "kind": normalized_kind,
+        **trace_kind_payload_fields(kind, normalized_kind),
         "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
         "aliases": trace_anchor_aliases(anchor),
         "doc_type": resolved_doc_type or "all",
@@ -38961,7 +38979,8 @@ def graph_store_resolve_anchor(
     kind: str = "auto",
     limit: int = 40,
 ) -> dict[str, Any]:
-    route_kind = kind if kind in TRACE_ROUTE_KINDS else "auto"
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     candidates = trace_route_candidates(anchor, kind=route_kind)
     diagnostics = trace_identity_diagnostics(anchor, kind=route_kind)
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
@@ -38992,7 +39011,7 @@ def graph_store_resolve_anchor(
     if exact_route_node_ids and ":" not in str(anchor or ""):
         return {
             "anchor": anchor,
-            "kind": route_kind,
+            **trace_kind_payload_fields(kind, route_kind),
             "aliases": trace_anchor_aliases(anchor),
             "alias_keys": alias_keys,
             "route_candidates": lookup_candidates,
@@ -39003,7 +39022,7 @@ def graph_store_resolve_anchor(
     if diagnostics and not lookup_candidates:
         return {
             "anchor": anchor,
-            "kind": route_kind,
+            **trace_kind_payload_fields(kind, route_kind),
             "aliases": trace_anchor_aliases(anchor),
             "alias_keys": alias_keys,
             "route_candidates": [],
@@ -39031,7 +39050,7 @@ def graph_store_resolve_anchor(
             break
     return {
         "anchor": anchor,
-        "kind": route_kind,
+        **trace_kind_payload_fields(kind, route_kind),
         "aliases": trace_anchor_aliases(anchor),
         "alias_keys": alias_keys,
         "route_candidates": lookup_candidates,
@@ -39156,7 +39175,8 @@ def resolve_graph_anchor(
     limit: int = 40,
 ) -> dict[str, Any]:
     node_map = graph_node_by_id(graph)
-    route_kind = kind if kind in TRACE_ROUTE_KINDS else "auto"
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     candidates = trace_route_candidates(anchor, kind=route_kind)
     diagnostics = trace_identity_diagnostics(anchor, kind=route_kind)
     lookup_candidates = trace_route_lookup_candidates(candidates, suppress_generic=bool(diagnostics))
@@ -39195,7 +39215,7 @@ def resolve_graph_anchor(
     if exact_route_node_ids and ":" not in str(anchor or ""):
         return {
             "anchor": anchor,
-            "kind": route_kind,
+            **trace_kind_payload_fields(kind, route_kind),
             "aliases": trace_anchor_aliases(anchor),
             "alias_keys": alias_keys,
             "route_candidates": lookup_candidates,
@@ -39206,7 +39226,7 @@ def resolve_graph_anchor(
     if diagnostics and not lookup_candidates:
         return {
             "anchor": anchor,
-            "kind": route_kind,
+            **trace_kind_payload_fields(kind, route_kind),
             "aliases": trace_anchor_aliases(anchor),
             "alias_keys": alias_keys,
             "route_candidates": [],
@@ -39228,7 +39248,7 @@ def resolve_graph_anchor(
             break
     return {
         "anchor": anchor,
-        "kind": route_kind,
+        **trace_kind_payload_fields(kind, route_kind),
         "aliases": trace_anchor_aliases(anchor),
         "alias_keys": alias_keys,
         "route_candidates": lookup_candidates,
@@ -39532,10 +39552,12 @@ def graph_neighborhood(
     depth: int = 1,
     limit: int = 40,
 ) -> dict[str, Any]:
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     store_graph = graph_from_store_neighborhood(
         aoa_root=aoa_root,
         anchor=anchor,
-        kind=kind,
+        kind=route_kind,
         depth=depth,
         limit=limit,
     )
@@ -39553,7 +39575,7 @@ def graph_neighborhood(
             "mutates": False,
             "truth_status": "graph_route_packet_not_reviewed_truth",
             "anchor": anchor,
-            "kind": kind,
+            **trace_kind_payload_fields(kind, route_kind),
             "depth": max(0, min(int_value(depth, 1), 3)),
             "resolved": resolved,
             "graph": {
@@ -39577,7 +39599,7 @@ def graph_neighborhood(
     trace = trace_route(
         aoa_root=aoa_root,
         anchor=anchor,
-        kind=kind,
+        kind=route_kind,
         limit=max(1, min(int_value(limit, 40), 200)),
         per_route_limit=max(5, min(int_value(limit, 40), 50)),
         doc_type="event",
@@ -39597,7 +39619,7 @@ def graph_neighborhood(
     )
     node_map = graph_node_by_id(graph)
     edge_map = graph_edge_by_id(graph)
-    resolved = resolve_graph_anchor(graph, anchor, kind=kind, limit=max(10, limit))
+    resolved = resolve_graph_anchor(graph, anchor, kind=route_kind, limit=max(10, limit))
     if not resolved.get("start_node_ids") and resolved.get("resolver_strategy") != "identity_diagnostic_no_route":
         resolved["start_node_ids"] = [str(node.get("id")) for node in graph.get("nodes", [])[: max(1, min(limit, 20))] if isinstance(node, dict)]
     depth = max(0, min(int_value(depth, 1), 3))
@@ -39620,7 +39642,7 @@ def graph_neighborhood(
         "mutates": False,
         "truth_status": "graph_route_packet_not_reviewed_truth",
         "anchor": anchor,
-        "kind": kind,
+        **trace_kind_payload_fields(kind, route_kind),
         "depth": depth,
         "resolved": resolved,
         "graph": {
@@ -39655,7 +39677,9 @@ def graph_timeline(
     kind: str = "auto",
     limit: int = 40,
 ) -> dict[str, Any]:
-    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=kind, depth=2, limit=max(limit * 4, 60))
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=2, limit=max(limit * 4, 60))
     events = [node for node in packet.get("nodes", []) if isinstance(node, dict) and node.get("type") == "event"]
     resolved = packet.get("resolved") if isinstance(packet.get("resolved"), dict) else {}
     if resolved.get("resolver_strategy") == "exact_route_node":
@@ -39684,7 +39708,7 @@ def graph_timeline(
         "mutates": False,
         "truth_status": "graph_timeline_packet_not_reviewed_truth",
         "anchor": anchor,
-        "kind": kind,
+        **trace_kind_payload_fields(kind, route_kind),
         "event_count": len(selected),
         "events": [graph_compact_node_for_packet(event) for event in selected],
         "resolved": resolved,
@@ -39702,8 +39726,10 @@ def graph_shortest_path(
     kind: str = "auto",
     max_depth: int = 4,
 ) -> dict[str, Any]:
-    source_packet = graph_neighborhood(aoa_root=aoa_root, anchor=source_anchor, kind=kind, depth=2, limit=80)
-    target_packet = graph_neighborhood(aoa_root=aoa_root, anchor=target_anchor, kind=kind, depth=2, limit=80)
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    source_packet = graph_neighborhood(aoa_root=aoa_root, anchor=source_anchor, kind=route_kind, depth=2, limit=80)
+    target_packet = graph_neighborhood(aoa_root=aoa_root, anchor=target_anchor, kind=route_kind, depth=2, limit=80)
     graph = {
         "source": "bounded_shortest_path_union",
         "generated_at": utc_now(),
@@ -39728,8 +39754,8 @@ def graph_shortest_path(
     }
     node_map = graph_node_by_id(graph)
     edge_map = graph_edge_by_id(graph)
-    source = resolve_graph_anchor(graph, source_anchor, kind=kind, limit=30)
-    target = resolve_graph_anchor(graph, target_anchor, kind=kind, limit=30)
+    source = resolve_graph_anchor(graph, source_anchor, kind=route_kind, limit=30)
+    target = resolve_graph_anchor(graph, target_anchor, kind=route_kind, limit=30)
     target_ids = set(target.get("start_node_ids", []))
     adjacency = graph_adjacency(graph.get("edges", []) if isinstance(graph.get("edges"), list) else [])
     max_depth = max(1, min(int_value(max_depth, 4), 8))
@@ -39786,6 +39812,8 @@ def graph_cooccurrence_from_packet(
     limit: int = 30,
     source: str = "bounded_cooccurrence_neighborhood",
 ) -> dict[str, Any]:
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     graph = {
         "source": source,
         "generated_at": utc_now(),
@@ -39796,7 +39824,7 @@ def graph_cooccurrence_from_packet(
     node_map = graph_node_by_id(graph)
     resolved = packet.get("resolved") if isinstance(packet.get("resolved"), dict) else {}
     if not resolved.get("start_node_ids"):
-        resolved = resolve_graph_anchor(graph, anchor, kind=kind, limit=60)
+        resolved = resolve_graph_anchor(graph, anchor, kind=route_kind, limit=60)
     if not resolved.get("start_node_ids"):
         resolved = packet.get("resolved", resolved) if isinstance(packet.get("resolved"), dict) else resolved
     start_ids = set(resolved.get("start_node_ids", []))
@@ -39850,7 +39878,7 @@ def graph_cooccurrence_from_packet(
         "truth_status": "cooccurrence_packet_not_reviewed_truth",
         "source": source,
         "anchor": anchor,
-        "kind": kind,
+        **trace_kind_payload_fields(kind, route_kind),
         "resolved": resolved,
         "anchor_event_count": len(anchor_events),
         "cooccurrences": selected,
@@ -39867,7 +39895,9 @@ def graph_cooccurrence(
     kind: str = "auto",
     limit: int = 30,
 ) -> dict[str, Any]:
-    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=kind, depth=1, limit=max(limit * 6, 60))
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=1, limit=max(limit * 6, 60))
     return graph_cooccurrence_from_packet(
         aoa_root=aoa_root,
         packet=packet,
@@ -40169,10 +40199,12 @@ def parse_graph_quality_anchor(value: str) -> dict[str, str]:
     if not text:
         return {}
     parts = text.split(":", 2)
-    if len(parts) == 3 and parts[1] in TRACE_ROUTE_KINDS:
-        anchor_id, kind, anchor = parts
-    elif len(parts) == 2 and parts[0] in TRACE_ROUTE_KINDS:
-        kind, anchor = parts
+    if len(parts) == 3 and normalize_trace_route_kind(parts[1]) in TRACE_ROUTE_KINDS:
+        anchor_id, raw_kind, anchor = parts
+        kind = normalize_trace_route_kind(raw_kind)
+    elif len(parts) == 2 and normalize_trace_route_kind(parts[0]) in TRACE_ROUTE_KINDS:
+        raw_kind, anchor = parts
+        kind = normalize_trace_route_kind(raw_kind)
         anchor_id = readable_slug(anchor, fallback=kind, max_chars=80)
     else:
         anchor_id = readable_slug(text, fallback="anchor", max_chars=80)
@@ -40181,8 +40213,8 @@ def parse_graph_quality_anchor(value: str) -> dict[str, str]:
     return {
         "id": route_key_slug(anchor_id, fallback="anchor", max_chars=80),
         "anchor": anchor.strip(),
-        "kind": kind if kind in TRACE_ROUTE_KINDS else "auto",
-        "role": kind if kind in TRACE_ROUTE_KINDS else "auto",
+        "kind": kind,
+        "role": kind,
     }
 
 
@@ -40195,14 +40227,17 @@ def graph_quality_anchor_items(anchors: list[Any] | None = None) -> list[dict[st
             anchor = str(item.get("anchor") or item.get("query") or "").strip()
             if not anchor:
                 continue
-            kind = str(item.get("kind") or "auto").strip().lower()
+            kind = normalize_trace_route_kind(str(item.get("kind") or "auto"))
+            route_kind = kind if kind in TRACE_ROUTE_KINDS else "auto"
+            role = normalize_trace_route_kind(str(item.get("role") or kind or "auto"))
+            route_role = role if role in TRACE_ROUTE_KINDS else route_kind
             anchor_id = str(item.get("id") or readable_slug(anchor, fallback=kind, max_chars=80))
             items.append(
                 {
                     "id": route_key_slug(anchor_id, fallback="anchor", max_chars=80),
                     "anchor": anchor,
-                    "kind": kind if kind in TRACE_ROUTE_KINDS else "auto",
-                    "role": str(item.get("role") or kind or "auto"),
+                    "kind": route_kind,
+                    "role": route_role,
                 }
             )
             continue
@@ -44619,14 +44654,16 @@ def entity_dossier(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
     limit = max(1, min(int_value(limit, 8), 30))
-    trace = trace_route(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=max(limit * 3, 12), per_route_limit=limit, doc_type="event", explain=True)
+    trace = trace_route(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=max(limit * 3, 12), per_route_limit=limit, doc_type="event", explain=True)
     packet = graph_rag_packet(aoa_root=aoa_root, query=anchor, anchor=anchor, limit=limit)
-    timeline = graph_timeline(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=limit)
-    cooccurrence = graph_cooccurrence(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=limit)
+    timeline = graph_timeline(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=limit)
+    cooccurrence = graph_cooccurrence(aoa_root=aoa_root, anchor=anchor, kind=route_kind, limit=limit)
     quality = graph_quality_audit(
         aoa_root=aoa_root,
-        anchors=[{"id": route_key_slug(anchor, fallback="entity", max_chars=80), "anchor": anchor, "kind": kind, "role": kind}],
+        anchors=[{"id": route_key_slug(anchor, fallback="entity", max_chars=80), "anchor": anchor, "kind": route_kind, "role": route_kind}],
         limit=limit,
         sample_ref_limit=min(5, limit),
     )
@@ -44699,8 +44736,8 @@ def entity_dossier(
         "mutates": False,
         "truth_status": "entity_dossier_routes_to_evidence_not_reviewed_truth",
         "anchor": anchor,
-        "kind": kind,
-        "what_it_is": f"{kind} route anchor `{anchor}` in aoa-session-memory" if kind != "auto" else f"route anchor `{anchor}` in aoa-session-memory",
+        **trace_kind_payload_fields(kind, route_kind),
+        "what_it_is": f"{route_kind} route anchor `{anchor}` in aoa-session-memory" if route_kind != "auto" else f"route anchor `{anchor}` in aoa-session-memory",
         "where_seen": where_seen,
         "strong_refs": strong_refs,
         "weak_refs": weak_refs,
@@ -45347,7 +45384,7 @@ def entity_usage_audit(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
-    normalized_kind = str(kind or "auto").strip().lower()
+    normalized_kind = normalize_trace_route_kind(kind)
     if normalized_kind not in TRACE_ROUTE_KINDS:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -45356,7 +45393,7 @@ def entity_usage_audit(
             "ok": False,
             "mutates": False,
             "anchor": anchor,
-            "kind": kind,
+            **trace_kind_payload_fields(kind, normalized_kind),
             "diagnostics": [f"unknown trace kind: {kind}"],
         }
     limit = max(1, min(int_value(limit, 20), 200))
@@ -45573,7 +45610,7 @@ def entity_usage_audit(
         "mutates": False,
         "truth_status": "session_memory_entity_usage_routes_to_evidence_not_reviewed_truth",
         "anchor": anchor,
-        "kind": normalized_kind,
+        **trace_kind_payload_fields(kind, normalized_kind),
         "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
         "aliases": trace_anchor_aliases(anchor),
         "session": session or "",
@@ -45666,6 +45703,8 @@ def entity_usage_neighborhood(
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else normalized_kind
     limit = max(1, min(int_value(limit, 6), 40))
     audit_limit = max(limit, min(200, max(limit * 4, limit + 8, 12)))
     audit_per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
@@ -45673,7 +45712,7 @@ def entity_usage_neighborhood(
     audit = entity_usage_audit(
         aoa_root=aoa_root,
         anchor=anchor,
-        kind=kind,
+        kind=route_kind,
         limit=audit_limit,
         per_route_limit=audit_per_route_limit,
         consequence_window=max(after, 1),
@@ -45742,7 +45781,7 @@ def entity_usage_neighborhood(
         "mutates": False,
         "truth_status": "session_memory_entity_usage_neighborhood_routes_to_raw_and_segment_evidence_not_reviewed_truth",
         "anchor": anchor,
-        "kind": str(kind or "auto").strip().lower(),
+        **trace_kind_payload_fields(kind, route_kind),
         "session": session or "",
         "before": max(0, min(int_value(before, 3), 24)),
         "after": max(1, min(int_value(after, 8), 48)),
@@ -46629,7 +46668,8 @@ def performance_baseline(
     limit = max(1, min(int_value(limit, 6), 30))
     per_route_limit = max(1, min(int_value(per_route_limit, 10), 50))
     anchor_text = str(anchor or "").strip() or "aoa-session-memory-mcp"
-    kind_text = str(kind or "auto")
+    kind_text = str(kind or "auto").strip().lower() or "auto"
+    trace_kind = normalize_trace_route_kind(kind_text)
     steps: list[dict[str, Any]] = [
         performance_baseline_step(
             "registry_lookup",
@@ -46644,7 +46684,7 @@ def performance_baseline(
             run=lambda: entity_usage_audit(
                 aoa_root=aoa_root,
                 anchor=anchor_text,
-                kind=kind_text,
+                kind=trace_kind,
                 limit=limit,
                 per_route_limit=per_route_limit,
                 consequence_window=4,
@@ -46658,7 +46698,7 @@ def performance_baseline(
             run=lambda: entity_usage_neighborhood(
                 aoa_root=aoa_root,
                 anchor=anchor_text,
-                kind=kind_text,
+                kind=trace_kind,
                 limit=min(limit, 6),
                 per_route_limit=per_route_limit,
                 before=2,
@@ -46741,7 +46781,7 @@ def performance_baseline(
         "mutates": bool(apply_refresh),
         "truth_status": "performance_measurement_not_correctness_proof",
         "anchor": anchor_text,
-        "kind": kind_text,
+        **trace_kind_payload_fields(kind_text, trace_kind),
         "limit": limit,
         "per_route_limit": per_route_limit,
         "search_target": search_target,
@@ -53780,7 +53820,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve a skill/MCP/hook/tool/git anchor into route candidates and evidence hits.",
     )
     trace_route_parser.add_argument("anchor", help="Skill, MCP service, hook, tool, path, Git/GitHub, or entity anchor to trace.")
-    trace_route_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    trace_route_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     trace_route_parser.add_argument("--workspace-root")
     trace_route_parser.add_argument("--aoa-root")
     trace_route_parser.add_argument("--limit", type=int, default=40, help="Maximum merged results.")
@@ -53976,7 +54016,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_neighborhood_parser.add_argument("anchor", help="Anchor to resolve into graph start nodes.")
     graph_neighborhood_parser.add_argument("--workspace-root")
     graph_neighborhood_parser.add_argument("--aoa-root")
-    graph_neighborhood_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    graph_neighborhood_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_neighborhood_parser.add_argument("--depth", type=int, default=1)
     graph_neighborhood_parser.add_argument("--limit", type=int, default=40)
     graph_neighborhood_parser.set_defaults(func=command_graph_neighborhood)
@@ -53985,7 +54025,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_timeline_parser.add_argument("anchor", help="Anchor to resolve into graph start nodes.")
     graph_timeline_parser.add_argument("--workspace-root")
     graph_timeline_parser.add_argument("--aoa-root")
-    graph_timeline_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    graph_timeline_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_timeline_parser.add_argument("--limit", type=int, default=40)
     graph_timeline_parser.set_defaults(func=command_graph_timeline)
 
@@ -53994,7 +54034,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_path_parser.add_argument("target", help="Target anchor.")
     graph_path_parser.add_argument("--workspace-root")
     graph_path_parser.add_argument("--aoa-root")
-    graph_path_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    graph_path_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_path_parser.add_argument("--max-depth", type=int, default=4)
     graph_path_parser.set_defaults(func=command_graph_shortest_path)
 
@@ -54002,7 +54042,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_cooccurrence_parser.add_argument("anchor", help="Anchor to resolve into graph start nodes.")
     graph_cooccurrence_parser.add_argument("--workspace-root")
     graph_cooccurrence_parser.add_argument("--aoa-root")
-    graph_cooccurrence_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    graph_cooccurrence_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_cooccurrence_parser.add_argument("--limit", type=int, default=30)
     graph_cooccurrence_parser.set_defaults(func=command_graph_cooccurrence)
 
@@ -54144,7 +54184,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build a human dossier for a skill, MCP, hook, tool, path, goal, failure, decision, or entity anchor.",
     )
     entity_dossier_parser.add_argument("anchor", help="Entity anchor to investigate.")
-    entity_dossier_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    entity_dossier_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     entity_dossier_parser.add_argument("--workspace-root")
     entity_dossier_parser.add_argument("--aoa-root")
     entity_dossier_parser.add_argument("--limit", type=int, default=8)
@@ -54158,7 +54198,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trace an entity anchor to usage events, consequences, and document refs without loading bulk raw.",
     )
     entity_usage_parser.add_argument("anchor", help="Entity anchor to audit.")
-    entity_usage_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    entity_usage_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     entity_usage_parser.add_argument("--workspace-root")
     entity_usage_parser.add_argument("--aoa-root")
     entity_usage_parser.add_argument("--limit", type=int, default=20, help="Maximum merged direct evidence hits.")
@@ -54177,7 +54217,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trace an entity anchor to usage events and return local before/after event windows with raw previews.",
     )
     entity_usage_neighborhood_parser.add_argument("anchor", help="Entity anchor to inspect.")
-    entity_usage_neighborhood_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    entity_usage_neighborhood_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     entity_usage_neighborhood_parser.add_argument("--workspace-root")
     entity_usage_neighborhood_parser.add_argument("--aoa-root")
     entity_usage_neighborhood_parser.add_argument("--limit", type=int, default=6, help="Maximum usage events to open into local windows.")
@@ -54218,7 +54258,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Measure registry lookup, usage audit, neighborhood, GraphRAG, and optional narrow refresh timings.",
     )
     performance_parser.add_argument("anchor", nargs="?", default="aoa-session-memory-mcp", help="Entity anchor to benchmark.")
-    performance_parser.add_argument("--kind", choices=sorted(TRACE_ROUTE_KINDS), default="auto")
+    performance_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     performance_parser.add_argument("--workspace-root")
     performance_parser.add_argument("--aoa-root")
     performance_parser.add_argument("--limit", type=int, default=6)

@@ -2965,10 +2965,20 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
     config_alias_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="mcp_servers.aoa_session_memory", kind="mcp")
     exact_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="tool")
+    registry_kind_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp_service")
+    registry_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="mcp_tool")
     usage_audit = module.entity_usage_audit(
         aoa_root=aoa_root,
         anchor="aoa-decisions-mcp",
         kind="mcp",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+    registry_kind_usage_audit = module.entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp_service",
         limit=8,
         per_route_limit=8,
         consequence_window=4,
@@ -2978,6 +2988,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         anchor="aoa-decisions-mcp",
         kind="mcp",
         limit=2,
+        per_route_limit=8,
+        before=1,
+        after=4,
+        raw_preview_chars=500,
+    )
+    registry_kind_usage_neighborhood = module.entity_usage_neighborhood(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp_service",
+        limit=1,
         per_route_limit=8,
         before=1,
         after=4,
@@ -3047,11 +3067,22 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert exact_tool_timeline["resolved"]["start_node_ids"] == ["route:tool:tool:aoa_decisions_search"]
     assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in exact_tool_timeline["events"])
     assert all(event.get("title") != "Tool call: spawn_agent" for event in exact_tool_timeline["events"])
+    assert registry_kind_timeline["kind"] == "mcp"
+    assert registry_kind_timeline["requested_kind"] == "mcp_service"
+    assert registry_kind_timeline["events"]
+    assert registry_tool_timeline["kind"] == "tool"
+    assert registry_tool_timeline["requested_kind"] == "mcp_tool"
+    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in registry_tool_timeline["events"])
     assert usage_audit["artifact_type"] == "session_memory_entity_usage_audit"
     assert usage_audit["ok"] is True
     assert usage_audit["usage_event_count"] >= 1
     assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in usage_audit["usage_events"])
     assert all(event.get("title") != "Tool call: spawn_agent" for event in usage_audit["usage_events"])
+    assert registry_kind_usage_audit["kind"] == "mcp"
+    assert registry_kind_usage_audit["requested_kind"] == "mcp_service"
+    assert registry_kind_usage_audit["ok"] is True
+    assert registry_kind_usage_audit["usage_event_count"] >= 1
+    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in registry_kind_usage_audit["usage_events"])
     assert usage_audit["consequence_event_count"] >= 1
     assert any(
         item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
@@ -3091,6 +3122,13 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert narrow_usage_neighborhood["quality"]["raw_preview_available"] is True
     assert narrow_usage_neighborhood["source_audit"]["usage_event_count"] >= 1
     assert narrow_usage_neighborhood["neighborhoods"][0]["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
+    assert registry_kind_usage_neighborhood["kind"] == "mcp"
+    assert registry_kind_usage_neighborhood["requested_kind"] == "mcp_service"
+    assert registry_kind_usage_neighborhood["ok"] is True
+    assert registry_kind_usage_neighborhood["neighborhoods"][0]["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
+    parser = module.build_parser()
+    assert parser.parse_args(["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
+    assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
     assert scenario_audit["quality"]["sample_count"] == 2
