@@ -30661,6 +30661,20 @@ def search_sessions_shard_fanout(
         )
     catalog = read_search_catalog(aoa_root)
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
+    session_filter_column, session_filter_value = exact_session_filter_for_search(aoa_root, session)
+    session_scope_shard = ""
+    if session and session_filter_column and session_filter_value:
+        session_scope_record: dict[str, Any] = {}
+        try:
+            session_scope_record = resolve_session_record(aoa_root, session)
+        except ValueError:
+            session_scope_record = {}
+        session_scope_label = str(session_scope_record.get("session_label") or "")
+        if not session_scope_label and session_filter_column == "documents.session_label":
+            session_scope_label = session_filter_value
+        session_scope_date = session_record_date(session_scope_record) if session_scope_record else ""
+        if session_scope_label or session_scope_date:
+            session_scope_shard = search_shard_key_for_session(session_scope_label, session_scope_date)
     candidate_shards: list[dict[str, Any]] = []
     uses_fts = bool(fts_query_from_user(query))
     for item in shards:
@@ -30672,6 +30686,8 @@ def search_sessions_shard_fanout(
             continue
         shard_materialized = bool(item.get("materialized"))
         if not search_shard_overlaps_date_filter(shard_key, date_from, date_to):
+            continue
+        if session_scope_shard and shard_key != session_scope_shard:
             continue
         if not shard_materialized and uses_fts:
             continue
@@ -30870,6 +30886,12 @@ def search_sessions_shard_fanout(
             "fallback_db_path": str(search_db_path(aoa_root)),
             "queried_shards": shard_payloads,
             "structured_nonmaterialized_shards_used": queried_structured_nonmaterialized_shards,
+            "session_scope": {
+                "requested": session or "",
+                "exact_filter_column": session_filter_column or "",
+                "exact_filter_value": session_filter_value or "",
+                "resolved_shard": session_scope_shard,
+            },
             "next_expansion_command": (
                 "python3 scripts/aoa_session_memory.py search --use-shards --max-shards "
                 f"{len(candidate_shards)} --query {shlex.quote(query)}"
@@ -31522,6 +31544,12 @@ def agent_event_search_projection_summary(
     truncated = any(bool(item.get("truncated")) for item in projections)
     candidate_shard_count = max((int_value(item.get("candidate_shard_count"), 0) for item in projections), default=0)
     mode = SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT if SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT in modes else (modes[0] if modes else "")
+    session_scopes = [
+        projection.get("session_scope")
+        for projection in projections
+        if isinstance(projection.get("session_scope"), dict)
+    ]
+    session_scope = session_scopes[0] if session_scopes else {}
     return {
         "mode": mode,
         "agent_event_class_count": len(classes),
@@ -31533,6 +31561,7 @@ def agent_event_search_projection_summary(
         "max_shards": max_shards,
         "truncated": truncated,
         "fallback_db_path": str(search_db_path(Path(str(payloads[0].get("aoa_root") or "")))) if payloads and payloads[0].get("aoa_root") else "",
+        "session_scope": session_scope,
         "next_expansion_command": (
             agent_event_shard_next_expansion_command(
                 query=query,

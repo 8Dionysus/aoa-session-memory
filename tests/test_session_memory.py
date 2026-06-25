@@ -11238,6 +11238,21 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert all(item["agent_event_source"] != "event_msg_stream" for item in progress["results"])
     assert {item["event_id"] for item in progress["results"]} == {"000003", "000004"}
 
+    latest_progress = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session="latest",
+        agent_events=["assistant_progress_update"],
+        limit=2,
+        use_shards=True,
+        explain=True,
+    )
+    assert latest_progress["ok"] is True
+    assert latest_progress["result_count"] == 2
+    assert latest_progress["search_projection"]["candidate_shard_count"] == 1
+    assert latest_progress["search_projection"]["session_scope"]["resolved_shard"] == "month/2026-06"
+    assert latest_progress["search_projection"]["session_scope"]["exact_filter_value"].startswith("2026-06-13__")
+    assert {item["session_id"] for item in latest_progress["results"]} == {"agent-progress-shard"}
+
     truncated = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_progress_update"],
