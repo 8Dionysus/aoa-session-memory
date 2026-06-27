@@ -150,7 +150,12 @@ outside the selected session set and only prunes orphaned rows in the full
 archive scope or inside explicitly selected sessions.
 Use `--budget-seconds` for bounded maintenance and `--token-max-raw-mb` for
 large token-ledger repairs without raising the separate raw-text extraction
-limit used by search indexing. The host bridge command is:
+limit used by search indexing. Bounded `index-maintenance` treats the budget as
+both an apply budget and a planning budget: if token backfill planning or
+search/atlas/entity/graph probes cannot safely start inside the remaining
+window, the report sets `budget_exhausted=true`, marks the unstarted surfaces as
+`deferred_budget_exhausted`, and leaves raw/search/atlas authority unchanged for
+the next maintenance tick. The host bridge command is:
 
 ```bash
 abyss-machine ai token-accounting aoa-summary --json
@@ -173,6 +178,11 @@ direct usage evidence. The payload exposes `text_search_skipped`,
 `route_hit_count_before_text_fallback`, and
 `route_usage_hit_count_before_text_fallback` so an agent can tell whether it got
 the fast indexed path or had to widen.
+For direct usage classes, the usage-role fast path uses the bounded
+`route_fetch_limit` as its internal harvest budget even when the requested
+presentation `--limit` is small. This keeps compact MCP packets from selecting
+from an artificially tiny candidate pool while preserving a small returned
+event list.
 
 Use `entity-usage-neighborhood` when the agent needs the local before/after
 event window around direct usage. Its `--limit` means "how many usage windows
@@ -193,6 +203,10 @@ operational entities. Its quality block separates
 `audit_total_elapsed_ms`, and `raw_preview_total_elapsed_ms` so slow runs can
 be attributed to candidate-pool selection, route audit, or raw-preview opening
 instead of becoming a vague "MCP is slow" complaint.
+Actionable quality flags are part of the scenario verdict, not decorative
+metadata. A sample that has direct usage or result evidence but no consequence
+chain is a warning (`direct_usage_without_consequence`), while evidence-only
+flags that do not change the agent's next action may remain informational.
 Compact route output keeps a bounded `provider` summary with portable SQLite
 status, schema, route-index presence, and freshness status. The full provider
 diagnostic remains behind `search-provider-status --provider portable_sqlite`
@@ -202,6 +216,35 @@ Hooks are a special case. A generic usage audit for a hook often returns
 receipt/result evidence rather than direct "usage" events. For hook health,
 start with hook receipt routes and use entity usage audit as surrounding
 session evidence.
+
+## Session Evidence Consumer Route
+
+`skills/aoa-session-memory-evidence-route` is the small route card for agents
+and sibling skills that need prior-session evidence without giving
+session-memory another owner's authority.
+
+Use it when the request shape is:
+
+- "how was this skill/MCP/hook/tool/API/script/test/validator/eval used?"
+- "what happened after this usage?"
+- "which raw or segment refs prove it?"
+- "where did this goal/answer/closeout/error/receipt appear?"
+- "which graph relation or bridge connects these operational entities?"
+
+The route order is:
+
+1. typed usage packet: `entity-usage-audit`;
+2. exact before/after windows: `entity-usage-neighborhood`;
+3. hook errors or health: hook receipts before usage audit;
+4. goal lifecycle: `goal-lifecycles` before raw search;
+5. agent answer/task intervals: agent-event or task-episode routes;
+6. literal phrase/path/command/error/session id: `literal-query-plan`;
+7. topology: compact graph routes with explicit node/edge/evidence budgets.
+
+Session-memory packets remain generated navigation and evidence routes. They
+must report freshness, truncation, refs, and next expansion, then hand decision
+truth, proof truth, skill meaning, or durable memory promotion back to the
+owning repository, eval layer, skill bundle, or reviewed memory surface.
 
 ## Agent Event And Task Episode Route
 
@@ -245,6 +288,12 @@ avoid raw semantic preview, compressed body hydration, and full-text search,
 then return bounded `search_body` previews plus raw/segment refs. Use
 `answer-neighborhood`, `agent-reasoning-windows`, or the returned refs when the
 task needs exact before/after evidence.
+Agent-event result packets are ordered by query rank when a query is present,
+then by session date and event position descending. The `quality` block reports
+agent-event class counts, freshness counts, source counts, raw/segment ref
+coverage, and the latest returned event. A latest answer can honestly be
+`stale` when the active transcript tail has moved; do not hide it behind older
+fresh events, but open the returned raw/segment refs before promoting a claim.
 When monthly shards are materialized, these agent-event routes accept
 `--use-shards` and return their `search_projection`; this is the preferred
 archive-wide route for MCP/agent answer, closeout, progress, and reasoning
@@ -252,6 +301,11 @@ queries that do not need broad raw-text FTS.
 Goal lifecycle navigation also returns the same compact provider/freshness
 summary, so an MCP caller can judge projection currency before opening
 generated refs or raw transcript authority.
+When a lifecycle starts after a compaction/resume boundary and the archive has
+`get_goal` output but no preserved `create_goal` event, the generated lifecycle
+may fill `observed_goal`, `state_observations`, and `objective_source` from the
+tool output. This improves route usefulness without inventing a creation ref:
+`missing_create` remains the honest boundary flag.
 
 `agent-event-audit --order longest` is the Stage-1 classification route for
 real long sessions. It records selected sessions, generated shape counts,
@@ -484,6 +538,13 @@ SQLite WAL checkpoint/truncate for the graph and search stores, reports busy
 readers/writers instead of killing them, and leaves raw evidence, graph rebuilds,
 search rebuilds, and raw-block cleanup outside this route.
 
+Use `maintenance-cleanup` for stale maintenance coordinator state and orphaned
+generated graph rebuild temp files. Its temp-family detector includes SQLite
+companions `-wal`, `-shm`, and `-journal`, including the live failure mode where
+only `.graph.sqlite3.<pid>.rebuild.tmp-journal` remains after the base rebuild
+tmp file is gone. This is generated-projection cleanup only; it must not delete
+raw transcript, segment, search, atlas, or reviewed memory evidence.
+
 Real Codex raw transcripts may express a compaction boundary as:
 
 - top-level `{"type": "compacted", ...}`
@@ -632,9 +693,10 @@ evidence before starting a manual catch-up.
 Graph source hashing has its own generated cache under `graph/source-hash-cache.json`.
 `graph-maintenance --hash-mode cached` may reuse entries whose path size and
 `mtime_ns` still match, while `--hash-mode exact` forces file reads. Updating
-the cache requires `--write-hash-cache`; that path is a maintenance writer and
-must use the shared lock, but ordinary read-only deep checks may consume an
-existing cache without mutating archive state.
+the cache is automatic for mutating graph-maintenance source scans and can also
+be requested explicitly with `--write-hash-cache`; that path is a maintenance
+writer and must use the shared lock, but ordinary read-only deep checks may
+consume an existing cache without mutating archive state.
 Manual-bulk commands use the same shared lock but must not block indefinitely
 behind an unattended timer. When the lock is still held after the bounded wait,
 they return a `session_memory_maintenance_lock_conflict` packet with
@@ -655,6 +717,12 @@ graph-deferred live sources use graph queue maintenance. This is the agent
 surface for deciding whether to use stable graph/search now, wait for the live
 quiet window, or run catch-up after the window has elapsed without dragging the
 full hot profile onto the interactive path.
+For graph state, the quiet-window boundary is session-wide: if a graph source
+belongs to a Codex transcript that is still being written, older segment
+indexes from that same transcript are still treated as deferred live sources.
+Ledger/store count mismatches and latest maintenance remainders caused only by
+those deferred live sources are reported separately and must not become
+actionable graph repair.
 
 Host timers should launch this command through
 `auto-maintenance-resource <profile> --apply --write-report`. That wrapper uses
@@ -673,15 +741,20 @@ route, not broad `auto-maintenance catchup all`. This keeps timer catch-up from
 turning a single live-tail repair into bulk archive selection or token-ledger
 backfill.
 For backlog and deep resource-blocked runs, graph drip is the safe fallback
-route: backlog can enable it from timer/service flags, and `deep` enables it by
-profile default because unattended heavy indexing is commonly capped by the host
-resource policy. If the requested auto-maintenance launch is blocked by host
-pressure, the wrapper may run a capped probe-class `graph-maintenance` batch,
-record `fallback_graph_drip`, and still keep the outer report `ok=false` so
-agents do not mistake partial graph progress for a completed backlog/deep
-profile. The fallback may set `--graph-drip-candidate-pool-limit` to exact-plan
-a wider bounded candidate window before selecting the cheapest real refresh
-plan; node/edge refresh caps remain the operational safety boundary. Use
+route: both profiles enable it by default because unattended medium/heavy
+indexing can be capped by host resource policy. If the requested
+auto-maintenance launch is blocked by host pressure, the wrapper may run a
+capped probe-class `graph-maintenance` batch, record `fallback_graph_drip`, and
+still keep the outer report `ok=false` so agents do not mistake partial graph
+progress for a completed backlog/deep profile. Profile graph-drip settings
+control the fallback batch, budget, candidate-pool window, and node/edge
+refresh caps unless explicit CLI overrides are passed. Installed user timer
+units must either inherit those profile defaults or carry matching explicit
+overrides; `maintenance-status` audits their `ExecStart` lines and reports
+unit drift before agents trust the automatic graph-drip route. If MCP cannot
+read the user systemd bus, the same check falls back to installed unit files so
+read-only agent routes still see timer-contract drift. The fallback only
+mutates when the outer resource route was called with `--apply`; use
 `--no-graph-drip-on-block` only when an explicit diagnostic run must preserve
 the raw resource-blocked state.
 
@@ -692,6 +765,16 @@ deferred. The report must show candidate counts, selected repair counts,
 remaining counts, and `*_repair_limited=true` while backlog remains.
 If catchup has no backlog, the report must stay a clean no-op instead of
 reading or writing the full portable SQLite search store.
+
+`maintenance-status` also exposes search-shard freshness as an agent action.
+When `operations.search_shards.status` is not current and the stale rows are
+not only deferred live-tail rows, `next_actions` includes
+`refresh_search_shard_structured` with the selected shard, stale/missing counts,
+raw-text fallback posture, and an exact bounded command. If the shard DB already
+exists, the command uses `search-shards --no-rebuild --dirty-only`; otherwise it
+uses a scoped structured rebuild only when the shard lane is already partially
+materialized. It does not add `--full-text`, because full lexical shard
+materialization is a separate weight/quality tradeoff.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.
@@ -815,6 +898,12 @@ python3 scripts/aoa_session_memory.py entity-registry \
   --lookup aoa-session-memory-mcp \
   --kind mcp
 ```
+
+Use lookup for the agent hot path: it reads the generated snapshot and answers
+source identity/registration questions without rebuilding runtime discovery.
+Use `entity-usage-audit` for how the entity behaved in sessions. Use
+`entity-registry --write` or `entity-registry-search-sync` only as maintenance
+refresh routes.
 
 `index-maintenance` refreshes the registry when the snapshot is missing, stale,
 or older than its source surfaces. MCP may expose entity inventory and lookup
@@ -1000,6 +1089,27 @@ rank sorting is worth the cost. A timed-out raw-text route must return a
 `sqlite_query_timeout` diagnostic and `next_expansion_command`, not a hanging
 agent workflow.
 
+Before broad literal search, use the read-only planner route:
+
+```bash
+python3 scripts/aoa_session_memory.py literal-query-plan \
+  --query "aoa-session-memory-mcp" \
+  --kind mcp \
+  --doc-type event
+```
+
+The planner classifies the literal shape, checks typed route candidates and the
+generated entity registry, then reports the cheapest reliable first route:
+entity usage/trace/graph for operational anchors, route-signal structured
+search for noisy phrases that still resolve to concrete route signals,
+structured search for exact filters, scoped full-text shards when a bounded
+shard can answer, or the monolith fallback only when raw literal recall is the
+right safety net. The planner is route advice, not evidence truth; returned
+commands still route to raw/segment/session refs.
+For command literals, the planner separates the executable/script anchor from
+the full raw phrase. Structured routes use the command anchor; exact recall
+still keeps the original command text as the last fallback.
+
 Build a recipe-based retrieval packet:
 
 ```bash
@@ -1054,7 +1164,8 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --batch-limit 3 \
   --budget-seconds 300 \
   --refresh-chunk-size 64 \
-  --write-report
+  --write-report \
+  --write-hash-cache
 ```
 
 That small batch is the hot/timer-safe route. For a large global backlog, the
@@ -1116,7 +1227,8 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --batch-limit 1 \
   --max-refresh-nodes 12000 \
   --max-refresh-edges 20000 \
-  --write-report
+  --write-report \
+  --write-hash-cache
 ```
 
 Full `graph-build all --write --force-large-export` remains the fallback for
@@ -1177,10 +1289,17 @@ Read-only graph packets:
 
 ```bash
 python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --depth 2
+python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --depth 2 --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-timeline aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py graph-shortest-path aoa-session-memory-mcp exec_command --kind auto
 python3 scripts/aoa_session_memory.py graph-cooccurrence exec_command --kind tool
 ```
+
+`graph-neighborhood` is compact by default: `--limit` bounds nodes and
+`--edge-limit` bounds edges. Packets report `truncated`,
+`omitted_node_count`, and `omitted_edge_count`; raise these budgets only for an
+explicit deeper relation walk, then verify important claims through raw,
+segment, or session refs.
 
 GraphRAG combines lexical search entrypoints, optional semantic/rerank overlays,
 graph-store expansion, cooccurrence clusters, evidence refs, and freshness:
@@ -1483,6 +1602,8 @@ aoa-session-batch-distill       -> first-wave historical-session conveyor
 aoa-session-manual-review       -> manual-review packets and promotion queue
 aoa-session-reindex             -> regenerate generated indexes from raw
 aoa-session-search              -> portable search, entity registry, route trace
+aoa-session-memory-evidence-route -> cross-session entity usage, consequences,
+                                   graph, and raw-ref evidence routing
 aoa-session-memory-stress-pass  -> bounded large-archive checks
 aoa-session-memory-audit        -> completion readiness
 aoa-session-memory-doctor       -> filesystem and live health
@@ -1496,6 +1617,16 @@ Install the top-level router for the current Codex user:
 python3 scripts/aoa_session_memory.py install-user-skill \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa
+```
+
+Install the evidence route explicitly when agents in other owner contexts should
+discover the prior-session entity/usage/consequence/graph route directly:
+
+```bash
+python3 scripts/aoa_session_memory.py install-user-skill \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --skill aoa-session-memory-evidence-route
 ```
 
 Generate the user-level hook config for the selected install roots:

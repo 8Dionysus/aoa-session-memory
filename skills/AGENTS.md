@@ -10,7 +10,10 @@ repeatable without turning hooks into heavy interpretation.
 ## Authority
 
 - Each skill directory owns one `SKILL.md`.
-- `aoa-session-memory-global-route` is the user-level router target.
+- `aoa-session-memory-global-route` is the default user-level router target.
+- `aoa-session-memory-evidence-route` may also be installed as a user-level
+  consumer route when agents need prior-session entity, usage, consequence,
+  graph, and raw-ref evidence from other owner contexts.
 - Narrow skills own manual routes such as rehydrate, raw diagnostic, reindex,
   naming readiness, naming waves, phase discovery, stress pass, audit,
   doctor, history import, search, and review packets.

@@ -160,7 +160,10 @@ python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --lim
 
 For archive-wide agent-event routes on a materialized archive, add
 `--use-shards`; the packet will expose `search_projection`, `cost_profile`, and
-the shard refs used for the result set.
+the shard refs used for the result set. Agent-event packets also expose
+`quality` with freshness counts, class counts, source counts, raw/segment ref
+coverage, and the latest returned event so a consumer can distinguish "latest
+but stale; verify refs" from "fresh enough to use as navigation".
 
 `agent-responses` is for assistant answers and reports. `agent-closeouts` is
 for final task handoff/completion packets. `agent-progress-updates` keeps
@@ -175,6 +178,14 @@ prompt, plans, tool/action refs, verification refs, errors/blockers, and
 closeout refs. Use `answer-neighborhood` when the answer itself is not enough
 and the before/after context matters.
 
+Use `goal-lifecycles` when the question is about goal start, inspection,
+completion, blocking, or intermediate goal tool observations. If a session only
+preserves `get_goal` / `update_goal` after a compaction or resume boundary, the
+packet may recover `objective`, `status`, and created/updated timestamps from
+the linked goal tool output as `observed_goal` and `state_observations`. That is
+still evidence routing: keep `missing_create` visible unless a real
+`create_goal` raw event exists.
+
 The MCP surface may expose these routes through read-only tools such as
 `aoa_session_search` filters (`agent_event`, `doc_type=task_episode`) or
 dedicated agent-event tools. MCP payloads are route packets with evidence refs;
@@ -188,6 +199,27 @@ python3 /srv/AbyssOS/8Dionysus/scripts/smoke_aoa_session_memory_mcp.py --workspa
 A green stdio smoke proves the package/launcher path, not that the already
 running Codex MCP host handle has recovered. Restart the Codex MCP host/session
 before claiming live MCP tool availability.
+
+## Session Evidence Consumer Route
+
+Use `skills/aoa-session-memory-evidence-route` when another agent or skill asks
+how a recurring operational entity was used in prior sessions and what happened
+nearby. It is the compact entry for skills, MCPs, hooks, tools, APIs, goals,
+evals, tests, validators, scripts, decisions, errors, and receipts.
+
+The first route should stay typed and cheap:
+
+```bash
+python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp --kind mcp
+python3 scripts/aoa_session_memory.py entity-usage-neighborhood aoa-session-memory-mcp --kind mcp
+python3 scripts/aoa_session_memory.py literal-query-plan "Traceback ValueError" --doc-type event
+python3 scripts/aoa_session_memory.py literal-query-plan "python3 scripts/aoa_session_memory.py agent-event-audit latest --probe-routes"
+python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --limit 12 --edge-limit 48
+```
+
+These packets are route evidence, not owner truth. Use them to find raw,
+segment, and session refs, then hand decisions, eval verdicts, skill meaning,
+or durable memory promotion back to the owning surface.
 
 ## Agent Atlas
 
@@ -277,7 +309,8 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --batch-limit 3 \
   --budget-seconds 300 \
   --refresh-chunk-size 64 \
-  --write-report
+  --write-report \
+  --write-hash-cache
 ```
 
 Hot timers intentionally keep small graph ticks. For a large global backlog,
@@ -293,7 +326,8 @@ abyss-machine resource launch --class medium --kind indexing --timeout 900 --jso
     --batch-limit 25 \
     --budget-seconds 300 \
     --refresh-chunk-size 64 \
-    --write-report
+    --write-report \
+    --write-hash-cache
 ```
 
 Each session or segment contributes its own graph slice. When a source changes,
@@ -316,11 +350,12 @@ refresh budgets.
 or during a mutation pass, the command records `deferred_time_budget` sources
 and rolls back the in-flight mutation instead of leaving a half-refreshed graph.
 Deep graph source scans can reuse `graph/source-hash-cache.json` with
-`--hash-mode cached` when file size and `mtime_ns` still match; use
-`--hash-mode exact --write-hash-cache` as an explicit maintenance pass to
-rehash source files and refresh that generated cache, or `--hash-mode exact`
-without cache writes when the operator needs a full file-read audit. The cache
-stores only path/stat/hash metadata and is not raw evidence or graph authority.
+`--hash-mode cached` when file size and `mtime_ns` still match. Mutating
+graph-maintenance source scans refresh that generated cache by default; use
+`--hash-mode exact --write-hash-cache` when the operator wants an explicit full
+file-read rehash, or `--hash-mode exact` without cache writes for a read-only
+audit. The cache stores only path/stat/hash metadata and is not raw evidence or
+graph authority.
 `index-maintenance` and `auto-maintenance` also use
 `graph_max_refresh_nodes` / `graph_max_refresh_edges` guards; individually
 oversized sources are reported under `oversized_sources`, while sources that
@@ -418,7 +453,7 @@ python3 scripts/aoa_session_memory.py graph-quality-audit --write-report
 python3 scripts/aoa_session_memory.py graph-quality-review diagnostics/<stamp>__graph-quality-audit.json \
   --verdict mcp_access_plane=accept:accept:"good MCP evidence route" \
   --write-report
-python3 scripts/aoa_session_memory.py graph-maintenance all --apply --write-report
+python3 scripts/aoa_session_memory.py graph-maintenance all --apply --write-report --write-hash-cache
 python3 scripts/aoa_session_memory.py graph-quality-corpus check --write-report
 python3 scripts/aoa_session_memory.py graph-freshness-check --write-report
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --write-report
@@ -575,6 +610,12 @@ long maintenance pass without opening raw transcripts or running deep dbstat.
 If `hot` finds a
 bulk/catchup/deep/manual writer already holding the lease, it defers instead of
 starting a competing rewrite.
+Use `maintenance-cleanup` when the status packet reports stale coordinator
+state or orphaned generated-store rebuild files. The cleanup route treats a lone
+SQLite rollback journal such as `.graph.sqlite3.<pid>.rebuild.tmp-journal` as
+part of the same generated graph rebuild tmp family, so an interrupted rebuild
+cannot hide behind a missing base `.tmp` file. It removes only stale generated
+maintenance artifacts and never raw transcript evidence.
 Manual maintenance writers use the same shared lock but must not wait
 silently behind a timer or another manual job. If the lock is held beyond the
 bounded wait, the command returns a
@@ -590,6 +631,10 @@ evidence while recent live claims should wait or use raw refs. `ready_for_catchu
 means the catch-up command in the packet is the next route. For deferred search
 sessions this command is a targeted `index-maintenance <session>
 --skip-graph-repair --apply --write-report` pass so search/atlas catch up
+without turning live graph repair into a broad maintenance run. For graph
+state, compare actionable and deferred counters: a
+`deferred_ledger_store_missing_count` caused by a still-written transcript is a
+quiet-window wait, not immediate graph repair.
 without paying graph repair cost on the interactive path; the same packet keeps
 the explicit graph follow-up route visible.
 Host timers should run maintenance through `auto-maintenance-resource <profile>
@@ -603,17 +648,23 @@ deferrals from agents. For `catchup all`, the wrapper reuses the live-tail
 packet and launches the targeted `index-maintenance <session>
 --skip-graph-repair --skip-token-accounting` route when the quiet window is
 ready, instead of starting broad `auto-maintenance catchup all` for a single
-deferred live session. Resource-blocked backlog and deep runs can fall back to a
-tightly capped probe-class graph drip instead of leaving graph maintenance idle:
-backlog enables this explicitly from its timer/service flags, while the `deep`
-profile enables it by default because unattended heavy indexing is commonly
-capped by the host resource policy. The report keeps the outer maintenance
-profile `ok=false`, records `fallback_graph_drip`, and does not claim the full
-backlog/deep profile succeeded. Use `--graph-drip-candidate-pool-limit` to let
-the fallback exact-plan a wider bounded window before selecting by real
-node/edge refresh cost; the `--graph-drip-max-refresh-*` caps remain the safety
-boundary. Use `--no-graph-drip-on-block` only for an explicit diagnostic run
-that must preserve the raw resource-blocked state.
+deferred live session. Resource-blocked backlog and deep runs fall back to a
+tightly capped probe-class graph drip instead of leaving graph maintenance
+idle. Both profiles enable this by default because unattended medium/heavy
+indexing can be capped by the host resource policy. The report keeps the outer
+maintenance profile `ok=false`, records `fallback_graph_drip`, and does not
+claim the full backlog/deep profile succeeded. Profile graph-drip settings
+control the batch, budget, candidate-pool window, and node/edge refresh caps
+unless explicit CLI overrides are passed. Installed user timers are part of
+that contract: `maintenance-status` reads their `ExecStart` lines and reports
+`available_with_unit_drift` when an explicit graph-drip override no longer
+matches the profile default. When a read-only MCP environment cannot query the
+user systemd bus, `maintenance-status` falls back to installed unit files and
+still reports the same unit-contract drift without turning the timer probe into
+a false maintenance error. The fallback mutates only when the
+outer resource route was called with `--apply`; use
+`--no-graph-drip-on-block` only for an explicit diagnostic run that must
+preserve the raw resource-blocked state.
 `aoa_session_memory` MCP remains read-only and plan-only.
 
 `maintenance-status` also reports `operations.graph_pressure` when graph
@@ -1029,6 +1080,14 @@ operations route reports `current_with_deferred_live_updates` instead of
 `search_shards_not_current`. The stale-looking row remains visible through
 `live_tail` and `deferred_live_session_count`; agents should wait for the quiet
 window or run the targeted catch-up route rather than rebuilding a whole shard.
+When a shard has actionable stale rows, `maintenance-status` surfaces a
+secondary `refresh_search_shard_structured` action in `next_actions` and
+`agent_route.search_shard_next_action`. Existing shard DBs are repaired through
+`search-shards --no-rebuild --dirty-only`; missing shard DBs route to a scoped
+structured rebuild only when the shard lane is already in use. The generated
+action deliberately omits `--full-text`, so
+raw-text recall stays on the monolith fallback unless an operator explicitly
+chooses a heavier shard-level lexical route.
 
 ```bash
 python3 scripts/aoa_session_memory.py search-shards all \
@@ -1067,6 +1126,10 @@ python3 scripts/aoa_session_memory.py entity-registry \
   --lookup aoa-session-memory-mcp \
   --kind mcp
 ```
+
+Use `--lookup` for the agent hot path: it reads the generated snapshot and is
+the right first route for “does this entity exist / where is its source?”. Use
+`entity-usage-audit` when the question is “how was it used and what happened?”.
 
 `maps/entity-registry.json` is generated navigation. It records active,
 observed, stale, removed, and unknown entity states so agents can route quickly
@@ -1163,6 +1226,14 @@ Structured filters with no text query, such as `--session-act`,
 route profile. Their payload exposes `cost_profile` and avoids raw semantic
 preview, compressed full-body hydration, and full-text search until a proof
 window or explicit text query asks for that heavier layer.
+
+`literal-query-plan` uses that same lightweight route when a noisy literal
+phrase still resolves to a concrete route signal, such as
+`hook_health:raw_unavailable`. The raw-text monolith remains an explicit recall
+fallback, not the first route for an already recognized operational signal.
+Command literals are classified separately from plain paths: the planner uses
+the command anchor for structured route candidates and keeps the full command
+text as the exact raw-text fallback.
 
 Audit the full operational route surface after classifier, atlas, or search
 changes:
@@ -1300,7 +1371,10 @@ Portable bundle skills live under `skills/`.
 
 The top-level router is `aoa-session-memory-global-route`. Install it into
 `~/.codex/skills` with `install-user-skill` when the current user should have
-`.aoa` session-memory guidance in every Codex session. The remaining skills stay
+`.aoa` session-memory guidance in every Codex session. The consumer evidence
+route `aoa-session-memory-evidence-route` is also approved for explicit
+user-level install when agents outside `.aoa` need prior-session entity usage,
+consequences, graph topology, and raw/segment refs. The remaining skills stay
 inside the bundle as the narrow routes for archive init, raw archiving,
 historical import, diagnostics, rehydration, first-pass distillation, stress
 checks, batch distillation, reindexing, portable search, audit, doctor, hook

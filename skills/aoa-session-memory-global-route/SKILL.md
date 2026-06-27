@@ -85,6 +85,10 @@ Use this skill in any Codex session when the task touches:
 - Portable search index, provider gates, retrieval packets, and evidence-routed
   retrieval:
   `aoa-session-search`
+- Cross-session evidence for how a skill, MCP, hook, tool, API, goal, eval,
+  test, validator, script, decision, error, receipt, or recurring operational
+  entity was used and what happened nearby:
+  `aoa-session-memory-evidence-route`
 - Naming queue, phase-discovery routing, and pre-rename checks:
   `aoa-session-naming-readiness`
 - Mass semantic naming waves, guarded batch apply, and naming quality audit:
