@@ -42194,14 +42194,16 @@ def graph_maintenance(
     ledger_update: dict[str, Any] = {}
     queue_update: dict[str, Any] = {}
     source_hash_cache_update: dict[str, Any] = {}
-    effective_write_ledger = bool(write_ledger or mutation_applied)
+    queue_consumer_applied = bool(use_queue and apply)
+    effective_write_ledger = bool(write_ledger or mutation_applied or queue_consumer_applied)
+    effective_write_queue = bool(write_queue or queue_consumer_applied)
     if effective_write_ledger:
         ledger_update = update_graph_source_state_ledger_from_states(
             aoa_root,
             state_rows_for_persistence,
             reason=f"graph_maintenance:{reason}",
         )
-    if write_queue:
+    if effective_write_queue:
         queue_update = update_graph_maintenance_queue_from_states(
             aoa_root,
             state_rows_for_persistence,
@@ -42220,10 +42222,10 @@ def graph_maintenance(
         "graph_store_schema_version": GRAPH_STORE_SCHEMA_VERSION,
         "generated_at": now,
         "ok": not diagnostics and not any(item.get("status") == "blocked" for item in results),
-        "mutates": bool(apply or write_ledger or write_queue or write_hash_cache),
+        "mutates": bool(apply or effective_write_ledger or effective_write_queue or write_hash_cache),
         "apply": apply,
         "use_queue": bool(use_queue),
-        "write_queue": bool(write_queue),
+        "write_queue": bool(effective_write_queue),
         "write_ledger": bool(effective_write_ledger),
         "target": target,
         "since": since,
@@ -50203,8 +50205,14 @@ def session_memory_live_tail_catchup_route(
             *root_args,
             "--use-queue",
             "--apply",
+            "--batch-limit",
+            str(GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT),
+            "--budget-seconds",
+            "300",
             "--write-report",
             "--write-hash-cache",
+            "--write-queue",
+            "--write-ledger",
         ]
         return {
             "command": command,
@@ -50786,6 +50794,46 @@ def session_memory_maintenance_status(
             live_tail["catchup_target_session_label"] = catchup_route.get("target_session_label")
         live_tail["catchup_ready_to_run"] = bool(catchup_route.get("ready_to_run"))
         live_tail["graph_followup"] = catchup_route.get("graph_followup")
+        live_catchup_ready = (
+            live_tail.get("status") == "ready_for_catchup"
+            and bool(catchup_route.get("ready_to_run"))
+        )
+        graph_live_queue_ready = (
+            live_catchup_ready
+            and catchup_route.get("command_kind") == "graph_queue_maintenance"
+            and int_value(graph.get("latest_maintenance_remaining_count")) <= 0
+        )
+        graph_action_ids = {
+            "repair_graph_bounded",
+            "repair_graph_budgeted",
+            "repair_graph_heavy_tail",
+            "repair_graph_queue",
+            "wait_live_catchup",
+        }
+        graph_actions_only = all(
+            isinstance(action, dict) and action.get("id") in graph_action_ids
+            for action in next_actions
+        )
+        if graph_live_queue_ready and (not next_actions or graph_actions_only):
+            next_actions = [
+                {
+                    "id": "run_live_catchup",
+                    "reason": "deferred_live_graph_queue_ready_for_bounded_catchup",
+                    "command": catchup_command,
+                    "catchup_command_kind": catchup_route.get("command_kind"),
+                    "catchup_scope": catchup_route.get("scope"),
+                    "catchup_target": catchup_route.get("target"),
+                    "graph_followup": catchup_route.get("graph_followup"),
+                    "quiet_seconds": live_tail.get("quiet_seconds"),
+                    "ready_count": live_tail.get("ready_count"),
+                    "waiting_count": live_tail.get("waiting_count"),
+                    "max_quiet_remaining_seconds": live_tail.get("max_quiet_remaining_seconds"),
+                    "next_ready_at": live_tail.get("next_ready_at"),
+                    "live_tail_status": live_tail.get("status"),
+                    "note": "Live quiet window is satisfied; run graph queue catch-up for deferred live sources before retrying source-scan graph maintenance.",
+                }
+            ]
+            recommendation = "run_live_catchup"
         for action in next_actions:
             if isinstance(action, dict) and action.get("id") == "wait_live_catchup":
                 action["command"] = catchup_command

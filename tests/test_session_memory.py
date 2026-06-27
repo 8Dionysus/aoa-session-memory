@@ -7681,6 +7681,74 @@ def test_graph_maintenance_queue_drives_hot_gate_and_bounded_update(tmp_path: Pa
     assert hot_clean["needs_graph_maintenance"] is False
 
 
+def test_graph_maintenance_use_queue_apply_prunes_clean_queue_and_ledger_by_default(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-27T00-30-00-clean-queue-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-27T00:30:00Z", "type": "session_meta", "payload": {"id": "clean-queue-source", "cwd": str(repo), "model": "gpt-5"}},
+            {"timestamp": "2026-05-27T00:30:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep the graph queue clean."}]}},
+            {"timestamp": "2026-05-27T00:30:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Graph queue remains bounded."}]}},
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "clean-queue-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-27__001__keep-the-graph-queue-clean"
+    built = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    assert built["ok"] is True
+    session_index = module.read_json(session_dir / module.SESSION_INDEX_JSON, {})
+    segment = session_index["segments"][0]
+    segment_id = segment["segment_id"]
+    source_key = module.graph_source_key("segment", "clean-queue-source", segment_id)
+
+    stale_entry = {
+        "source_key": source_key,
+        "source_type": "segment",
+        "session_id": "clean-queue-source",
+        "session_label": session_dir.name,
+        "segment_id": segment_id,
+        "session_dir": str(session_dir),
+        "source_path": str(session_dir / segment["index"]),
+        "status": "dirty",
+        "reason": "stale_test_queue_entry",
+    }
+    module.write_graph_maintenance_queue(aoa_root, {"items": {source_key: stale_entry}})
+    module.write_graph_source_state_ledger(aoa_root, {"sources": {source_key: stale_entry}})
+
+    maintained = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        use_queue=True,
+        batch_limit=5,
+    )
+
+    assert maintained["ok"] is True
+    assert maintained["use_queue"] is True
+    assert maintained["write_queue"] is True
+    assert maintained["write_ledger"] is True
+    assert maintained["selected_count"] == 0
+    assert maintained["pre_source_state"]["status_counts"] == {"clean": 1}
+    assert maintained["queue_update"]["removed_count"] == 1
+    assert maintained["queue_update"]["queued_count"] == 0
+    assert maintained["ledger_update"]["status_counts"] == {"clean": 1}
+    assert module.read_graph_maintenance_queue(aoa_root)["items"] == {}
+    ledger_entry = module.read_graph_source_state_ledger(aoa_root)["sources"][source_key]
+    assert ledger_entry["status"] == "clean"
+
+
 def test_route_cache_hot_gate_uses_cached_states_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -11397,6 +11465,124 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["next_actions"][0]["live_tail_status"] == "ready_for_catchup"
     assert compact["next_actions"][0]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
     assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
+
+
+def test_maintenance_status_routes_ready_graph_live_queue_before_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {"ok": True, "providers": {"portable_sqlite": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        module,
+        "search_maintenance_status_from_provider",
+        lambda _provider_status: {
+            "status": "current",
+            "provider_status": "ready",
+            "freshness_mode": "hot",
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 0,
+            "dirty_session_count": 0,
+            "missing_freshness_state_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": False,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": True,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": ["graph_maintenance_needed"],
+            "graph_store": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance_status_from_state",
+        lambda _graph_state, **_kwargs: {
+            "status": "dirty",
+            "needs_maintenance": True,
+            "needs_full_rebuild": False,
+            "source_count": 5627,
+            "existing_source_count": 5627,
+            "status_counts": {"clean": 5556, "blocked": 10},
+            "dirty_count": 1418,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "retired_count": 63,
+            "actionable_count": 1418,
+            "latest_maintenance_remaining_count": 0,
+            "latest_maintenance_remaining_total_count": 0,
+            "deferred_live_source_count": 499,
+            "maintenance_recommendation": {
+                "route": "budgeted_graph_maintenance",
+                "reason": "mixed_or_medium_backlog",
+                "command": "python3 scripts/aoa_session_memory.py graph-maintenance all --apply --batch-limit 75",
+                "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 3,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "maintenance_lock_snapshot", lambda _aoa_root: {"active": False, "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 0,
+                "graph_actionable_source_count": 1418,
+                "graph_dirty_count": 1418,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current"},
+            "warnings": [],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert payload["recommendation"] == "run_live_catchup"
+    assert payload["next_actions"][0]["id"] == "run_live_catchup"
+    assert payload["next_actions"][0]["catchup_command_kind"] == "graph_queue_maintenance"
+    assert payload["live_tail"]["catchup_command_kind"] == "graph_queue_maintenance"
+    assert payload["live_tail"]["catchup_ready_to_run"] is True
+    assert payload["graph"]["latest_maintenance_remaining_count"] == 0
+    assert payload["graph"]["deferred_live_source_count"] == 499
+    assert " --use-queue " in f" {payload['exact_next_command']} "
+    assert f" --batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT} " in f" {payload['exact_next_command']} "
+    assert " --write-queue " in f" {payload['exact_next_command']} "
+    assert " --write-ledger " in f" {payload['exact_next_command']} "
 
 
 def test_maintenance_status_surfaces_search_shard_tail_as_agent_action(tmp_path: Path, monkeypatch: Any) -> None:
