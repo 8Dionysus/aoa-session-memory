@@ -61334,6 +61334,73 @@ def session_has_plain_raw_blocks(record: dict[str, Any]) -> bool:
     return any(raw_block_plain_path(session_dir, block).is_file() for block in raw_block_records_for_session(session_dir, manifest))
 
 
+def raw_block_compaction_deferred_live_lookup(aoa_root: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {}, []
+    try:
+        conn = connect_existing_search_db(db_path, timeout=0.5)
+    except sqlite3.Error as exc:
+        return {}, [f"search_freshness_state_probe_failed:{sqlite_error_status(exc)}"]
+    try:
+        if not sqlite_table_exists(conn, "search_freshness_state"):
+            return {}, []
+        rows = conn.execute(
+            """
+            SELECT session_id, session_label, session_dir, status, reason,
+                   deferred_live_reason, live_transcript_path, updated_at
+            FROM search_freshness_state
+            WHERE status = 'deferred_live'
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return {}, [f"search_freshness_state_probe_failed:{sqlite_error_status(exc)}"]
+    finally:
+        conn.close()
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        packet = {
+            "session_id": row["session_id"],
+            "session_label": row["session_label"],
+            "session_dir": row["session_dir"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "deferred_live_reason": row["deferred_live_reason"],
+            "live_transcript_path": row["live_transcript_path"],
+            "updated_at": row["updated_at"],
+        }
+        session_dir = Path(str(row["session_dir"] or ""))
+        keys = unique_preserving_order(
+            [
+                str(row["session_id"] or ""),
+                str(row["session_label"] or ""),
+                str(row["session_dir"] or ""),
+                session_dir.name if str(session_dir) else "",
+            ]
+        )
+        for key in keys:
+            if key:
+                lookup[key] = packet
+    return lookup, []
+
+
+def raw_block_compaction_deferred_live_info(record: dict[str, Any], lookup: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+    keys = unique_preserving_order(
+        [
+            str(record.get("session_id") or ""),
+            str(record.get("session_label") or ""),
+            str(record.get("path") or ""),
+            str(record.get("navigation_path") or ""),
+            session_dir.name if str(session_dir) else "",
+        ]
+    )
+    for key in keys:
+        if key and key in lookup:
+            return lookup[key]
+    return {}
+
+
 def raw_block_record_key(record: dict[str, Any]) -> str:
     return str(record.get("block_id") or record.get("segment_id") or record.get("rel") or record.get("path") or "")
 
@@ -61475,7 +61542,32 @@ def raw_block_storage_compact(
         selected_records = [record for record in selected_records if session_has_plain_raw_blocks(record)]
         if limit is not None:
             selected_records = selected_records[: max(0, int_value(limit))]
-    no_plain_candidates = bool(skip_no_plain and not selected_records and not selection_diagnostics)
+    deferred_live_lookup, deferred_live_diagnostics = raw_block_compaction_deferred_live_lookup(aoa_root)
+    diagnostics.extend(deferred_live_diagnostics)
+    skipped_live_deferred_sessions: list[dict[str, Any]] = []
+    if deferred_live_lookup:
+        guarded_records: list[dict[str, Any]] = []
+        for record in selected_records:
+            deferred_info = raw_block_compaction_deferred_live_info(record, deferred_live_lookup)
+            if deferred_info:
+                session_dir = Path(str(record.get("path") or record.get("navigation_path") or deferred_info.get("session_dir") or ""))
+                skipped_live_deferred_sessions.append(
+                    {
+                        "session_id": record.get("session_id") or deferred_info.get("session_id"),
+                        "session_label": record.get("session_label") or deferred_info.get("session_label") or session_dir.name,
+                        "session_dir": str(session_dir) if str(session_dir) else str(deferred_info.get("session_dir") or ""),
+                        "status": "skipped_live_deferred",
+                        "reason": deferred_info.get("reason") or "deferred_live",
+                        "deferred_live_reason": deferred_info.get("deferred_live_reason") or "",
+                        "live_transcript_path": deferred_info.get("live_transcript_path") or "",
+                        "next_route": "wait for live quiet-window catch-up before raw-block physical cleanup",
+                    }
+                )
+                continue
+            guarded_records.append(record)
+        selected_records = guarded_records
+    live_deferred_only = bool(skipped_live_deferred_sessions and not selected_records and not selection_diagnostics)
+    no_plain_candidates = bool(skip_no_plain and not selected_records and not selection_diagnostics and not skipped_live_deferred_sessions)
     if confirm_remove_plain and not apply:
         diagnostics.append("confirm_remove_plain_requires_apply")
     preflight = raw_block_ref_audit(
@@ -61486,7 +61578,7 @@ def raw_block_storage_compact(
         max_chars=0,
         selected_records_override=selected_records,
     )
-    if apply and not preflight.get("ok") and not no_plain_candidates:
+    if apply and not preflight.get("ok") and not no_plain_candidates and not live_deferred_only:
         diagnostics.append("raw_block_ref_audit_preflight_failed")
     can_apply = bool(apply and selected_records) and not any(item in diagnostics for item in ("confirm_remove_plain_requires_apply", "raw_block_ref_audit_preflight_failed"))
     now = utc_now()
@@ -61498,6 +61590,27 @@ def raw_block_storage_compact(
     compressed_bytes_total = 0
     removed_plain_bytes_total = 0
     created_compressed_bytes_total = 0
+    for skipped in skipped_live_deferred_sessions:
+        results.append(
+            {
+                "session_id": skipped.get("session_id"),
+                "session_label": skipped.get("session_label"),
+                "session_dir": skipped.get("session_dir"),
+                "status": "skipped_live_deferred",
+                "planned_count": 0,
+                "compressed_count": 0,
+                "removed_plain_count": 0,
+                "plain_bytes": 0,
+                "plain_bytes_human": "0 B",
+                "compressed_bytes": 0,
+                "compressed_bytes_human": "0 B",
+                "created_compressed_bytes": 0,
+                "removed_plain_bytes": 0,
+                "reason": skipped.get("reason"),
+                "deferred_live_reason": skipped.get("deferred_live_reason"),
+                "next_route": skipped.get("next_route"),
+            }
+        )
     for record in selected_records:
         session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
         manifest_path = session_dir / "session.manifest.json"
@@ -61687,14 +61800,14 @@ def raw_block_storage_compact(
     if can_apply and not post_audit.get("ok"):
         diagnostics.append("raw_block_ref_audit_post_apply_failed")
     net_reclaim_bytes = removed_plain_bytes_total - created_compressed_bytes_total
-    status = "current_no_plain_candidates" if no_plain_candidates else "applied" if can_apply else "planned"
+    status = "current_no_plain_candidates" if no_plain_candidates else "skipped_live_deferred" if live_deferred_only else "applied" if can_apply else "planned"
     if diagnostics and not can_apply:
         status = "blocked"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_raw_block_storage_compact",
         "generated_at": now,
-        "ok": (no_plain_candidates or bool(selected_records)) and not any(item.endswith("_failed") or item == "confirm_remove_plain_requires_apply" for item in diagnostics),
+        "ok": (no_plain_candidates or bool(selected_records) or live_deferred_only) and not any(item.endswith("_failed") or item == "confirm_remove_plain_requires_apply" for item in diagnostics),
         "mutates": bool(can_apply),
         "target": target,
         "apply": bool(apply),
@@ -61706,6 +61819,8 @@ def raw_block_storage_compact(
         "storage_mode": RAW_BLOCK_STORAGE_MODE_GZIP,
         "status": status,
         "selected_count": len(selected_records),
+        "skipped_live_deferred_count": len(skipped_live_deferred_sessions),
+        "skipped_live_deferred_sessions": skipped_live_deferred_sessions,
         "planned_count": planned_count,
         "compressed_count": compressed_count,
         "removed_plain_count": removed_plain_count,

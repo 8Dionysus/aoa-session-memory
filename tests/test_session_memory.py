@@ -1584,6 +1584,99 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     assert no_candidates["selected_count"] == 0
 
 
+def test_raw_block_storage_compact_skips_deferred_live_sessions(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    live_transcript = tmp_path / "rollout-2026-05-12T00-00-00-raw-block-live.jsonl"
+    stable_transcript = tmp_path / "rollout-2026-05-13T00-00-00-raw-block-stable.jsonl"
+    write_jsonl(
+        live_transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "raw-block-live", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep live raw blocks guarded."}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "turn_context", "payload": {"summary": "live compact boundary"}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Live deferred sessions should not be physically compacted."}]}},
+        ],
+    )
+    write_jsonl(
+        stable_transcript,
+        [
+            {"timestamp": "2026-05-13T00:00:00Z", "type": "session_meta", "payload": {"id": "raw-block-stable", "cwd": str(workspace)}},
+            {"timestamp": "2026-05-13T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Compact stable raw blocks."}]}},
+            {"timestamp": "2026-05-13T00:00:02Z", "type": "turn_context", "payload": {"summary": "stable compact boundary"}},
+            {"timestamp": "2026-05-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Stable sessions can be compacted."}]}},
+        ],
+    )
+    for transcript, session_id in ((live_transcript, "raw-block-live"), (stable_transcript, "raw-block-stable")):
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    live_dir = aoa_root / "sessions" / "2026-05-12__001__keep-live-raw-blocks-guarded"
+    stable_dir = aoa_root / "sessions" / "2026-05-13__001__compact-stable-raw-blocks"
+    live_manifest = json.loads((live_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    stable_manifest = json.loads((stable_dir / "session.manifest.json").read_text(encoding="utf-8"))
+    live_plain_path = Path(live_manifest["raw_blocks"]["blocks"][0]["path"])
+    stable_plain_path = Path(stable_manifest["raw_blocks"]["blocks"][0]["path"])
+
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=False)
+    module.upsert_search_freshness_state(
+        conn,
+        projection_state={
+            "session_id": "raw-block-live",
+            "session_label": live_dir.name,
+            "session_dir": str(live_dir),
+            "fingerprint": "live",
+            "latest_source_mtime": 1.0,
+        },
+        status="deferred_live",
+        reason="recent_live_projection_updates_deferred",
+        checked_at="2026-05-13T00:00:04Z",
+        deferred_live_reason="recent_live_codex_transcript_update",
+        live_transcript_path=str(live_transcript),
+        live_transcript_mtime=1.0,
+    )
+    conn.commit()
+    conn.close()
+
+    live_only = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=live_dir.name,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert live_only["ok"] is True
+    assert live_only["mutates"] is False
+    assert live_only["status"] == "skipped_live_deferred"
+    assert live_only["skipped_live_deferred_count"] == 1
+    assert live_plain_path.exists()
+
+    mixed = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target="all",
+        skip_no_plain=True,
+        limit=20,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert mixed["ok"] is True
+    assert mixed["mutates"] is True
+    assert mixed["skipped_live_deferred_count"] == 1
+    assert any(item["status"] == "skipped_live_deferred" for item in mixed["results"])
+    assert live_plain_path.exists()
+    assert not stable_plain_path.exists()
+
+
 def test_raw_block_storage_compact_apply_uses_maintenance_lock(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
