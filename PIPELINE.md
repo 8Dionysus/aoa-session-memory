@@ -266,7 +266,9 @@ The route order is:
 7. agent answer/task intervals: agent-event or task-episode routes;
 8. literal phrase/path/command/error/session id: `literal-query-plan`;
 9. topology: `graph-bridge` for "how are X and Y connected?", then compact
-   graph routes with explicit node/edge/evidence budgets.
+   graph routes with explicit node/edge/evidence budgets. The bridge packet
+   keeps side neighborhoods shallow by default so dense anchors such as common
+   tools do not turn the first route into a heavy graph scan.
 
 Session-memory packets remain generated navigation and evidence routes. They
 must report freshness, truncation, refs, and next expansion, then hand decision
@@ -1339,9 +1341,10 @@ python3 scripts/aoa_session_memory.py graph-cooccurrence exec_command --kind too
 explicit deeper relation walk, then verify important claims through raw,
 segment, or session refs.
 `graph-bridge` is the consumer route for relation questions between two
-operational anchors. It wraps shortest-path plus source/target timeline
-samples, freshness/noise flags, and next expansion commands; it remains
-generated route evidence, not reviewed truth.
+operational anchors. It wraps shallow source/target neighborhoods, timeline
+samples, freshness/noise flags, evidence refs, and next expansion commands; it
+remains generated route evidence, not reviewed truth. Use the returned
+`shortest_path` expansion when a deeper path is actually needed.
 
 GraphRAG combines lexical search entrypoints, optional semantic/rerank overlays,
 graph-store expansion, cooccurrence clusters, evidence refs, and freshness:
