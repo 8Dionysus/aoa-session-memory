@@ -39,7 +39,7 @@
             "required_primary_routes": [
               "route_signal_structured_search",
               "entity_inventory",
-              "entity_usage_audit",
+              "entity_usage_chain",
               "command_structured_search",
               "session_rehydrate"
             ],

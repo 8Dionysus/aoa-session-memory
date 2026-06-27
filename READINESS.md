@@ -73,15 +73,21 @@ Build the `.aoa` session-memory mechanism end to end:
   `entity-registry-search-sync` refreshes the generated registry snapshot and
   SQLite registry docs without selecting an arbitrary session for
   `search-index --no-rebuild`
+- Entity usage-chain consumer route: `usage-chain` is the compact first packet
+  for operational entity usage/consequence questions; it returns direct usage,
+  result/consequence chains, evidence refs, freshness, noise flags, and next
+  expansion commands while skipping GraphRAG, graph neighborhood, and
+  raw-preview neighborhoods by default
 - Entity usage fast path: `entity-usage-audit` starts from typed route signals
   and direct usage classes, skips raw semantic previews during the indexed
   harvest, avoids compressed full-body hydration when bounded search rows are
   enough, and only falls back to broad text search when structured route hits do
   not include direct usage evidence
-- Entity dossier consumer route: `entity-dossier` is the compact first packet
-  for operational entity usage/consequence/graph/ref questions; it routes to
-  usage audit, neighborhood windows, graph expansion, and raw/segment/session
-  refs without becoming owner truth
+- Entity dossier consumer route: `entity-dossier` is the heavier packet for
+  operational entity usage/consequence/graph/ref questions that need full
+  graph/cooccurrence/timeline context; it routes to usage audit, neighborhood
+  windows, graph expansion, and raw/segment/session refs without becoming owner
+  truth
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors; typed route hits now skip
   the broad text fallback once the requested evidence limit is satisfied, so
@@ -760,12 +766,18 @@ Last observed result:
   `classifications`, `fallback_plan`, and `next_expansion` on route packets,
   and exact UUID session ids route through `session_rehydrate` plus
   session-scoped structured search before global literal fallback. Live
-  `live-scenario-audit --profile literal_planner --seed
-  literal-session-id-20260627 --sample-size 5 --limit 5` returned `ok=true`,
-  `sample_count=5`, `failed_count=0`, `elapsed_ms=480`, with primary route
-  counts including `session_rehydrate=1`, `route_signal_structured_search=1`,
-  `entity_inventory=1`, `entity_usage_audit=1`, and
-  `command_structured_search=1`.
+- 2026-06-27 usage-chain/literal-planner route update: concrete operational
+  entity queries now route through `entity_usage_chain` before the underlying
+  `entity_usage_audit`, heavy dossier, graph, or raw-text fallback. Live
+  `usage-chain aoa-session-memory-mcp --kind mcp --limit 2
+  --per-route-limit 3 --consequence-window 4 --document-limit 12` returned
+  `ok=true` in `1.38s`, with `usage_event_count=2`,
+  `chain_with_result_or_consequence_count=2`, `noise_flag_count=0`,
+  raw/segment/session refs, and `skipped_graph_rag_packet=true`. Live
+  `live-scenario-audit --profile literal_planner --limit 4` returned
+  `ok=true`, `failed_count=0`, `elapsed_ms=533`, with primary route counts
+  including `entity_usage_chain=1`, `entity_inventory=1`,
+  `route_signal_structured_search=1`, and `command_structured_search=1`.
 - 2026-06-27 live scenario corpus gate: consumer-loop regression controls now
   live under `config/live-scenario-regression-corpus.json` and are checked by
   `live-scenario-corpus check`. The gate preserves allowed warnings as

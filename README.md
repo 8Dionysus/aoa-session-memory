@@ -210,6 +210,7 @@ evals, tests, validators, scripts, decisions, errors, and receipts.
 The first route should stay typed and cheap:
 
 ```bash
+python3 scripts/aoa_session_memory.py usage-chain aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood aoa-session-memory-mcp --kind mcp
@@ -488,9 +489,13 @@ stable corruption.
 `config/live-scenario-regression-corpus.json` against the current archive. It
 keeps warnings as `actionable_gaps`, so allowed warning states still leave a
 precise next route instead of becoming silent green.
-`entity-dossier` builds a human card for one stable anchor with strong refs,
-weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
-questions, and a read-first route.
+`usage-chain` builds the hot consumer packet for one stable anchor: direct
+usage events, result/consequence events, refs, freshness, noise flags, and
+next expansion commands without opening GraphRAG, graph neighborhood, or raw
+preview neighborhoods by default.
+`entity-dossier` builds the heavier human card for one stable anchor with
+strong refs, weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/
+decisions, open questions, and a read-first route.
 `graph-bridge` is the compact first graph route when the question is how two
 operational anchors are connected. It combines a bounded shortest path,
 source/target timeline samples, evidence refs, freshness, noise flags, and
@@ -1144,10 +1149,10 @@ python3 scripts/aoa_session_memory.py entity-registry \
 
 Use `--lookup` for the agent hot path: it reads the generated snapshot and is
 the right first route for “does this entity exist / where is its source?”. Use
-`entity-dossier` when the question is “how was it used, what happened, which
-graph/ref context applies, and what should I open next?”. Use
-`entity-usage-audit` when the dossier is unavailable or the task needs the
-underlying usage/consequence event list.
+`usage-chain` when the question is “how was it used and what happened after?”.
+Use `entity-dossier` when graph/cooccurrence/timeline context or a heavier
+human card is needed. Use `entity-usage-audit` when the chain or dossier is
+unavailable or the task needs the underlying usage/consequence event list.
 
 `maps/entity-registry.json` is generated navigation. It records active,
 observed, stale, removed, and unknown entity states so agents can route quickly
@@ -1184,7 +1189,7 @@ fingerprint still matches, registry-only refresh returns a fast no-op with
 Ask how an entity was actually used, with consequences and evidence refs:
 
 ```bash
-python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp \
+python3 scripts/aoa_session_memory.py usage-chain aoa-session-memory-mcp \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
   --kind mcp \

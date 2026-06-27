@@ -166,13 +166,19 @@ does not own `.aoa` raw, manifests, indexes, or registry truth.
 
 ## Entity Usage Retrieval Route
 
-Use `entity-dossier` when the agent needs the compact consumer packet for how a
-skill, MCP, hook, tool, API, script, validator, test, graph, memory surface, or
-other recurring entity appears in archived work, what happened nearby, which
+Use `usage-chain` when the agent asks how a skill, MCP, hook, tool, API,
+script, validator, test, graph, memory surface, or other recurring entity was
+used and what happened immediately after it. This is the hot consumer packet:
+it is built from structured usage evidence, keeps raw/segment/session refs, and
+skips GraphRAG, graph neighborhood, and raw-preview neighborhoods by default.
+
+Use `entity-dossier` when the agent needs the heavier human card for how a
+recurring entity appears in archived work, what happened nearby, which
 graph/ref context applies, and which next route should be opened.
 
-Use `entity-usage-audit` when the dossier is unavailable, too coarse, or the
-agent specifically needs the underlying usage/consequence event list.
+Use `entity-usage-audit` when the usage-chain or dossier is unavailable, too
+coarse, or the agent specifically needs the underlying usage/consequence event
+list.
 
 `entity-usage-audit` is a structured-fast route first. It queries typed route
 signals and direct usage classes with lightweight search hits, skips raw
@@ -203,8 +209,9 @@ This keeps MCP-sized packets fast without making the packet the authority.
 
 Use `entity-dossier` as the one-packet consumer route for operational entity
 questions that need source identity, usage, consequence, graph neighborhood,
-refs, freshness, noise flags, and next expansion commands together. It is still
-route evidence, not reviewed truth.
+refs, freshness, noise flags, and next expansion commands together. Use
+`usage-chain` first when the question only needs the usage-to-consequence
+chain. Both routes are evidence packets, not reviewed truth.
 
 Use `live-scenario-audit` with the default `entity_dossier` profile as the
 consumer-loop smoke for that one-packet route. Use
@@ -248,15 +255,17 @@ Use it when the request shape is:
 
 The route order is:
 
-1. typed entity dossier: `entity-dossier`;
-2. typed usage packet: `entity-usage-audit` when the dossier is unavailable,
+1. typed usage-to-consequence packet: `usage-chain`;
+2. typed entity dossier: `entity-dossier` when graph/cooccurrence/timeline
+   context is needed;
+3. typed usage packet: `entity-usage-audit` when the chain or dossier is unavailable,
    truncated, stale, or too coarse;
-3. exact before/after windows: `entity-usage-neighborhood`;
-4. hook errors or health: hook receipts before usage audit;
-5. goal lifecycle: `goal-lifecycles` before raw search;
-6. agent answer/task intervals: agent-event or task-episode routes;
-7. literal phrase/path/command/error/session id: `literal-query-plan`;
-8. topology: `graph-bridge` for "how are X and Y connected?", then compact
+4. exact before/after windows: `entity-usage-neighborhood`;
+5. hook errors or health: hook receipts before usage audit;
+6. goal lifecycle: `goal-lifecycles` before raw search;
+7. agent answer/task intervals: agent-event or task-episode routes;
+8. literal phrase/path/command/error/session id: `literal-query-plan`;
+9. topology: `graph-bridge` for "how are X and Y connected?", then compact
    graph routes with explicit node/edge/evidence budgets.
 
 Session-memory packets remain generated navigation and evidence routes. They
@@ -845,6 +854,7 @@ python3 scripts/aoa_session_memory.py graph-quality-audit --write-report
 python3 scripts/aoa_session_memory.py graph-quality-review diagnostics/<stamp>__graph-quality-audit.json --write-report
 python3 scripts/aoa_session_memory.py graph-quality-corpus check --write-report
 python3 scripts/aoa_session_memory.py graph-freshness-check --write-report
+python3 scripts/aoa_session_memory.py usage-chain aoa-session-memory-mcp --kind mcp --write-report
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --write-report
 ```
 
