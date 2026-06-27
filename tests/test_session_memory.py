@@ -2364,36 +2364,50 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
         },
     )
     conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
-    conn.execute(
-        "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
-        ("script", "skill_intelligence", "script:skill_intelligence"),
-    )
-    route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", ("script:skill_intelligence",)).fetchone()[0]
-    cursor = conn.execute(
-        """
-        INSERT INTO documents(
-          id, doc_type, session_id, session_label, session_date, event_id,
-          event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+
+    def insert_observed_route(layer: str, key: str, *, event_id: str) -> None:
+        route_signal = f"{layer}:{key}"
+        conn.execute(
+            "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "event:observed-script:001:000001",
-            "event",
-            "observed-script",
-            "observed-script",
-            "2026-06-26",
-            "000001",
-            "COMMAND",
-            "tool_call",
-            "usage",
-            "|script:skill_intelligence|",
-            "raw:line:1",
-            "session.manifest.json",
-            "{}",
-        ),
-    )
-    conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+        route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (route_signal,)).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"event:observed-route:{event_id}",
+                "event",
+                "observed-route",
+                "observed-route",
+                "2026-06-26",
+                event_id,
+                "COMMAND",
+                "tool_call",
+                "usage",
+                f"|{route_signal}|",
+                f"raw:line:{int(event_id)}",
+                "session.manifest.json",
+                "{}",
+            ),
+        )
+        conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+
+    insert_observed_route("script", "skill_intelligence", event_id="000001")
+    insert_observed_route("goal", "goal_inspected", event_id="000002")
+    insert_observed_route("git", "commit", event_id="000003")
+    insert_observed_route("agent", "sub_agent", event_id="000004")
+    insert_observed_route("decision_thread", "open_thread", event_id="000005")
+    insert_observed_route("failure_mode", "test_failure", event_id="000006")
+    insert_observed_route("hook_health", "userpromptsubmit", event_id="000007")
+    insert_observed_route("agent_event", "assistant_answer", event_id="000008")
+    insert_observed_route("owner_route", "abyss_stack", event_id="000009")
+    insert_observed_route("route_next_action", "repair", event_id="000010")
     conn.commit()
     conn.close()
 
@@ -2406,6 +2420,35 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
     assert lookup["entries"][0]["source_surface"] == "archived_route_terms"
     assert lookup["entries"][0]["freshness"]["signal_count"] == 1
     assert lookup["entries"][0]["freshness"]["session_count"] == 1
+
+    observed_expectations = [
+        ("goal_inspected", "goal", "goal_inspected", "goal:goal_inspected"),
+        ("commit", "git", "commit", "git:commit"),
+        ("sub_agent", "agent", "sub_agent", "agent:sub_agent"),
+        ("open_thread", "decision", "open_thread", "decision_thread:open_thread"),
+        ("test_failure", "error", "test_failure", "failure_mode:test_failure"),
+        ("userpromptsubmit", "receipt", "userpromptsubmit", "hook_health:userpromptsubmit"),
+        ("assistant_answer", "agent_event", "assistant_answer", "agent_event:assistant_answer"),
+        ("abyss_stack", "owner_route", "abyss_stack", "owner_route:abyss_stack"),
+        ("repair", "route_next_action", "repair", "route_next_action:repair"),
+    ]
+    for anchor, kind, key, route_signal in observed_expectations:
+        typed_lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor=anchor, kind=kind)
+        assert typed_lookup["agent_route_packet"]["registered"] is True
+        assert typed_lookup["entries"][0]["kind"] == kind
+        assert typed_lookup["entries"][0]["canonical_key"] == key
+        assert typed_lookup["entries"][0]["route_signal"] == route_signal
+        assert typed_lookup["entries"][0]["status"] == "observed"
+        assert typed_lookup["entries"][0]["source_surface"] == "archived_route_terms"
+
+    receipt_candidates = module.trace_route_candidates("userpromptsubmit", kind="receipt")
+    error_candidates = module.trace_route_candidates("test_failure", kind="error")
+    owner_route_candidates = module.trace_route_candidates("abyss_stack", kind="owner_route")
+    next_action_candidates = module.trace_route_candidates("repair", kind="route_next_action")
+    assert any(candidate["route_signal"] == "hook_health:userpromptsubmit" for candidate in receipt_candidates)
+    assert any(candidate["route_signal"] == "failure_mode:test_failure" for candidate in error_candidates)
+    assert any(candidate["route_signal"] == "owner_route:abyss_stack" for candidate in owner_route_candidates)
+    assert any(candidate["route_signal"] == "route_next_action:repair" for candidate in next_action_candidates)
 
 
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:

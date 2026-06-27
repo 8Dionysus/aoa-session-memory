@@ -643,16 +643,25 @@ ENTITY_REGISTRY_KINDS = (
     "tool",
     "api",
     "plugin",
+    "agent",
     "hook",
+    "receipt",
     "script",
     "validator",
     "test",
     "eval",
+    "git",
     "playbook",
     "technique",
     "mechanic",
     "graph",
     "memory",
+    "goal",
+    "agent_event",
+    "decision",
+    "error",
+    "owner_route",
+    "route_next_action",
 )
 ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND = {
     "skill": "skill",
@@ -661,16 +670,25 @@ ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND = {
     "tool": "tool",
     "api": "api",
     "plugin": "plugin",
+    "agent": "agent",
     "hook": "hook",
+    "receipt": "hook_health",
     "script": "script",
     "validator": "validator",
     "test": "test",
     "eval": "eval",
+    "git": "git",
     "playbook": "playbook",
     "technique": "technique",
     "mechanic": "mechanic",
     "graph": "graph",
     "memory": "memory",
+    "goal": "goal",
+    "agent_event": "agent_event",
+    "decision": "decision_thread",
+    "error": "failure_mode",
+    "owner_route": "owner_route",
+    "route_next_action": "route_next_action",
 }
 ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER = {
     "skill": "skill",
@@ -678,16 +696,25 @@ ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER = {
     "tool": "tool",
     "api": "api",
     "plugin": "plugin",
+    "agent": "agent",
     "hook": "hook",
+    "hook_health": "receipt",
     "script": "script",
     "validator": "validator",
     "test": "test",
     "eval": "eval",
+    "git": "git",
     "playbook": "playbook",
     "technique": "technique",
     "mechanic": "mechanic",
     "graph": "graph",
     "memory": "memory",
+    "goal": "goal",
+    "agent_event": "agent_event",
+    "decision_thread": "decision",
+    "failure_mode": "error",
+    "owner_route": "owner_route",
+    "route_next_action": "route_next_action",
 }
 ENTITY_REGISTRY_RETIRED_SOURCE_KINDS = {"skill", "mcp_service"}
 
@@ -35151,6 +35178,7 @@ TRACE_ROUTE_KINDS = {
     "skill",
     "mcp",
     "hook",
+    "receipt",
     "tool",
     "api",
     "agent_event",
@@ -35170,12 +35198,18 @@ TRACE_ROUTE_KINDS = {
     "path",
     "goal",
     "failure",
+    "error",
     "decision",
+    "owner_route",
+    "route_next_action",
     "external",
 }
 TRACE_ROUTE_KIND_ALIASES = {
     "mcp_service": "mcp",
     "mcp_tool": "tool",
+    "failure_mode": "failure",
+    "hook_health": "receipt",
+    "route": "owner_route",
 }
 TRACE_ROUTE_KIND_CHOICES = sorted(TRACE_ROUTE_KINDS | set(TRACE_ROUTE_KIND_ALIASES))
 
@@ -35251,7 +35285,7 @@ def infer_trace_route_kinds(anchor: str, explicit_kind: str = "auto") -> list[st
     if "mcp" in lowered or any(canonical_mcp_service_key(alias, path_source="/" in alias) for alias in aliases):
         add_kind("mcp")
     hook_names = {route_key_slug(name, fallback=name) for name in HOOK_EVENT_ORDER}
-    if "hook" in lowered or route_key_slug(lowered, fallback="") in hook_names:
+    if "hook" in lowered or "receipt" in lowered or route_key_slug(lowered, fallback="") in hook_names:
         add_kind("hook")
     if "api" in lowered or any(api_entity_candidates_from_texts([alias]) for alias in aliases):
         add_kind("api")
@@ -35292,7 +35326,7 @@ def infer_trace_route_kinds(anchor: str, explicit_kind: str = "auto") -> list[st
         add_kind("path")
     if "goal" in lowered or "цель" in lowered or route_key_slug(lowered, fallback="") in {"create_goal", "update_goal", "get_goal", "goal_created", "goal_updated", "goal_completed", "goal_blocked", "goal_inspected"}:
         add_kind("goal")
-    if "failure" in lowered or "failed" in lowered or "ошиб" in lowered or "timeout" in lowered or "stale" in lowered:
+    if "failure" in lowered or "failed" in lowered or "error" in lowered or "ошиб" in lowered or "timeout" in lowered or "stale" in lowered:
         add_kind("failure")
     if "decision" in lowered or "assumption" in lowered or "open thread" in lowered or "решен" in lowered:
         add_kind("decision")
@@ -35390,7 +35424,7 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
         if any(alias in {"read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates"} for alias in aliases):
             add_candidate("external_snapshot", "mcp", source="mcp_tool_alias", detail=anchor)
 
-    if "hook" in kinds:
+    if any(item in kinds for item in {"hook", "receipt"}):
         add_candidate("hook_health", "", source="hook_layer_hint", confidence="low", detail="generic hook route layer")
         hook_slug_by_name = {route_key_slug(name, fallback=name): name for name in HOOK_EVENT_ORDER}
         for alias in aliases:
@@ -35401,7 +35435,8 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
             add_candidate("hook_health", "raw_unavailable", source="hook_health_alias", confidence="high", detail=anchor)
         if "deferred" in lowered or "queue" in lowered or "worker" in lowered:
             add_candidate("hook_health", "deferred_sync_or_worker_queue", source="hook_health_alias", confidence="medium", detail=anchor)
-        add_candidate("mutation_surface", "hooks", source="hook_surface_alias", confidence="medium", detail=anchor)
+        if "hook" in kinds:
+            add_candidate("mutation_surface", "hooks", source="hook_surface_alias", confidence="medium", detail=anchor)
 
     if "goal" in kinds:
         add_candidate("goal", "", source="goal_layer_hint", confidence="low", detail="generic goal route layer")
@@ -35423,7 +35458,7 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
             elif slug and slug not in {"goal", "цель"}:
                 add_candidate("goal", slug, source="goal_alias", confidence="medium", detail=alias)
 
-    if "failure" in kinds:
+    if any(item in kinds for item in {"failure", "error"}):
         add_candidate("failure_mode", "", source="failure_layer_hint", confidence="low", detail="generic failure route layer")
         failure_aliases = {
             "timeout": "timeout",
@@ -35461,6 +35496,20 @@ def trace_route_candidates(anchor: str, *, kind: str = "auto") -> list[dict[str,
             key = decision_aliases.get(slug, slug if slug and slug not in {"decision", "решение"} else "")
             if key:
                 add_candidate("decision_thread", key, source="decision_alias", confidence="medium", detail=alias)
+
+    if "owner_route" in kinds:
+        add_candidate("owner_route", "", source="owner_route_layer_hint", confidence="low", detail="generic owner-route layer")
+        for alias in aliases:
+            slug = route_key_slug(alias, fallback="")
+            if slug and slug not in {"owner_route", "route"}:
+                add_candidate("owner_route", slug, source="owner_route_alias", confidence="medium", detail=alias)
+
+    if "route_next_action" in kinds:
+        add_candidate("route_next_action", "", source="route_next_action_layer_hint", confidence="low", detail="generic route-next-action layer")
+        for alias in aliases:
+            slug = route_key_slug(alias, fallback="")
+            if slug and slug not in {"route_next_action", "route", "next_action"}:
+                add_candidate("route_next_action", slug, source="route_next_action_alias", confidence="medium", detail=alias)
 
     if "tool" in kinds:
         add_candidate("tool", "", source="tool_layer_hint", confidence="low", detail="generic tool route layer")
@@ -50864,7 +50913,7 @@ def session_memory_maintenance_status(
     )
     agent_route["entity_registry_status"] = entity_registry.get("status")
     agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
-    agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, script, validator, test, eval, graph, or memory entity."
+    agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, agent, script, validator, test, eval, git, graph, memory, goal, event class, decision thread, error, receipt, or route entity."
     latest_reports = {
         "auto_maintenance": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-*.json", exclude_markers=("__auto-maintenance-resource-",)),
         "auto_maintenance_resource": latest_diagnostic_summary(aoa_root, "*__auto-maintenance-resource-*.json"),
@@ -50905,7 +50954,7 @@ def session_memory_maintenance_status(
             )
             agent_route["entity_registry_status"] = entity_registry.get("status")
             agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
-            agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, script, validator, test, eval, graph, or memory entity."
+            agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, agent, script, validator, test, eval, git, graph, memory, goal, event class, decision thread, error, receipt, or route entity."
         elif not any(isinstance(action, dict) and action.get("id") == search_shard_next_action.get("id") for action in next_actions):
             next_actions.append(search_shard_next_action)
     timers_status = session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": [], "diagnostics": []}
@@ -53808,7 +53857,7 @@ ENTITY_USAGE_SCENARIO_LAYER_KIND = {
     "plugin": "plugin",
     "agent": "agent",
     "hook": "hook",
-    "hook_health": "hook",
+    "hook_health": "receipt",
     "script": "script",
     "validator": "validator",
     "test": "test",
@@ -53823,7 +53872,7 @@ ENTITY_USAGE_SCENARIO_LAYER_KIND = {
     "path": "path",
     "goal": "goal",
     "agent_event": "agent_event",
-    "failure_mode": "failure",
+    "failure_mode": "error",
     "decision_thread": "decision",
     "external_snapshot": "external",
     "delivery_state": "git",

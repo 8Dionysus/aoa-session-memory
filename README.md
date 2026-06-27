@@ -1117,7 +1117,10 @@ index build, entity-registry refresh, and search-catalog refresh so long paths
 are diagnosable.
 
 Build or inspect the generated entity registry for skills, MCPs, hooks, tools,
-APIs, scripts, validators, tests, evals, graph, and memory surfaces:
+APIs, plugins, agents, scripts, validators, tests, evals, Git, playbooks,
+techniques, mechanics, graph and memory surfaces, goals, agent event classes,
+decision/open-thread signals, failure/error signals, hook-health receipts, and
+route signals:
 
 ```bash
 python3 scripts/aoa_session_memory.py entity-registry \
