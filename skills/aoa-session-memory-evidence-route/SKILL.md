@@ -52,9 +52,10 @@ Use these first routes when available:
   `literal-query-plan` first; follow its cheaper structured route or bounded
   raw fallback. For commands, use the planner's command anchor for structured
   routes and preserve the full command text for exact recall.
-- relation/topology question between entities: `graph-neighborhood`,
-  `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with compact
-  node, edge, and evidence budgets.
+- relation/topology question between entities: `graph-bridge` first when the
+  question asks how two anchors connect; otherwise `graph-neighborhood`,
+  `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
+  compact node, edge, and evidence budgets.
 
 ## MCP Preference
 
@@ -73,6 +74,7 @@ query is fuzzy:
 - before/after usage windows: `aoa_session_entity_usage_neighborhood`
 - hook receipts and hook failures: `aoa_session_hook_receipts`
 - graph topology: `aoa_session_graph_neighborhood`
+- graph relation bridge: `aoa_session_graph_bridge`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
 
 Then call the MCP tool with the same typed anchor/kind that the CLI route would
@@ -99,6 +101,7 @@ python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind 
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
+python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
 ```
 
 Name the fallback in the report. A missing MCP tool or closed MCP transport is

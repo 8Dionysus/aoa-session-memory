@@ -4727,6 +4727,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     query_state = module.graph_store_query_state(aoa_root)
     storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
     cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
+    bridge = module.graph_bridge(
+        aoa_root=aoa_root,
+        source_anchor="aoa-session-memory-mcp",
+        target_anchor="exec_command",
+        source_kind="mcp",
+        target_kind="tool",
+        limit=4,
+        max_depth=4,
+    )
     packet = module.graph_rag_packet(
         aoa_root=aoa_root,
         query="aoa-session-memory-mcp",
@@ -4844,6 +4853,9 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert parser.parse_args(["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
     assert parser.parse_args(["graph-neighborhood", "aoa-session-memory-mcp", "--edge-limit", "5"]).edge_limit == 5
+    parsed_bridge = parser.parse_args(["graph-bridge", "aoa-session-memory-mcp", "exec_command", "--source-kind", "mcp", "--target-kind", "tool"])
+    assert parsed_bridge.source_kind == "mcp"
+    assert parsed_bridge.target_kind == "tool"
     assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer"]).use_shards is True
     assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer", "--no-shards"]).use_shards is False
     assert parser.parse_args(["answer-neighborhood", "--session", "latest"]).use_shards is True
@@ -4993,6 +5005,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
     assert "graph-cooccurrence" in cooccurrence["next_command"]
     assert "graph-cooccurrence" in cooccurrence["next_expansion_command"]
+    assert bridge["artifact_type"] == "session_memory_graph_bridge"
+    assert bridge["ok"] is True
+    assert bridge["normalized_entities"]["source"]["kind"] == "mcp"
+    assert bridge["normalized_entities"]["target"]["kind"] == "tool"
+    assert bridge["quality"]["one_short_route"] is True
+    assert bridge["quality"]["evidence_ref_count"] >= 1
+    assert bridge["quality"]["raw_or_segment_ref_present"] is True
+    assert "graph-bridge" in bridge["next_command"]
+    assert any(item.get("id") == "shortest_path" for item in bridge["next_expansion"])
     assert packet["ok"] is True
     assert packet["truth_status"] == "rag_graphrag_evidence_packet_not_reviewed_truth"
     assert packet["kind"] == "mcp"

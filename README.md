@@ -448,6 +448,7 @@ Query examples:
 
 ```bash
 python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --depth 2
+python3 scripts/aoa_session_memory.py graph-bridge aoa-session-memory-mcp exec_command --source-kind mcp --target-kind tool
 python3 scripts/aoa_session_memory.py graphrag-packet --query aoa-session-memory-mcp --anchor aoa-session-memory-mcp
 python3 scripts/aoa_session_memory.py graph-eval
 python3 scripts/aoa_session_memory.py graph-quality-audit --write-report
@@ -484,6 +485,10 @@ stable corruption.
 `entity-dossier` builds a human card for one stable anchor with strong refs,
 weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
 questions, and a read-first route.
+`graph-bridge` is the compact first graph route when the question is how two
+operational anchors are connected. It combines a bounded shortest path,
+source/target timeline samples, evidence refs, freshness, noise flags, and
+expansion commands without turning graph output into reviewed truth.
 
 Audit whether the 22 operational route layers are currently covered by
 session route indexes, source atlas axes, generated atlas entries, and the

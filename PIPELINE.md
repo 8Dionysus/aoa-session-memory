@@ -252,7 +252,8 @@ The route order is:
 5. goal lifecycle: `goal-lifecycles` before raw search;
 6. agent answer/task intervals: agent-event or task-episode routes;
 7. literal phrase/path/command/error/session id: `literal-query-plan`;
-8. topology: compact graph routes with explicit node/edge/evidence budgets.
+8. topology: `graph-bridge` for "how are X and Y connected?", then compact
+   graph routes with explicit node/edge/evidence budgets.
 
 Session-memory packets remain generated navigation and evidence routes. They
 must report freshness, truncation, refs, and next expansion, then hand decision
@@ -1309,6 +1310,7 @@ python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp 
 python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --depth 2 --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-timeline aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py graph-shortest-path aoa-session-memory-mcp exec_command --kind auto
+python3 scripts/aoa_session_memory.py graph-bridge aoa-session-memory-mcp exec_command --source-kind mcp --target-kind tool
 python3 scripts/aoa_session_memory.py graph-cooccurrence exec_command --kind tool
 ```
 
@@ -1317,6 +1319,10 @@ python3 scripts/aoa_session_memory.py graph-cooccurrence exec_command --kind too
 `omitted_node_count`, and `omitted_edge_count`; raise these budgets only for an
 explicit deeper relation walk, then verify important claims through raw,
 segment, or session refs.
+`graph-bridge` is the consumer route for relation questions between two
+operational anchors. It wraps shortest-path plus source/target timeline
+samples, freshness/noise flags, and next expansion commands; it remains
+generated route evidence, not reviewed truth.
 
 GraphRAG combines lexical search entrypoints, optional semantic/rerank overlays,
 graph-store expansion, cooccurrence clusters, evidence refs, and freshness:

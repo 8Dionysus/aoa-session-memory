@@ -46932,6 +46932,489 @@ def graph_shortest_path(
     }
 
 
+def graph_shortest_path_from_packets(
+    *,
+    aoa_root: Path,
+    source_anchor: str,
+    target_anchor: str,
+    source_packet: dict[str, Any],
+    target_packet: dict[str, Any],
+    kind: str = "auto",
+    source_kind: str = "auto",
+    target_kind: str = "auto",
+    max_depth: int = 4,
+) -> dict[str, Any]:
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    source_route_kind = normalize_trace_route_kind(source_kind)
+    if source_route_kind not in TRACE_ROUTE_KINDS:
+        source_route_kind = route_kind
+    target_route_kind = normalize_trace_route_kind(target_kind)
+    if target_route_kind not in TRACE_ROUTE_KINDS:
+        target_route_kind = route_kind
+    graph = {
+        "source": "bounded_shortest_path_side_neighborhoods",
+        "generated_at": utc_now(),
+        "nodes": graph_unique_records(
+            [
+                *(source_packet.get("nodes", []) if isinstance(source_packet.get("nodes"), list) else []),
+                *(target_packet.get("nodes", []) if isinstance(target_packet.get("nodes"), list) else []),
+            ],
+            limit=120,
+        ),
+        "edges": graph_unique_records(
+            [
+                *(source_packet.get("edges", []) if isinstance(source_packet.get("edges"), list) else []),
+                *(target_packet.get("edges", []) if isinstance(target_packet.get("edges"), list) else []),
+            ],
+            limit=180,
+        ),
+        "diagnostics": [
+            *(source_packet.get("diagnostics", []) if isinstance(source_packet.get("diagnostics"), list) else []),
+            *(target_packet.get("diagnostics", []) if isinstance(target_packet.get("diagnostics"), list) else []),
+        ],
+    }
+    node_map = graph_node_by_id(graph)
+    edge_map = graph_edge_by_id(graph)
+    source = resolve_graph_anchor(graph, source_anchor, kind=source_route_kind, limit=30)
+    target = resolve_graph_anchor(graph, target_anchor, kind=target_route_kind, limit=30)
+    target_ids = set(target.get("start_node_ids", []))
+    adjacency = graph_adjacency(graph.get("edges", []) if isinstance(graph.get("edges"), list) else [])
+    max_depth = max(1, min(int_value(max_depth, 4), 8))
+    queue: deque[tuple[str, list[str], list[str]]] = deque((node_id, [node_id], []) for node_id in source.get("start_node_ids", []))
+    seen: set[str] = set()
+    found_nodes: list[str] = []
+    found_edges: list[str] = []
+    while queue:
+        node_id, path_nodes, path_edges = queue.popleft()
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        if node_id in target_ids:
+            found_nodes = path_nodes
+            found_edges = path_edges
+            break
+        if len(path_edges) >= max_depth:
+            continue
+        for neighbor, edge_id in adjacency.get(node_id, []):
+            if neighbor in path_nodes:
+                continue
+            queue.append((neighbor, [*path_nodes, neighbor], [*path_edges, edge_id]))
+    nodes = [node_map[node_id] for node_id in found_nodes if node_id in node_map]
+    edges = [edge_map[edge_id] for edge_id in found_edges if edge_id in edge_map]
+    evidence_refs = graph_collect_evidence(nodes, edges)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_shortest_path",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(found_nodes),
+        "mutates": False,
+        "truth_status": "graph_path_packet_not_reviewed_truth",
+        "source_anchor": source_anchor,
+        "target_anchor": target_anchor,
+        "source_resolved": source,
+        "target_resolved": target,
+        "max_depth": max_depth,
+        "path_length": len(edges) if edges else 0,
+        "nodes": [graph_compact_node_for_packet(node) for node in nodes],
+        "edges": [graph_compact_edge_for_packet(edge) for edge in edges],
+        "evidence_refs": evidence_refs,
+        "freshness": graph_freshness(aoa_root, graph),
+        "diagnostics": graph.get("diagnostics", []),
+        "next_route": "verify path claims through raw_ref, segment_ref, and session_ref before promotion",
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-shortest-path",
+            anchors=[source_anchor, target_anchor],
+            kind=kind,
+            route_kind=route_kind,
+            max_depth=max_depth,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-shortest-path",
+            anchors=[source_anchor, target_anchor],
+            kind=kind,
+            route_kind=route_kind,
+            max_depth=min(max_depth + 1, 8),
+        ),
+        "next_expansion_reason": "Increase bounded max depth when no bridge is found or a longer relation chain is acceptable.",
+    }
+
+
+def graph_bridge_command_line(
+    *,
+    aoa_root: Path,
+    source_anchor: str,
+    target_anchor: str,
+    kind: str,
+    route_kind: str,
+    source_kind: str,
+    source_route_kind: str,
+    target_kind: str,
+    target_route_kind: str,
+    limit: int,
+    max_depth: int,
+) -> str:
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "graph-bridge",
+        source_anchor,
+        target_anchor,
+        "--aoa-root",
+        str(aoa_root),
+        "--kind",
+        graph_packet_cli_kind(kind, route_kind),
+        "--limit",
+        str(max(1, int_value(limit, 8))),
+        "--max-depth",
+        str(max(1, min(int_value(max_depth, 4), 8))),
+    ]
+    if str(source_kind or ""):
+        command.extend(["--source-kind", graph_packet_cli_kind(source_kind, source_route_kind)])
+    if str(target_kind or ""):
+        command.extend(["--target-kind", graph_packet_cli_kind(target_kind, target_route_kind)])
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def graph_bridge_entity_summary(
+    *,
+    anchor: str,
+    requested_kind: str,
+    route_kind: str,
+    resolved: dict[str, Any],
+    timeline: dict[str, Any],
+) -> dict[str, Any]:
+    route_key = route_key_slug(anchor, fallback="entity", max_chars=80)
+    route_signal = f"{route_kind}:{route_key}" if route_kind != "auto" and route_key else ""
+    return {
+        "anchor": anchor,
+        "route_key": route_key,
+        "kind": route_kind,
+        "requested_kind": str(requested_kind or "auto"),
+        "route_signal": route_signal,
+        "resolver_strategy": resolved.get("resolver_strategy"),
+        "resolved_start_node_count": len(resolved.get("start_node_ids", []) if isinstance(resolved.get("start_node_ids"), list) else []),
+        "timeline_event_count": int_value(timeline.get("event_count"), len(timeline.get("events") or [])),
+        "timeline_ok": bool(timeline.get("ok")),
+    }
+
+
+def graph_bridge_compact_node(node: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "id",
+        "type",
+        "label",
+        "title",
+        "event_type",
+        "session_act",
+        "conversation_act",
+        "session_id",
+        "session_label",
+        "segment_id",
+        "event_id",
+        "timestamp",
+        "line",
+        "route_signal_count",
+    ):
+        if node.get(key) not in (None, "", [], {}):
+            compact[key] = node.get(key)
+    if isinstance(node.get("refs"), dict) and node["refs"]:
+        compact["refs"] = node["refs"]
+    elif isinstance(node.get("evidence_refs"), list):
+        for ref in node["evidence_refs"]:
+            refs = ref.get("refs") if isinstance(ref, dict) and isinstance(ref.get("refs"), dict) else {}
+            if refs:
+                compact["refs"] = refs
+                break
+    if isinstance(node.get("evidence_refs"), list) and node["evidence_refs"]:
+        compact["evidence_ref_count"] = len(node["evidence_refs"])
+    return compact
+
+
+def graph_bridge_compact_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("id", "type", "source", "target", "count"):
+        if edge.get(key) not in (None, "", [], {}):
+            compact[key] = edge.get(key)
+    if isinstance(edge.get("evidence_refs"), list) and edge["evidence_refs"]:
+        compact["evidence_ref_count"] = len(edge["evidence_refs"])
+    return compact
+
+
+def graph_bridge_evidence_refs(refs: list[Any], *, limit: int) -> list[Any]:
+    selected: list[Any] = []
+    seen: set[str] = set()
+    for ref in refs:
+        values = graph_ref_values(ref)
+        if any(values.get(key) for key in ("session", "segment", "raw")):
+            token = "|".join(str(values.get(key) or "") for key in ("session", "segment", "raw"))
+        else:
+            token = "|".join(str(values.get(key) or "") for key in ("session_id", "segment_id", "event_id"))
+        if not token.strip("|"):
+            token = graph_evidence_ref_token(ref)
+        if token in seen:
+            continue
+        seen.add(token)
+        selected.append(ref)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def graph_bridge_compact_freshness(packet: dict[str, Any]) -> dict[str, Any]:
+    freshness = packet.get("freshness") if isinstance(packet.get("freshness"), dict) else {}
+    compact = {
+        key: freshness.get(key)
+        for key in (
+            "status",
+            "graph_source",
+            "graph_generated_at",
+            "search_index_generated_at",
+            "hot_gate_status",
+            "needs_maintenance",
+            "needs_full_rebuild",
+            "actionable_graph_source_count",
+            "deferred_live_source_count",
+            "ledger_store_missing_count",
+            "latest_maintenance_remaining_count",
+        )
+        if freshness.get(key) not in (None, "", [], {})
+    }
+    recommendation = freshness.get("maintenance_recommendation") if isinstance(freshness.get("maintenance_recommendation"), dict) else {}
+    if recommendation and recommendation.get("route") not in (None, "", "none"):
+        compact["maintenance_recommendation"] = {
+            key: recommendation.get(key)
+            for key in ("route", "reason", "command", "actionable_count", "blocked_count")
+            if recommendation.get(key) not in (None, "", [], {})
+        }
+    return compact
+
+
+def graph_bridge(
+    *,
+    aoa_root: Path,
+    source_anchor: str,
+    target_anchor: str,
+    kind: str = "auto",
+    source_kind: str = "",
+    target_kind: str = "",
+    max_depth: int = 4,
+    limit: int = 8,
+) -> dict[str, Any]:
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    normalized_source_kind = normalize_trace_route_kind(source_kind or route_kind)
+    source_route_kind = normalized_source_kind if normalized_source_kind in TRACE_ROUTE_KINDS else route_kind
+    normalized_target_kind = normalize_trace_route_kind(target_kind or route_kind)
+    target_route_kind = normalized_target_kind if normalized_target_kind in TRACE_ROUTE_KINDS else route_kind
+    selected_limit = max(1, min(int_value(limit, 8), 30))
+    selected_max_depth = max(1, min(int_value(max_depth, 4), 8))
+
+    bridge_node_limit = max(selected_limit * 4, 16)
+    bridge_edge_limit = max(selected_limit * 8, 32)
+    source_neighborhood = graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=source_anchor,
+        kind=source_route_kind,
+        depth=2,
+        limit=bridge_node_limit,
+        edge_limit=bridge_edge_limit,
+    )
+    target_neighborhood = graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=target_anchor,
+        kind=target_route_kind,
+        depth=2,
+        limit=bridge_node_limit,
+        edge_limit=bridge_edge_limit,
+    )
+    path = graph_shortest_path_from_packets(
+        aoa_root=aoa_root,
+        source_anchor=source_anchor,
+        target_anchor=target_anchor,
+        source_packet=source_neighborhood,
+        target_packet=target_neighborhood,
+        kind=route_kind,
+        source_kind=source_route_kind,
+        target_kind=target_route_kind,
+        max_depth=selected_max_depth,
+    )
+    source_timeline = graph_timeline(
+        aoa_root=aoa_root,
+        anchor=source_anchor,
+        kind=source_route_kind,
+        limit=selected_limit,
+    )
+    target_timeline = graph_timeline(
+        aoa_root=aoa_root,
+        anchor=target_anchor,
+        kind=target_route_kind,
+        limit=selected_limit,
+    )
+
+    path_nodes = path.get("nodes") if isinstance(path.get("nodes"), list) else []
+    path_edges = path.get("edges") if isinstance(path.get("edges"), list) else []
+    source_events = source_timeline.get("events") if isinstance(source_timeline.get("events"), list) else []
+    target_events = target_timeline.get("events") if isinstance(target_timeline.get("events"), list) else []
+    evidence_refs = graph_bridge_evidence_refs(
+        [
+            *(path.get("evidence_refs", []) if isinstance(path.get("evidence_refs"), list) else []),
+            *(source_timeline.get("evidence_refs", []) if isinstance(source_timeline.get("evidence_refs"), list) else []),
+            *(target_timeline.get("evidence_refs", []) if isinstance(target_timeline.get("evidence_refs"), list) else []),
+        ],
+        limit=80,
+    )
+    ref_counts = graph_ref_quality_counts(evidence_refs)
+    path_found = bool(path.get("ok") and path_nodes)
+    noise_flags: list[str] = []
+    if not path_found:
+        noise_flags.append("no_bounded_graph_path_found")
+    if not evidence_refs:
+        noise_flags.append("no_evidence_refs_returned")
+    if not (ref_counts.get("raw_ref_count") or ref_counts.get("segment_ref_count")):
+        noise_flags.append("no_raw_or_segment_refs")
+    for label, packet in (("path", path), ("source_timeline", source_timeline), ("target_timeline", target_timeline)):
+        freshness = packet.get("freshness") if isinstance(packet.get("freshness"), dict) else {}
+        if freshness.get("needs_maintenance") or freshness.get("status") in {"stale", "graph_store_stale"}:
+            noise_flags.append(f"{label}_freshness_requires_attention")
+    for label, packet in (("source_neighborhood", source_neighborhood), ("target_neighborhood", target_neighborhood)):
+        freshness = packet.get("freshness") if isinstance(packet.get("freshness"), dict) else {}
+        if freshness.get("needs_maintenance") or freshness.get("status") in {"stale", "graph_store_stale"}:
+            noise_flags.append(f"{label}_freshness_requires_attention")
+
+    current_command = graph_bridge_command_line(
+        aoa_root=aoa_root,
+        source_anchor=source_anchor,
+        target_anchor=target_anchor,
+        kind=kind,
+        route_kind=route_kind,
+        source_kind=source_kind,
+        source_route_kind=source_route_kind,
+        target_kind=target_kind,
+        target_route_kind=target_route_kind,
+        limit=selected_limit,
+        max_depth=selected_max_depth,
+    )
+    expansion_command = graph_bridge_command_line(
+        aoa_root=aoa_root,
+        source_anchor=source_anchor,
+        target_anchor=target_anchor,
+        kind=kind,
+        route_kind=route_kind,
+        source_kind=source_kind,
+        source_route_kind=source_route_kind,
+        target_kind=target_kind,
+        target_route_kind=target_route_kind,
+        limit=graph_packet_expanded_limit(selected_limit, default=selected_limit, maximum=30),
+        max_depth=min(selected_max_depth + 1, 8),
+    )
+    source_resolved = path.get("source_resolved") if isinstance(path.get("source_resolved"), dict) else {}
+    target_resolved = path.get("target_resolved") if isinstance(path.get("target_resolved"), dict) else {}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_bridge",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(path_found or evidence_refs or source_events or target_events),
+        "mutates": False,
+        "truth_status": "graph_bridge_packet_not_reviewed_truth",
+        "source_anchor": source_anchor,
+        "target_anchor": target_anchor,
+        **trace_kind_payload_fields(kind, route_kind),
+        "source_kind": source_route_kind,
+        "target_kind": target_route_kind,
+        "normalized_entities": {
+            "source": graph_bridge_entity_summary(
+                anchor=source_anchor,
+                requested_kind=source_kind or route_kind,
+                route_kind=source_route_kind,
+                resolved=source_resolved,
+                timeline=source_timeline,
+            ),
+            "target": graph_bridge_entity_summary(
+                anchor=target_anchor,
+                requested_kind=target_kind or route_kind,
+                route_kind=target_route_kind,
+                resolved=target_resolved,
+                timeline=target_timeline,
+            ),
+        },
+        "bridge": {
+            "path_found": path_found,
+            "path_length": int_value(path.get("path_length"), len(path_edges)),
+            "max_depth": selected_max_depth,
+            "nodes": [graph_bridge_compact_node(node) for node in path_nodes[:selected_limit] if isinstance(node, dict)],
+            "edges": [graph_bridge_compact_edge(edge) for edge in path_edges[: max(selected_limit * 2, selected_limit)] if isinstance(edge, dict)],
+            "evidence_refs": (path.get("evidence_refs", []) if isinstance(path.get("evidence_refs"), list) else [])[:selected_limit],
+            "next_expansion_command": path.get("next_expansion_command"),
+        },
+        "usage_chain": {
+            "source_event_count": int_value(source_timeline.get("event_count"), len(source_events)),
+            "target_event_count": int_value(target_timeline.get("event_count"), len(target_events)),
+            "source_events": [graph_bridge_compact_node(event) for event in source_events[:selected_limit] if isinstance(event, dict)],
+            "target_events": [graph_bridge_compact_node(event) for event in target_events[:selected_limit] if isinstance(event, dict)],
+        },
+        "evidence_refs": evidence_refs[: max(selected_limit * 3, selected_limit)],
+        "evidence_ref_count": len(evidence_refs),
+        "freshness": {
+            "path": graph_bridge_compact_freshness(path),
+            "source_timeline": graph_bridge_compact_freshness(source_timeline),
+            "target_timeline": graph_bridge_compact_freshness(target_timeline),
+            "source_neighborhood": graph_bridge_compact_freshness(source_neighborhood),
+            "target_neighborhood": graph_bridge_compact_freshness(target_neighborhood),
+        },
+        "quality": {
+            "one_short_route": True,
+            "path_found": path_found,
+            "path_length": int_value(path.get("path_length"), len(path_edges)),
+            "path_node_count": len(path_nodes),
+            "path_edge_count": len(path_edges),
+            "source_event_count": int_value(source_timeline.get("event_count"), len(source_events)),
+            "target_event_count": int_value(target_timeline.get("event_count"), len(target_events)),
+            "source_neighborhood_node_count": int_value(source_neighborhood.get("node_count"), len(source_neighborhood.get("nodes") or [])),
+            "target_neighborhood_node_count": int_value(target_neighborhood.get("node_count"), len(target_neighborhood.get("nodes") or [])),
+            "evidence_ref_count": len(evidence_refs),
+            "raw_or_segment_ref_present": bool(ref_counts.get("raw_ref_count") or ref_counts.get("segment_ref_count")),
+            "ref_counts": ref_counts,
+            "noise_flag_count": len(noise_flags),
+        },
+        "noise_flags": noise_flags,
+        "diagnostics": [
+            *(path.get("diagnostics", []) if isinstance(path.get("diagnostics"), list) else []),
+            *(source_timeline.get("diagnostics", []) if isinstance(source_timeline.get("diagnostics"), list) else []),
+            *(target_timeline.get("diagnostics", []) if isinstance(target_timeline.get("diagnostics"), list) else []),
+            *(source_neighborhood.get("diagnostics", []) if isinstance(source_neighborhood.get("diagnostics"), list) else []),
+            *(target_neighborhood.get("diagnostics", []) if isinstance(target_neighborhood.get("diagnostics"), list) else []),
+        ],
+        "next_route": "Use graph-bridge as a compact relation route; verify important claims through raw_ref, segment_ref, and owner source surfaces.",
+        "next_command": current_command,
+        "next_expansion_command": expansion_command,
+        "next_expansion": [
+            {
+                "id": "shortest_path",
+                "command": path.get("next_expansion_command"),
+                "use_when": "the bounded bridge path is missing or a longer relation chain is acceptable",
+            },
+            {
+                "id": "source_timeline",
+                "command": source_timeline.get("next_expansion_command"),
+                "use_when": "source-side usage/event ordering needs more examples",
+            },
+            {
+                "id": "target_timeline",
+                "command": target_timeline.get("next_expansion_command"),
+                "use_when": "target-side usage/event ordering needs more examples",
+            },
+        ],
+        "authority_boundary": "graph bridge routes relation evidence only; raw/segment refs and owner source surfaces remain stronger.",
+    }
+    return payload
+
+
 def graph_cooccurrence_from_packet(
     *,
     aoa_root: Path,
@@ -55888,6 +56371,19 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         )
         if ok and not (result["node_count"] or result["edge_count"] or result["evidence_ref_count"]):
             result["status"] = "warn"
+    elif profile == "graph_bridge":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        result.update(
+            {
+                "path_found": quality.get("path_found"),
+                "path_length": int_value(quality.get("path_length")),
+                "evidence_ref_count": int_value(quality.get("evidence_ref_count"), len(payload.get("evidence_refs") or [])),
+                "source_event_count": int_value(quality.get("source_event_count")),
+                "target_event_count": int_value(quality.get("target_event_count")),
+            }
+        )
+        if ok and not result["evidence_ref_count"]:
+            result["status"] = "warn"
     if not ok:
         result["status"] = "failed"
     if not counts and profile != "literal_planner":
@@ -55939,6 +56435,7 @@ def live_scenario_audit(
         "agent_closeout",
         "literal_planner",
         "graph_neighborhood",
+        "graph_bridge",
     }
     default_profiles = [
         "entity_dossier",
@@ -55948,6 +56445,7 @@ def live_scenario_audit(
         "agent_closeout",
         "literal_planner",
         "graph_neighborhood",
+        "graph_bridge",
     ]
     selected_profiles: list[str] = []
     diagnostics: list[str] = []
@@ -56056,6 +56554,21 @@ def live_scenario_audit(
                         kind="mcp",
                         limit=max(selected_limit, 4),
                         edge_limit=max(selected_limit * 4, 8),
+                    ),
+                )
+            )
+        elif profile == "graph_bridge":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_bridge(
+                        aoa_root=aoa_root,
+                        source_anchor="aoa-session-memory-mcp",
+                        target_anchor="exec_command",
+                        source_kind="mcp",
+                        target_kind="tool",
+                        limit=max(selected_limit, 4),
+                        max_depth=4,
                     ),
                 )
             )
@@ -58680,6 +59193,23 @@ def command_graph_shortest_path(args: argparse.Namespace) -> int:
         target_anchor=args.target,
         kind=args.kind,
         max_depth=args.max_depth,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_graph_bridge(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = graph_bridge(
+        aoa_root=root,
+        source_anchor=args.source,
+        target_anchor=args.target,
+        kind=args.kind,
+        source_kind=args.source_kind,
+        target_kind=args.target_kind,
+        max_depth=args.max_depth,
+        limit=args.limit,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -64340,6 +64870,18 @@ def build_parser() -> argparse.ArgumentParser:
     graph_path_parser.add_argument("--max-depth", type=int, default=4)
     graph_path_parser.set_defaults(func=command_graph_shortest_path)
 
+    graph_bridge_parser = sub.add_parser("graph-bridge", help="Return a compact graph bridge packet between two operational anchors.")
+    graph_bridge_parser.add_argument("source", help="Source anchor.")
+    graph_bridge_parser.add_argument("target", help="Target anchor.")
+    graph_bridge_parser.add_argument("--workspace-root")
+    graph_bridge_parser.add_argument("--aoa-root")
+    graph_bridge_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
+    graph_bridge_parser.add_argument("--source-kind", choices=TRACE_ROUTE_KIND_CHOICES, default="")
+    graph_bridge_parser.add_argument("--target-kind", choices=TRACE_ROUTE_KIND_CHOICES, default="")
+    graph_bridge_parser.add_argument("--max-depth", type=int, default=4)
+    graph_bridge_parser.add_argument("--limit", type=int, default=8)
+    graph_bridge_parser.set_defaults(func=command_graph_bridge)
+
     graph_cooccurrence_parser = sub.add_parser("graph-cooccurrence", help="Aggregate route-signal cooccurrences near an anchor.")
     graph_cooccurrence_parser.add_argument("anchor", help="Anchor to resolve into graph start nodes.")
     graph_cooccurrence_parser.add_argument("--workspace-root")
@@ -64577,7 +65119,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)

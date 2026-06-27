@@ -89,7 +89,8 @@ Build the `.aoa` session-memory mechanism end to end:
   route index already answered the question
 - Incremental graph store, sidecar snapshots, and GraphRAG packets:
   `graph-build`, `graph-maintenance`, `graph-neighborhood`,
-  `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`,
+  `graph-timeline`, `graph-shortest-path`, `graph-bridge`,
+  `graph-cooccurrence`,
   `graphrag-packet`, `graph-explain-packet`, `graph-eval`, and
   `graph-quality-audit` / `graph-quality-review`
 - Large-archive graph maintenance controls: store-only / in-place
@@ -1198,7 +1199,7 @@ Stress-pass evidence:
 | Agents can query route layers directly | `search --route-layer`, `search --route-signal`, SQLite route-signal columns |
 | The source atlas skeleton can be turned into generated entries and indexes | `atlas build`, `maps/by-*/entries/*.json`, `maps/by-*/INDEX.md`, atlas-build regression test |
 | Agents can maintain graph state incrementally by session/segment contribution | `graph/graph.sqlite3`, `graph-maintenance`, graph source states, dirty-source replacement regression test |
-| Agents can expand operational anchors through graph neighborhoods without losing evidence refs | `graph-build`, `graph-maintenance`, `graph-prune-sidecar`, `graph-neighborhood`, `graph-timeline`, `graph-shortest-path`, `graph-cooccurrence`, graph sidecar regression test |
+| Agents can expand operational anchors and bridge two operational anchors through graph packets without losing evidence refs | `graph-build`, `graph-maintenance`, `graph-prune-sidecar`, `graph-neighborhood`, `graph-timeline`, `graph-shortest-path`, `graph-bridge`, `graph-cooccurrence`, graph sidecar regression test |
 | GraphRAG packets combine lexical entrypoints, graph expansion, cooccurrence, refs, and freshness without promoting claims | `graphrag-packet`, `graph-eval`, graph/GraphRAG regression test |
 | Graph/RAG quality can be sampled before trusting an operational anchor route | `graph-quality-audit`, raw preview refs, freshness flags, graph quality regression test, 2026-05-26 live 9-anchor sample |
 | Graph/RAG quality verdicts can produce feedback and regression candidates without mutating evidence | `graph-quality-review`, verdict/action counts, quality feedback, regression candidates, graph quality review regression test |
