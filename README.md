@@ -210,6 +210,7 @@ evals, tests, validators, scripts, decisions, errors, and receipts.
 The first route should stay typed and cheap:
 
 ```bash
+python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py literal-query-plan "Traceback ValueError" --doc-type event
@@ -1132,7 +1133,10 @@ python3 scripts/aoa_session_memory.py entity-registry \
 
 Use `--lookup` for the agent hot path: it reads the generated snapshot and is
 the right first route for “does this entity exist / where is its source?”. Use
-`entity-usage-audit` when the question is “how was it used and what happened?”.
+`entity-dossier` when the question is “how was it used, what happened, which
+graph/ref context applies, and what should I open next?”. Use
+`entity-usage-audit` when the dossier is unavailable or the task needs the
+underlying usage/consequence event list.
 
 `maps/entity-registry.json` is generated navigation. It records active,
 observed, stale, removed, and unknown entity states so agents can route quickly
@@ -1238,6 +1242,11 @@ When a longer human phrase embeds a registered operational entity, such as
 `как агент использовал aoa-decision`, the planner routes first through the
 registry entity anchor (`aoa_decision`, `skill`) and keeps the original phrase
 as the exact raw-text fallback.
+Broad class questions such as `какие skills есть в системе` or
+`найди все MCP которые агент использовал` are classified separately from
+concrete anchors. The planner starts with typed registry/inventory routes, adds
+an entity-usage scenario sample when the question asks about use, errors, or
+consequences, and leaves full-text recall as the last safety net.
 Command literals are classified separately from plain paths: the planner uses
 the command anchor for structured route candidates and keeps the full command
 text as the exact raw-text fallback.

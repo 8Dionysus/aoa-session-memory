@@ -78,6 +78,10 @@ Build the `.aoa` session-memory mechanism end to end:
   harvest, avoids compressed full-body hydration when bounded search rows are
   enough, and only falls back to broad text search when structured route hits do
   not include direct usage evidence
+- Entity dossier consumer route: `entity-dossier` is the compact first packet
+  for operational entity usage/consequence/graph/ref questions; it routes to
+  usage audit, neighborhood windows, graph expansion, and raw/segment/session
+  refs without becoming owner truth
 - Route-trace resolver: `trace-route` / `resolve-anchor` over skill, MCP,
   hook, tool, Git/GitHub, entity, and path anchors; typed route hits now skip
   the broad text fallback once the requested evidence limit is satisfied, so

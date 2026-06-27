@@ -29,11 +29,18 @@ Use these first routes when available:
   exist”: `entity-registry --lookup <anchor> --kind <kind>` first. A registered
   source entity with zero session hits means “known but not yet observed in
   session usage”, not “missing”.
+- skill, MCP, hook, tool, API, script, validator, test, eval, graph, memory
+  surface, decision, error, receipt, or other operational entity usage:
+  `entity-dossier <anchor> --kind <kind>` first when the question asks how it
+  was used, what happened nearby, which graph/ref context applies, or which
+  expansion route to take next. Use the dossier as a compact route packet, not
+  as owner truth.
 - skill, MCP, tool, API, script, validator, test, eval, graph, memory surface:
-  `entity-usage-audit`, then `entity-usage-neighborhood` for before/after
-  evidence.
+  use `entity-usage-audit`, then `entity-usage-neighborhood` only when the
+  dossier is unavailable, truncated, stale, or too coarse for the needed
+  before/after evidence.
 - hook health or recent hook errors: `hook-receipts` first, then
-  `entity-usage-audit` for surrounding session evidence.
+  `entity-dossier` or `entity-usage-audit` for surrounding session evidence.
 - goal lifecycle: `goal-lifecycles` first, then task or answer routes by refs.
   Treat `observed_goal` / `state_observations` from `get_goal` output as
   observed state evidence, not as proof that a `create_goal` raw event exists;
@@ -59,6 +66,7 @@ For Codex tool discovery, search exact MCP tool names first when the general
 query is fuzzy:
 
 - literal planner: `aoa_session_literal_query_plan`
+- entity usage dossier: `aoa_session_entity_dossier`
 - typed entity inventory: `aoa_session_entity_inventory`
 - source/entity registry lookup: `aoa_session_entity_registry`
 - usage and consequence audit: `aoa_session_entity_usage_audit`
@@ -85,6 +93,7 @@ If configured stdio is green but the current Codex session has no fresh
 MCP freshness proof requires a Codex/MCP restart.
 
 ```bash
+python3 scripts/aoa_session_memory.py entity-dossier <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-audit <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
@@ -100,7 +109,7 @@ a runtime reload issue, not a reason to widen into unbounded raw search.
 Prefer packets that expose:
 
 - normalized entity or route candidates;
-- usage, result, outcome, consequence, and neighborhood counts;
+- usage, result, outcome, consequence, graph, and neighborhood counts;
 - freshness, ambiguity, truncation, and omitted counts;
 - `raw`, `segment`, `segment_index`, and `session` refs;
 - `next_command` or next expansion route.

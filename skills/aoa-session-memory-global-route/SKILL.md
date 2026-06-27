@@ -87,7 +87,8 @@ Use this skill in any Codex session when the task touches:
   `aoa-session-search`
 - Cross-session evidence for how a skill, MCP, hook, tool, API, goal, eval,
   test, validator, script, decision, error, receipt, or recurring operational
-  entity was used and what happened nearby:
+  entity was used, what happened nearby, which graph refs apply, and which
+  raw/segment refs prove it:
   `aoa-session-memory-evidence-route`
 - Naming queue, phase-discovery routing, and pre-rename checks:
   `aoa-session-naming-readiness`

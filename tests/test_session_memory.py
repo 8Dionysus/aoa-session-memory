@@ -3939,6 +3939,20 @@ def test_hook_receipt_route_search_reads_bounded_receipts(tmp_path: Path) -> Non
 
 
 def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_dossier(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "quality": {
+                "one_short_route": True,
+                "strong_ref_count": 1,
+                "usage_event_count": 1,
+                "consequence_event_count": 1,
+                "graph_node_count": 2,
+                "graph_evidence_ref_count": 1,
+            },
+            "read_first": [{"refs": {"raw": "raw:line:0", "segment": "segment.md"}}],
+        }
+
     def fake_usage(**_kwargs: Any) -> dict[str, Any]:
         return {
             "ok": True,
@@ -3962,16 +3976,42 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     def fake_closeouts(**_kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "result_count": 1, "results": [{"refs": {"segment_index": "segment.index.json"}}]}
 
-    def fake_literal(**_kwargs: Any) -> dict[str, Any]:
+    def fake_literal(**kwargs: Any) -> dict[str, Any]:
+        query = str(kwargs.get("query") or "")
+        if "raw_unavailable" in query:
+            route_id = "route_signal_structured_search"
+            shape = "error_text"
+        elif "найди все MCP" in query:
+            route_id = "entity_inventory"
+            shape = "entity_class"
+        elif "aoa-session-memory-mcp" in query:
+            route_id = "entity_usage_audit"
+            shape = "entity_anchor"
+        elif query.startswith("python3 "):
+            route_id = "command_structured_search"
+            shape = "command"
+        else:
+            route_id = "entity_usage_audit"
+            shape = "entity_anchor"
         return {
             "ok": True,
-            "primary_route": {"route_id": "entity_usage_audit"},
-            "cost_profile": {"structured_first": True, "monolith_fallback_first": False},
+            "query_shape": {"primary": shape},
+            "primary_route": {"route_id": route_id},
+            "cost_profile": {"structured_first": True, "uses_fts_first": False, "monolith_fallback_first": False},
         }
 
     def fake_graph(**_kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "node_count": 2, "edge_count": 1, "evidence_refs": [{"refs": {"raw": "raw:line:3"}}]}
 
+    monkeypatch.setattr(
+        module,
+        "entity_usage_scenario_candidates",
+        lambda **_kwargs: (
+            [{"layer": "skill", "kind": "skill", "anchor": "aoa-session-memory-evidence-route", "route_signal": "skill:aoa_session_memory_evidence_route"}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(module, "entity_dossier", fake_dossier)
     monkeypatch.setattr(module, "entity_usage_scenario_audit", fake_usage)
     monkeypatch.setattr(module, "hook_receipt_route_search", fake_hooks)
     monkeypatch.setattr(module, "goal_lifecycle_route_search", fake_goals)
@@ -3981,7 +4021,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
 
     audit = module.live_scenario_audit(
         aoa_root=tmp_path / ".aoa",
-        profiles=["entity_usage", "hook_failure", "goal_lifecycle", "agent_closeout", "literal_planner", "graph_neighborhood"],
+        profiles=["entity_dossier", "entity_usage", "hook_failure", "goal_lifecycle", "agent_closeout", "literal_planner", "graph_neighborhood"],
         sample_size=1,
         recent_days=7,
         limit=1,
@@ -3989,12 +4029,33 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
 
     assert audit["ok"] is True
     assert audit["artifact_type"] == "session_memory_live_scenario_audit"
-    assert audit["quality"]["scenario_count"] == 6
+    assert audit["quality"]["scenario_count"] == 7
     assert audit["quality"]["failed_count"] == 0
-    assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 5
+    assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 6
     scenarios = {item["profile"]: item for item in audit["scenarios"]}
-    assert scenarios["literal_planner"]["primary_route_id"] == "entity_usage_audit"
+    assert scenarios["entity_dossier"]["sample_count"] == 1
+    assert scenarios["entity_dossier"]["one_short_route_sample_count"] == 1
+    assert scenarios["literal_planner"]["sample_count"] == 4
+    assert scenarios["literal_planner"]["failed_count"] == 0
+    assert scenarios["literal_planner"]["primary_route_counts"]["entity_inventory"] == 1
+    assert scenarios["literal_planner"]["primary_route_counts"]["route_signal_structured_search"] == 1
+    assert scenarios["literal_planner"]["shape_counts"]["entity_class"] == 1
     assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
+
+
+def test_live_scenario_audit_fails_empty_entity_dossier_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(module, "entity_usage_scenario_candidates", lambda **_kwargs: ([], ["empty_fixture"]))
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["entity_dossier"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is False
+    assert audit["quality"]["failed_count"] == 1
+    assert audit["scenarios"][0]["status"] == "failed"
 
 
 def test_trace_route_supports_agent_event_kind() -> None:
@@ -4626,6 +4687,21 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query="как агент использовал aoa-decision",
         doc_type="event",
     )
+    broad_mcp_usage_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди все MCP которые агент использовал и ошибки рядом",
+        doc_type="event",
+    )
+    broad_skill_inventory_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="какие skills есть в системе",
+        doc_type="event",
+    )
+    concrete_mcp_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="как агент использовал aoa-session-memory-mcp и к чему это привело",
+        doc_type="event",
+    )
     structured_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="",
@@ -4817,6 +4893,32 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert "--kind skill" in embedded_skill_literal_plan["next_command"]
     assert embedded_skill_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
     assert "как агент использовал aoa-decision" in embedded_skill_literal_plan["ordered_routes"][-1]["command"]
+    assert broad_mcp_usage_literal_plan["query_shape"]["primary"] == "entity_class"
+    assert broad_mcp_usage_literal_plan["route_anchor_source"] == "broad_entity_class_query"
+    assert broad_mcp_usage_literal_plan["broad_entity_class"]["layer"] == "mcp"
+    assert broad_mcp_usage_literal_plan["broad_entity_class"]["usage_intent"] is True
+    assert broad_mcp_usage_literal_plan["primary_route"]["route_id"] == "entity_inventory"
+    assert broad_mcp_usage_literal_plan["cost_profile"]["structured_first"] is True
+    assert broad_mcp_usage_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert broad_mcp_usage_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert [route["route_id"] for route in broad_mcp_usage_literal_plan["ordered_routes"][:3]] == [
+        "entity_inventory",
+        "entity_registry_class",
+        "entity_usage_scenario_audit",
+    ]
+    assert broad_mcp_usage_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert broad_skill_inventory_literal_plan["query_shape"]["primary"] == "entity_class"
+    assert broad_skill_inventory_literal_plan["route_anchor"] == "skill"
+    assert broad_skill_inventory_literal_plan["broad_entity_class"]["layer"] == "skill"
+    assert broad_skill_inventory_literal_plan["broad_entity_class"]["usage_intent"] is False
+    assert broad_skill_inventory_literal_plan["primary_route"]["route_id"] == "entity_registry_class"
+    assert "--kind skill" in broad_skill_inventory_literal_plan["next_command"]
+    assert broad_skill_inventory_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert concrete_mcp_literal_plan["query_shape"]["primary"] == "entity_anchor"
+    assert concrete_mcp_literal_plan["route_anchor"] == "aoa_session_memory_mcp"
+    assert concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
+    assert concrete_mcp_literal_plan["broad_entity_class"] == {}
+    assert concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_audit"
     assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
     assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
@@ -4983,6 +5085,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert dossier["ok"] is True
     assert dossier["strong_refs"]
     assert dossier["read_first"]
+    assert dossier["quality"]["one_short_route"] is True
+    assert dossier["usage"]["usage_event_count"] >= 1
+    assert dossier["consequence_chain"]["usage_consequence_event_count"] >= 1
+    assert dossier["graph_neighborhood"]["node_count"] >= 1
+    assert dossier["next_expansion"]
     assert Path(dossier["report_json"]).exists()
 
 

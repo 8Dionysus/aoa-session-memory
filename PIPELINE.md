@@ -166,9 +166,13 @@ does not own `.aoa` raw, manifests, indexes, or registry truth.
 
 ## Entity Usage Retrieval Route
 
-Use `entity-usage-audit` when the agent needs a compact cross-session packet
-for how a skill, MCP, hook, tool, API, script, validator, test, graph, memory
-surface, or other recurring entity appears in archived work.
+Use `entity-dossier` when the agent needs the compact consumer packet for how a
+skill, MCP, hook, tool, API, script, validator, test, graph, memory surface, or
+other recurring entity appears in archived work, what happened nearby, which
+graph/ref context applies, and which next route should be opened.
+
+Use `entity-usage-audit` when the dossier is unavailable, too coarse, or the
+agent specifically needs the underlying usage/consequence event list.
 
 `entity-usage-audit` is a structured-fast route first. It queries typed route
 signals and direct usage classes with lightweight search hits, skips raw
@@ -197,8 +201,15 @@ Usage payloads keep route signals bounded: they include a route-signal sample,
 `segment_index` and raw refs for the full route-signal set or exact evidence.
 This keeps MCP-sized packets fast without making the packet the authority.
 
-Use `entity-usage-scenario-audit` as the live randomized pipeline test for
-operational entities. Its quality block separates
+Use `entity-dossier` as the one-packet consumer route for operational entity
+questions that need source identity, usage, consequence, graph neighborhood,
+refs, freshness, noise flags, and next expansion commands together. It is still
+route evidence, not reviewed truth.
+
+Use `live-scenario-audit` with the default `entity_dossier` profile as the
+consumer-loop smoke for that one-packet route. Use
+`entity-usage-scenario-audit` as the narrower live randomized pipeline test for
+operational entity usage retrieval. Its quality block separates
 `candidate_selection_elapsed_ms`, `sample_total_elapsed_ms`,
 `audit_total_elapsed_ms`, and `raw_preview_total_elapsed_ms` so slow runs can
 be attributed to candidate-pool selection, route audit, or raw-preview opening
@@ -233,13 +244,15 @@ Use it when the request shape is:
 
 The route order is:
 
-1. typed usage packet: `entity-usage-audit`;
-2. exact before/after windows: `entity-usage-neighborhood`;
-3. hook errors or health: hook receipts before usage audit;
-4. goal lifecycle: `goal-lifecycles` before raw search;
-5. agent answer/task intervals: agent-event or task-episode routes;
-6. literal phrase/path/command/error/session id: `literal-query-plan`;
-7. topology: compact graph routes with explicit node/edge/evidence budgets.
+1. typed entity dossier: `entity-dossier`;
+2. typed usage packet: `entity-usage-audit` when the dossier is unavailable,
+   truncated, stale, or too coarse;
+3. exact before/after windows: `entity-usage-neighborhood`;
+4. hook errors or health: hook receipts before usage audit;
+5. goal lifecycle: `goal-lifecycles` before raw search;
+6. agent answer/task intervals: agent-event or task-episode routes;
+7. literal phrase/path/command/error/session id: `literal-query-plan`;
+8. topology: compact graph routes with explicit node/edge/evidence budgets.
 
 Session-memory packets remain generated navigation and evidence routes. They
 must report freshness, truncation, refs, and next expansion, then hand decision
@@ -901,7 +914,8 @@ python3 scripts/aoa_session_memory.py entity-registry \
 
 Use lookup for the agent hot path: it reads the generated snapshot and answers
 source identity/registration questions without rebuilding runtime discovery.
-Use `entity-usage-audit` for how the entity behaved in sessions. Use
+Use `entity-dossier` for how the entity behaved in sessions and what graph/ref
+context should be opened next. Use
 `entity-registry --write` or `entity-registry-search-sync` only as maintenance
 refresh routes.
 
@@ -1101,11 +1115,14 @@ python3 scripts/aoa_session_memory.py literal-query-plan \
 The planner classifies the literal shape, checks typed route candidates and the
 generated entity registry, then reports the cheapest reliable first route:
 entity usage/trace/graph for operational anchors, route-signal structured
-search for noisy phrases that still resolve to concrete route signals,
-structured search for exact filters, scoped full-text shards when a bounded
-shard can answer, or the monolith fallback only when raw literal recall is the
-right safety net. The planner is route advice, not evidence truth; returned
-commands still route to raw/segment/session refs.
+search for noisy phrases that still resolve to concrete route signals, typed
+registry/inventory for broad class questions such as `skills`, `MCP`, `hooks`,
+or `tools`, structured search for exact filters, scoped full-text shards when a
+bounded shard can answer, or the monolith fallback only when raw literal recall
+is the right safety net. For broad class questions with use/error/consequence
+intent, the plan includes an entity-usage scenario sample route after the
+inventory/registry route. The planner is route advice, not evidence truth;
+returned commands still route to raw/segment/session refs.
 For command literals, the planner separates the executable/script anchor from
 the full raw phrase. Structured routes use the command anchor; exact recall
 still keeps the original command text as the last fallback.
