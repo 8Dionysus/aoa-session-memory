@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import fcntl
 import gzip
@@ -719,7 +720,7 @@ ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER = {
     "owner_route": "owner_route",
     "route_next_action": "route_next_action",
 }
-ENTITY_REGISTRY_RETIRED_SOURCE_KINDS = {"skill", "mcp_service"}
+ENTITY_REGISTRY_RETIRED_SOURCE_KINDS = {"skill", "mcp_service", "mcp_tool"}
 
 GRAPH_ROUTE_NODE_TYPE_BY_LAYER = {
     "entity": "entity",
@@ -3924,28 +3925,116 @@ def entity_registry_mcp_service_entries_from_config(path: Path) -> list[dict[str
     return entries
 
 
+def entity_registry_mcp_service_roots() -> list[Path]:
+    env_value = os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", "").strip()
+    if env_value:
+        candidates = [Path(value).expanduser() for value in env_value.split(os.pathsep) if value.strip()]
+    else:
+        candidates = [
+            Path("/home/dionysus/src/abyss-stack/mcp/services"),
+            Path("/srv/AbyssOS/abyss-stack/mcp/services"),
+        ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for root in candidates:
+        token = str(root)
+        if token in seen:
+            continue
+        seen.add(token)
+        if root.exists():
+            roots.append(root)
+    return roots
+
+
+def entity_registry_mcp_service_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    for services_root in entity_registry_mcp_service_roots():
+        try:
+            dirs.extend(sorted(path for path in services_root.iterdir() if path.is_dir()))
+        except OSError:
+            continue
+    return dirs
+
+
+def entity_registry_mcp_tool_name_from_decorator(decorator: ast.AST, fallback: str) -> str:
+    call = decorator if isinstance(decorator, ast.Call) else None
+    target = call.func if call is not None else decorator
+    if not isinstance(target, ast.Attribute) or target.attr != "tool":
+        return ""
+    if call is not None:
+        for keyword in call.keywords:
+            if keyword.arg == "name" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                return keyword.value.value.strip()
+        if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+            return call.args[0].value.strip()
+    return fallback
+
+
+def entity_registry_mcp_tool_entries_from_server(service_dir: Path, server_path: Path) -> list[dict[str, Any]]:
+    try:
+        tree = ast.parse(server_path.read_text(encoding="utf-8", errors="replace"), filename=str(server_path))
+    except (OSError, SyntaxError):
+        return []
+    service_key = canonical_mcp_service_key(service_dir.name, path_source=True)
+    entries: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        tool_name = next(
+            (
+                entity_registry_mcp_tool_name_from_decorator(decorator, node.name)
+                for decorator in node.decorator_list
+                if entity_registry_mcp_tool_name_from_decorator(decorator, node.name)
+            ),
+            "",
+        )
+        tool_key = route_key_slug(tool_name, fallback="", max_chars=120)
+        if not tool_key:
+            continue
+        aliases = [tool_name, f"mcp_tool:{tool_name}"]
+        if service_key:
+            aliases.extend([f"{service_key}:{tool_name}", service_dir.name])
+        entries.append(
+            entity_registry_make_entry(
+                kind="mcp_tool",
+                key=tool_key,
+                aliases=aliases,
+                source_refs=[entity_registry_source_ref(server_path, source_type="abyss_stack_mcp_tool_source", status="active")],
+                source_surface="abyss_stack_mcp_tool_source",
+                owner="abyss-stack",
+                status="active",
+            )
+        )
+    return entries
+
+
+def entity_registry_discover_mcp_tools() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for service_dir in entity_registry_mcp_service_dirs():
+        for server_path in sorted(service_dir.glob("src/**/server.py")):
+            entries.extend(entity_registry_mcp_tool_entries_from_server(service_dir, server_path))
+    return entries
+
+
 def entity_registry_discover_mcp_services(aoa_root: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for config_path in entity_registry_codex_config_paths(aoa_root):
         entries.extend(entity_registry_mcp_service_entries_from_config(config_path))
-    for services_root in (Path("/home/dionysus/src/abyss-stack/mcp/services"), Path("/srv/AbyssOS/abyss-stack/mcp/services")):
-        if not services_root.exists():
+    for service_dir in entity_registry_mcp_service_dirs():
+        key = canonical_mcp_service_key(service_dir.name, path_source=True)
+        if not key:
             continue
-        for service_dir in sorted(path for path in services_root.iterdir() if path.is_dir()):
-            key = canonical_mcp_service_key(service_dir.name, path_source=True)
-            if not key:
-                continue
-            entries.append(
-                entity_registry_make_entry(
-                    kind="mcp_service",
-                    key=key,
-                    aliases=[service_dir.name, key.replace("_", "-")],
-                    source_refs=[entity_registry_source_ref(service_dir, source_type="abyss_stack_mcp_service_dir", status="active")],
-                    source_surface="abyss_stack_mcp_service_dir",
-                    owner="abyss-stack",
-                    status="active",
-                )
+        entries.append(
+            entity_registry_make_entry(
+                kind="mcp_service",
+                key=key,
+                aliases=[service_dir.name, key.replace("_", "-")],
+                source_refs=[entity_registry_source_ref(service_dir, source_type="abyss_stack_mcp_service_dir", status="active")],
+                source_surface="abyss_stack_mcp_service_dir",
+                owner="abyss-stack",
+                status="active",
             )
+        )
     return entries
 
 
@@ -4106,11 +4195,10 @@ def entity_registry_source_surface_state(aoa_root: Path) -> dict[str, Any]:
         except OSError:
             continue
     paths.extend(entity_registry_codex_config_paths(aoa_root))
-    for services_root in (Path("/home/dionysus/src/abyss-stack/mcp/services"), Path("/srv/AbyssOS/abyss-stack/mcp/services")):
-        if not services_root.exists():
-            continue
+    for service_dir in entity_registry_mcp_service_dirs():
+        paths.append(service_dir)
         try:
-            paths.extend(sorted(path for path in services_root.iterdir() if path.is_dir()))
+            paths.extend(sorted(service_dir.glob("src/**/server.py")))
         except OSError:
             continue
     latest_mtime = 0.0
@@ -4222,6 +4310,7 @@ def build_entity_registry(
         runtime_entries = [
             *entity_registry_discover_skills(aoa_root),
             *entity_registry_discover_mcp_services(aoa_root),
+            *entity_registry_discover_mcp_tools(),
         ]
         current_active_entity_ids = {
             str(entry.get("entity_id") or "")
@@ -4235,7 +4324,7 @@ def build_entity_registry(
             current_active_entity_ids=current_active_entity_ids,
         ):
             entity_registry_merge_entry(entries_by_id, entry)
-        source_surfaces.extend(["runtime_skills", "runtime_mcp_config", "runtime_mcp_service_dirs", "previous_entity_registry_snapshot"])
+        source_surfaces.extend(["runtime_skills", "runtime_mcp_config", "runtime_mcp_service_dirs", "runtime_mcp_tool_sources", "previous_entity_registry_snapshot"])
     for entry in entity_registry_entries_from_route_terms(aoa_root, db_path=route_terms_db_path):
         entity_registry_merge_entry(entries_by_id, entry)
     source_surfaces.append("archived_route_terms")
@@ -4275,6 +4364,7 @@ def build_entity_registry(
             "repo-local SKILL.md surfaces",
             "CODEX_HOME/config.toml mcp_servers",
             "abyss-stack/mcp/services/*",
+            "abyss-stack/mcp/services/*/src/**/server.py @mcp.tool functions",
             "portable search route_terms archived evidence",
             "previous entity registry snapshot for stale/removed navigation state",
         ],
@@ -55791,11 +55881,13 @@ ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS = (
 ENTITY_USAGE_SCENARIO_SOURCE_PREFERRED_LAYERS = {"api", "mcp", "skill", "tool"}
 ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES = {"active", "available"}
 ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES = {
+    "abyss_stack_mcp_tool_source",
     "abyss_stack_mcp_service_dir",
     "codex_mcp_config",
     "codex_user_skills",
     "runtime_mcp_config",
     "runtime_mcp_service_dirs",
+    "runtime_mcp_tool_sources",
     "runtime_skills",
 }
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_MULTIPLIER = 8
@@ -56380,6 +56472,22 @@ def entity_usage_scenario_audit(
             event_buckets.extend(event for event in bucket if isinstance(event, dict))
         usage_events = audit.get("usage_events") if isinstance(audit.get("usage_events"), list) else []
         consequence_events = audit.get("consequence_events") if isinstance(audit.get("consequence_events"), list) else []
+        document_refs = [
+            item for item in audit.get("document_refs", []) if isinstance(item, dict)
+        ][: max(0, min(int_value(document_limit, 24), 100))]
+        evidence_refs = entity_usage_chain_refs(
+            event_buckets,
+            document_refs,
+            limit=max(12, min(int_value(document_limit, 24) or 24, 100)),
+        )
+        evidence_ref_counts = live_scenario_evidence_counts(
+            {
+                "events": event_buckets,
+                "evidence_refs": evidence_refs,
+                "document_refs": document_refs,
+            }
+        )
+        first_ref = live_scenario_first_ref(event_buckets) or live_scenario_first_ref({"evidence_refs": evidence_refs})
         preview_started = time.monotonic()
         preview_counts = entity_usage_raw_preview_counts(event_buckets, limit=raw_preview_limit)
         raw_preview_elapsed_ms = int((time.monotonic() - preview_started) * 1000)
@@ -56427,7 +56535,11 @@ def entity_usage_scenario_audit(
             "outcome_event_count": audit.get("outcome_event_count"),
             "context_event_count": audit.get("context_event_count"),
             "consequence_event_count": audit.get("consequence_event_count"),
-            "document_ref_count": len(audit.get("document_refs", []) if isinstance(audit.get("document_refs"), list) else []),
+            "document_ref_count": len(document_refs),
+            "document_refs": document_refs[:6],
+            "evidence_refs": evidence_refs[:12],
+            "evidence_ref_counts": evidence_ref_counts,
+            "first_ref": first_ref,
             "freshness_counts": sample_freshness,
             "raw_preview_counts": preview_counts,
             "first_usage": (usage_events[0] if usage_events else {}),
@@ -56468,6 +56580,14 @@ def entity_usage_scenario_audit(
         "raw_preview_counts": dict(sorted(raw_preview_totals.items())),
         "evidence_mode_counts": dict(sorted(evidence_mode_counts.items())),
         "quality_flag_counts": dict(sorted(quality_flag_counts.items())),
+        "raw_or_segment_ref_sample_count": sum(
+            1
+            for sample in samples
+            if any(
+                int_value((sample.get("evidence_ref_counts") or {}).get(key)) > 0
+                for key in ("raw_ref", "segment_ref", "receipt_ref")
+            )
+        ),
         "direct_usage_sample_count": sum(
             count
             for mode, count in evidence_mode_counts.items()
@@ -56715,7 +56835,30 @@ def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
         if depth > 8:
             return
         if isinstance(item, dict):
+            kind = str(item.get("kind") or "")
+            if kind in {"raw_line", "raw_block"} and item.get("value"):
+                counts["raw_ref"] += 1
+            elif kind in {"segment_markdown", "segment_index"} and item.get("value"):
+                counts["segment_ref"] += 1
+            elif kind == "session_manifest" and item.get("value"):
+                counts["session_ref"] += 1
+            evidence_counts = item.get("evidence_ref_counts")
+            if isinstance(evidence_counts, dict):
+                for count_key, target_key in (
+                    ("raw_ref", "raw_ref"),
+                    ("raw_ref_count", "raw_ref"),
+                    ("segment_ref", "segment_ref"),
+                    ("segment_ref_count", "segment_ref"),
+                    ("session_ref", "session_ref"),
+                    ("session_ref_count", "session_ref"),
+                    ("receipt_ref", "receipt_ref"),
+                    ("receipt_ref_count", "receipt_ref"),
+                ):
+                    if count_key in evidence_counts:
+                        counts[target_key] += int_value(evidence_counts.get(count_key))
             for key, nested in item.items():
+                if key == "evidence_ref_counts":
+                    continue
                 if nested in (None, "", [], {}):
                     continue
                 if key in {"raw", "raw_ref"}:
@@ -56737,6 +56880,13 @@ def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
 
 def live_scenario_first_ref(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
+        direct = {
+            key: value.get(key)
+            for key in ("raw", "segment", "segment_index", "session", "receipt")
+            if value.get(key)
+        }
+        if direct:
+            return direct
         refs = value.get("refs")
         if isinstance(refs, dict) and refs:
             return {key: refs.get(key) for key in ("raw", "segment", "segment_index", "session", "receipt") if refs.get(key)}

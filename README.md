@@ -1156,8 +1156,11 @@ unavailable or the task needs the underlying usage/consequence event list.
 
 `maps/entity-registry.json` is generated navigation. It records active,
 observed, stale, removed, and unknown entity states so agents can route quickly
-without treating the registry as source truth. `index-maintenance` refreshes it
-when source skill/MCP surfaces are newer, and MCP exposes it read-only.
+without treating the registry as source truth. Active source discovery includes
+skills, MCP service configuration/directories, and MCP server `@*.tool()`
+functions, so a newly added MCP tool can be registered before it appears in
+archived session usage. `index-maintenance` refreshes the registry when source
+skill/MCP surfaces are newer, and MCP exposes it read-only.
 When the registry must stay synchronized with SQLite search, use the direct
 sync route:
 
