@@ -3501,6 +3501,9 @@ def test_entity_usage_chain_builds_compact_sequence_without_graph_packets(tmp_pa
     assert payload["quality"]["skipped_graph_neighborhood"] is True
     assert payload["quality"]["raw_or_segment_ref_present"] is True
     assert payload["noise_flags"] == []
+    assert payload["first_ref"]["raw"] == "raw:line:10"
+    assert payload["first_ref"]["segment"] == "001.md#event-000010"
+    assert payload["first_ref"]["session"] == "session.manifest.json"
     assert any(item["kind"] == "raw_line" and item["value"] == "raw:line:10" for item in payload["evidence_refs"])
     assert "source_audit" not in payload
     assert payload["next_expansion"][0]["id"] == "usage_neighborhood"

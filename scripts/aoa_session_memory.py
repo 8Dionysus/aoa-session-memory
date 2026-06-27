@@ -55236,6 +55236,41 @@ def entity_usage_chain_refs(events: list[dict[str, Any]], document_refs: list[di
     return refs[:limit]
 
 
+def entity_usage_chain_first_ref(events: list[dict[str, Any]], evidence_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+        first_ref = {
+            "raw": refs.get("raw") or "",
+            "raw_block": refs.get("raw_block") or "",
+            "segment": refs.get("segment") or "",
+            "segment_index": refs.get("segment_index") or "",
+            "session": refs.get("session") or "",
+        }
+        if any(first_ref.values()):
+            return first_ref
+    first_ref = {"raw": "", "raw_block": "", "segment": "", "segment_index": "", "session": ""}
+    for item in evidence_refs:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        value = str(item.get("value") or "")
+        if not value:
+            continue
+        if kind == "raw_line" and not first_ref["raw"]:
+            first_ref["raw"] = value
+        elif kind == "raw_block" and not first_ref["raw_block"]:
+            first_ref["raw_block"] = value
+        elif kind == "segment_markdown" and not first_ref["segment"]:
+            first_ref["segment"] = value
+        elif kind == "segment_index" and not first_ref["segment_index"]:
+            first_ref["segment_index"] = value
+        elif kind == "session_manifest" and not first_ref["session"]:
+            first_ref["session"] = value
+    return {key: value for key, value in first_ref.items() if value}
+
+
 def entity_usage_chain_command(
     command_name: str,
     *,
@@ -55367,6 +55402,7 @@ def entity_usage_chain(
         *context_events,
     ]
     evidence_refs = entity_usage_chain_refs(all_chain_events, document_refs, limit=max(12, document_limit or 12))
+    first_ref = entity_usage_chain_first_ref(all_chain_events, evidence_refs)
     raw_or_segment_ref_present = any(
         item.get("kind") in {"raw_line", "raw_block", "segment_markdown", "segment_index"}
         for item in evidence_refs
@@ -55430,6 +55466,7 @@ def entity_usage_chain(
         },
         "document_refs": document_refs,
         "evidence_refs": evidence_refs,
+        "first_ref": first_ref,
         "sessions": audit.get("sessions", []) if isinstance(audit.get("sessions"), list) else [],
         "counts": {
             "event_count": audit.get("event_count"),
