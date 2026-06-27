@@ -5611,6 +5611,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert bridge["normalized_entities"]["source"]["kind"] == "mcp"
     assert bridge["normalized_entities"]["target"]["kind"] == "tool"
     assert bridge["quality"]["one_short_route"] is True
+    assert bridge["quality"]["compact_side_neighborhood"] is True
+    assert bridge["quality"]["side_neighborhood_depth"] == 1
+    assert bridge["quality"]["side_neighborhood_node_limit"] == 4
+    assert bridge["quality"]["side_neighborhood_edge_limit"] == 8
     assert bridge["quality"]["evidence_ref_count"] >= 1
     assert bridge["quality"]["raw_or_segment_ref_present"] is True
     assert "graph-bridge" in bridge["next_command"]

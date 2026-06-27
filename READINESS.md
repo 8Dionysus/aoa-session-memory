@@ -909,6 +909,27 @@ Last observed result:
   --sample-size 2 --limit 2 --seed mcp-tool-registry-source-scan` returned
   `3/3` passed, `warn_count=0`, `actionable_gap_count=0`, and surfaced a first
   raw/segment ref directly in the `entity_usage` scenario packet.
+- 2026-06-27 compact graph-bridge performance proof: the reviewed
+  `graph_bridge_refs_contract` corpus case was correct but spent `62.841s`
+  expanding the dense `tool:exec_command` side before returning evidence refs.
+  `graph-bridge` now keeps side neighborhoods shallow in the first packet and
+  leaves deeper path search behind the returned `shortest_path` expansion. A
+  direct `graph-bridge aoa-session-memory-mcp exec_command --source-kind mcp
+  --target-kind tool --limit 4 --max-depth 4` run returned in `3.85s` with
+  `evidence_ref_count=8`, raw/segment/session refs, and
+  `compact_side_neighborhood=true`. Re-running `live-scenario-corpus check`
+  kept `graph_bridge_refs_contract` green and reduced the observed
+  `graph_bridge` profile to `2.133s` with `raw_ref=16`, `segment_ref=16`, and
+  `session_ref=16`.
+- 2026-06-27 broad consumer live-loop proof: `live-scenario-audit --profile
+  entity_usage --profile literal_planner --profile graph_bridge --profile
+  graph_neighborhood --profile hook_failure --profile goal_lifecycle --profile
+  agent_closeout --sample-size 3 --limit 3 --seed
+  broad-route-proof-after-bridge-fastpath --write-report` returned `7/7`
+  passed, `warn_count=0`, `failed_count=0`, `actionable_gap_count=0`, and
+  `elapsed_ms=6802`. The run covered entity usage, literal routing, graph
+  bridge, graph neighborhood, hook failures, goal lifecycle, and final closeout
+  routes with raw/segment/session or receipt refs on all evidence profiles.
 - 2026-06-25 resource live-tail fast-path proof: a timer-driven
   `auto-maintenance-resource catchup all` launched broad
   `auto-maintenance catchup all`, selected `285` sessions, touched

@@ -47424,13 +47424,14 @@ def graph_bridge(
     selected_limit = max(1, min(int_value(limit, 8), 30))
     selected_max_depth = max(1, min(int_value(max_depth, 4), 8))
 
-    bridge_node_limit = max(selected_limit * 4, 16)
-    bridge_edge_limit = max(selected_limit * 8, 32)
+    bridge_side_depth = 1
+    bridge_node_limit = max(selected_limit, 4)
+    bridge_edge_limit = max(selected_limit * 2, 8)
     source_neighborhood = graph_neighborhood(
         aoa_root=aoa_root,
         anchor=source_anchor,
         kind=source_route_kind,
-        depth=2,
+        depth=bridge_side_depth,
         limit=bridge_node_limit,
         edge_limit=bridge_edge_limit,
     )
@@ -47438,7 +47439,7 @@ def graph_bridge(
         aoa_root=aoa_root,
         anchor=target_anchor,
         kind=target_route_kind,
-        depth=2,
+        depth=bridge_side_depth,
         limit=bridge_node_limit,
         edge_limit=bridge_edge_limit,
     )
@@ -47583,6 +47584,10 @@ def graph_bridge(
             "path_length": int_value(path.get("path_length"), len(path_edges)),
             "path_node_count": len(path_nodes),
             "path_edge_count": len(path_edges),
+            "compact_side_neighborhood": True,
+            "side_neighborhood_depth": bridge_side_depth,
+            "side_neighborhood_node_limit": bridge_node_limit,
+            "side_neighborhood_edge_limit": bridge_edge_limit,
             "source_event_count": int_value(source_timeline.get("event_count"), len(source_events)),
             "target_event_count": int_value(target_timeline.get("event_count"), len(target_events)),
             "source_neighborhood_node_count": int_value(source_neighborhood.get("node_count"), len(source_neighborhood.get("nodes") or [])),

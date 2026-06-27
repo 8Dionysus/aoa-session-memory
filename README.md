@@ -497,9 +497,11 @@ preview neighborhoods by default.
 strong refs, weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/
 decisions, open questions, and a read-first route.
 `graph-bridge` is the compact first graph route when the question is how two
-operational anchors are connected. It combines a bounded shortest path,
+operational anchors are connected. It combines shallow side neighborhoods,
 source/target timeline samples, evidence refs, freshness, noise flags, and
-expansion commands without turning graph output into reviewed truth.
+expansion commands without turning graph output into reviewed truth. The
+default packet intentionally keeps dense anchors cheap; open the returned
+`shortest_path` expansion only when the task really needs a deeper graph path.
 
 Audit whether the 22 operational route layers are currently covered by
 session route indexes, source atlas axes, generated atlas entries, and the
