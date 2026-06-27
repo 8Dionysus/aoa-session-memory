@@ -71,6 +71,19 @@ Then call the MCP tool with the same typed anchor/kind that the CLI route would
 use. For graph/topology questions, search `aoa_session_graph_neighborhood`
 directly if a broad "graph route" tool search does not surface it.
 
+If an exact MCP tool is discovered but the call returns `Transport closed`,
+treat it as a Codex/MCP transport reload gate, not as evidence failure and not
+as permission to widen into broad raw search. Verify the configured stdio plane
+first:
+
+```bash
+python3 /home/dionysus/src/abyss-stack/mcp/services/aoa-session-memory-mcp/scripts/validate_session_memory_mcp.py
+```
+
+If configured stdio is green but the current Codex session has no fresh
+`aoa-session-memory` child, name CLI fallback explicitly and state that direct
+MCP freshness proof requires a Codex/MCP restart.
+
 ```bash
 python3 scripts/aoa_session_memory.py entity-usage-audit <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind <kind>
@@ -79,8 +92,8 @@ python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 ```
 
-Name the fallback in the report. A missing MCP tool is a runtime reload issue,
-not a reason to widen into unbounded raw search.
+Name the fallback in the report. A missing MCP tool or closed MCP transport is
+a runtime reload issue, not a reason to widen into unbounded raw search.
 
 ## Reading Packets
 
