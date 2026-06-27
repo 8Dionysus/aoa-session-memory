@@ -1234,6 +1234,10 @@ window or explicit text query asks for that heavier layer.
 phrase still resolves to a concrete route signal, such as
 `hook_health:raw_unavailable`. The raw-text monolith remains an explicit recall
 fallback, not the first route for an already recognized operational signal.
+When a longer human phrase embeds a registered operational entity, such as
+`как агент использовал aoa-decision`, the planner routes first through the
+registry entity anchor (`aoa_decision`, `skill`) and keeps the original phrase
+as the exact raw-text fallback.
 Command literals are classified separately from plain paths: the planner uses
 the command anchor for structured route candidates and keeps the full command
 text as the exact raw-text fallback.

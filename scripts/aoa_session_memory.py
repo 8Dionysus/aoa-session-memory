@@ -35841,6 +35841,57 @@ LITERAL_QUERY_ROUTE_SIGNAL_CONFIDENCE_PRIORITY = {
     "medium": 1,
     "low": 2,
 }
+LITERAL_QUERY_EMBEDDED_ENTITY_KIND_PRIORITY = {
+    "mcp_service": 0,
+    "skill": 1,
+    "mcp_tool": 2,
+    "tool": 3,
+    "api": 4,
+    "hook": 5,
+    "receipt": 6,
+    "goal": 7,
+    "agent_event": 8,
+    "script": 9,
+    "validator": 10,
+    "test": 11,
+    "eval": 12,
+    "graph": 13,
+    "memory": 14,
+    "decision": 15,
+    "error": 16,
+    "git": 17,
+    "plugin": 18,
+    "agent": 19,
+    "playbook": 20,
+    "technique": 21,
+    "mechanic": 22,
+    "owner_route": 23,
+    "route_next_action": 24,
+}
+LITERAL_QUERY_EMBEDDED_ENTITY_STOP_KEYS = {
+    "agent",
+    "api",
+    "decision",
+    "entity",
+    "error",
+    "eval",
+    "failure",
+    "git",
+    "goal",
+    "graph",
+    "hook",
+    "mcp",
+    "memory",
+    "open_thread",
+    "path",
+    "receipt",
+    "route",
+    "script",
+    "skill",
+    "test",
+    "tool",
+    "validator",
+}
 LITERAL_QUERY_COMMAND_EXECUTABLES = {
     "bash",
     "cat",
@@ -35858,6 +35909,103 @@ LITERAL_QUERY_COMMAND_EXECUTABLES = {
     "sh",
     "uv",
 }
+
+
+def trace_kind_for_entity_registry_kind(kind: str) -> str:
+    registry_kind = route_key_slug(kind, fallback="")
+    if registry_kind == "mcp_service":
+        return "mcp"
+    if registry_kind == "mcp_tool":
+        return "tool"
+    if registry_kind == "error":
+        return "error"
+    if registry_kind == "decision":
+        return "decision"
+    return normalize_trace_route_kind(registry_kind)
+
+
+def literal_query_embedded_entity_search_kinds(normalized_kind: str) -> set[str]:
+    kind = normalize_trace_route_kind(normalized_kind)
+    if kind in {"auto", "all", "entity"}:
+        return set(ENTITY_REGISTRY_KINDS)
+    if kind == "mcp":
+        return {"mcp_service"}
+    if kind == "tool":
+        return {"tool", "mcp_tool"}
+    if kind == "receipt":
+        return {"receipt", "hook"}
+    if kind == "failure":
+        return {"error"}
+    if kind == "decision":
+        return {"decision", "skill"}
+    return {kind}
+
+
+def literal_query_embedded_entity_anchor(
+    *,
+    aoa_root: Path,
+    query: str,
+    kind: str,
+) -> dict[str, Any]:
+    text = str(query or "").strip()
+    normalized_text = route_key_slug(text, fallback="", max_chars=512)
+    if not normalized_text or len(normalized_text) < 8:
+        return {}
+    search_kinds = literal_query_embedded_entity_search_kinds(kind)
+    registry = load_entity_registry(aoa_root)
+    entries = registry.get("entries") if isinstance(registry.get("entries"), list) else []
+    candidates: list[tuple[tuple[int, int, int, int, int], dict[str, Any]]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        registry_kind = str(entry.get("kind") or "")
+        if registry_kind not in search_kinds:
+            continue
+        key = str(entry.get("canonical_key") or "")
+        aliases = entry.get("aliases") if isinstance(entry.get("aliases"), list) else []
+        match_values = [key, *[str(alias) for alias in aliases if alias]]
+        for raw_value in match_values:
+            match_key = route_key_slug(raw_value, fallback="", max_chars=160)
+            if (
+                not match_key
+                or match_key in LITERAL_QUERY_EMBEDDED_ENTITY_STOP_KEYS
+                or len(match_key) < 4
+                or match_key == normalized_text
+            ):
+                continue
+            if not re.search(rf"(?:^|_){re.escape(match_key)}(?:_|$)", normalized_text):
+                continue
+            status = str(entry.get("status") or "")
+            status_score = {
+                "active": 5,
+                "observed": 4,
+                "stale": 2,
+                "removed": 1,
+                "unknown": 0,
+            }.get(status, 0)
+            kind_score = 100 - LITERAL_QUERY_EMBEDDED_ENTITY_KIND_PRIORITY.get(registry_kind, 90)
+            source_score = 1 if raw_value == key else 0
+            signal_score = min(int_value(entry.get("signal_count")), 1000)
+            score = (status_score, kind_score, len(match_key), source_score, signal_score)
+            candidates.append(
+                (
+                    score,
+                    {
+                        "anchor": key,
+                        "kind": trace_kind_for_entity_registry_kind(registry_kind),
+                        "registry_kind": registry_kind,
+                        "entity_id": entry.get("entity_id"),
+                        "status": status,
+                        "matched_text": raw_value,
+                        "match_key": match_key,
+                        "source_surface": entry.get("source_surface"),
+                    },
+                )
+            )
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def literal_query_looks_like_path(value: str) -> bool:
@@ -36075,9 +36223,47 @@ def literal_query_plan(
     shape = literal_query_shape(text)
     command_anchor = str(shape.get("command_anchor") or "")
     route_anchor_text = command_anchor if command_anchor else text
-    diagnostics = trace_identity_diagnostics(text, kind=normalized_kind) if text else []
+    route_anchor_source = "command_anchor" if command_anchor else "query"
+    route_anchor_kind = normalized_kind
+    embedded_entity_anchor: dict[str, Any] = {}
+    protected_primary_shapes = {
+        LITERAL_QUERY_KIND_COMMAND,
+        LITERAL_QUERY_KIND_PATH,
+        LITERAL_QUERY_KIND_RAW_REF,
+        LITERAL_QUERY_KIND_SESSION_ID,
+        LITERAL_QUERY_KIND_HOOK_RECEIPT,
+    }
+    shape_primary = str(shape.get("primary") or "")
+    error_text_can_use_embedded_entity = shape_primary == LITERAL_QUERY_KIND_ERROR_TEXT and normalized_kind in {"error", "failure"}
+    if (
+        text
+        and not command_anchor
+        and shape_primary not in protected_primary_shapes
+        and (shape_primary != LITERAL_QUERY_KIND_ERROR_TEXT or error_text_can_use_embedded_entity)
+    ):
+        embedded_entity_anchor = literal_query_embedded_entity_anchor(
+            aoa_root=aoa_root,
+            query=text,
+            kind=normalized_kind,
+        )
+        embedded_anchor = str(embedded_entity_anchor.get("anchor") or "").strip()
+        embedded_kind = normalize_trace_route_kind(str(embedded_entity_anchor.get("kind") or ""))
+        if embedded_anchor and embedded_kind in TRACE_ROUTE_KINDS:
+            route_anchor_text = embedded_anchor
+            route_anchor_kind = embedded_kind
+            route_anchor_source = "embedded_entity_registry"
+            signals = list(shape.get("signals") or [])
+            if LITERAL_QUERY_KIND_ENTITY_ANCHOR not in signals:
+                signals.insert(0, LITERAL_QUERY_KIND_ENTITY_ANCHOR)
+            shape = {
+                **shape,
+                "primary": LITERAL_QUERY_KIND_ENTITY_ANCHOR,
+                "signals": signals,
+                "embedded_entity_anchor": embedded_entity_anchor,
+            }
+    diagnostics = trace_identity_diagnostics(route_anchor_text, kind=route_anchor_kind) if route_anchor_text else []
     route_candidates = trace_route_lookup_candidates(
-        trace_route_candidates(route_anchor_text, kind=normalized_kind),
+        trace_route_candidates(route_anchor_text, kind=route_anchor_kind),
         suppress_generic=bool(diagnostics),
     ) if route_anchor_text else []
     specific_route_candidates = [
@@ -36090,7 +36276,7 @@ def literal_query_plan(
     lookup = entity_registry_lookup(
         aoa_root=aoa_root,
         anchor=route_anchor_text,
-        kind=normalized_kind,
+        kind=route_anchor_kind,
         include_unknown=False,
     ) if route_anchor_text else {"match_count": 0, "entries": []}
     registry_entries = lookup.get("entries") if isinstance(lookup.get("entries"), list) else []
@@ -36238,7 +36424,7 @@ def literal_query_plan(
             authority="generated_search_refs",
         )
     if typed_route_allowed and text:
-        route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+        route_kind = route_anchor_kind if route_anchor_kind in TRACE_ROUTE_KINDS else "auto"
         add_route(
             "entity_usage_audit",
             "query resolves to a typed operational anchor; inspect structured usage/consequence before raw-text fallback",
@@ -36395,10 +36581,13 @@ def literal_query_plan(
         "query": text,
         "normalized_query": fts_query,
         "route_anchor": route_anchor_text,
+        "route_anchor_source": route_anchor_source,
+        "route_anchor_kind": route_anchor_kind,
+        "embedded_entity_anchor": embedded_entity_anchor,
         **trace_kind_payload_fields(kind, normalized_kind),
         "query_shape": shape,
         "structured_filters": structured_filters,
-        "inferred_kinds": infer_trace_route_kinds(text, normalized_kind) if text else [],
+        "inferred_kinds": infer_trace_route_kinds(route_anchor_text, route_anchor_kind) if route_anchor_text else [],
         "entity_registry": {
             "match_count": len(registry_entries),
             "entries": registry_entries[:5],

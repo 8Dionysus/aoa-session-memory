@@ -4422,6 +4422,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query="aoa session memory hook failure raw_unavailable",
         doc_type="event",
     )
+    embedded_skill_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="как агент использовал aoa-decision",
+        doc_type="event",
+    )
     structured_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="",
@@ -4599,6 +4604,20 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert noisy_route_signal_literal_plan["structured_route_signal_candidates"][0]["route_signal"] == "hook_health:raw_unavailable"
     assert "--route-signal hook_health:raw_unavailable" in noisy_route_signal_literal_plan["next_command"]
     assert noisy_route_signal_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert embedded_skill_literal_plan["query_shape"]["primary"] == "entity_anchor"
+    assert embedded_skill_literal_plan["route_anchor"] == "aoa_decision"
+    assert embedded_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"
+    assert embedded_skill_literal_plan["route_anchor_kind"] == "skill"
+    assert embedded_skill_literal_plan["embedded_entity_anchor"]["registry_kind"] == "skill"
+    assert embedded_skill_literal_plan["primary_route"]["route_id"] == "entity_usage_audit"
+    assert embedded_skill_literal_plan["cost_profile"]["structured_first"] is True
+    assert embedded_skill_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert embedded_skill_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert embedded_skill_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is True
+    assert "entity-usage-audit aoa_decision" in embedded_skill_literal_plan["next_command"]
+    assert "--kind skill" in embedded_skill_literal_plan["next_command"]
+    assert embedded_skill_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert "как агент использовал aoa-decision" in embedded_skill_literal_plan["ordered_routes"][-1]["command"]
     assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
     assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
