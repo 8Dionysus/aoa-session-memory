@@ -13806,6 +13806,124 @@ def test_hot_auto_maintenance_repairs_route_cache_and_advances_graph(tmp_path: P
     assert calls["maintenance"]["graph_batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["hot"]["graph_batch_limit"]
 
 
+def test_hot_auto_maintenance_reports_budget_remaining_backlog(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, int] = {"freshness": 0}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        calls["freshness"] += 1
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 7,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": ["index_maintenance_needed", "graph_maintenance_needed"],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 7,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "repair_limit": kwargs["repair_limit"],
+            "budget_exhausted": True,
+            "search_repair_limited": False,
+            "search_repair_remaining_count": 3,
+            "atlas_repair_limited": False,
+            "atlas_repair_remaining_count": 0,
+            "action_counts": {"applied": 1, "deferred_budget_exhausted": 2},
+            "diagnostics": ["search_index_budget_exhausted"],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_remaining_backlog"
+    assert payload["expected_remaining_backlog"] is True
+    assert payload["expected_catchup_remaining"] is False
+    assert payload["hard_diagnostics"] == []
+    assert "search_index_budget_exhausted" in payload["diagnostics"]
+    assert calls["freshness"] == 2
+
+
+def test_index_maintenance_skips_search_repair_for_empty_scoped_records(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda *_args, **_kwargs: (0.0, []))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [{"session_id": "outside-hot-scope"}])
+    monkeypatch.setattr(
+        module,
+        "token_accounting_backfill",
+        lambda **kwargs: {
+            "ok": True,
+            "selected_count": len(kwargs.get("selected_records") or []),
+            "processed_count": 0,
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "counts": {"planned": 0, "backfilled": 0, "current": 0, "skipped": 0},
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "sqlite_search_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False})
+    monkeypatch.setattr(module, "graph_store_state", lambda **_kwargs: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    def fake_reindex_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls["reindex_selected_records"] = kwargs.get("selected_records")
+        return {"ok": True, "selected_count": 0, "processed_count": 0, "remaining_count": 0, "counts": {}, "diagnostics": []}
+
+    def fail_search_index_sessions(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("empty scoped records should not call search-index")
+
+    monkeypatch.setattr(module, "reindex_sessions", fake_reindex_sessions)
+    monkeypatch.setattr(module, "search_index_sessions", fail_search_index_sessions)
+    monkeypatch.setattr(module, "build_agent_atlas", lambda **_kwargs: {"ok": True, "selected_count": 0, "processed_count": 0, "remaining_count": 0, "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "route_layer_readiness",
+        lambda **_kwargs: {
+            "ok": True,
+            "target": "all",
+            "selected_count": 0,
+            "covered_requirement_count": 0,
+            "required_requirement_count": 0,
+            "remaining": [],
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[],
+        apply=True,
+        repair_graph=False,
+        repair_token_accounting=False,
+    )
+
+    search_action = next(action for action in payload["actions"] if action["id"] == "rebuild_search_index")
+    assert calls["reindex_selected_records"] == []
+    assert search_action["status"] == "skipped_clean"
+    assert search_action["skip_reason"] == "no_search_records_selected_after_scoped_projection_planning"
+    assert search_action["result"]["ok"] is True
+    assert "no sessions selected" not in payload["diagnostics"]
+    assert payload["ok"] is True
+
+
 def test_hot_auto_maintenance_includes_old_session_with_fresh_activity_mtime(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

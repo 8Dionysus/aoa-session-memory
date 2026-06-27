@@ -15206,12 +15206,15 @@ def reindex_sessions(
     write_report: bool = False,
     budget_seconds: float | None = None,
     progress_every: int = 0,
+    selected_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + max(0.0, budget_seconds) if budget_seconds is not None else None
     try:
-        if target and target != "all":
+        if selected_records is not None:
+            records = list(selected_records)
+        elif target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
         else:
             selection_limit = None if stale_route_indexes else limit
@@ -18775,6 +18778,7 @@ def maintain_indexes(
                     write_report=write_report,
                     budget_seconds=budget_remaining(),
                     progress_every=progress_every,
+                    selected_records=records,
                 )
                 reindex_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
                 reindex_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_exhausted", "counts", "report_json", "report_markdown", "diagnostics")}
@@ -18898,44 +18902,59 @@ def maintain_indexes(
                 action_results.append(search_action)
             else:
                 selected_search_records = None if search_rebuild_required else (search_reindex_records or (records if reindex_ran or token_backfill_ran else []))
-                result = search_index_sessions(
-                    aoa_root=aoa_root,
-                    target=search_update_target,
-                    since=None if search_rebuild_required else since,
-                    until=None if search_rebuild_required else until,
-                    limit=None if search_rebuild_required else limit,
-                    max_raw_bytes=max_raw_bytes,
-                    rebuild=search_rebuild_required,
-                    write_report=write_report,
-                    selected_records=selected_search_records,
-                    budget_seconds=None if search_rebuild_required else budget_remaining(),
-                    progress_every=progress_every,
-                )
-                search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
-                search_action["result"] = {
-                    key: result.get(key)
-                    for key in (
-                        "ok",
-                        "selected_count",
-                        "processed_count",
-                        "remaining_count",
-                        "budget_exhausted",
-                        "document_count",
-                        "removed_document_count",
-                        "entity_registry_document_count",
-                        "inserted_entity_registry_document_count",
-                        "updated_entity_registry_document_count",
-                        "unchanged_entity_registry_document_count",
-                        "removed_entity_registry_document_count",
-                        "report_json",
-                        "report_markdown",
-                        "diagnostics",
+                if not search_rebuild_required and selected_search_records == []:
+                    search_action["status"] = "skipped_clean"
+                    search_action["skip_reason"] = "no_search_records_selected_after_scoped_projection_planning"
+                    search_action["result"] = {
+                        "ok": True,
+                        "selected_count": 0,
+                        "processed_count": 0,
+                        "remaining_count": 0,
+                        "budget_exhausted": False,
+                        "document_count": 0,
+                        "removed_document_count": 0,
+                        "diagnostics": [],
+                    }
+                    action_results.append(search_action)
+                else:
+                    result = search_index_sessions(
+                        aoa_root=aoa_root,
+                        target=search_update_target,
+                        since=None if search_rebuild_required else since,
+                        until=None if search_rebuild_required else until,
+                        limit=None if search_rebuild_required else limit,
+                        max_raw_bytes=max_raw_bytes,
+                        rebuild=search_rebuild_required,
+                        write_report=write_report,
+                        selected_records=selected_search_records,
+                        budget_seconds=None if search_rebuild_required else budget_remaining(),
+                        progress_every=progress_every,
                     )
-                }
-                action_results.append(search_action)
-                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
-                if not result.get("ok") and result.get("diagnostics"):
-                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+                    search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
+                    search_action["result"] = {
+                        key: result.get(key)
+                        for key in (
+                            "ok",
+                            "selected_count",
+                            "processed_count",
+                            "remaining_count",
+                            "budget_exhausted",
+                            "document_count",
+                            "removed_document_count",
+                            "entity_registry_document_count",
+                            "inserted_entity_registry_document_count",
+                            "updated_entity_registry_document_count",
+                            "unchanged_entity_registry_document_count",
+                            "removed_entity_registry_document_count",
+                            "report_json",
+                            "report_markdown",
+                            "diagnostics",
+                        )
+                    }
+                    action_results.append(search_action)
+                    budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
+                    if not result.get("ok") and result.get("diagnostics"):
+                        diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if entity_registry_action["needed"]:
             if search_action["needed"] or reindex_ran or token_backfill_ran:
                 entity_registry_action["status"] = "covered_by_search_index"
@@ -22298,6 +22317,18 @@ def expected_catchup_remaining_diagnostic(diagnostic: str) -> bool:
     return diagnostic.endswith(":route_signal_classifier_mismatch")
 
 
+def expected_auto_maintenance_remaining_diagnostic(diagnostic: str) -> bool:
+    if expected_catchup_remaining_diagnostic(diagnostic):
+        return True
+    return diagnostic in {
+        "graph_maintenance_needed",
+        "search_index_budget_exhausted",
+        "index_maintenance_planning_budget_exhausted",
+        "search_refreshability_budget_exhausted",
+        "token_accounting_backfill_budget_exhausted",
+    }
+
+
 def auto_maintenance_has_remaining_route_readiness_backlog(maintenance: dict[str, Any]) -> bool:
     action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
     if int_value(action_counts.get("remaining")) <= 0:
@@ -22312,6 +22343,26 @@ def auto_maintenance_has_remaining_route_readiness_backlog(maintenance: dict[str
             continue
         result = action.get("result") if isinstance(action.get("result"), dict) else {}
         if int_value(result.get("remaining_count")) > 0 or int_value(action.get("dirty_count")) > 0:
+            return True
+    return False
+
+
+def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -> bool:
+    action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+    if int_value(action_counts.get("failed")) > 0:
+        return False
+    if bool(maintenance.get("budget_exhausted")):
+        return True
+    if int_value(action_counts.get("deferred_budget_exhausted")) > 0:
+        return True
+    actions = maintenance.get("actions") if isinstance(maintenance.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("status") or "") in {"deferred_budget_exhausted", "applied_partial_budget_exhausted"}:
+            return True
+        result = action.get("result") if isinstance(action.get("result"), dict) else {}
+        if bool(result.get("budget_exhausted")) and int_value(result.get("remaining_count")) > 0:
             return True
     return False
 
@@ -22353,6 +22404,35 @@ def auto_maintenance_expected_catchup_remaining(
     if not expected_remaining:
         return False, diagnostics
     hard_diagnostics = [item for item in diagnostics if not expected_catchup_remaining_diagnostic(str(item))]
+    return not hard_diagnostics, hard_diagnostics
+
+
+def auto_maintenance_expected_remaining_backlog(
+    *,
+    profile: str,
+    apply: bool,
+    maintenance: dict[str, Any],
+    diagnostics: list[str],
+) -> tuple[bool, list[str]]:
+    if not apply:
+        return False, diagnostics
+    action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+    if int_value(action_counts.get("failed")) > 0:
+        return False, diagnostics
+    budget_remaining = auto_maintenance_has_budget_remaining_backlog(maintenance) and (
+        bool(diagnostics) or not bool(maintenance.get("ok"))
+    )
+    expected_remaining = bool(
+        maintenance.get("search_repair_limited")
+        or maintenance.get("atlas_repair_limited")
+        or int_value(maintenance.get("search_repair_remaining_count")) > 0
+        or int_value(maintenance.get("atlas_repair_remaining_count")) > 0
+        or auto_maintenance_has_remaining_route_readiness_backlog(maintenance)
+        or budget_remaining
+    )
+    if not expected_remaining:
+        return False, diagnostics
+    hard_diagnostics = [item for item in diagnostics if not expected_auto_maintenance_remaining_diagnostic(str(item))]
     return not hard_diagnostics, hard_diagnostics
 
 
@@ -22974,13 +23054,23 @@ def auto_maintenance(
                 budget_seconds=deferred_graph_job_budget_seconds,
             )
         diagnostics = sorted(set(diagnostics))
-        expected_catchup_remaining, hard_diagnostics = auto_maintenance_expected_catchup_remaining(
+        expected_catchup_remaining, catchup_hard_diagnostics = auto_maintenance_expected_catchup_remaining(
             profile=profile,
             apply=apply,
             maintenance=maintenance,
             diagnostics=diagnostics,
         )
-        payload_ok = (not diagnostics and bool(maintenance.get("ok"))) or expected_catchup_remaining
+        expected_remaining_backlog, hard_diagnostics = auto_maintenance_expected_remaining_backlog(
+            profile=profile,
+            apply=apply,
+            maintenance=maintenance,
+            diagnostics=diagnostics,
+        )
+        if profile == "catchup":
+            expected_catchup_remaining = expected_remaining_backlog
+        elif expected_catchup_remaining and not expected_remaining_backlog:
+            hard_diagnostics = catchup_hard_diagnostics
+        payload_ok = (not diagnostics and bool(maintenance.get("ok"))) or expected_remaining_backlog
         selection_deferred_count = int_value(selection_scope.get("deferred_live_session_count"))
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -22989,7 +23079,7 @@ def auto_maintenance(
             "ok": payload_ok,
             "status": (
                 "applied_with_remaining_backlog"
-                if expected_catchup_remaining
+                if expected_remaining_backlog
                 else (
                     "applied_with_deferred_graph"
                     if apply and deferred_graph_after
@@ -23032,6 +23122,7 @@ def auto_maintenance(
             "deferred_live_selection_count": selection_deferred_count,
             "deferred_graph_after": deferred_graph_after,
             "graph_deferred_by_budget": graph_deferred_by_budget,
+            "expected_remaining_backlog": expected_remaining_backlog,
             "expected_catchup_remaining": expected_catchup_remaining,
             "hard_diagnostics": hard_diagnostics,
             "deferred_graph_job": str(deferred_graph_job_path) if deferred_graph_job_path else "",
