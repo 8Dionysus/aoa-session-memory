@@ -36590,6 +36590,12 @@ def literal_query_plan(
         candidate_shard_count=len(candidate_shards),
         queried_shard_count=min(len(candidate_shards), max(1, int_value(max_shards, 24))),
     )
+    resolved_session_record: dict[str, Any] = {}
+    if LITERAL_QUERY_KIND_SESSION_ID in shape.get("signals", []) and text:
+        try:
+            resolved_session_record = resolve_session_record(aoa_root, text)
+        except ValueError as exc:
+            diagnostics.append(f"session_id_not_resolved:{exc}")
 
     routes: list[dict[str, Any]] = []
 
@@ -36604,6 +36610,51 @@ def literal_query_plan(
                 "authority": authority,
                 "command": command,
             }
+        )
+
+    if resolved_session_record:
+        session_target = str(
+            resolved_session_record.get("session_label")
+            or resolved_session_record.get("label")
+            or resolved_session_record.get("session_id")
+            or text
+        )
+        add_route(
+            "session_rehydrate",
+            "query is an exact session id; open the generated session rehydration packet before raw-text recall",
+            " ".join(
+                shlex.quote(part)
+                for part in [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "rehydrate",
+                    session_target,
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--max-events",
+                    "24",
+                ]
+            ),
+            cost="low",
+            authority="session_manifest_refs",
+        )
+        add_route(
+            "session_structured_search",
+            "session id resolved to an archive; search inside that session scope before global literal recall",
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query="",
+                session=session_target,
+                doc_type=doc_type or "event",
+                agent_event=agent_event,
+                usage_role=usage_role,
+                task_episode_id=task_episode_id,
+                date_from=date_from,
+                date_to=date_to,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+            authority="generated_session_refs",
         )
 
     if broad_entity_class:
@@ -36911,6 +36962,23 @@ def literal_query_plan(
         )
 
     primary_route = routes[0]
+    raw_text_fallback_route_ids = {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    fallback_plan = next((route for route in routes if route.get("route_id") in raw_text_fallback_route_ids), None)
+    next_expansion = next((route for route in routes[1:] if route.get("command")), None)
+    if (
+        primary_route.get("route_id") == "monolith_raw_text_fallback"
+        and raw_text_fallback.get("scoped_full_text_next_commands")
+    ):
+        scoped_next = raw_text_fallback.get("scoped_full_text_next_commands", [{}])[0]
+        if isinstance(scoped_next, dict) and scoped_next.get("command"):
+            next_expansion = {
+                "route_id": "materialize_scoped_full_text_shard",
+                "reason": scoped_next.get("reason")
+                or "materialize a narrower full-text shard before repeating broad raw recall",
+                "estimated_cost": "medium",
+                "authority": "generated_search_refs",
+                "command": scoped_next.get("command"),
+            }
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_literal_query_plan",
@@ -36927,6 +36995,15 @@ def literal_query_plan(
         "embedded_entity_anchor": embedded_entity_anchor,
         **trace_kind_payload_fields(kind, normalized_kind),
         "query_shape": shape,
+        "classifications": {
+            "primary": shape.get("primary"),
+            "signals": list(shape.get("signals") or []),
+            "route_anchor_source": route_anchor_source,
+            "route_anchor_kind": route_anchor_kind,
+            "broad_entity_class": bool(broad_entity_class),
+            "embedded_entity_anchor": bool(embedded_entity_anchor),
+            "structured_filter_keys": sorted(key for key, value in structured_filters.items() if value),
+        },
         "structured_filters": structured_filters,
         "inferred_kinds": infer_trace_route_kinds(route_anchor_text, route_anchor_kind) if route_anchor_text else [],
         "entity_registry": {
@@ -36959,6 +37036,8 @@ def literal_query_plan(
                 "route_signal_structured_search",
                 "agent_event_route",
                 "task_episode_route",
+                "session_rehydrate",
+                "session_structured_search",
                 "raw_ref_scoped_verification",
                 "hook_receipts",
                 "command_structured_search",
@@ -36968,11 +37047,10 @@ def literal_query_plan(
             "query_timeout_ms": normalized_search_fts_query_timeout_ms(query_timeout_ms) if has_literal_text else 0,
             "exact_recall_preserved_by_fallback": bool(has_literal_text),
         },
+        "fallback_plan": fallback_plan,
         "next_command": primary_route.get("command"),
-        "next_expansion_command": raw_text_fallback.get("scoped_full_text_next_commands", [{}])[0].get("command")
-        if primary_route.get("route_id") == "monolith_raw_text_fallback"
-        and raw_text_fallback.get("scoped_full_text_next_commands")
-        else "",
+        "next_expansion": next_expansion or {},
+        "next_expansion_command": (next_expansion or {}).get("command", ""),
         "authority_boundary": "This planner chooses a cheap first route; raw transcript and segment indexes remain evidence authority.",
         "diagnostics": diagnostics,
     }
@@ -56175,6 +56253,29 @@ def live_scenario_literal_planner_audit(
             "expected_primary_route": "command_structured_search",
         },
     ]
+    try:
+        session_id_probe = next(
+            (
+                str(record.get("session_id") or "")
+                for record in reversed(chronological_session_records(aoa_root))
+                if re.fullmatch(
+                    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                    str(record.get("session_id") or ""),
+                )
+            ),
+            "",
+        )
+    except Exception:
+        session_id_probe = ""
+    if session_id_probe:
+        probes.append(
+            {
+                "name": "session_id",
+                "query": session_id_probe,
+                "expected_shape": LITERAL_QUERY_KIND_SESSION_ID,
+                "expected_primary_route": "session_rehydrate",
+            }
+        )
     selected_limit = max(1, min(int_value(limit, len(probes)), len(probes)))
     samples: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()

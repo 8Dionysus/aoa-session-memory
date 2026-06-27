@@ -215,6 +215,7 @@ python3 scripts/aoa_session_memory.py entity-usage-audit aoa-session-memory-mcp 
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood aoa-session-memory-mcp --kind mcp
 python3 scripts/aoa_session_memory.py literal-query-plan "Traceback ValueError" --doc-type event
 python3 scripts/aoa_session_memory.py literal-query-plan "python3 scripts/aoa_session_memory.py agent-event-audit latest --probe-routes"
+python3 scripts/aoa_session_memory.py literal-query-plan "019e8b6e-343d-7951-87a7-579e1184cceb"
 python3 scripts/aoa_session_memory.py graph-neighborhood aoa-session-memory-mcp --kind mcp --limit 12 --edge-limit 48
 ```
 
@@ -1193,6 +1194,13 @@ previews and compressed full-body hydration, and it skips broad text fallback
 when route hits already contain direct usage evidence. Use the returned
 raw/session refs or
 `entity-usage-neighborhood` when exact before/after evidence is needed.
+
+For literal text, path, command, error text, or session-id inputs, use
+`literal-query-plan` before `search`. The packet exposes the detected
+`classifications`, primary route, `cost_profile`, `fallback_plan`, and
+`next_expansion_command`. Exact session ids route to `rehydrate` and
+session-scoped search before global literal fallback; this keeps exact recall
+available without making monolith FTS the first move.
 
 Query it without losing evidence routing:
 

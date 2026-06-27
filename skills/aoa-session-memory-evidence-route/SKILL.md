@@ -50,8 +50,11 @@ Use these first routes when available:
   `agent-reasoning-windows`, or `answer-neighborhood`.
 - exact text, path, command, error, session id, or human phrase:
   `literal-query-plan` first; follow its cheaper structured route or bounded
-  raw fallback. For commands, use the planner's command anchor for structured
-  routes and preserve the full command text for exact recall.
+  raw fallback. Read `classifications`, `cost_profile`, `fallback_plan`, and
+  `next_expansion_command` before opening raw. For commands, use the planner's
+  command anchor for structured routes and preserve the full command text for
+  exact recall. For exact session ids, use the planner's rehydrate/session
+  search route before global literal fallback.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with

@@ -4434,13 +4434,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     (repo / "AGENTS.md").write_text("# graph route\n", encoding="utf-8")
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-26T00-00-00-graph-rag.jsonl"
+    graph_session_id = "019e8b6e-343d-7951-87a7-579e1184cceb"
     write_jsonl(
         transcript,
         [
             {
                 "timestamp": "2026-05-26T00:00:00Z",
                 "type": "session_meta",
-                "payload": {"id": "graph-rag", "cwd": str(repo), "model": "gpt-5"},
+                "payload": {"id": graph_session_id, "cwd": str(repo), "model": "gpt-5"},
             },
             {
                 "timestamp": "2026-05-26T00:00:01Z",
@@ -4515,7 +4516,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     module.handle_hook_event(
         "Stop",
         {
-            "session_id": "graph-rag",
+            "session_id": graph_session_id,
             "transcript_path": str(transcript),
             "cwd": str(repo),
             "hook_event_name": "Stop",
@@ -4723,6 +4724,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query="python3 scripts/aoa_session_memory.py agent-event-audit latest --probe-routes",
         doc_type="event",
     )
+    session_id_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query=graph_session_id,
+        doc_type="event",
+    )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
     storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
@@ -4873,6 +4879,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert typed_literal_plan["ok"] is True
     assert typed_literal_plan["primary_route"]["route_id"] == "entity_usage_audit"
     assert typed_literal_plan["cost_profile"]["structured_first"] is True
+    assert typed_literal_plan["classifications"]["primary"] == "entity_anchor"
+    assert typed_literal_plan["fallback_plan"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert typed_literal_plan["next_expansion"]["route_id"] == "trace_route"
+    assert typed_literal_plan["next_expansion_command"]
     assert typed_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert any(
         item.get("route_signal") == "mcp:aoa_decisions_mcp"
@@ -4955,6 +4965,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert command_literal_plan["cost_profile"]["structured_first"] is True
     assert command_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert command_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert session_id_literal_plan["query_shape"]["primary"] == "session_id"
+    assert session_id_literal_plan["classifications"]["primary"] == "session_id"
+    assert session_id_literal_plan["primary_route"]["route_id"] == "session_rehydrate"
+    assert session_id_literal_plan["ordered_routes"][1]["route_id"] == "session_structured_search"
+    assert session_id_literal_plan["fallback_plan"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert session_id_literal_plan["cost_profile"]["structured_first"] is True
+    assert session_id_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert session_id_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert "rehydrate" in session_id_literal_plan["next_command"]
+    assert "--session" in session_id_literal_plan["next_expansion_command"]
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])

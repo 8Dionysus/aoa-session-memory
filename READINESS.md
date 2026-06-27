@@ -751,6 +751,16 @@ Last observed result:
   `first_useful_packet_ms=395`, graph neighborhood `node_count=17` /
   `edge_count=16` / `evidence_ref_count=50`, and the literal planner selected
   `route_signal_structured_search`.
+- 2026-06-27 literal planner session-id proof: the planner now exposes
+  `classifications`, `fallback_plan`, and `next_expansion` on route packets,
+  and exact UUID session ids route through `session_rehydrate` plus
+  session-scoped structured search before global literal fallback. Live
+  `live-scenario-audit --profile literal_planner --seed
+  literal-session-id-20260627 --sample-size 5 --limit 5` returned `ok=true`,
+  `sample_count=5`, `failed_count=0`, `elapsed_ms=480`, with primary route
+  counts including `session_rehydrate=1`, `route_signal_structured_search=1`,
+  `entity_inventory=1`, `entity_usage_audit=1`, and
+  `command_structured_search=1`.
 - 2026-06-26 consumer MCP / graph-drip proof: live MCP registry and usage
   routes found both the new `aoa-session-memory-evidence-route` skill and the
   older `aoa-decision` skill as active generated navigation entities with
