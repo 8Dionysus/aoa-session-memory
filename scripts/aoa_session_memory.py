@@ -124,6 +124,8 @@ SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_slim_preview_v3"
 SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v2"
 SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
+SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT = 1_000_000
+SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT = 500_000
 SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
@@ -28385,6 +28387,7 @@ def materialize_search_shards(
     slow_session_rows: list[dict[str, Any]] = []
     processed_count = 0
     document_count = 0
+    document_type_counts: Counter[str] = Counter()
     for shard_key in sorted(groups):
         if deadline is not None and processed_count > 0 and time.monotonic() >= deadline:
             diagnostics.append("search_shard_materialization_budget_exhausted")
@@ -28447,6 +28450,16 @@ def materialize_search_shards(
         diagnostics.extend(f"{shard_key}:{item}" for item in shard_diagnostics)
         processed_count += int_value(result.get("processed_count"))
         document_count += int_value(result.get("document_count"))
+        shard_document_counts = {
+            "session": int_value(result.get("session_document_count")),
+            "segment": int_value(result.get("segment_document_count")),
+            "event": int_value(result.get("event_document_count")),
+            "incident": int_value(result.get("incident_document_count")),
+            "entity_registry": int_value(result.get("entity_registry_document_count")),
+            "goal_lifecycle": int_value(result.get("goal_lifecycle_document_count")),
+            "task_episode": int_value(result.get("task_episode_document_count")),
+        }
+        document_type_counts.update({key: value for key, value in shard_document_counts.items() if value > 0})
         shard_results.append(
             {
                 "shard": shard_key,
@@ -28456,6 +28469,8 @@ def materialize_search_shards(
                 "session_count": len(shard_records),
                 "processed_count": int_value(result.get("processed_count")),
                 "document_count": int_value(result.get("document_count")),
+                "document_counts": shard_document_counts,
+                "event_document_count": shard_document_counts["event"],
                 "elapsed_ms": shard_elapsed_ms,
                 "documents_per_second": round(int_value(result.get("document_count")) / (shard_elapsed_ms / 1000.0), 2)
                 if shard_elapsed_ms > 0 and int_value(result.get("document_count")) > 0
@@ -28525,6 +28540,9 @@ def materialize_search_shards(
         "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "shard_count": len(shard_results),
         "document_count": document_count,
+        "document_counts": dict(sorted(document_type_counts.items())),
+        "event_document_count": int_value(document_type_counts.get("event")),
+        "event_document_ratio": round(int_value(document_type_counts.get("event")) / document_count, 6) if document_count > 0 else 0.0,
         "slow_sessions": search_slow_session_rows(slow_session_rows),
         "slow_session_warning_count": sum(1 for item in slow_session_rows if item.get("warning")),
         "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
@@ -32548,6 +32566,8 @@ def search_index_sessions(
         "segment_document_count": counts.get("segment", 0),
         "event_document_count": counts.get("event", 0),
         "incident_document_count": counts.get("incident", 0),
+        "task_episode_document_count": counts.get("task_episode", 0),
+        "goal_lifecycle_document_count": counts.get("goal_lifecycle", 0),
         "entity_registry_document_count": counts.get("entity_registry", 0),
         "db_path": str(db_path),
         "build_db_path": str(write_db_path),
@@ -49930,6 +49950,9 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
         "processed_count": processed_count,
         "shard_count": report.get("shard_count"),
         "document_count": document_count,
+        "document_counts": report.get("document_counts") if isinstance(report.get("document_counts"), dict) else {},
+        "event_document_count": report.get("event_document_count"),
+        "event_document_ratio": report.get("event_document_ratio"),
         "elapsed_ms": elapsed_ms if elapsed_ms > 0 else report.get("elapsed_ms"),
         "documents_per_second": round(document_count / elapsed_seconds, 2)
         if elapsed_seconds > 0 and document_count > 0
@@ -49959,6 +49982,8 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
                     "session_count",
                     "processed_count",
                     "document_count",
+                    "document_counts",
+                    "event_document_count",
                     "elapsed_ms",
                     "documents_per_second",
                     "slow_session_warning_count",
@@ -50742,6 +50767,7 @@ def session_memory_ops_warnings(
         )
     combined_search_bytes = int_value(search_shards.get("combined_search_projection_total_bytes"))
     if combined_search_bytes >= OPS_SEARCH_DB_WARNING_BYTES:
+        document_hotset = search_document_hotset_pressure(search_shards)
         warnings.append(
             {
                 "code": "search_projection_combined_large",
@@ -50752,6 +50778,9 @@ def session_memory_ops_warnings(
                 "shard_total_human": search_shards.get("shard_db_total_human"),
                 "warning_bytes": OPS_SEARCH_DB_WARNING_BYTES,
                 "critical_bytes": OPS_SEARCH_DB_CRITICAL_BYTES,
+                "document_hotset_status": document_hotset.get("status"),
+                "document_count": document_hotset.get("document_count"),
+                "latest_event_document_count": document_hotset.get("latest_materialization_event_document_count"),
             }
         )
     if entity_registry.get("needs_maintenance"):
@@ -50910,6 +50939,101 @@ def session_memory_ops_long_maintenance_reasons(
     return reasons[:12]
 
 
+def search_document_hotset_pressure(search_shards: dict[str, Any]) -> dict[str, Any]:
+    latest = (
+        search_shards.get("latest_materialization")
+        if isinstance(search_shards.get("latest_materialization"), dict)
+        else {}
+    )
+    raw_text_fallback = (
+        search_shards.get("raw_text_fallback_dependency")
+        if isinstance(search_shards.get("raw_text_fallback_dependency"), dict)
+        else {}
+    )
+    document_count = int_value(search_shards.get("document_count"))
+    latest_document_count = int_value(latest.get("document_count"))
+    latest_event_document_count = int_value(latest.get("event_document_count"))
+    latest_event_ratio = ops_float_value(latest.get("event_document_ratio"))
+    structured_only_count = int_value(raw_text_fallback.get("structured_only_shard_count"))
+    full_text_count = int_value(raw_text_fallback.get("full_text_shard_count"))
+    largest_shards = [
+        {
+            key: item.get(key)
+            for key in (
+                "shard",
+                "status",
+                "document_count",
+                "total_with_wal_human",
+                "storage_profile",
+                "raw_text_query_support",
+            )
+            if key in item
+        }
+        for item in (search_shards.get("largest_shards") or [])[:4]
+        if isinstance(item, dict)
+    ]
+    latest_slow_sessions = [
+        {
+            key: item.get(key)
+            for key in (
+                "shard",
+                "session_label",
+                "document_count",
+                "elapsed_ms",
+                "documents_per_second",
+                "warning",
+                "raw_text_status",
+            )
+            if key in item
+        }
+        for item in (latest.get("slow_sessions") or [])[:4]
+        if isinstance(item, dict)
+    ]
+
+    if latest_event_document_count >= SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT:
+        status = "latest_materialization_event_hotset"
+        cause = "latest search-shards run was dominated by event documents"
+    elif document_count >= SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT and structured_only_count > 0:
+        status = "large_structured_document_hotset"
+        cause = "structured shards are slim per row, but the event/document cardinality is large"
+    else:
+        status = "normal"
+        cause = "no large structured document hotset is visible from compact catalog/materialization evidence"
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_document_hotset_pressure",
+        "mutates": False,
+        "status": status,
+        "cause": cause,
+        "document_count": document_count,
+        "latest_materialization_document_count": latest_document_count,
+        "latest_materialization_document_counts": latest.get("document_counts")
+        if isinstance(latest.get("document_counts"), dict)
+        else {},
+        "latest_materialization_event_document_count": latest_event_document_count,
+        "latest_materialization_event_document_ratio": latest_event_ratio,
+        "structured_only_shard_count": structured_only_count,
+        "full_text_shard_count": full_text_count,
+        "largest_shards": largest_shards,
+        "latest_slow_sessions": latest_slow_sessions,
+        "quality_boundary": (
+            "do not drop event documents from structured shards without a replacement route that preserves "
+            "agent-event, usage, consequence, and raw/segment refs"
+        ),
+        "speed_boundary": (
+            "structured shard fan-out remains the fast path for agent-event/entity/goal routes; broad literal "
+            "raw text remains on the monolith fallback"
+        ),
+        "next_route": (
+            "design a compact operational-event projection or schema normalization; do not expect sqlite vacuum "
+            "or full-text shard toggles to solve this pressure"
+            if status != "normal"
+            else "continue monitoring document cardinality through search-shards reports"
+        ),
+    }
+
+
 def session_memory_search_pressure_summary(
     *,
     aoa_root: Path,
@@ -50935,6 +51059,7 @@ def session_memory_search_pressure_summary(
     raw_text_fallback_status = str(raw_text_fallback.get("status") or "unknown")
     actionable_noncurrent_shard_count = int_value(search_shards.get("actionable_noncurrent_shard_count"))
     deferred_live_session_count = int_value(search_shards.get("deferred_live_session_count"))
+    document_hotset = search_document_hotset_pressure(search_shards)
     near_warning_bytes = int(OPS_SEARCH_DB_WARNING_BYTES * OPS_SEARCH_DB_NEAR_WARNING_RATIO)
     if combined_total_bytes >= OPS_SEARCH_DB_CRITICAL_BYTES:
         status = "critical_projection_stack"
@@ -50954,6 +51079,11 @@ def session_memory_search_pressure_summary(
         next_route = (
             "wait for the live quiet window or run the targeted live catch-up; avoid broad full-text shard materialization "
             "while only deferred_live sessions are pending"
+        )
+    elif status in {"critical_projection_stack", "large_projection_stack"} and document_hotset.get("status") != "normal":
+        next_route = (
+            "treat search weight as structured document hotset/cardinality pressure; design a compact operational-event "
+            "projection or schema normalization, then use storage-audit/search-sqlite-compact only as evidence"
         )
     elif status in {"critical_projection_stack", "large_projection_stack"}:
         next_route = (
@@ -51014,6 +51144,7 @@ def session_memory_search_pressure_summary(
         "raw_text_fallback_status": raw_text_fallback_status,
         "raw_text_query_route": search_shards.get("raw_text_query_route"),
         "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
+        "document_hotset": document_hotset,
         "quality_boundary": "structured routes and raw-text fallback are routing projections; raw transcripts and segment indexes remain authority",
         "speed_boundary": "agent-event/entity/goal routes should use structured shards; literal raw-text stays bounded and may use the monolith fallback",
         "weight_boundary": "do not remove the monolith solely for size while it is the verified raw-text fallback",
@@ -52524,6 +52655,28 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         }
         | (
             {
+                "document_hotset": {
+                    key: (search_pressure.get("document_hotset") or {}).get(key)
+                    for key in (
+                        "status",
+                        "cause",
+                        "document_count",
+                        "latest_materialization_document_count",
+                        "latest_materialization_event_document_count",
+                        "latest_materialization_event_document_ratio",
+                        "structured_only_shard_count",
+                        "full_text_shard_count",
+                        "next_route",
+                    )
+                    if isinstance(search_pressure.get("document_hotset"), dict)
+                    and key in (search_pressure.get("document_hotset") or {})
+                }
+            }
+            if isinstance(search_pressure.get("document_hotset"), dict)
+            else {}
+        )
+        | (
+            {
                 "physical_compaction": {
                     key: (search_pressure.get("physical_compaction") or {}).get(key)
                     for key in ("status", "reason", "exact_plan_command")
@@ -52649,6 +52802,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "processed_count",
                     "shard_count",
                     "document_count",
+                    "document_counts",
+                    "event_document_count",
+                    "event_document_ratio",
                     "elapsed_ms",
                     "documents_per_second",
                     "sessions_per_second",

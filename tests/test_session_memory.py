@@ -14228,6 +14228,78 @@ def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(
     assert "search-sqlite-compact" in summary["physical_compaction"]["exact_plan_command"]
 
 
+def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    monkeypatch.setattr(module, "SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT", 1_000)
+    monkeypatch.setattr(module, "SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT", 500)
+    combined_bytes = int(module.OPS_SEARCH_DB_WARNING_BYTES * 1.1)
+    summary = module.session_memory_search_pressure_summary(
+        aoa_root=aoa_root,
+        storage={
+            "search_db": {
+                "total_with_wal_bytes": combined_bytes,
+                "total_with_wal_human": "13.2 GiB",
+            },
+            "search_root": {"size_bytes": combined_bytes, "size_human": "13.2 GiB"},
+        },
+        search_shards={
+            "status": "current",
+            "document_count": 2_500,
+            "monolith_db_total_bytes": combined_bytes,
+            "monolith_db_total_human": "13.2 GiB",
+            "shard_db_total_bytes": 4096,
+            "shard_db_total_human": "4.0 KiB",
+            "combined_search_projection_total_bytes": combined_bytes,
+            "combined_search_projection_total_human": "13.2 GiB",
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "materialized_shard_count": 2,
+            "shard_count": 2,
+            "largest_shards": [
+                {
+                    "shard": "month/2026-06",
+                    "status": "current",
+                    "document_count": 2_500,
+                    "total_with_wal_human": "4.0 KiB",
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                }
+            ],
+            "latest_materialization": {
+                "document_count": 900,
+                "document_counts": {"event": 700, "session": 2},
+                "event_document_count": 700,
+                "event_document_ratio": 0.777778,
+                "slow_sessions": [
+                    {
+                        "shard": "month/2026-06",
+                        "session_label": "2026-06-21__002__slow-shard-session",
+                        "document_count": 700,
+                        "elapsed_ms": 3000,
+                        "documents_per_second": 233.33,
+                        "warning": True,
+                    }
+                ],
+            },
+            "raw_text_query_route": "structured shards use monolith fallback",
+            "raw_text_fallback_dependency": {
+                "status": "monolith_required_for_raw_text_query",
+                "structured_only_shard_count": 2,
+                "full_text_shard_count": 0,
+            },
+        },
+    )
+
+    assert summary["status"] == "large_projection_stack"
+    assert summary["document_hotset"]["status"] == "latest_materialization_event_hotset"
+    assert summary["document_hotset"]["latest_materialization_document_counts"]["event"] == 700
+    assert summary["document_hotset"]["latest_slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
+    assert "operational-event projection" in summary["document_hotset"]["next_route"]
+    assert "structured document hotset" in summary["next_route"]
+    assert summary["physical_compaction"]["status"] == "requires_explicit_plan"
+
+
 def test_storage_audit_recommends_event_sequence_projection_rebuild(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)
@@ -16034,6 +16106,9 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert shards["search_route_signals_preview_chars"] == module.SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS
     assert shards["search_tags_storage_policy"] == module.SEARCH_TAGS_STORAGE_POLICY_STRUCTURED_SHARD
     assert shards["shard_count"] == 2
+    assert shards["document_counts"]["event"] > 0
+    assert shards["event_document_count"] == shards["document_counts"]["event"]
+    assert shards["event_document_ratio"] > 0
     assert shards["elapsed_ms"] >= 0
     assert shards["documents_per_second"] is not None
     assert shards["slow_session_warning_count"] == 0
@@ -16117,8 +16192,11 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert ops["search_shards"]["latest_materialization"]["exists"] is True
     assert ops["search_shards"]["latest_materialization"]["search_document_storage_profile"] == module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
     assert ops["search_shards"]["latest_materialization"]["document_count"] == shards["document_count"]
+    assert ops["search_shards"]["latest_materialization"]["document_counts"]["event"] == shards["document_counts"]["event"]
+    assert ops["search_shards"]["latest_materialization"]["event_document_count"] == shards["event_document_count"]
     assert ops["search_shards"]["latest_materialization"]["slow_sessions"]
     assert ops["search_pressure"]["raw_text_fallback_status"] == "monolith_required_for_raw_text_query"
+    assert ops["search_pressure"]["document_hotset"]["status"] == "normal"
     compact = module.compact_maintenance_status_payload(
         {
             "schema_version": module.SCHEMA_VERSION,
@@ -16128,6 +16206,8 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     )
     assert compact["operations"]["search_shards"]["latest_materialization"]["slow_sessions"]
     assert compact["operations"]["search_pressure"]["raw_text_fallback_status"] == "monolith_required_for_raw_text_query"
+    assert compact["operations"]["search_pressure"]["document_hotset"]["status"] == "normal"
+    assert compact["operations"]["search_shards"]["latest_materialization"]["event_document_count"] == shards["event_document_count"]
     assert compact["operations"]["search_pressure"]["physical_compaction"]["status"]
 
     archive_session("june-shard-incremental", "2026-06-25T00:00:00Z", "june-shard-incremental-anchor")

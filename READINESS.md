@@ -103,7 +103,12 @@ Build the `.aoa` session-memory mechanism end to end:
   contribution payloads with evidence hydration from contribution rows, sampled
   graph aggregate payload reclaim estimates, materialized
   `graph-cardinality` node/edge type counts, and search body storage with
-  full-text FTS plus compressed selected-hit hydration
+  full-text FTS plus compressed selected-hit hydration; search-shard
+  materialization reports expose per-document-type counts, event-document
+  totals, and event-document ratio, while `maintenance-status` surfaces
+  `operations.search_pressure.document_hotset` so agents can distinguish true
+  structured event/document cardinality pressure from physical SQLite reclaim
+  or full-text shard toggles
 - SQLite physical compaction promotion: `graph-sqlite-compact` and
   `search-sqlite-compact` can now promote a verified `VACUUM INTO` copy over
   the live generated store with `--promote-copy`, keeping a backup by default
