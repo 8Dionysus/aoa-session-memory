@@ -4031,6 +4031,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     assert audit["artifact_type"] == "session_memory_live_scenario_audit"
     assert audit["quality"]["scenario_count"] == 7
     assert audit["quality"]["failed_count"] == 0
+    assert audit["quality"]["actionable_gap_count"] == 0
     assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 6
     scenarios = {item["profile"]: item for item in audit["scenarios"]}
     assert scenarios["entity_dossier"]["sample_count"] == 1
@@ -4055,7 +4056,202 @@ def test_live_scenario_audit_fails_empty_entity_dossier_profile(tmp_path: Path, 
 
     assert audit["ok"] is False
     assert audit["quality"]["failed_count"] == 1
+    assert audit["quality"]["actionable_gap_count"] == 1
     assert audit["scenarios"][0]["status"] == "failed"
+    assert audit["actionable_gaps"][0]["profile"] == "entity_dossier"
+
+
+def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    corpus_path.parent.mkdir(parents=True)
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "literal_planner_route_contract",
+                    "profiles": ["literal_planner"],
+                    "seed": "literal-test",
+                    "sample_size": 5,
+                    "limit": 5,
+                    "expect": {
+                        "max_failed_count": 0,
+                        "max_warn_count": 0,
+                        "profile_expectations": [
+                            {
+                                "profile": "literal_planner",
+                                "allowed_statuses": ["passed"],
+                                "min_sample_count": 5,
+                                "max_failed_count": 0,
+                                "max_warn_count": 0,
+                                "required_primary_routes": ["entity_inventory", "session_rehydrate"],
+                                "required_shape_counts": ["entity_class", "session_id"],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "id": "entity_usage_refs_contract",
+                    "profiles": ["entity_usage"],
+                    "seed": "usage-test",
+                    "sample_size": 3,
+                    "limit": 3,
+                    "expect": {
+                        "max_failed_count": 0,
+                        "min_raw_or_segment_ref_scenario_count": 1,
+                        "profile_expectations": [
+                            {
+                                "profile": "entity_usage",
+                                "allowed_statuses": ["passed", "warn"],
+                                "min_sample_count": 3,
+                                "max_failed_count": 0,
+                                "min_raw_ref_count": 1,
+                                "min_segment_ref_count": 1,
+                            }
+                        ],
+                    },
+                },
+            ],
+        },
+    )
+
+    def fake_live_scenario_audit(**kwargs: Any) -> dict[str, Any]:
+        profiles = kwargs.get("profiles") or []
+        if profiles == ["literal_planner"]:
+            return {
+                "ok": True,
+                "profiles": profiles,
+                "quality": {
+                    "scenario_count": 1,
+                    "passed_count": 1,
+                    "warn_count": 0,
+                    "failed_count": 0,
+                    "actionable_gap_count": 0,
+                    "raw_or_segment_ref_scenario_count": 0,
+                },
+                "scenarios": [
+                    {
+                        "profile": "literal_planner",
+                        "status": "passed",
+                        "sample_count": 5,
+                        "passed_count": 5,
+                        "warn_count": 0,
+                        "failed_count": 0,
+                        "primary_route_counts": {"entity_inventory": 1, "session_rehydrate": 1},
+                        "shape_counts": {"entity_class": 1, "session_id": 1},
+                    }
+                ],
+                "actionable_gaps": [],
+            }
+        return {
+            "ok": True,
+            "profiles": profiles,
+            "quality": {
+                "scenario_count": 1,
+                "passed_count": 0,
+                "warn_count": 1,
+                "failed_count": 0,
+                "actionable_gap_count": 1,
+                "raw_or_segment_ref_scenario_count": 1,
+            },
+            "scenarios": [
+                {
+                    "profile": "entity_usage",
+                    "status": "warn",
+                    "sample_count": 3,
+                    "passed_count": 2,
+                    "warn_count": 1,
+                    "failed_count": 0,
+                    "evidence_ref_counts": {"raw_ref": 2, "segment_ref": 2},
+                    "first_ref": {"raw": "raw:line:7", "segment": "segment.md"},
+                    "quality_flags": ["direct_usage_without_consequence"],
+                }
+            ],
+            "actionable_gaps": [
+                {
+                    "profile": "entity_usage",
+                    "status": "warn",
+                    "reasons": ["direct_usage_without_consequence"],
+                    "first_ref": {"raw": "raw:line:7", "segment": "segment.md"},
+                    "next_route": "rerun entity usage",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(module, "live_scenario_audit", fake_live_scenario_audit)
+
+    payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
+
+    assert payload["artifact_type"] == "session_memory_live_scenario_regression_check"
+    assert payload["ok"] is True
+    assert payload["case_count"] == 2
+    assert payload["failed_count"] == 0
+    assert payload["actionable_gap_count"] == 1
+    assert payload["actionable_gaps"][0]["case_id"] == "entity_usage_refs_contract"
+
+
+def test_live_scenario_corpus_check_fails_missing_required_route(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    corpus_path.parent.mkdir(parents=True)
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "literal_missing_route",
+                    "profiles": ["literal_planner"],
+                    "expect": {
+                        "max_failed_count": 0,
+                        "profile_expectations": [
+                            {
+                                "profile": "literal_planner",
+                                "allowed_statuses": ["passed"],
+                                "required_primary_routes": ["session_rehydrate"],
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        module,
+        "live_scenario_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "profiles": ["literal_planner"],
+            "quality": {
+                "scenario_count": 1,
+                "passed_count": 1,
+                "warn_count": 0,
+                "failed_count": 0,
+                "actionable_gap_count": 0,
+                "raw_or_segment_ref_scenario_count": 0,
+            },
+            "scenarios": [
+                {
+                    "profile": "literal_planner",
+                    "status": "passed",
+                    "primary_route_counts": {"entity_inventory": 1},
+                    "shape_counts": {"entity_class": 1},
+                }
+            ],
+            "actionable_gaps": [],
+        },
+    )
+
+    payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
+
+    assert payload["ok"] is False
+    assert payload["failed_count"] == 1
+    assert payload["results"][0]["failures"] == ["literal_planner:missing_primary_route:session_rehydrate"]
 
 
 def test_trace_route_supports_agent_event_kind() -> None:

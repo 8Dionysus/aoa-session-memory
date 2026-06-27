@@ -400,6 +400,7 @@ SESSION_MEMORY_GRAPH_DRIP_OVERRIDE_FLAGS = {
     "--graph-drip-candidate-pool-limit": "graph_drip_candidate_pool_limit",
 }
 GRAPH_QUALITY_CORPUS_PATH = Path("config/graph-quality-regression-corpus.json")
+LIVE_SCENARIO_CORPUS_PATH = Path("config/live-scenario-regression-corpus.json")
 ATLAS_POLICY_PATH = Path("config/atlas-policy.json")
 ATLAS_ROUTE_ENTRY_SCHEMA_PATH = Path("schemas/atlas-route-entry.schema.json")
 ATLAS_ROUTE_ENTRY_TRUST_LAYER = [
@@ -56514,8 +56515,75 @@ def live_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         lines.append(
             f"- `{scenario.get('profile')}`: `{scenario.get('status')}` elapsed_ms=`{scenario.get('elapsed_ms')}` first_ref=`{scenario.get('first_ref')}`"
         )
+    gaps = payload.get("actionable_gaps") if isinstance(payload.get("actionable_gaps"), list) else []
+    if gaps:
+        lines.extend(["", "## Actionable Gaps", ""])
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                continue
+            reasons = ", ".join(str(item) for item in gap.get("reasons", []) if item)
+            lines.append(
+                f"- `{gap.get('profile')}` `{gap.get('status')}`: {reasons} next=`{gap.get('next_route')}`"
+            )
     lines.extend(["", "## Next Route", "", str(payload.get("next_route") or ""), ""])
     return "\n".join(lines)
+
+
+def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) -> str:
+    if profile == "entity_usage":
+        return "Run entity-usage-scenario-audit with the same seed and --full --write-report, then open the first raw/segment refs."
+    if profile == "entity_dossier":
+        return "Run entity-dossier for the sampled anchor and open read_first raw/segment refs before changing the route."
+    if profile == "literal_planner":
+        return "Run live-scenario-audit --profile literal_planner with the same seed and inspect failed route samples before changing planner rules."
+    if profile == "hook_failure":
+        return "Open the receipt ref, then rerun hook-receipts with the same event/date filter."
+    if profile in {"graph_neighborhood", "graph_bridge"}:
+        return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
+    if first_ref:
+        return "Open the first raw/segment/receipt ref, then rerun this live-scenario profile with --write-report."
+    return "Rerun this live-scenario profile with --write-report and inspect diagnostics before treating it as proof."
+
+
+def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        profile = str(scenario.get("profile") or "")
+        status = str(scenario.get("status") or "")
+        if status not in {"warn", "failed"}:
+            continue
+        reasons: list[str] = []
+        for flag in scenario.get("quality_flags", []) if isinstance(scenario.get("quality_flags"), list) else []:
+            if flag:
+                reasons.append(str(flag))
+        if scenario.get("error"):
+            reasons.append(f"error:{short_text(str(scenario.get('error')), max_chars=160)}")
+        failed_count = int_value(scenario.get("failed_count"))
+        warn_count = int_value(scenario.get("warn_count"))
+        if failed_count:
+            reasons.append(f"failed_subsample_count:{failed_count}")
+        if warn_count:
+            reasons.append(f"warn_subsample_count:{warn_count}")
+        counts = scenario.get("evidence_ref_counts") if isinstance(scenario.get("evidence_ref_counts"), dict) else {}
+        if profile != "literal_planner" and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
+            reasons.append("no_direct_raw_segment_or_receipt_ref")
+        if profile == "literal_planner" and scenario.get("monolith_fallback_first") is True:
+            reasons.append("literal_planner_used_monolith_fallback_first")
+        if not reasons:
+            reasons.append(f"profile_status:{status}")
+        first_ref = scenario.get("first_ref") if isinstance(scenario.get("first_ref"), dict) else {}
+        gaps.append(
+            {
+                "profile": profile,
+                "status": status,
+                "reasons": sorted(set(reasons)),
+                "first_ref": first_ref,
+                "next_route": live_scenario_profile_next_route(profile, first_ref),
+            }
+        )
+    return gaps
 
 
 def live_scenario_audit(
@@ -56675,11 +56743,13 @@ def live_scenario_audit(
             )
 
     status_counts = Counter(str(item.get("status") or "unknown") for item in scenarios)
+    actionable_gaps = live_scenario_actionable_gaps(scenarios)
     quality = {
         "scenario_count": len(scenarios),
         "passed_count": status_counts.get("passed", 0),
         "warn_count": status_counts.get("warn", 0),
         "failed_count": status_counts.get("failed", 0),
+        "actionable_gap_count": len(actionable_gaps),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "profile_status_counts": dict(status_counts),
         "first_useful_packet_ms": min((int_value(item.get("elapsed_ms")) for item in scenarios), default=0),
@@ -56709,6 +56779,7 @@ def live_scenario_audit(
         },
         "quality": quality,
         "scenarios": scenarios,
+        "actionable_gaps": actionable_gaps,
         "diagnostics": diagnostics,
         "next_route": "Open first_ref raw/segment/receipt refs for any warn/failed scenario before treating this packet as quality proof.",
         "authority_boundary": "session-memory routes evidence only; owner layers keep decision/proof/skill authority.",
@@ -56721,6 +56792,269 @@ def live_scenario_audit(
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
+
+
+def live_scenario_corpus_default_path(aoa_root: Path) -> Path:
+    return aoa_root / LIVE_SCENARIO_CORPUS_PATH
+
+
+def load_live_scenario_corpus(path: Path) -> tuple[dict[str, Any], list[str]]:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict) or payload.get("artifact_type") != "session_memory_live_scenario_regression_corpus":
+        return {}, [f"not a live scenario regression corpus: {path}"]
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        return payload, [f"corpus has no cases list: {path}"]
+    return payload, []
+
+
+def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
+    profiles: list[dict[str, Any]] = []
+    for scenario in audit.get("scenarios", []) if isinstance(audit.get("scenarios"), list) else []:
+        if not isinstance(scenario, dict):
+            continue
+        item = {
+            "profile": scenario.get("profile"),
+            "status": scenario.get("status"),
+            "elapsed_ms": scenario.get("elapsed_ms"),
+            "sample_count": scenario.get("sample_count"),
+            "warn_count": scenario.get("warn_count"),
+            "failed_count": scenario.get("failed_count"),
+            "evidence_ref_counts": scenario.get("evidence_ref_counts"),
+            "first_ref": scenario.get("first_ref"),
+            "primary_route_counts": scenario.get("primary_route_counts"),
+            "shape_counts": scenario.get("shape_counts"),
+            "evidence_ref_count": scenario.get("evidence_ref_count"),
+            "path_found": scenario.get("path_found"),
+        }
+        profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
+    return {
+        "ok": audit.get("ok"),
+        "quality": audit.get("quality"),
+        "profiles": profiles,
+    }
+
+
+def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expectation: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    profile = str(expectation.get("profile") or scenario.get("profile") or "")
+    status = str(scenario.get("status") or "")
+    allowed_statuses = [
+        str(item)
+        for item in expectation.get("allowed_statuses", [])
+        if item
+    ] if isinstance(expectation.get("allowed_statuses"), list) else []
+    if allowed_statuses and status not in allowed_statuses:
+        failures.append(f"{profile}:status:{status} not in {allowed_statuses}")
+    min_sample_count = int_value(expectation.get("min_sample_count"))
+    if min_sample_count and int_value(scenario.get("sample_count")) < min_sample_count:
+        failures.append(f"{profile}:sample_count:{scenario.get('sample_count')}<{min_sample_count}")
+    max_failed_count = expectation.get("max_failed_count")
+    if max_failed_count is not None and int_value(scenario.get("failed_count")) > int_value(max_failed_count):
+        failures.append(f"{profile}:failed_count:{scenario.get('failed_count')}>{int_value(max_failed_count)}")
+    max_warn_count = expectation.get("max_warn_count")
+    if max_warn_count is not None and int_value(scenario.get("warn_count")) > int_value(max_warn_count):
+        failures.append(f"{profile}:warn_count:{scenario.get('warn_count')}>{int_value(max_warn_count)}")
+    counts = scenario.get("evidence_ref_counts") if isinstance(scenario.get("evidence_ref_counts"), dict) else {}
+    ref_expectations = {
+        "min_raw_ref_count": "raw_ref",
+        "min_segment_ref_count": "segment_ref",
+        "min_session_ref_count": "session_ref",
+        "min_receipt_ref_count": "receipt_ref",
+    }
+    for expectation_key, count_key in ref_expectations.items():
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(counts.get(count_key)) < minimum:
+            failures.append(f"{profile}:{count_key}:{counts.get(count_key)}<{minimum}")
+    min_evidence_ref_count = int_value(expectation.get("min_evidence_ref_count"))
+    if min_evidence_ref_count and int_value(scenario.get("evidence_ref_count")) < min_evidence_ref_count:
+        failures.append(f"{profile}:evidence_ref_count:{scenario.get('evidence_ref_count')}<{min_evidence_ref_count}")
+    primary_route_counts = scenario.get("primary_route_counts") if isinstance(scenario.get("primary_route_counts"), dict) else {}
+    for route_id in expectation.get("required_primary_routes", []) if isinstance(expectation.get("required_primary_routes"), list) else []:
+        if int_value(primary_route_counts.get(str(route_id))) <= 0:
+            failures.append(f"{profile}:missing_primary_route:{route_id}")
+    for route_id in expectation.get("forbidden_primary_routes", []) if isinstance(expectation.get("forbidden_primary_routes"), list) else []:
+        if int_value(primary_route_counts.get(str(route_id))) > 0:
+            failures.append(f"{profile}:forbidden_primary_route:{route_id}")
+    shape_counts = scenario.get("shape_counts") if isinstance(scenario.get("shape_counts"), dict) else {}
+    for shape in expectation.get("required_shape_counts", []) if isinstance(expectation.get("required_shape_counts"), list) else []:
+        if int_value(shape_counts.get(str(shape))) <= 0:
+            failures.append(f"{profile}:missing_shape:{shape}")
+    return failures
+
+
+def live_scenario_expectation_failures(audit: dict[str, Any], expect: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    quality = audit.get("quality") if isinstance(audit.get("quality"), dict) else {}
+    if not audit.get("ok") and "max_failed_count" not in expect:
+        failures.append("audit_not_ok")
+    max_failed_count = expect.get("max_failed_count")
+    if max_failed_count is not None and int_value(quality.get("failed_count")) > int_value(max_failed_count):
+        failures.append(f"failed_count:{quality.get('failed_count')}>{int_value(max_failed_count)}")
+    max_warn_count = expect.get("max_warn_count")
+    if max_warn_count is not None and int_value(quality.get("warn_count")) > int_value(max_warn_count):
+        failures.append(f"warn_count:{quality.get('warn_count')}>{int_value(max_warn_count)}")
+    min_ref_scenarios = int_value(expect.get("min_raw_or_segment_ref_scenario_count"))
+    if min_ref_scenarios and int_value(quality.get("raw_or_segment_ref_scenario_count")) < min_ref_scenarios:
+        failures.append(
+            f"raw_or_segment_ref_scenario_count:{quality.get('raw_or_segment_ref_scenario_count')}<{min_ref_scenarios}"
+        )
+    scenarios_by_profile = {
+        str(item.get("profile") or ""): item
+        for item in audit.get("scenarios", [])
+        if isinstance(item, dict)
+    } if isinstance(audit.get("scenarios"), list) else {}
+    for profile_expectation in expect.get("profile_expectations", []) if isinstance(expect.get("profile_expectations"), list) else []:
+        if not isinstance(profile_expectation, dict):
+            continue
+        profile = str(profile_expectation.get("profile") or "")
+        scenario = scenarios_by_profile.get(profile)
+        if not scenario:
+            failures.append(f"missing_profile:{profile}")
+            continue
+        failures.extend(live_scenario_profile_expectation_failures(scenario, profile_expectation))
+    return failures
+
+
+def live_scenario_corpus_case_check(
+    aoa_root: Path,
+    case: dict[str, Any],
+) -> dict[str, Any]:
+    live_check = str(case.get("live_check") or "run")
+    if live_check in {"skip", "fixture_required"}:
+        return {
+            "id": case.get("id"),
+            "ok": True,
+            "skipped": True,
+            "skip_reason": live_check,
+            "failures": [],
+            "actionable_gaps": [],
+            "observed": {},
+        }
+    profiles = [
+        route_key_slug(str(item), fallback="", max_chars=80)
+        for item in case.get("profiles", [])
+        if item
+    ] if isinstance(case.get("profiles"), list) else []
+    expect = case.get("expect") if isinstance(case.get("expect"), dict) else {}
+    if not profiles:
+        profiles = [
+            str(item.get("profile") or "")
+            for item in expect.get("profile_expectations", [])
+            if isinstance(item, dict) and item.get("profile")
+        ]
+    audit = live_scenario_audit(
+        aoa_root=aoa_root,
+        seed=str(case.get("seed") or case.get("id") or "live-scenario-corpus"),
+        profiles=profiles or None,
+        sample_size=max(1, min(int_value(case.get("sample_size"), 4), 12)),
+        recent_days=max(1, min(int_value(case.get("recent_days"), 7), 90)),
+        limit=max(1, min(int_value(case.get("limit"), 3), 10)),
+        write_report=False,
+    )
+    failures = live_scenario_expectation_failures(audit, expect)
+    return {
+        "id": case.get("id"),
+        "ok": not failures,
+        "skipped": False,
+        "profiles": audit.get("profiles"),
+        "failures": failures,
+        "actionable_gaps": audit.get("actionable_gaps", []) if isinstance(audit.get("actionable_gaps"), list) else [],
+        "observed": live_scenario_compact_observed(audit),
+    }
+
+
+def live_scenario_corpus_check(
+    *,
+    aoa_root: Path,
+    corpus_path: Path | None = None,
+    case_limit: int = 0,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    target = corpus_path or live_scenario_corpus_default_path(aoa_root)
+    corpus, diagnostics = load_live_scenario_corpus(target)
+    all_cases = [case for case in corpus.get("cases", []) if isinstance(case, dict)] if isinstance(corpus.get("cases"), list) else []
+    selected_limit = max(0, int_value(case_limit, 0))
+    cases = all_cases[:selected_limit] if selected_limit else all_cases
+    results = [live_scenario_corpus_case_check(aoa_root, case) for case in cases]
+    failures = [result for result in results if not result.get("ok")]
+    actionable_gaps = [
+        {**gap, "case_id": result.get("id")}
+        for result in results
+        for gap in result.get("actionable_gaps", [])
+        if isinstance(gap, dict)
+    ]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_live_scenario_regression_check",
+        "generated_at": now,
+        "ok": not diagnostics and bool(results) and not failures,
+        "mutates": False,
+        "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
+        "corpus_path": str(target),
+        "case_count": len(results),
+        "available_case_count": len(all_cases),
+        "passed_count": sum(1 for result in results if result.get("ok")),
+        "skipped_count": sum(1 for result in results if result.get("skipped")),
+        "failed_count": len(failures),
+        "actionable_gap_count": len(actionable_gaps),
+        "actionable_gaps": actionable_gaps[:40],
+        "results": results,
+        "diagnostics": diagnostics,
+        "next_route": "Open result failures first; warnings in actionable_gaps are quality debts even when the reviewed case allows them.",
+        "authority_boundary": "Live scenario corpus checks route behavior over the current archive; raw/segment refs remain stronger than the corpus packet.",
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__live-scenario-corpus-check"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, live_scenario_corpus_check_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def live_scenario_corpus_check_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Live Scenario Corpus Check",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- corpus_path: `{payload.get('corpus_path')}`",
+        f"- passed: `{payload.get('passed_count')}/{payload.get('case_count')}`",
+        f"- skipped: `{payload.get('skipped_count')}`",
+        f"- actionable_gaps: `{payload.get('actionable_gap_count')}`",
+        "",
+        "| id | ok | skipped | profiles | failures |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for result in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if isinstance(result, dict):
+            lines.append(
+                "| `{}` | `{}` | `{}` | `{}` | {} |".format(
+                    result.get("id"),
+                    result.get("ok"),
+                    result.get("skipped"),
+                    ", ".join(str(item) for item in result.get("profiles", []) if item) if isinstance(result.get("profiles"), list) else "",
+                    markdown_cell(", ".join(str(item) for item in result.get("failures", []) if item)),
+                )
+            )
+    gaps = payload.get("actionable_gaps") if isinstance(payload.get("actionable_gaps"), list) else []
+    if gaps:
+        lines.extend(["", "## Actionable Gaps", ""])
+        for gap in gaps:
+            if isinstance(gap, dict):
+                lines.append(f"- `{gap.get('case_id')}` `{gap.get('profile')}` `{gap.get('status')}`: {', '.join(str(item) for item in gap.get('reasons', []) if item)}")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
 
 
 def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -57472,6 +57806,20 @@ def command_live_scenario_audit(args: argparse.Namespace) -> int:
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_live_scenario_corpus(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = live_scenario_corpus_check(
+        aoa_root=root,
+        corpus_path=Path(args.corpus) if args.corpus else None,
+        case_limit=args.case_limit,
+        write_report=args.write_report,
+    )
+    stdout_payload = payload if args.full else {key: value for key, value in payload.items() if key not in {"results"}}
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -63375,6 +63723,7 @@ REQUIRED_ROOT_FILES = [
     "config/event-taxonomy.json",
     "config/atlas-policy.json",
     "config/graph-quality-regression-corpus.json",
+    "config/live-scenario-regression-corpus.json",
     "config/naming-golden-set.json",
     "config/naming-policy.json",
     "config/search-providers.json",
@@ -65226,6 +65575,21 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--limit", type=int, default=3)
     live_scenario.add_argument("--write-report", action="store_true")
     live_scenario.set_defaults(func=command_live_scenario_audit)
+
+    live_scenario_corpus = sub.add_parser(
+        "live-scenario-corpus",
+        aliases=["scenario-regression-corpus"],
+        help="Check a source-owned live-scenario regression corpus against current route behavior.",
+    )
+    live_scenario_corpus_sub = live_scenario_corpus.add_subparsers(dest="live_scenario_corpus_action", required=True)
+    live_scenario_corpus_check = live_scenario_corpus_sub.add_parser("check", help="Run reviewed live-scenario cases against the current archive.")
+    live_scenario_corpus_check.add_argument("--workspace-root")
+    live_scenario_corpus_check.add_argument("--aoa-root")
+    live_scenario_corpus_check.add_argument("--corpus", help="Corpus path. Defaults to config/live-scenario-regression-corpus.json.")
+    live_scenario_corpus_check.add_argument("--case-limit", type=int, default=0, help="Maximum cases to run; 0 means all cases.")
+    live_scenario_corpus_check.add_argument("--write-report", action="store_true", help="Write JSON and Markdown check reports under .aoa/diagnostics.")
+    live_scenario_corpus_check.add_argument("--full", action="store_true", help="Print per-case observed route summaries.")
+    live_scenario_corpus_check.set_defaults(func=command_live_scenario_corpus)
 
     performance_parser = sub.add_parser(
         "performance-baseline",

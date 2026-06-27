@@ -19,6 +19,8 @@ review lanes. They are machine-readable route law, not generated reports.
   for the agent-facing atlas under `maps/`.
 - `graph-quality-regression-corpus.json` defines source-owned graph-quality
   regression controls for pre-GraphRAG trust gates.
+- `live-scenario-regression-corpus.json` defines source-owned live scenario
+  route-quality controls for consumer-loop regressions; it is not memory truth.
 - `naming-golden-set.json` defines portable naming-quality examples for
   mass naming wave regression checks.
 - `search-providers.json` defines the portable SQLite default, optional host

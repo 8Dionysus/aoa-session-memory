@@ -458,6 +458,7 @@ python3 scripts/aoa_session_memory.py graph-quality-review diagnostics/<stamp>__
   --write-report
 python3 scripts/aoa_session_memory.py graph-maintenance all --apply --write-report --write-hash-cache
 python3 scripts/aoa_session_memory.py graph-quality-corpus check --write-report
+python3 scripts/aoa_session_memory.py live-scenario-corpus check --write-report
 python3 scripts/aoa_session_memory.py graph-freshness-check --write-report
 python3 scripts/aoa_session_memory.py entity-dossier aoa-session-memory-mcp --kind mcp --write-report
 ```
@@ -483,6 +484,10 @@ archive-wide gate. A fresh Codex transcript under
 `~/.codex/sessions/.../rollout-*.jsonl` is enough to defer a session even when
 the archive projection is older; that state means live-not-yet-archived, not
 stable corruption.
+`live-scenario-corpus` checks reviewed consumer-loop route controls from
+`config/live-scenario-regression-corpus.json` against the current archive. It
+keeps warnings as `actionable_gaps`, so allowed warning states still leave a
+precise next route instead of becoming silent green.
 `entity-dossier` builds a human card for one stable anchor with strong refs,
 weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/decisions, open
 questions, and a read-first route.

@@ -218,6 +218,10 @@ Actionable quality flags are part of the scenario verdict, not decorative
 metadata. A sample that has direct usage or result evidence but no consequence
 chain is a warning (`direct_usage_without_consequence`), while evidence-only
 flags that do not change the agent's next action may remain informational.
+Use `live-scenario-corpus check` when the loop needs regression proof rather
+than a one-off diagnostic. The source-owned cases live in
+`config/live-scenario-regression-corpus.json`; they check route behavior and
+evidence refs, while raw/segment/receipt refs remain the stronger authority.
 Compact route output keeps a bounded `provider` summary with portable SQLite
 status, schema, route-index presence, and freshness status. The full provider
 diagnostic remains behind `search-provider-status --provider portable_sqlite`

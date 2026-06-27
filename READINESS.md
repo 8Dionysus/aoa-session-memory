@@ -761,6 +761,11 @@ Last observed result:
   counts including `session_rehydrate=1`, `route_signal_structured_search=1`,
   `entity_inventory=1`, `entity_usage_audit=1`, and
   `command_structured_search=1`.
+- 2026-06-27 live scenario corpus gate: consumer-loop regression controls now
+  live under `config/live-scenario-regression-corpus.json` and are checked by
+  `live-scenario-corpus check`. The gate preserves allowed warnings as
+  `actionable_gaps`, so route-quality debt remains visible even when a case
+  does not fail.
 - 2026-06-26 consumer MCP / graph-drip proof: live MCP registry and usage
   routes found both the new `aoa-session-memory-evidence-route` skill and the
   older `aoa-decision` skill as active generated navigation entities with

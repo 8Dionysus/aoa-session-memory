@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_memory_live_scenario_regression_corpus",
+  "corpus_schema_version": 1,
+  "generated_at": "2026-06-27T00:00:00Z",
+  "ok": true,
+  "mutates": false,
+  "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
+  "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
+  "case_count": 3,
+  "cases": [
+    {
+      "id": "literal_planner_route_contract",
+      "profiles": [
+        "literal_planner"
+      ],
+      "seed": "corpus-literal-planner",
+      "sample_size": 5,
+      "recent_days": 7,
+      "limit": 5,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-27",
+        "note": "Literal planner must stay structured-first for common route shapes, including exact session id rehydrate."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "profile_expectations": [
+          {
+            "profile": "literal_planner",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 5,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "required_primary_routes": [
+              "route_signal_structured_search",
+              "entity_inventory",
+              "entity_usage_audit",
+              "command_structured_search",
+              "session_rehydrate"
+            ],
+            "forbidden_primary_routes": [
+              "monolith_raw_text_fallback",
+              "scoped_shard_full_text"
+            ],
+            "required_shape_counts": [
+              "error_text",
+              "entity_class",
+              "entity_anchor",
+              "command",
+              "session_id"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "entity_usage_refs_contract",
+      "profiles": [
+        "entity_usage"
+      ],
+      "seed": "corpus-entity-usage",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-27",
+        "note": "Entity usage may warn on consequence depth, but it must not fail and must return direct raw or segment evidence."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "entity_usage",
+            "allowed_statuses": [
+              "passed",
+              "warn"
+            ],
+            "min_sample_count": 3,
+            "max_failed_count": 0,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph_bridge_refs_contract",
+      "profiles": [
+        "graph_bridge"
+      ],
+      "seed": "corpus-graph-bridge",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-27",
+        "note": "Graph bridge is useful only as a route companion with evidence refs; path_found is not required."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "graph_bridge",
+            "allowed_statuses": [
+              "passed",
+              "warn"
+            ],
+            "max_failed_count": 0,
+            "min_evidence_ref_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_session_ref_count": 1
+          }
+        ]
+      }
+    }
+  ],
+  "diagnostics": []
+}
