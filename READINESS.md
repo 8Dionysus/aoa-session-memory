@@ -184,6 +184,18 @@ Build the `.aoa` session-memory mechanism end to end:
   `deferred_live_skipped_count`. This gives operators an automatic route for
   “repair the few stale sessions in this shard” without rematerializing the
   whole month or masking live-tail catch-up.
+- `maintenance-status` surfaces actionable search-shard tails in the agent
+  packet: `next_actions` can include `refresh_search_shard_structured` beside
+  graph/live-tail repair, while `agent_route.search_shard_next_action` carries
+  the selected shard and counts for compact MCP consumers. Existing stale shard
+  DBs route to `search-shards --no-rebuild --dirty-only`; missing DBs route to a
+  scoped structured rebuild only after the shard lane is already partially
+  materialized, never to implicit `--full-text`.
+  2026-06-27 live proof: `month/2026-06` dirty-only repaired `7` stale
+  sessions, processed `243997` structured documents in `270581ms`, and left
+  `search_shards.status=current`; the slowest session contributed `146325`
+  documents and took `170372ms`, making large per-session document fan-out the
+  visible bottleneck.
 - Operations warnings distinguish current failures from repaired shard
   freshness failures: an `index-maintenance` report that failed only because a
   monthly shard had `search_documents_stale_segment_refs` is no longer kept as
@@ -217,7 +229,9 @@ Build the `.aoa` session-memory mechanism end to end:
 - Schemas: `schemas/`
 - Skills: `skills/`, including the user-level router
   `aoa-session-memory-global-route` and narrow operation skills for stress,
-  historical import, audit, doctor, hook trust, and compact probe work
+  historical import, audit, doctor, hook trust, compact probe work, and the
+  consumer `aoa-session-memory-evidence-route` for prior-session entity usage,
+  consequence, graph, and raw-ref evidence routing
 - Mass naming route: `naming-wave build/apply/audit` and
   `skills/aoa-session-naming-wave`
 - CLI and hooks: `scripts/aoa_session_memory.py`
@@ -236,6 +250,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_se
 python3 scripts/aoa_session_memory.py codex-grounding --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py install-user-skill --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --skill aoa-session-memory-evidence-route
 python3 scripts/aoa_session_memory.py import-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 21 --dry-run --write-report
 python3 scripts/aoa_session_memory.py sweep-codex-sessions --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --since-days 7 --min-age-sec 60 --dry-run --write-report
 python3 scripts/aoa_session_memory.py reindex-sessions all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --max-raw-mb 16 --write-report
@@ -256,7 +271,7 @@ python3 scripts/aoa_session_memory.py trace-route aoa-memo-writeback --workspace
 python3 scripts/aoa_session_memory.py search --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "hook timeout route" --include-semantic-context --rerank-local --allow-host-warnings --host-timeout 120 --explain
 python3 scripts/aoa_session_memory.py atlas build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write-report
 python3 scripts/aoa_session_memory.py graph-build all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --write --force-large-export
-python3 scripts/aoa_session_memory.py graph-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --batch-limit 3 --write-report
+python3 scripts/aoa_session_memory.py graph-maintenance all --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --apply --batch-limit 3 --write-report --write-hash-cache
 python3 scripts/aoa_session_memory.py graphrag-packet --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --query "aoa-session-memory-mcp" --anchor aoa-session-memory-mcp
 python3 scripts/aoa_session_memory.py graph-explain-packet "debug aoa-session-memory-mcp" --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa --anchor aoa-session-memory-mcp
 python3 scripts/aoa_session_memory.py graph-eval --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
@@ -600,18 +615,16 @@ Last observed result:
   `status=resource_blocked`, `ok=false`, and
   `blocked_reasons=[indexing_unattended_swap_used_pressure]`; `maintenance-status`
   now surfaces that report under `latest_reports.auto_maintenance_resource` and
-  `operations.recent_problem_jobs`. Backlog service now enables
-  `--graph-drip-on-block`, so a blocked medium backlog can still run a capped
-  probe-class graph-maintenance fallback and expose it as
-  `fallback_graph_drip` without marking the full backlog profile as successful.
-  The fallback now carries a bounded candidate-pool limit so graph recovery can
-  exact-plan more than the small default batch multiplier and select cheaper
-  source repairs under the same node/edge refresh caps. Deep resource launches
-  now use the same bounded graph-drip route by profile default, because the
-  unattended heavy class may be capped or blocked by host resource policy; a
-  successful fallback supersedes older blocked diagnostics for the same profile
-  in `operations.recent_problem_jobs` while still keeping the outer deep report
-  `ok=false`.
+  `operations.recent_problem_jobs`. Backlog and deep profiles now enable
+  graph-drip fallback by profile default, so a blocked medium/heavy run can
+  still run a capped probe-class graph-maintenance batch and expose it as
+  `fallback_graph_drip` without marking the full backlog/deep profile as
+  successful. The fallback now takes batch, budget, candidate-pool window, and
+  node/edge caps from profile graph-drip settings unless explicitly overridden,
+  so graph recovery can exact-plan more than the small old default while
+  staying within the same safety boundary. It mutates only when the outer
+  resource route is called with `--apply`; dry resource probes preserve the raw
+  blocked state.
 - 2026-06-14 search read-availability proof: a live hot maintenance run opened
   a long rollback-journal write window on `search/aoa-search.sqlite3`; during
   that window both `agent-responses` and `search` returned
@@ -682,6 +695,20 @@ Last observed result:
   `portable_sqlite` ready, search schema `13`, route-index presence, and
   `freshness.status=current`; compact scenario output no longer drops provider
   freshness before MCP sees it.
+- 2026-06-26 entity usage compact-harvest proof: a live
+  `aoa_session_entity_usage_audit` MCP call for
+  `aoa-session-memory-evidence-route` with `limit=2` /
+  `per_route_limit=2` now keeps the returned packet compact while using the
+  bounded route harvest internally. The MCP packet returned in about `1.9s`
+  with `usage_role_fast_path_fetch_limit=12`,
+  `candidate_usage_event_count=12`, `freshness_counts={"fresh": 3}`,
+  `stale_event_count=0`, and `consequence_present=true`, so a tiny
+  presentation limit no longer forces a tiny usage candidate pool. A follow-up
+  randomized live scenario with seed `compact-harvest-20260626` returned
+  `3/3` passed, `0` warnings, `0` failures, evidence mode
+  `usage_with_consequence` for all samples, `freshness_counts={"fresh": 13}`,
+  raw previews available for proof windows, and report
+  `diagnostics/20260626T215221Z__entity-usage-scenario-audit__compact_harvest_20260626.json`.
 - 2026-06-21 structured agent-route proof: broad
   `agent-responses --limit 10 --explain` initially exceeded `90s` and had to be
   killed because the default SQL ordered by a computed stream-copy rank and
@@ -695,6 +722,45 @@ Last observed result:
   `uses_shards=true`, and raw/segment/session refs; MCP CLI
   `agent-responses --session latest --limit 5` returned in `0.13s` through the
   local SQLite fast path and exposes an archive shard expansion command.
+- 2026-06-26 agent-event route ordering/quality proof: live
+  `agent-responses --session 019e9388-dc4c-7f82-b6bf-04bea3aed7f4 --limit 5
+  --explain` now orders the no-query shard fan-out by date and event position,
+  returning the live tail first (`event_id=123022`, `segment_id=374`) instead
+  of older same-session events. The packet exposes `quality` with
+  `ordered_by=query_rank_then_session_date_then_event_position_desc`,
+  `agent_event_counts={"assistant_answer": 3, "assistant_final_closeout": 1,
+  "assistant_verification_report": 1}`, `freshness_counts={"stale": 5}`,
+  `stale_result_present=true`, and raw/segment refs for every result; stale
+  latest refs remain visible instead of being replaced by older fresh evidence.
+- 2026-06-26 entity usage scenario quality proof: a fresh stdio MCP
+  `aoa_session_entity_usage_scenario_audit` across typed layers (`skill`,
+  `mcp`, `hook`, `tool`, `api`, `script`, `validator`, `test`, `eval`, `git`)
+  with seed `typed-kinds-20260626` now surfaces actionable quality flags as
+  sample warnings instead of silently passing them. The live packet returned
+  `ok=true`, `10` samples, `passed_count=9`, `warn_count=1`,
+  `failed_count=0`, and
+  `quality_flag_counts={"direct_usage_without_consequence": 1}`; the warning
+  sample was `api:http`, with `evidence_mode=usage_with_result` and
+  `consequence_event_count=0`. The follow-up full live loop with seed
+  `goal-live-loop-20260626` returned `6/6` profiles passed,
+  `first_useful_packet_ms=395`, graph neighborhood `node_count=17` /
+  `edge_count=16` / `evidence_ref_count=50`, and the literal planner selected
+  `route_signal_structured_search`.
+- 2026-06-26 consumer MCP / graph-drip proof: live MCP registry and usage
+  routes found both the new `aoa-session-memory-evidence-route` skill and the
+  older `aoa-decision` skill as active generated navigation entities with
+  source refs, observed usage, consequence refs, freshness, and full expansion
+  commands. The live graph route correctly failed closed with
+  `graph_store_stale`, `latest_graph_maintenance_remaining_sources`, and
+  GraphRAG `answer_rule_gate:stale`; registry sync then refreshed the generated
+  entity registry to `current`, and a bounded `graph-maintenance --apply`
+  batch processed `25` graph sources without rollback. Backlog/deep
+  auto-maintenance resource fallbacks now use profile graph-drip defaults, and
+  regression tests cover profile fallback, explicit disable, and the dry-run
+  safety boundary that prevents graph mutation without outer `--apply`.
+  `maintenance-status` also audits installed user timer `ExecStart` lines so a
+  stale explicit graph-drip override is visible as unit drift instead of
+  silently slowing automatic graph catch-up.
 - 2026-06-21 search raw-lexical policy proof: live `search-provider-status`,
   `maintenance-status --full`, and `storage-audit` showed the current search
   store has no recorded bounded raw-lexical metadata and is classified as
@@ -805,6 +871,15 @@ Last observed result:
   During an active Codex session, `maintenance-status` may still report
   `waiting_for_quiet_window` for recently written live transcripts; that is a
   live-tail deferral, not archive evidence loss.
+- 2026-06-26 graph live-tail hot-gate proof: a stale graph ledger first exposed
+  dirty/missing sources from an active long Codex transcript, then a live
+  `maintenance-status` run after the deferred-live fix reported
+  `graph.status=current_with_deferred_live_sources`,
+  `graph.needs_maintenance=false`, `actionable_count=0`,
+  `ledger_store_missing_total_count=10`,
+  `deferred_ledger_store_missing_count=10`, and `diagnostics=[]`. Regression
+  proof: `test_graph_hot_state_defers_old_source_when_live_transcript_recent`
+  plus the existing graph hot-state mismatch tests.
 - 2026-06-25 live-tail shard route proof: a month shard that was non-current
   only because of `freshness_counts.deferred_live` now reports
   `current_with_deferred_live_updates` instead of
@@ -930,11 +1005,18 @@ Last observed result:
   `test_maintenance_next_actions_uses_budgeted_graph_batch_limit`,
   and `test_manual_maintenance_lock_returns_conflict_instead_of_blocking`.
   Live proof: a 2026-06-21 resource-gated manual batch
-  `graph-maintenance all --apply --batch-limit 25 --budget-seconds 300
-  --refresh-chunk-size 64 --write-report` completed under
-  `abyss-machine resource launch --class medium --kind indexing` in `102.559s`,
-  selected `25` sources, left `4679` global missing sources, consumed `4G`
-  peak memory, and used `0B` swap.
+	  `graph-maintenance all --apply --batch-limit 25 --budget-seconds 300
+	  --refresh-chunk-size 64 --write-report --write-hash-cache` completed under
+	  `abyss-machine resource launch --class medium --kind indexing` in `102.559s`,
+	  selected `25` sources, left `4679` global missing sources, consumed `4G`
+	  peak memory, and used `0B` swap.
+- 2026-06-27 graph rebuild cleanup proof: live maintenance found an orphaned
+  `.graph.sqlite3.<pid>.rebuild.tmp-journal` after interrupted graph work while
+  the base `.rebuild.tmp` file was already gone. `maintenance-cleanup` now
+  groups rollback journals with graph rebuild temp families, reports them in
+  storage status, and removes only stale generated maintenance artifacts.
+  Regression proof:
+  `test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base`.
 - 2026-06-21 raw-ref prune route: `graph-raw-ref-prune` is the controlled lane
   for that mixed-store tail. Dry-run is read-only and uses materialized
   `graph_type_counts`; apply runs under the maintenance coordinator, deletes only
@@ -1130,7 +1212,7 @@ Stress-pass evidence:
 | Manual review packets and promotion candidates remain unreviewed until promotion review | `manual-review`, `promotion-review`, manual review packet regression test |
 | Repeated manual-review passes are append-only and remain open for future passes | manual-review wave regression test, live wave2 diagnostics |
 | User-level hooks can be generated from selected roots | `hooks-config`, tests |
-| User-level router skill can be installed and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, audit checklist, tests |
+| Approved user-level session-memory skills can be installed, surfaced, and checked from selected roots | `install-user-skill`, `doctor --check-user-skill`, `doctor --check-installable-user-skills`, audit checklist, tests |
 | Historical Codex JSONL sessions can be discovered, dry-run checked, and sequentially imported | `import-codex-sessions`, import report diagnostics, tests |
 | Missed close/no-hook and stale Codex transcripts can be found without trusting active context | `sweep-codex-sessions`, `indexed_archive_freshness`, sweep report diagnostics, tests |
 | Session token accounting remains count-only and separates provider, exact tokenizer, and estimated ledgers | `token-accounting`, `token-accounting-backfill`, token accounting regression test, host `aoa-summary` bridge self-test |
