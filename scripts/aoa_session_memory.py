@@ -53603,17 +53603,21 @@ def entity_dossier(
     graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     graph_edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
     graph_evidence_refs = graph.get("evidence_refs") if isinstance(graph.get("evidence_refs"), list) else []
+    event_count = int_value(usage.get("event_count"))
     usage_count = int_value(usage.get("usage_event_count"), len(usage_events))
     consequence_count = int_value(usage.get("consequence_event_count"), len(consequence_events))
+    outcome_count = int_value(usage.get("outcome_event_count"), len(usage.get("outcome_events", []) if isinstance(usage.get("outcome_events"), list) else []))
+    event_like_route = route_kind in {"agent_event"}
+    event_route_has_observed_events = event_like_route and bool(event_count or outcome_count or document_refs)
     graph_node_count = int_value(graph.get("node_count"), len(graph_nodes))
     graph_edge_count = int_value(graph.get("edge_count"), len(graph_edges))
     graph_ref_count = int_value(graph.get("evidence_ref_count"), len(graph_evidence_refs))
     noise_flags: list[str] = []
     if not strong_refs:
         noise_flags.append("no_strong_raw_segment_session_refs")
-    if usage_count <= 0:
+    if usage_count <= 0 and not event_route_has_observed_events:
         noise_flags.append("no_usage_events_returned_by_usage_audit")
-    if consequence_count <= 0:
+    if consequence_count <= 0 and not event_route_has_observed_events:
         noise_flags.append("no_consequence_events_returned_by_usage_audit")
     if graph_node_count <= 0 and graph_edge_count <= 0 and graph_ref_count <= 0:
         noise_flags.append("graph_neighborhood_empty")
@@ -53702,12 +53706,16 @@ def entity_dossier(
             "one_short_route": True,
             "strong_ref_count": len(strong_refs),
             "weak_ref_count": len(weak_refs),
+            "event_count": event_count,
             "usage_event_count": usage_count,
+            "outcome_event_count": outcome_count,
             "consequence_event_count": consequence_count,
+            "document_ref_count": len(document_refs),
             "graph_node_count": graph_node_count,
             "graph_edge_count": graph_edge_count,
             "graph_evidence_ref_count": graph_ref_count,
             "raw_or_segment_ref_present": bool(strong_refs),
+            "event_route_has_observed_events": event_route_has_observed_events,
             "noise_flag_count": len(noise_flags),
         },
         "noise_flags": noise_flags,
@@ -56145,13 +56153,19 @@ def live_scenario_entity_dossier_audit(
         evidence_ref_counts = live_scenario_evidence_counts(dossier)
         status = "failed" if not dossier.get("ok") else "passed"
         sample_quality_flags: list[str] = []
+        event_like_route = route_kind in {"agent_event"}
+        observed_event_count = max(
+            int_value(quality.get("event_count")),
+            int_value(quality.get("outcome_event_count")),
+            int_value(quality.get("document_ref_count")),
+        )
         if not quality.get("one_short_route"):
             sample_quality_flags.append("dossier_missing_one_short_route_flag")
         if int_value(quality.get("strong_ref_count")) <= 0 and not evidence_ref_counts:
             sample_quality_flags.append("dossier_missing_evidence_refs")
-        if int_value(quality.get("usage_event_count")) <= 0:
+        if int_value(quality.get("usage_event_count")) <= 0 and not (event_like_route and observed_event_count > 0):
             sample_quality_flags.append("dossier_no_usage_events")
-        if int_value(quality.get("consequence_event_count")) <= 0:
+        if int_value(quality.get("consequence_event_count")) <= 0 and not (event_like_route and observed_event_count > 0):
             sample_quality_flags.append("dossier_no_consequence_events")
         if int_value(quality.get("graph_node_count")) <= 0 and int_value(quality.get("graph_evidence_ref_count")) <= 0:
             sample_quality_flags.append("dossier_no_graph_neighborhood")
@@ -56172,8 +56186,11 @@ def live_scenario_entity_dossier_audit(
                 "evidence_ref_counts": evidence_ref_counts,
                 "quality_flags": sample_quality_flags,
                 "strong_ref_count": quality.get("strong_ref_count"),
+                "event_count": quality.get("event_count"),
                 "usage_event_count": quality.get("usage_event_count"),
+                "outcome_event_count": quality.get("outcome_event_count"),
                 "consequence_event_count": quality.get("consequence_event_count"),
+                "document_ref_count": quality.get("document_ref_count"),
                 "graph_node_count": quality.get("graph_node_count"),
                 "graph_edge_count": quality.get("graph_edge_count"),
                 "graph_evidence_ref_count": quality.get("graph_evidence_ref_count"),
@@ -56208,6 +56225,14 @@ def live_scenario_entity_dossier_audit(
                 )
             ),
             "usage_event_sample_count": sum(1 for sample in samples if int_value(sample.get("usage_event_count")) > 0),
+            "usage_or_observed_event_sample_count": sum(
+                1
+                for sample in samples
+                if int_value(sample.get("usage_event_count")) > 0
+                or int_value(sample.get("event_count")) > 0
+                or int_value(sample.get("outcome_event_count")) > 0
+                or int_value(sample.get("document_ref_count")) > 0
+            ),
             "consequence_event_sample_count": sum(1 for sample in samples if int_value(sample.get("consequence_event_count")) > 0),
             "graph_neighbor_sample_count": sum(
                 1
@@ -56361,6 +56386,54 @@ def live_scenario_literal_planner_audit(
     }
 
 
+def live_scenario_compact_sample(sample: dict[str, Any], *, profile: str) -> dict[str, Any]:
+    anchor = str(sample.get("anchor") or "")
+    kind = str(sample.get("kind") or sample.get("requested_kind") or "")
+    quality_flags = [str(flag) for flag in sample.get("quality_flags", []) if flag] if isinstance(sample.get("quality_flags"), list) else []
+    first_ref = sample.get("first_ref") if isinstance(sample.get("first_ref"), dict) else {}
+    compact: dict[str, Any] = {
+        "status": sample.get("status"),
+        "anchor": anchor,
+        "kind": kind,
+        "quality_flags": quality_flags,
+        "first_ref": first_ref,
+        "evidence_ref_counts": sample.get("evidence_ref_counts") if isinstance(sample.get("evidence_ref_counts"), dict) else {},
+        "elapsed_ms": int_value(sample.get("elapsed_ms")),
+    }
+    if profile == "entity_dossier" and anchor:
+        compact["next_command"] = (
+            "python3 scripts/aoa_session_memory.py entity-dossier "
+            f"{shlex.quote(anchor)} --kind {shlex.quote(kind or 'auto')} --aoa-root <aoa-root> --full --write-report"
+        )
+    for key in (
+        "strong_ref_count",
+        "event_count",
+        "usage_event_count",
+        "outcome_event_count",
+        "consequence_event_count",
+        "document_ref_count",
+        "graph_node_count",
+        "graph_evidence_ref_count",
+    ):
+        if sample.get(key) not in (None, ""):
+            compact[key] = sample.get(key)
+    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+
+
+def live_scenario_compact_samples(payload: dict[str, Any], *, profile: str, statuses: set[str], limit: int = 5) -> list[dict[str, Any]]:
+    samples = payload.get("samples") if isinstance(payload.get("samples"), list) else []
+    compact: list[dict[str, Any]] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        if str(sample.get("status") or "") not in statuses:
+            continue
+        compact.append(live_scenario_compact_sample(sample, profile=profile))
+        if len(compact) >= limit:
+            break
+    return compact
+
+
 def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: int) -> dict[str, Any]:
     ok = bool(payload.get("ok", True))
     counts = live_scenario_evidence_counts(payload)
@@ -56387,8 +56460,11 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "one_short_route_sample_count": quality.get("one_short_route_sample_count"),
                 "raw_or_segment_ref_sample_count": quality.get("raw_or_segment_ref_sample_count"),
                 "usage_event_sample_count": quality.get("usage_event_sample_count"),
+                "usage_or_observed_event_sample_count": quality.get("usage_or_observed_event_sample_count"),
                 "consequence_event_sample_count": quality.get("consequence_event_sample_count"),
                 "graph_neighbor_sample_count": quality.get("graph_neighbor_sample_count"),
+                "warning_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"warn"}),
+                "failed_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"failed"}),
             }
         )
         if failed:
@@ -56525,6 +56601,13 @@ def live_scenario_audit_markdown(payload: dict[str, Any]) -> str:
             lines.append(
                 f"- `{gap.get('profile')}` `{gap.get('status')}`: {reasons} next=`{gap.get('next_route')}`"
             )
+            for sample in gap.get("samples", []) if isinstance(gap.get("samples"), list) else []:
+                if not isinstance(sample, dict):
+                    continue
+                flags = ", ".join(str(flag) for flag in sample.get("quality_flags", []) if flag)
+                lines.append(
+                    f"  - sample `{sample.get('anchor')}` kind=`{sample.get('kind')}` status=`{sample.get('status')}` flags=`{flags}` first_ref=`{sample.get('first_ref')}`"
+                )
     lines.extend(["", "## Next Route", "", str(payload.get("next_route") or ""), ""])
     return "\n".join(lines)
 
@@ -56562,6 +56645,17 @@ def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[
             reasons.append(f"error:{short_text(str(scenario.get('error')), max_chars=160)}")
         failed_count = int_value(scenario.get("failed_count"))
         warn_count = int_value(scenario.get("warn_count"))
+        gap_samples = []
+        for sample in scenario.get("failed_samples", []) if isinstance(scenario.get("failed_samples"), list) else []:
+            if isinstance(sample, dict):
+                gap_samples.append(sample)
+        for sample in scenario.get("warning_samples", []) if isinstance(scenario.get("warning_samples"), list) else []:
+            if isinstance(sample, dict):
+                gap_samples.append(sample)
+        for sample in gap_samples[:5]:
+            for flag in sample.get("quality_flags", []) if isinstance(sample.get("quality_flags"), list) else []:
+                if flag:
+                    reasons.append(str(flag))
         if failed_count:
             reasons.append(f"failed_subsample_count:{failed_count}")
         if warn_count:
@@ -56574,12 +56668,22 @@ def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[
         if not reasons:
             reasons.append(f"profile_status:{status}")
         first_ref = scenario.get("first_ref") if isinstance(scenario.get("first_ref"), dict) else {}
+        if not first_ref:
+            first_ref = next(
+                (
+                    sample.get("first_ref")
+                    for sample in gap_samples
+                    if isinstance(sample.get("first_ref"), dict) and sample.get("first_ref")
+                ),
+                {},
+            )
         gaps.append(
             {
                 "profile": profile,
                 "status": status,
                 "reasons": sorted(set(reasons)),
                 "first_ref": first_ref,
+                "samples": gap_samples[:5],
                 "next_route": live_scenario_profile_next_route(profile, first_ref),
             }
         )

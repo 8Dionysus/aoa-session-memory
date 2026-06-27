@@ -4154,6 +4154,94 @@ def test_live_scenario_audit_fails_empty_entity_dossier_profile(tmp_path: Path, 
     assert audit["actionable_gaps"][0]["profile"] == "entity_dossier"
 
 
+def test_live_scenario_audit_entity_dossier_warning_keeps_sample_anchor(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        module,
+        "entity_usage_scenario_candidates",
+        lambda **_kwargs: (
+            [{"layer": "skill", "kind": "skill", "anchor": "aoa-session-memory-evidence-route"}],
+            [],
+        ),
+    )
+
+    def fake_dossier(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "quality": {
+                "one_short_route": True,
+                "strong_ref_count": 1,
+                "usage_event_count": 1,
+                "consequence_event_count": 0,
+                "graph_node_count": 1,
+                "graph_evidence_ref_count": 1,
+            },
+            "read_first": [{"refs": {"raw": "raw:line:7", "segment": "segment.md"}}],
+        }
+
+    monkeypatch.setattr(module, "entity_dossier", fake_dossier)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["entity_dossier"],
+        sample_size=1,
+        limit=1,
+    )
+
+    scenario = audit["scenarios"][0]
+    assert scenario["status"] == "warn"
+    assert scenario["warning_samples"][0]["anchor"] == "aoa-session-memory-evidence-route"
+    assert scenario["warning_samples"][0]["kind"] == "skill"
+    assert "dossier_no_consequence_events" in scenario["warning_samples"][0]["quality_flags"]
+    gap = audit["actionable_gaps"][0]
+    assert gap["samples"][0]["anchor"] == "aoa-session-memory-evidence-route"
+    assert gap["samples"][0]["next_command"].startswith("python3 scripts/aoa_session_memory.py entity-dossier")
+    assert gap["first_ref"]["raw"] == "raw:line:7"
+
+
+def test_live_scenario_audit_agent_event_dossier_uses_observed_events(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        module,
+        "entity_usage_scenario_candidates",
+        lambda **_kwargs: (
+            [{"layer": "agent_event", "kind": "agent_event", "anchor": "assistant_progress_update"}],
+            [],
+        ),
+    )
+
+    def fake_dossier(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "quality": {
+                "one_short_route": True,
+                "strong_ref_count": 1,
+                "event_count": 3,
+                "usage_event_count": 0,
+                "outcome_event_count": 3,
+                "consequence_event_count": 0,
+                "document_ref_count": 6,
+                "graph_node_count": 1,
+                "graph_evidence_ref_count": 1,
+            },
+            "read_first": [{"refs": {"raw": "raw:line:9", "segment": "segment.md"}}],
+        }
+
+    monkeypatch.setattr(module, "entity_dossier", fake_dossier)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["entity_dossier"],
+        sample_size=1,
+        limit=1,
+    )
+
+    scenario = audit["scenarios"][0]
+    assert scenario["status"] == "passed"
+    assert scenario["warn_count"] == 0
+    assert scenario["usage_event_sample_count"] == 0
+    assert scenario["usage_or_observed_event_sample_count"] == 1
+    assert audit["quality"]["actionable_gap_count"] == 0
+
+
 def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
