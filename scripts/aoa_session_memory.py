@@ -19769,6 +19769,7 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- deferred_live_selection_count: `{payload.get('deferred_live_selection_count')}`",
         f"- deferred_graph_after: `{payload.get('deferred_graph_after')}`",
         f"- graph_deferred_by_budget: `{payload.get('graph_deferred_by_budget')}`",
+        f"- expected_deferred_live_remaining: `{payload.get('expected_deferred_live_remaining')}`",
         f"- expected_catchup_remaining: `{payload.get('expected_catchup_remaining')}`",
         f"- deferred_graph_job: `{payload.get('deferred_graph_job')}`",
         f"- action_counts: `{maintenance.get('action_counts') if isinstance(maintenance, dict) else {}}`",
@@ -19878,6 +19879,7 @@ def auto_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fals
     compact["graph_deferred_by_budget"] = compact.get("graph_deferred_by_budget")
     compact["deferred_live_after"] = compact.get("deferred_live_after")
     compact["deferred_live_selection_count"] = compact.get("deferred_live_selection_count")
+    compact["expected_deferred_live_remaining"] = compact.get("expected_deferred_live_remaining")
     compact["expected_catchup_remaining"] = compact.get("expected_catchup_remaining")
     compact["hard_diagnostics"] = compact.get("hard_diagnostics")
     compact["deferred_graph_job"] = compact.get("deferred_graph_job")
@@ -23068,12 +23070,34 @@ def auto_maintenance(
             maintenance=maintenance,
             diagnostics=diagnostics,
         )
+        selection_deferred_count = int_value(selection_scope.get("deferred_live_session_count"))
+        maintenance_action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+        expected_deferred_live_remaining = bool(
+            apply
+            and selection_deferred_count > 0
+            and bool(maintenance.get("ok"))
+            and int_value(maintenance_action_counts.get("failed")) <= 0
+            and diagnostics
+        )
+        if expected_deferred_live_remaining and not expected_remaining_backlog:
+            deferred_live_hard_diagnostics = [
+                item for item in diagnostics
+                if not expected_auto_maintenance_remaining_diagnostic(str(item))
+            ]
+            if not deferred_live_hard_diagnostics:
+                hard_diagnostics = []
+            else:
+                expected_deferred_live_remaining = False
+                hard_diagnostics = deferred_live_hard_diagnostics
         if profile == "catchup":
             expected_catchup_remaining = expected_remaining_backlog
         elif expected_catchup_remaining and not expected_remaining_backlog:
             hard_diagnostics = catchup_hard_diagnostics
-        payload_ok = (not diagnostics and bool(maintenance.get("ok"))) or expected_remaining_backlog
-        selection_deferred_count = int_value(selection_scope.get("deferred_live_session_count"))
+        payload_ok = (
+            (not diagnostics and bool(maintenance.get("ok")))
+            or expected_remaining_backlog
+            or expected_deferred_live_remaining
+        )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_auto_maintenance",
@@ -23124,6 +23148,7 @@ def auto_maintenance(
             "deferred_live_selection_count": selection_deferred_count,
             "deferred_graph_after": deferred_graph_after,
             "graph_deferred_by_budget": graph_deferred_by_budget,
+            "expected_deferred_live_remaining": expected_deferred_live_remaining,
             "expected_remaining_backlog": expected_remaining_backlog,
             "expected_catchup_remaining": expected_catchup_remaining,
             "hard_diagnostics": hard_diagnostics,

@@ -13949,6 +13949,61 @@ def test_hot_auto_maintenance_reports_budget_remaining_backlog(tmp_path: Path, m
     assert calls["freshness"] == 2
 
 
+def test_hot_auto_maintenance_treats_deferred_live_remaining_as_expected(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 7,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": ["index_maintenance_needed", "graph_maintenance_needed"],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 7,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "repair_limit": kwargs["repair_limit"],
+            "budget_exhausted": False,
+            "action_counts": {"applied": 5},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+    active_record = {"session_id": "active-live", "session_label": "2026-06-12__001__active-live"}
+    stable_record = {"session_id": "stable-live", "session_label": "2026-06-11__001__stable-live"}
+    monkeypatch.setattr(
+        module,
+        "hot_source_session_scope",
+        lambda *_args, **_kwargs: ([active_record, stable_record], {"selection_source": "test", "selected_count": 2}),
+    )
+    monkeypatch.setattr(
+        module,
+        "projection_quiescence_split",
+        lambda records, **_kwargs: ([stable_record], {}, [active_record], {"deferred_live_session_count": 1}),
+    )
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_deferred_live"
+    assert payload["deferred_live_after"] is True
+    assert payload["expected_deferred_live_remaining"] is True
+    assert payload["expected_remaining_backlog"] is False
+    assert payload["hard_diagnostics"] == []
+    assert payload["diagnostics"] == ["graph_maintenance_needed", "index_maintenance_needed"]
+
+
 def test_index_maintenance_skips_search_repair_for_empty_scoped_records(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
