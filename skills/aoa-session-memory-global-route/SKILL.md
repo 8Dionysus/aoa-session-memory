@@ -44,6 +44,8 @@ Use this skill in any Codex session when the task touches:
   freshness
 - retrieval packets, `retrieve`, `retrieval-packet`, or long-session
   continuation recipes
+- live route-quality checks, `live-scenario-audit`, or
+  `live-scenario-corpus`
 - naming readiness, `SESSION_NAMES.md`, `sessions/INDEX.md`, or
   `naming-readiness`
 - mass session naming, `naming-wave`, semantic session-name review plans, or

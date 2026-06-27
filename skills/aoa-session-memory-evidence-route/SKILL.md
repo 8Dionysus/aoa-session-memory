@@ -59,6 +59,11 @@ Use these first routes when available:
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
   compact node, edge, and evidence budgets.
+- live route-quality regression proof: `live-scenario-corpus check` first when
+  the question is whether current entity/search/literal/graph consumer routes
+  still satisfy reviewed cases. Use `live-scenario-audit` for one-off
+  diagnostics; use the corpus check when the result should be treated as a
+  regression gate.
 
 ## MCP Preference
 
@@ -79,6 +84,8 @@ query is fuzzy:
 - graph topology: `aoa_session_graph_neighborhood`
 - graph relation bridge: `aoa_session_graph_bridge`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
+- reviewed live quality regression gate:
+  `aoa_session_live_scenario_corpus_check`
 
 Then call the MCP tool with the same typed anchor/kind that the CLI route would
 use. For graph/topology questions, search `aoa_session_graph_neighborhood`
@@ -105,6 +112,7 @@ python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
+python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1
 ```
 
 Name the fallback in the report. A missing MCP tool or closed MCP transport is
