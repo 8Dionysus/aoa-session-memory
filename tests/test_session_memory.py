@@ -6192,6 +6192,41 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
     assert "small_candidate_pool_preserves_progress_when_exact_planning_is_expensive" in recommendation["notes"]
 
 
+def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=5625,
+        existing_source_count=5625,
+        dirty_count=0,
+        missing_count=612,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={"latest_graph_maintenance_remaining_sources": 612},
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 612,
+            "actionable_remaining_count": 612,
+            "selected_count": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+            * module.GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+            "recent_budget_no_progress": True,
+            "recent_budget_no_progress_remaining_count": 612,
+            "recent_budget_no_progress_selected_count": 0,
+            "recent_budget_no_progress_mutation_rolled_back": True,
+        },
+    )
+
+    assert recommendation["route"] == "heavy_tail_graph_maintenance"
+    assert recommendation["reason"] == "recent_budgeted_graph_maintenance_exhausted_without_progress"
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
+    assert "recent_no_progress_report_keeps_heavy_tail_route_sticky" in recommendation["notes"]
+
+
 def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=5625,
@@ -6281,6 +6316,7 @@ def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: 
     )
 
     assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_heavy_tail"
     command_text = module.shlex.join(actions[0]["command"])
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
@@ -8842,7 +8878,7 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT}" in nested_command
     assert "--refresh-chunk-size 64" in nested_command
     assert recommendation == "run_maintenance"
-    assert actions[0]["id"] == "repair_graph_budgeted"
+    assert actions[0]["id"] == "repair_graph_bounded"
     command_text = module.shlex.join(actions[0]["command"])
     assert "graph-maintenance" in command_text
     assert str(workspace) in command_text
@@ -8924,6 +8960,109 @@ def test_graph_hot_state_uses_latest_graph_maintenance_remaining_count(tmp_path:
     assert summary["missing_count"] == 10
     assert summary["actionable_count"] == 10
     assert summary["reason_group_counts"]["latest_graph_maintenance_remaining_sources"] == 10
+
+
+def test_graph_hot_state_keeps_recent_no_progress_report_for_heavy_tail_route(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:recent-no-progress:000",
+            "source_type": "segment",
+            "session_id": "recent-no-progress",
+            "session_label": "2026-06-21__001__recent-no-progress",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-recent-no-progress",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": "event:recent-no-progress:000:000001", "type": "event"},
+            {"id": "route:skill:aoa_decision", "type": "skill"},
+        ],
+        "edges": [
+            {
+                "id": "event:recent-no-progress:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "source": "event:recent-no-progress:000:000001",
+                "target": "route:skill:aoa_decision",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {"sources": {"segment:recent-no-progress:000": {"source_key": "segment:recent-no-progress:000", "status": "clean"}}},
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+    diagnostics_dir = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics_dir.mkdir(parents=True)
+    no_progress_report = diagnostics_dir / "20260621T175400Z__graph-maintenance.json"
+    module.write_json(
+        no_progress_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_maintenance",
+            "generated_at": "2026-06-21T17:54:00Z",
+            "ok": False,
+            "apply": True,
+            "target": "all",
+            "selected_count": 0,
+            "remaining_count": 612,
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+            * module.GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+            "budget_exhausted": True,
+            "maintenance_detail": {"mutation_rolled_back": True},
+            "source_state": {"selection_scope": "global"},
+        },
+    )
+    latest_report = diagnostics_dir / "20260621T175500Z__graph-maintenance.json"
+    module.write_json(
+        latest_report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_maintenance",
+            "generated_at": "2026-06-21T17:55:00Z",
+            "ok": True,
+            "apply": True,
+            "target": "all",
+            "selected_count": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "remaining_count": 612,
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+            * module.GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+            "budget_exhausted": False,
+            "source_state": {"selection_scope": "global"},
+        },
+    )
+    graph_store_mtime = module.path_mtime(module.graph_paths(aoa_root)["store"])
+    os.utime(no_progress_report, (graph_store_mtime + 10, graph_store_mtime + 10))
+    os.utime(latest_report, (graph_store_mtime + 20, graph_store_mtime + 20))
+
+    state = module.graph_store_hot_state(aoa_root)
+    summary = module.graph_maintenance_status_from_state(
+        state,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert state["latest_maintenance"]["usable_for_hot_gate"] is True
+    assert state["latest_maintenance"]["recent_budget_no_progress"] is True
+    assert state["latest_maintenance"]["recent_budget_no_progress_remaining_count"] == 612
+    assert summary["maintenance_recommendation"]["route"] == "heavy_tail_graph_maintenance"
+    assert summary["maintenance_recommendation"]["reason"] == "recent_budgeted_graph_maintenance_exhausted_without_progress"
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in summary["maintenance_recommendation"]["command"]
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in summary["maintenance_recommendation"]["command"]
 
 
 def test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count(tmp_path: Path) -> None:

@@ -253,6 +253,8 @@ GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 75
 GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT = 25
 GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT = 25
 GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
+GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT = 12
+GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS = 6 * 60 * 60
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
@@ -40693,6 +40695,14 @@ def graph_source_maintenance_recommendation(
             or bool(latest_maintenance.get("mutation_rolled_back"))
         )
     )
+    recent_budget_no_progress_remaining = int_value(latest_maintenance.get("recent_budget_no_progress_remaining_count"))
+    recent_budget_no_progress_near_current = (
+        latest_usable
+        and latest_remaining > 0
+        and bool(latest_maintenance.get("recent_budget_no_progress"))
+        and recent_budget_no_progress_remaining > 0
+        and latest_remaining <= recent_budget_no_progress_remaining + budgeted_batch_limit
+    )
     latest_heavy_tail_success = (
         latest_usable
         and latest_remaining > 0
@@ -40761,6 +40771,13 @@ def graph_source_maintenance_recommendation(
             heavy_tail_batch_limit,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
+    elif recent_budget_no_progress_near_current:
+        route = "heavy_tail_graph_maintenance"
+        reason = "recent_budgeted_graph_maintenance_exhausted_without_progress"
+        command = graph_maintenance_command(
+            heavy_tail_batch_limit,
+            candidate_pool_limit=heavy_tail_candidate_pool_limit,
+        )
     elif latest_heavy_tail_success and actionable_count > heavy_tail_batch_limit:
         route = "heavy_tail_graph_maintenance"
         reason = "continue_heavy_tail_graph_maintenance"
@@ -40798,6 +40815,8 @@ def graph_source_maintenance_recommendation(
     if route == "heavy_tail_graph_maintenance":
         notes.append("latest_budgeted_graph_maintenance_showed_heavy_tail_or_budget_rollback")
         notes.append("small_candidate_pool_preserves_progress_when_exact_planning_is_expensive")
+        if reason == "recent_budgeted_graph_maintenance_exhausted_without_progress":
+            notes.append("recent_no_progress_report_keeps_heavy_tail_route_sticky")
     if route == "budgeted_graph_maintenance" and actionable_count > 100:
         notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
@@ -50409,12 +50428,22 @@ def session_memory_maintenance_next_actions(
             ]
             if graph_candidate_pool_limit > 0:
                 command.extend(["--candidate-pool-limit", str(graph_candidate_pool_limit)])
+            graph_route = str(graph_recommendation.get("route") or "")
+            if graph_route == "heavy_tail_graph_maintenance":
+                action_id = "repair_graph_heavy_tail"
+                action_note = "Run small-candidate graph repair after budgeted maintenance showed a heavy tail or rollback; this preserves progress without retrying an expensive full candidate pool."
+            elif graph_route == "budgeted_graph_maintenance":
+                action_id = "repair_graph_budgeted"
+                action_note = "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
+            else:
+                action_id = "repair_graph_bounded"
+                action_note = "Run bounded incremental graph repair for a small generated projection backlog."
             actions.append(
                 {
-                    "id": "repair_graph_budgeted",
+                    "id": action_id,
                     "reason": graph_recommendation.get("reason") or "graph_budgeted_maintenance",
                     "command": command,
-                    "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers.",
+                    "note": action_note,
                 }
             )
             return "run_maintenance", actions
@@ -51920,6 +51949,73 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     }
 
 
+def graph_maintenance_report_selection_scope(report: dict[str, Any]) -> str:
+    source_state = report.get("source_state") if isinstance(report.get("source_state"), dict) else {}
+    return str(source_state.get("selection_scope") or "")
+
+
+def graph_maintenance_report_scope_is_global(report: dict[str, Any]) -> bool:
+    selection_scope = graph_maintenance_report_selection_scope(report)
+    return bool(
+        str(report.get("target") or "") == "all"
+        and not report.get("since")
+        and not report.get("until")
+        and report.get("limit") in (None, 0, "0", "")
+        and selection_scope in {"", "global"}
+    )
+
+
+def graph_maintenance_report_mutation_rolled_back(report: dict[str, Any]) -> bool:
+    detail = report.get("maintenance_detail") if isinstance(report.get("maintenance_detail"), dict) else {}
+    return bool(detail.get("mutation_rolled_back"))
+
+
+def recent_graph_maintenance_no_progress_evidence(
+    reports: list[dict[str, Any]],
+    *,
+    current_remaining_count: int,
+    budgeted_batch_limit: int = GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    current_remaining = int_value(current_remaining_count)
+    if current_remaining <= 0:
+        return {"exists": False}
+    lower_bound = (time.time() if now_ts is None else float(now_ts)) - GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS
+    near_current_limit = current_remaining + max(1, int_value(budgeted_batch_limit))
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        report_mtime = ops_float_value(report.get("_diagnostic_mtime"))
+        if report_mtime <= 0 or report_mtime < lower_bound:
+            continue
+        remaining_count = int_value(report.get("remaining_count"))
+        if remaining_count <= 0 or remaining_count > near_current_limit:
+            continue
+        if not graph_maintenance_report_scope_is_global(report):
+            continue
+        if not bool(report.get("apply", True)):
+            continue
+        selected_count = int_value(report.get("selected_count"))
+        mutation_rolled_back = graph_maintenance_report_mutation_rolled_back(report)
+        if not bool(report.get("budget_exhausted")):
+            continue
+        if selected_count > 0 and not mutation_rolled_back:
+            continue
+        return {
+            "exists": True,
+            "path": report.get("_diagnostic_path"),
+            "mtime": report_mtime,
+            "generated_at": report.get("generated_at"),
+            "remaining_count": remaining_count,
+            "selected_count": selected_count,
+            "batch_limit": report.get("batch_limit"),
+            "candidate_pool_limit": report.get("candidate_pool_limit"),
+            "budget_exhausted": True,
+            "mutation_rolled_back": mutation_rolled_back,
+        }
+    return {"exists": False}
+
+
 def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
     paths = graph_paths(aoa_root)
     if not paths["store"].exists():
@@ -51975,22 +52071,19 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         "remaining_count": 0,
         "usable_for_hot_gate": False,
     }
-    latest_graph_reports = diagnostic_json_payloads(aoa_root, "*__graph-maintenance.json", limit=1)
+    latest_graph_reports = diagnostic_json_payloads(
+        aoa_root,
+        "*__graph-maintenance.json",
+        limit=GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT,
+    )
     if latest_graph_reports:
         latest_report = latest_graph_reports[0]
         report_mtime = ops_float_value(latest_report.get("_diagnostic_mtime"))
         store_metadata_updated_at = parse_utc_timestamp(str(metadata.get("updated_at") or ""))
         store_updated_epoch = store_metadata_updated_at.timestamp() if store_metadata_updated_at is not None else path_mtime(paths["store"])
         remaining_count = int_value(latest_report.get("remaining_count"))
-        report_source_state = latest_report.get("source_state") if isinstance(latest_report.get("source_state"), dict) else {}
-        report_selection_scope = str(report_source_state.get("selection_scope") or "")
-        report_scope_is_global = (
-            str(latest_report.get("target") or "") == "all"
-            and not latest_report.get("since")
-            and not latest_report.get("until")
-            and latest_report.get("limit") in (None, 0, "0", "")
-            and report_selection_scope in {"", "global"}
-        )
+        report_selection_scope = graph_maintenance_report_selection_scope(latest_report)
+        report_scope_is_global = graph_maintenance_report_scope_is_global(latest_report)
         usable_for_hot_gate = bool(report_scope_is_global and report_mtime and report_mtime >= store_updated_epoch and remaining_count > 0)
         latest_maintenance = {
             "exists": True,
@@ -52012,11 +52105,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "candidate_pool_limit": latest_report.get("candidate_pool_limit"),
             "budget_exhausted": bool(latest_report.get("budget_exhausted")),
             "elapsed_ms": latest_report.get("elapsed_ms"),
-            "mutation_rolled_back": bool(
-                (latest_report.get("maintenance_detail") or {}).get("mutation_rolled_back")
-            )
-            if isinstance(latest_report.get("maintenance_detail"), dict)
-            else False,
+            "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_report),
             "usable_for_hot_gate": usable_for_hot_gate,
         }
     ledger_exists = paths["source_state_ledger"].exists()
@@ -52068,6 +52157,31 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         and not source_version_maintenance_count
     ):
         latest_remaining_actionable_count = 0
+    latest_maintenance_output = {
+        **latest_maintenance,
+        "actionable_remaining_count": latest_remaining_actionable_count,
+    }
+    recent_no_progress = recent_graph_maintenance_no_progress_evidence(
+        latest_graph_reports,
+        current_remaining_count=latest_remaining_actionable_count,
+        budgeted_batch_limit=GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+    )
+    if recent_no_progress.get("exists"):
+        latest_maintenance_output.update(
+            {
+                "recent_budget_no_progress": True,
+                "recent_budget_no_progress_path": recent_no_progress.get("path"),
+                "recent_budget_no_progress_mtime": recent_no_progress.get("mtime"),
+                "recent_budget_no_progress_generated_at": recent_no_progress.get("generated_at"),
+                "recent_budget_no_progress_remaining_count": recent_no_progress.get("remaining_count"),
+                "recent_budget_no_progress_selected_count": recent_no_progress.get("selected_count"),
+                "recent_budget_no_progress_batch_limit": recent_no_progress.get("batch_limit"),
+                "recent_budget_no_progress_candidate_pool_limit": recent_no_progress.get("candidate_pool_limit"),
+                "recent_budget_no_progress_mutation_rolled_back": recent_no_progress.get("mutation_rolled_back"),
+            }
+        )
+    else:
+        latest_maintenance_output["recent_budget_no_progress"] = False
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
         diagnostics.append("graph_store_schema_mismatch")
     if int_value(metadata.get("graph_schema_version")) != GRAPH_SCHEMA_VERSION:
@@ -52139,7 +52253,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "live_transcript_lookup_mode": ledger_live_summary.get("live_transcript_lookup_mode"),
             "live_transcript_session_cache_count": ledger_live_summary.get("live_transcript_session_cache_count"),
         },
-        "latest_maintenance": {**latest_maintenance, "actionable_remaining_count": latest_remaining_actionable_count},
+        "latest_maintenance": latest_maintenance_output,
         "queue": {
             "path": str(paths["maintenance_queue"]),
             "exists": queue_exists,
