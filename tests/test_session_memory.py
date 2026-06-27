@@ -2350,6 +2350,64 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert budgeted_noop_refresh["diagnostics"] == []
 
 
+def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-06-27T12:00:00Z",
+            "generated_at_epoch": 1782561600.0,
+            "ok": True,
+            "aoa_root": str(aoa_root),
+            "registry_path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
+            "counts_by_kind": {"mcp_service": 1, "skill": 1},
+            "counts_by_status": {"active": 2},
+            "entries": [
+                {
+                    "entity_id": "mcp_service:aoa_session_memory_mcp",
+                    "kind": "mcp_service",
+                    "canonical_key": "aoa_session_memory_mcp",
+                    "aliases": ["aoa-session-memory-mcp"],
+                    "status": "active",
+                },
+                {
+                    "entity_id": "skill:aoa_session_memory_evidence_route",
+                    "kind": "skill",
+                    "canonical_key": "aoa_session_memory_evidence_route",
+                    "aliases": ["aoa-session-memory-evidence-route"],
+                    "status": "active",
+                },
+            ],
+        },
+    )
+
+    def fail_rebuild(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("read-only entity-registry query must not rebuild")
+
+    monkeypatch.setattr(module, "build_entity_registry", fail_rebuild)
+    rc = module.command_entity_registry(
+        SimpleNamespace(
+            workspace_root=None,
+            aoa_root=str(aoa_root),
+            lookup="",
+            kind="mcp_service",
+            query="aoa-session-memory",
+            limit=5,
+            write=False,
+            no_runtime=False,
+            no_unknown=False,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["read_mode"] == "generated_snapshot"
+    assert payload["entity_count"] == 1
+    assert payload["entries"][0]["canonical_key"] == "aoa_session_memory_mcp"
+
+
 def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / module.ENTITY_REGISTRY_PATH.parent).mkdir(parents=True)
@@ -3796,6 +3854,147 @@ def test_entity_usage_scenario_audit_compact_cli_keeps_provider_summary(
     assert "dirty_session_ids" not in freshness
     assert "dirty_sessions" not in freshness
     assert "provider_summary" not in payload
+
+
+def test_entity_usage_scenario_layers_accept_default_and_kind_aliases() -> None:
+    assert module.normalize_entity_usage_scenario_layers(None) == list(module.ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS)
+    assert module.normalize_entity_usage_scenario_layers(["any"]) == list(module.ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS)
+    assert module.normalize_entity_usage_scenario_layers(["mcp_service", "receipt", "skill"]) == [
+        "mcp",
+        "hook_health",
+        "skill",
+    ]
+    assert module.normalize_entity_usage_scenario_layers(["any", "validator"]) == [
+        *module.ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS,
+        "validator",
+    ]
+
+
+def test_hook_receipt_route_search_reads_bounded_receipts(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / module.SESSION_ROOT / "2026-06-27__001__hook-receipts"
+    manifest = {
+        "schema_version": 1,
+        "session_id": "session-hook",
+        "session_label": "2026-06-27__001__hook-receipts",
+        "session_title": "Hook receipts",
+        "updated_at": "2026-06-27T12:00:00Z",
+        "archive_status": "raw_archived",
+        "display": {
+            "label": "2026-06-27__001__hook-receipts",
+            "title": "Hook receipts",
+            "navigation_path": str(session_dir),
+        },
+        "source": {},
+        "segments": [],
+    }
+    write_json(session_dir / "session.manifest.json", manifest)
+    write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "schema_version": 1,
+            "sessions": [module.registry_record(manifest, session_dir)],
+        },
+    )
+    write_jsonl(
+        session_dir / "hooks" / "receipts.jsonl",
+        [
+            {
+                "schema_version": 1,
+                "timestamp": "2026-06-27T12:00:01Z",
+                "hook_event_name": "UserPromptSubmit",
+                "ok": True,
+                "session_id": "session-hook",
+                "actions": ["hook_event_recorded"],
+                "errors": [],
+                "duration_ms": 10,
+            },
+            {
+                "schema_version": 1,
+                "timestamp": "2026-06-27T12:00:02Z",
+                "hook_event_name": "UserPromptSubmit",
+                "ok": True,
+                "session_id": "session-hook",
+                "actions": ["typing_prompt_bridge_failed"],
+                "errors": [],
+                "duration_ms": 3000,
+                "typing_bridge": {"ok": False, "status": "timeout", "timeout_sec": 3.0},
+            },
+        ],
+    )
+
+    packet = module.hook_receipt_route_search(
+        aoa_root=aoa_root,
+        event_name="UserPromptSubmit",
+        date_from="2026-06-27",
+        only_errors=True,
+        limit=5,
+    )
+
+    assert packet["ok"] is True
+    assert packet["total_receipt_count"] == 1
+    assert packet["returned_receipt_count"] == 1
+    assert packet["receipts"][0]["is_error"] is True
+    assert packet["receipts"][0]["refs"]["receipt"].endswith("hooks/receipts.jsonl#L2")
+
+
+def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_usage(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "quality": {"sample_count": 1, "passed_count": 1, "warn_count": 0, "failed_count": 0},
+            "samples": [{"refs": {"raw": "raw:line:1", "segment": "segment.md"}}],
+        }
+
+    def fake_hooks(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "total_receipt_count": 1,
+            "returned_receipt_count": 1,
+            "scanned_line_count": 1,
+            "date_semantics": {"filter_basis": "hook_receipt_timestamp"},
+            "receipts": [{"refs": {"receipt": "hooks/receipts.jsonl#L1", "session": "session.manifest.json"}}],
+        }
+
+    def fake_goals(**_kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result_count": 1, "results": [{"refs": {"raw": "raw:line:2"}}]}
+
+    def fake_closeouts(**_kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result_count": 1, "results": [{"refs": {"segment_index": "segment.index.json"}}]}
+
+    def fake_literal(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "primary_route": {"route_id": "entity_usage_audit"},
+            "cost_profile": {"structured_first": True, "monolith_fallback_first": False},
+        }
+
+    def fake_graph(**_kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "node_count": 2, "edge_count": 1, "evidence_refs": [{"refs": {"raw": "raw:line:3"}}]}
+
+    monkeypatch.setattr(module, "entity_usage_scenario_audit", fake_usage)
+    monkeypatch.setattr(module, "hook_receipt_route_search", fake_hooks)
+    monkeypatch.setattr(module, "goal_lifecycle_route_search", fake_goals)
+    monkeypatch.setattr(module, "agent_event_route_search", fake_closeouts)
+    monkeypatch.setattr(module, "literal_query_plan", fake_literal)
+    monkeypatch.setattr(module, "graph_neighborhood", fake_graph)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["entity_usage", "hook_failure", "goal_lifecycle", "agent_closeout", "literal_planner", "graph_neighborhood"],
+        sample_size=1,
+        recent_days=7,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["artifact_type"] == "session_memory_live_scenario_audit"
+    assert audit["quality"]["scenario_count"] == 6
+    assert audit["quality"]["failed_count"] == 0
+    assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 5
+    scenarios = {item["profile"]: item for item in audit["scenarios"]}
+    assert scenarios["literal_planner"]["primary_route_id"] == "entity_usage_audit"
+    assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
 
 
 def test_trace_route_supports_agent_event_kind() -> None:
