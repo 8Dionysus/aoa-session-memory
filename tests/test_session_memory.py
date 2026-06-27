@@ -6159,6 +6159,68 @@ def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> 
     assert "/path/to/workspace" not in recommendation["command"]
 
 
+def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=5625,
+        existing_source_count=5623,
+        dirty_count=618,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=10,
+        reason_group_counts={"source_sha_mismatch": 618},
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 618,
+            "actionable_remaining_count": 618,
+            "selected_count": 0,
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+            * module.GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+            "budget_exhausted": True,
+            "mutation_rolled_back": True,
+        },
+    )
+
+    assert recommendation["route"] == "heavy_tail_graph_maintenance"
+    assert recommendation["reason"] == "latest_budgeted_graph_maintenance_exhausted_without_progress"
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
+    assert recommendation["batch_limit"] == module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+    assert recommendation["candidate_pool_limit"] == module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+    assert "small_candidate_pool_preserves_progress_when_exact_planning_is_expensive" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=5625,
+        existing_source_count=5623,
+        dirty_count=593,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=10,
+        reason_group_counts={"source_sha_mismatch": 593},
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 593,
+            "actionable_remaining_count": 593,
+            "selected_count": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+        },
+    )
+
+    assert recommendation["route"] == "heavy_tail_graph_maintenance"
+    assert recommendation["reason"] == "continue_heavy_tail_graph_maintenance"
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
+
+
 def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -6190,6 +6252,38 @@ def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path
     assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in command_text
     assert str(workspace) in command_text
     assert str(aoa_root) in command_text
+
+
+def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 593,
+        "maintenance_recommendation": {
+            "route": "heavy_tail_graph_maintenance",
+            "reason": "continue_heavy_tail_graph_maintenance",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
 
 
 def test_maintenance_next_actions_routes_mostly_missing_graph_store_to_rebuild(tmp_path: Path) -> None:

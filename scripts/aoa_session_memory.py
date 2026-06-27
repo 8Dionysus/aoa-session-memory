@@ -250,6 +250,8 @@ GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
 GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 75
+GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT = 25
+GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT = 25
 GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
@@ -40597,6 +40599,7 @@ def graph_source_maintenance_recommendation(
     reason_group_counts: dict[str, Any],
     workspace_root: str = "/path/to/workspace",
     aoa_root: str = "/path/to/workspace/.aoa",
+    latest_maintenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     actionable_count = max(0, int_value(dirty_count) + int_value(missing_count) + int_value(orphaned_count))
     source_total = max(0, int_value(source_count))
@@ -40613,13 +40616,19 @@ def graph_source_maintenance_recommendation(
     root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
     bounded_batch_limit = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
     budgeted_batch_limit = GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+    heavy_tail_batch_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+    heavy_tail_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+    latest_maintenance = latest_maintenance if isinstance(latest_maintenance, dict) else {}
 
-    def graph_maintenance_command(batch_limit: int) -> str:
-        return (
+    def graph_maintenance_command(batch_limit: int, *, candidate_pool_limit: int | None = None) -> str:
+        command = (
             "python3 scripts/aoa_session_memory.py graph-maintenance all "
             f"{root_args} --apply --batch-limit {batch_limit} --budget-seconds 300 "
             f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report --write-hash-cache"
         )
+        if candidate_pool_limit is not None and int_value(candidate_pool_limit) > 0:
+            command += f" --candidate-pool-limit {max(1, int_value(candidate_pool_limit))}"
+        return command
 
     def graph_store_only_rebuild_command() -> str:
         return (
@@ -40643,6 +40652,32 @@ def graph_source_maintenance_recommendation(
         source_total >= 500
         and missing_total >= max(500, int(source_total * 0.75))
         and existing_total <= max(100, int(source_total * 0.15))
+    )
+    latest_usable = bool(latest_maintenance.get("usable_for_hot_gate"))
+    latest_remaining = int_value(
+        latest_maintenance.get("actionable_remaining_count", latest_maintenance.get("remaining_count"))
+    )
+    latest_batch_limit = int_value(latest_maintenance.get("batch_limit"))
+    latest_candidate_pool_limit = int_value(latest_maintenance.get("candidate_pool_limit"))
+    latest_budget_no_progress = (
+        latest_usable
+        and latest_remaining > 0
+        and bool(latest_maintenance.get("budget_exhausted"))
+        and (
+            int_value(latest_maintenance.get("selected_count")) <= 0
+            or bool(latest_maintenance.get("mutation_rolled_back"))
+        )
+    )
+    latest_heavy_tail_success = (
+        latest_usable
+        and latest_remaining > 0
+        and latest_batch_limit > 0
+        and latest_batch_limit <= heavy_tail_batch_limit
+        and (
+            latest_candidate_pool_limit <= 0
+            or latest_candidate_pool_limit <= heavy_tail_candidate_pool_limit
+        )
+        and int_value(latest_maintenance.get("selected_count")) > 0
     )
 
     if actionable_count <= 0 and ledger_coverage_gap:
@@ -40694,6 +40729,20 @@ def graph_source_maintenance_recommendation(
         route = "budgeted_graph_maintenance"
         reason = "graph_store_missing_sources_budgeted_recovery"
         command = graph_maintenance_command(budgeted_batch_limit)
+    elif latest_budget_no_progress:
+        route = "heavy_tail_graph_maintenance"
+        reason = "latest_budgeted_graph_maintenance_exhausted_without_progress"
+        command = graph_maintenance_command(
+            heavy_tail_batch_limit,
+            candidate_pool_limit=heavy_tail_candidate_pool_limit,
+        )
+    elif latest_heavy_tail_success and actionable_count > heavy_tail_batch_limit:
+        route = "heavy_tail_graph_maintenance"
+        reason = "continue_heavy_tail_graph_maintenance"
+        command = graph_maintenance_command(
+            heavy_tail_batch_limit,
+            candidate_pool_limit=heavy_tail_candidate_pool_limit,
+        )
     elif actionable_count <= 100:
         route = "bounded_graph_maintenance"
         reason = "small_incremental_backlog"
@@ -40721,6 +40770,9 @@ def graph_source_maintenance_recommendation(
     if route == "graph_event_sequence_prune":
         notes.append("generated_sequence_edges_can_be_pruned_without_full_source_regeneration")
         notes.append("raw_session_and_segment_order_remain_authoritative")
+    if route == "heavy_tail_graph_maintenance":
+        notes.append("latest_budgeted_graph_maintenance_showed_heavy_tail_or_budget_rollback")
+        notes.append("small_candidate_pool_preserves_progress_when_exact_planning_is_expensive")
     if route == "budgeted_graph_maintenance" and actionable_count > 100:
         notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
@@ -40732,6 +40784,12 @@ def graph_source_maintenance_recommendation(
         "blocked_count": blocked,
         "dominant_reason": max(reason_group_counts.items(), key=lambda item: int_value(item[1]))[0] if reason_group_counts else "",
         "command": command,
+        "batch_limit": heavy_tail_batch_limit if route == "heavy_tail_graph_maintenance" else (
+            budgeted_batch_limit if route == "budgeted_graph_maintenance" else bounded_batch_limit
+        ),
+        "candidate_pool_limit": (
+            heavy_tail_candidate_pool_limit if route == "heavy_tail_graph_maintenance" else None
+        ),
         "notes": notes,
     }
 
@@ -48537,6 +48595,7 @@ def graph_maintenance_status_from_state(
         reason_group_counts=reason_group_counts,
         workspace_root=str(workspace_root),
         aoa_root=str(aoa_root),
+        latest_maintenance=latest_maintenance,
     )
     return {
         "status": graph_state.get("status"),
@@ -50296,32 +50355,40 @@ def session_memory_maintenance_next_actions(
                 }
             )
             return "run_maintenance", actions
-        if graph_recommendation.get("route") in {"bounded_graph_maintenance", "budgeted_graph_maintenance"} and graph_recommendation.get("command"):
-            graph_batch_limit = (
-                GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
-                if graph_recommendation.get("route") == "budgeted_graph_maintenance"
-                else GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
-            )
+        if graph_recommendation.get("route") in {"bounded_graph_maintenance", "budgeted_graph_maintenance", "heavy_tail_graph_maintenance"} and graph_recommendation.get("command"):
+            graph_batch_limit = int_value(graph_recommendation.get("batch_limit"))
+            if graph_batch_limit <= 0:
+                graph_batch_limit = (
+                    GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+                    if graph_recommendation.get("route") == "heavy_tail_graph_maintenance"
+                    else GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+                    if graph_recommendation.get("route") == "budgeted_graph_maintenance"
+                    else GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
+                )
+            graph_candidate_pool_limit = int_value(graph_recommendation.get("candidate_pool_limit"))
+            command = [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "graph-maintenance",
+                "all",
+                *root_args,
+                "--apply",
+                "--batch-limit",
+                str(graph_batch_limit),
+                "--budget-seconds",
+                "300",
+                "--refresh-chunk-size",
+                str(GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
+                "--write-report",
+                "--write-hash-cache",
+            ]
+            if graph_candidate_pool_limit > 0:
+                command.extend(["--candidate-pool-limit", str(graph_candidate_pool_limit)])
             actions.append(
                 {
                     "id": "repair_graph_budgeted",
                     "reason": graph_recommendation.get("reason") or "graph_budgeted_maintenance",
-                    "command": [
-                        "python3",
-                        "scripts/aoa_session_memory.py",
-                        "graph-maintenance",
-                        "all",
-                        *root_args,
-                        "--apply",
-                        "--batch-limit",
-                        str(graph_batch_limit),
-                        "--budget-seconds",
-                        "300",
-                        "--refresh-chunk-size",
-                        str(GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
-                        "--write-report",
-                        "--write-hash-cache",
-                    ],
+                    "command": command,
                     "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers.",
                 }
             )
@@ -51803,6 +51870,7 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
         reason_group_counts=reason_group_counts,
         workspace_root=str(aoa_root.parent),
         aoa_root=str(aoa_root),
+        latest_maintenance=latest_maintenance,
     )
     return {
         "source_count": max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
@@ -51915,6 +51983,15 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "scope_is_global": report_scope_is_global,
             "remaining_count": remaining_count,
             "selected_count": latest_report.get("selected_count"),
+            "batch_limit": latest_report.get("batch_limit"),
+            "candidate_pool_limit": latest_report.get("candidate_pool_limit"),
+            "budget_exhausted": bool(latest_report.get("budget_exhausted")),
+            "elapsed_ms": latest_report.get("elapsed_ms"),
+            "mutation_rolled_back": bool(
+                (latest_report.get("maintenance_detail") or {}).get("mutation_rolled_back")
+            )
+            if isinstance(latest_report.get("maintenance_detail"), dict)
+            else False,
             "usable_for_hot_gate": usable_for_hot_gate,
         }
     ledger_exists = paths["source_state_ledger"].exists()
