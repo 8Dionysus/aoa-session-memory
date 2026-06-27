@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import fcntl
+import io
 import json
 import os
 import sqlite3
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -23,6 +26,195 @@ spec.loader.exec_module(module)
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def touch_old(path: Path, old_ts: float) -> None:
+    os.utime(path, (old_ts, old_ts))
+
+
+def build_doctor_root_with_missing_generated_segment(
+    tmp_path: Path,
+    *,
+    recent_live: bool,
+) -> tuple[Path, Path]:
+    workspace = tmp_path / "AbyssOS"
+    root = workspace / ".aoa"
+    root.mkdir(parents=True)
+    for rel_path in module.REQUIRED_ROOT_FILES:
+        path = root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n" if path.suffix == ".json" else "\n", encoding="utf-8")
+    write_json(root / "config" / "event-taxonomy.json", {"event_types": module.EVENT_TYPE_ORDER})
+    write_json(
+        root / "config" / "event-distillation-routes.json",
+        {"routes": {event_type: {"lane": "test"} for event_type in module.EVENT_TYPE_ORDER}},
+    )
+    write_json(
+        root / "config" / "naming-policy.json",
+        {
+            "banned_durable_name_terms": [],
+            "segment_roles": [
+                "initial-to-latest",
+                "initial-to-compaction",
+                "compaction-to-compaction",
+                "compaction-to-latest",
+            ],
+        },
+    )
+    write_json(
+        root / "hooks" / "codex-hooks.user.example.json",
+        {"hooks": {event_name: [{"command": "true"}] for event_name in module.REQUIRED_HOOK_EVENTS}},
+    )
+    sessions_root = root / module.SESSION_ROOT
+    label = "2026-06-11__006__doctor-live-tail"
+    session_dir = sessions_root / label
+    (session_dir / "raw" / "blocks").mkdir(parents=True)
+    (session_dir / "segments").mkdir(parents=True)
+    (root / module.SESSION_NAME_INDEX_MARKDOWN).write_text("# Session Names\n", encoding="utf-8")
+    (sessions_root / module.SESSIONS_INDEX_MARKDOWN).write_text("# Sessions\n", encoding="utf-8")
+    (session_dir / "AGENTS.md").write_text("# Session\n", encoding="utf-8")
+    (session_dir / module.SESSION_INDEX_MARKDOWN).write_text("# Session\n", encoding="utf-8")
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_path.write_text("{}\n", encoding="utf-8")
+    live_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "11" / "rollout-2026-06-11T16-22-32-live-tail.jsonl"
+    if recent_live:
+        live_transcript.parent.mkdir(parents=True, exist_ok=True)
+        live_transcript.write_text("{}\n", encoding="utf-8")
+    raw_source_path = str(live_transcript if recent_live else tmp_path / "not-live.jsonl")
+    raw_block_record = {
+        "block_id": "000",
+        "segment_id": "000",
+        "role": "initial-to-latest",
+        "status": "open",
+        "storage_mode": module.RAW_BLOCK_STORAGE_MODE_PLAIN,
+        "path": str(session_dir / "raw" / "blocks" / "000__initial-to-latest.raw.jsonl"),
+        "rel": "raw/blocks/000__initial-to-latest.raw.jsonl",
+        "plain_path": str(session_dir / "raw" / "blocks" / "000__initial-to-latest.raw.jsonl"),
+        "plain_rel": "raw/blocks/000__initial-to-latest.raw.jsonl",
+    }
+    segment_record = {
+        "segment_id": "000",
+        "role": "initial-to-latest",
+        "markdown": str(session_dir / "segments" / "000__initial-to-latest.md"),
+        "index": str(session_dir / "segments" / "000__initial-to-latest.index.json"),
+        "raw_block": raw_block_record,
+    }
+    manifest = {
+        "schema_version": module.SCHEMA_VERSION,
+        "archive_format_version": 2,
+        "session_id": "doctor-live-tail",
+        "session_label": label,
+        "display": {"label": label, "date": "2026-06-11", "sequence": 6},
+        "archive_status": "indexed",
+        "distillation_status": "raw_archived",
+        "raw": {
+            "path": str(raw_path),
+            "source_path": raw_source_path,
+            "bytes": raw_path.stat().st_size,
+            "line_count": 1,
+            "sha256": "test",
+            "indexing_status": "indexed",
+        },
+        "source": {"transcript_path": raw_source_path},
+        "raw_blocks": {
+            "index": str(session_dir / "raw" / module.RAW_BLOCK_INDEX_JSON),
+            "compaction_events": str(session_dir / "raw" / module.RAW_COMPACTION_EVENTS_JSONL),
+            "blocks": [raw_block_record],
+        },
+        "segments": [segment_record],
+    }
+    write_json(session_dir / "raw" / module.RAW_SOURCE_JSON, {"source_path": raw_source_path})
+    write_json(session_dir / "raw" / module.RAW_BLOCK_INDEX_JSON, {"blocks": [raw_block_record]})
+    (session_dir / "raw" / module.RAW_COMPACTION_EVENTS_JSONL).write_text("", encoding="utf-8")
+    write_json(session_dir / "session.manifest.json", manifest)
+    write_json(session_dir / module.SESSION_INDEX_JSON, {"schema_version": 1, "events": []})
+    write_json(
+        root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": "doctor-live-tail",
+                    "session_label": label,
+                    "path": str(session_dir),
+                    "archive_status": "indexed",
+                    "display": {"label": label},
+                }
+            ]
+        },
+    )
+    write_json(
+        root / module.SESSION_NAME_INDEX_JSON,
+        {"artifact_type": "session_name_index", "session_count": 1, "naming_readiness_counts": {}},
+    )
+    write_json(
+        sessions_root / module.SESSIONS_INDEX_JSON,
+        {"artifact_type": "sessions_directory_index", "session_count": 1, "naming_readiness_counts": {}},
+    )
+    old_ts = time.time() - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 120
+    if not recent_live:
+        for path in [session_dir, session_dir / "raw", session_dir / "raw" / "blocks", session_dir / "segments"]:
+            touch_old(path, old_ts)
+        for path in [
+            raw_path,
+            session_dir / "raw" / module.RAW_SOURCE_JSON,
+            session_dir / "raw" / module.RAW_BLOCK_INDEX_JSON,
+            session_dir / "raw" / module.RAW_COMPACTION_EVENTS_JSONL,
+            session_dir / "session.manifest.json",
+            session_dir / module.SESSION_INDEX_JSON,
+            session_dir / module.SESSION_INDEX_MARKDOWN,
+        ]:
+            if path.exists():
+                touch_old(path, old_ts)
+    return workspace, root
+
+
+def run_doctor_payload(workspace: Path, root: Path) -> tuple[int, dict[str, Any]]:
+    args = SimpleNamespace(
+        workspace_root=str(workspace),
+        aoa_root=str(root),
+        check_live_hooks=False,
+        check_user_skill=False,
+        check_installable_user_skills=False,
+        check_codex_grounding=False,
+    )
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = module.command_doctor(args)
+    return code, json.loads(out.getvalue())
+
+
+def test_doctor_defers_generated_segment_gaps_for_recent_live_tail(tmp_path: Path) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(tmp_path, recent_live=True)
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["status"] == "current_with_deferred_live_updates"
+    assert payload["deferred_live_problem_count"] >= 3
+    assert payload["problems"] == []
+    assert set(payload["installable_user_skills"]["skills"]) == set(module.USER_LEVEL_INSTALLABLE_SKILL_NAMES)
+    assert payload["installable_user_skills"]["source_ok"] is True
+    assert payload["deferred_live_problem_sessions"][0]["session_id"] == "doctor-live-tail"
+    assert payload["live_tail"]["next_route"] == "wait_for_quiet_window_then_rerun_doctor_or_auto_maintenance"
+
+
+def test_doctor_keeps_quiet_generated_segment_gaps_actionable(tmp_path: Path) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(tmp_path, recent_live=False)
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["status"] == "failed"
+    assert payload["deferred_live_problem_count"] == 0
+    assert any("missing segment markdown" in item for item in payload["problems"])
+    assert any("missing segment index" in item for item in payload["problems"])
 
 
 def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
@@ -101,6 +293,9 @@ def test_default_standalone_repo_prefers_bundles_topology(tmp_path: Path) -> Non
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
+    shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_db.parent.mkdir(parents=True)
+    shard_db.write_bytes(b"existing structured shard")
 
     assert module.default_standalone_repo_for(aoa_root) == workspace / "bundles" / "aoa-session-memory"
 
@@ -385,6 +580,11 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert audit["stream_canonical_neighbor_pair_count"] >= 1
     assert audit["stream_canonical_retrieval_guard_ok"] is True
     assert audit["quality_ok"] is True
+    route_probes = {probe["route"]: probe for probe in audit["route_probes"]}
+    assert route_probes["agent-reasoning-windows"]["route_kind"] == "window_route"
+    assert route_probes["agent-reasoning-windows"]["window_count"] == 1
+    assert route_probes["agent-reasoning-windows"]["sample_refs"][0]["agent_event"] == "assistant_reasoning_boundary"
+    assert route_probes["agent-reasoning-windows"]["sample_refs"][0]["raw_ref"] == "raw:line:3"
     assert audit["raw_shape_samples"]
     assert any(sample["raw_shape"]["payload_type"] == "message" for sample in audit["raw_shape_samples"])
     ordered_audit = module.agent_event_audit(
@@ -505,6 +705,16 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert reasoning_window["preview_source"] == "raw_semantic_text"
     assert reasoning_window["bounded_preview"]
     assert "Need inspect source" in reasoning_window["bounded_preview"]
+    windows_without_explain = module.agent_event_windows(
+        aoa_root=aoa_root,
+        agent_events=["assistant_reasoning_boundary"],
+        limit=1,
+        before=1,
+        after=2,
+        explain=False,
+    )
+    assert windows_without_explain["window_count"] == 1
+    assert "explain" not in windows_without_explain["results"][0]
 
 
 def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path: Path) -> None:
@@ -1648,6 +1858,30 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
             {
                 "timestamp": "2026-06-18T00:00:09Z",
                 "type": "response_item",
+                "payload": {"type": "function_call", "name": "get_goal", "call_id": "call-inspect-external-goal", "arguments": "{}"},
+            },
+            {
+                "timestamp": "2026-06-18T00:00:10Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-inspect-external-goal",
+                    "output": json.dumps(
+                        {
+                            "goal": {
+                                "threadId": "goal-lifecycle",
+                                "objective": "resume external goal from inspected state",
+                                "status": "active",
+                                "createdAt": 1780000000,
+                                "updatedAt": 1780000100,
+                            }
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-18T00:00:11Z",
+                "type": "response_item",
                 "payload": {"type": "function_call", "name": "update_goal", "call_id": "call-block-goal", "arguments": json.dumps({"status": "blocked"})},
             },
         ],
@@ -1672,16 +1906,16 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     session_index = json.loads((session_dir / module.SESSION_INDEX_JSON).read_text(encoding="utf-8"))
 
     complete_signals = {f"{signal['layer']}:{signal['key']}" for signal in events["000007"]["facets"]["route_signals"]}
-    blocked_signals = {f"{signal['layer']}:{signal['key']}" for signal in events["000010"]["facets"]["route_signals"]}
+    blocked_signals = {f"{signal['layer']}:{signal['key']}" for signal in events["000012"]["facets"]["route_signals"]}
     assert events["000007"]["facets"]["session_act"]["kind"] == "goal_completed"
-    assert events["000010"]["facets"]["session_act"]["kind"] == "goal_blocked"
+    assert events["000012"]["facets"]["session_act"]["kind"] == "goal_blocked"
     assert {"goal:goal_updated", "goal:goal_completed"}.issubset(complete_signals)
     assert {"goal:goal_updated", "goal:goal_blocked"}.issubset(blocked_signals)
 
     assert session_index["goal_lifecycle_schema_version"] == module.GOAL_LIFECYCLE_SCHEMA_VERSION
     assert session_index["goal_lifecycle_counts"]["total"] == 2
     assert session_index["goal_event_counts"]["goal_created"] == 1
-    assert session_index["goal_event_counts"]["goal_inspected"] == 1
+    assert session_index["goal_event_counts"]["goal_inspected"] == 2
     assert session_index["goal_event_counts"]["goal_updated"] == 1
     assert session_index["goal_event_counts"]["goal_completed"] == 1
     assert session_index["goal_event_counts"]["goal_blocked"] == 1
@@ -1695,9 +1929,15 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert "missing_create" not in first["ambiguity_flags"]
     assert second["goal_id"] == "goal-0002"
     assert second["status"] == "blocked"
+    assert second["objective"] == "resume external goal from inspected state"
+    assert second["objective_source"] == "goal_tool_output"
+    assert second["observed_goal"]["createdAt"] == 1780000000
     assert "missing_create" in second["ambiguity_flags"]
-    assert second["blocked_ref"]["raw_ref"] == "raw:line:10"
+    assert "objective_from_goal_inspection" in second["ambiguity_flags"]
+    assert "create_time_from_goal_inspection" in second["ambiguity_flags"]
+    assert second["blocked_ref"]["raw_ref"] == "raw:line:12"
     assert second["task_episode_ids"] == ["task-0002"]
+    assert second["state_observations"][0]["refs"]["raw_ref"] == "raw:line:11"
     assert session_index["route_signal_counts"]["goal"]["goal_completed"] == 1
     assert session_index["route_signal_counts"]["goal"]["goal_blocked"] == 1
 
@@ -1709,6 +1949,11 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert lifecycle_route["provider"]["response_compacted"] is True
     assert "portable_sqlite" in lifecycle_route["provider"]["providers"]
     assert "freshness" in lifecycle_route["provider"]["providers"]["portable_sqlite"]
+    blocked_route = module.goal_lifecycle_route_search(aoa_root=aoa_root, target="latest", status="blocked", limit=1)
+    assert blocked_route["ok"] is True
+    assert blocked_route["results"][0]["objective_source"] == "goal_tool_output"
+    assert blocked_route["results"][0]["observed_goal"]["createdAt"] == 1780000000
+    assert blocked_route["results"][0]["state_observations"][0]["refs"]["raw_ref"] == "raw:line:11"
 
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
@@ -2105,6 +2350,64 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert budgeted_noop_refresh["diagnostics"] == []
 
 
+def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / module.ENTITY_REGISTRY_PATH.parent).mkdir(parents=True)
+    module.write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-06-26T00:00:00Z",
+            "ok": True,
+            "entries": [],
+        },
+    )
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+    conn.execute(
+        "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("script", "skill_intelligence", "script:skill_intelligence"),
+    )
+    route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", ("script:skill_intelligence",)).fetchone()[0]
+    cursor = conn.execute(
+        """
+        INSERT INTO documents(
+          id, doc_type, session_id, session_label, session_date, event_id,
+          event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "event:observed-script:001:000001",
+            "event",
+            "observed-script",
+            "observed-script",
+            "2026-06-26",
+            "000001",
+            "COMMAND",
+            "tool_call",
+            "usage",
+            "|script:skill_intelligence|",
+            "raw:line:1",
+            "session.manifest.json",
+            "{}",
+        ),
+    )
+    conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+    conn.commit()
+    conn.close()
+
+    lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="skill_intelligence", kind="script")
+
+    assert lookup["agent_route_packet"]["registered"] is True
+    assert lookup["entries"][0]["kind"] == "script"
+    assert lookup["entries"][0]["canonical_key"] == "skill_intelligence"
+    assert lookup["entries"][0]["status"] == "observed"
+    assert lookup["entries"][0]["source_surface"] == "archived_route_terms"
+    assert lookup["entries"][0]["freshness"]["signal_count"] == 1
+    assert lookup["entries"][0]["freshness"]["session_count"] == 1
+
+
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -2434,13 +2737,91 @@ def test_entity_usage_audit_uses_usage_role_fast_path_before_wide_retry(tmp_path
 
     assert audit["ok"] is True
     assert set(called_usage_roles) == {"usage"}
-    assert max(called_limits) == 3
+    assert max(called_limits) == 12
     assert audit["quality"]["usage_role_fast_path_supported"] is True
     assert audit["quality"]["usage_role_fast_path_applied"] is True
+    assert audit["quality"]["usage_role_fast_path_fetch_limit"] == audit["quality"]["route_fetch_limit"]
     assert audit["quality"]["usage_role_fast_path_broad_route_search_skipped"] is True
     assert audit["quality"]["route_usage_retry_applied"] is False
     assert audit["quality"]["text_search_skipped"] is True
     assert audit["usage_event_count"] == 3
+
+
+def test_entity_usage_audit_prefers_non_stale_usage_in_compact_slice(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hits = [
+        {
+            "doc_id": "event:session:001:000001",
+            "event_type": "FILE_READ",
+            "conversation_act": "command_inspection_request",
+            "session_act": "memory_read",
+            "usage_role": "usage",
+            "title": "Stale skill read",
+            "route_signals": "skill:aoa_session_memory_evidence_route",
+            "refs": {"raw": "raw:line:1", "segment": "001.md", "session": "session.manifest.json"},
+            "freshness": {"status": "stale"},
+        },
+        {
+            "doc_id": "event:session:001:000002",
+            "event_type": "FILE_READ",
+            "conversation_act": "command_inspection_request",
+            "session_act": "memory_read",
+            "usage_role": "usage",
+            "title": "Unverifiable skill read",
+            "route_signals": "skill:aoa_session_memory_evidence_route",
+            "refs": {"raw": "raw:line:2", "segment": "001.md", "session": "session.manifest.json"},
+            "freshness": {"status": "unverifiable"},
+        },
+        {
+            "doc_id": "event:session:001:000003",
+            "event_type": "FILE_READ",
+            "conversation_act": "command_inspection_request",
+            "session_act": "memory_read",
+            "usage_role": "usage",
+            "title": "Fresh skill read",
+            "route_signals": "skill:aoa_session_memory_evidence_route",
+            "refs": {"raw": "raw:line:3", "segment": "001.md", "session": "session.manifest.json"},
+            "freshness": {"status": "fresh"},
+        },
+    ]
+    called_limits: list[int] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        called_limits.append(int(kwargs.get("limit") or 0))
+        limit = int(kwargs.get("limit") or 0)
+        return {"ok": True, "result_count": min(limit, len(usage_hits)), "results": usage_hits[:limit], "diagnostics": []}
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "route_index_count": 1,
+                    "route_term_count": 1,
+                }
+            }
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-evidence-route",
+        kind="skill",
+        limit=2,
+        per_route_limit=2,
+    )
+
+    assert audit["ok"] is True
+    assert max(called_limits) == 12
+    assert audit["quality"]["candidate_usage_event_count"] == 3
+    assert [event["doc_id"] for event in audit["usage_events"]] == [
+        "event:session:001:000003",
+        "event:session:001:000002",
+    ]
+    assert audit["quality"]["freshness_counts"] == {"fresh": 1, "unverifiable": 1}
 
 
 def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: Path, monkeypatch: Any) -> None:
@@ -2913,6 +3294,7 @@ def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tm
     add_route_doc("mcp:aoa_session_memory_mcp", doc_id="good-mcp", event_type="COMMAND", session_act="memory_read")
     add_route_doc("hook_health:postcompact", doc_id="good-hook", event_type="COMMAND_OUTPUT", session_act="memory_observation")
     add_route_doc("agent_event:assistant_answer", doc_id="good-agent-answer", event_type="ASSISTANT_MESSAGE", session_act="assistant_message")
+    add_route_doc("script:skill_intelligence", doc_id="good-script", event_type="COMMAND", session_act="tool_call")
     add_route_doc("mcp:abyss_stack_mcp", doc_id="service-only-mcp", event_type="COMMAND_OUTPUT", session_act="memory_observation")
     add_route_doc("entity:config_projectio", doc_id="truncated-entity", event_type="COMMAND_OUTPUT", session_act="command_result")
     add_route_doc(
@@ -2927,15 +3309,17 @@ def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tm
 
     candidates, diagnostics = module.entity_usage_scenario_candidates(
         aoa_root=aoa_root,
-        layers=["mcp", "hook_health", "agent_event", "entity", "path", "skill"],
+        layers=["mcp", "hook_health", "agent_event", "entity", "path", "skill", "script"],
         sample_size=8,
         seed="scenario-candidate-filter",
     )
     route_signals = {candidate["route_signal"] for candidate in candidates}
+    kinds_by_route_signal = {candidate["route_signal"]: candidate["kind"] for candidate in candidates}
 
     assert "mcp:aoa_session_memory_mcp" in route_signals
     assert "hook_health:postcompact" in route_signals
     assert "agent_event:assistant_answer" in route_signals
+    assert kinds_by_route_signal["script:skill_intelligence"] == "script"
     assert "mcp:abyss_stack_mcp" not in route_signals
     assert "entity:config_projectio" not in route_signals
     assert not any("pycache" in signal for signal in route_signals)
@@ -2944,10 +3328,69 @@ def test_entity_usage_scenario_candidates_are_event_scoped_and_noise_filtered(tm
     assert any(item.startswith("candidate_pool_filtered:generated_runtime_key:") for item in diagnostics)
 
 
+def test_entity_usage_scenario_candidates_count_route_postings_for_minimum(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+
+    def add_route_doc(route_signal: str, *, doc_id: str) -> None:
+        layer, key = route_signal.split(":", 1)
+        conn.execute(
+            "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
+        )
+        route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (route_signal,)).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+            )
+            VALUES (?, 'event', 'scenario-session', 'scenario-session', '2026-06-21', ?,
+                    'COMMAND', 'memory_read', ?, ?, 'raw:line:1', 'session.manifest.json', '{}')
+            """,
+            (
+                doc_id,
+                doc_id,
+                module.entity_usage_event_role("COMMAND", session_act="memory_read"),
+                f"|{route_signal}|",
+            ),
+        )
+        conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+
+    add_route_doc("mcp:aoa_session_memory_mcp", doc_id="good-mcp-1")
+    add_route_doc("mcp:aoa_session_memory_mcp", doc_id="good-mcp-2")
+    add_route_doc("mcp:single_posting_mcp", doc_id="single-mcp")
+    conn.commit()
+    conn.close()
+
+    candidates, diagnostics = module.entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=["mcp"],
+        sample_size=4,
+        seed="scenario-min-postings-count",
+        min_postings=2,
+    )
+    route_signals = {candidate["route_signal"] for candidate in candidates}
+
+    assert "mcp:aoa_session_memory_mcp" in route_signals
+    assert "mcp:single_posting_mcp" not in route_signals
+    assert any(item.startswith("candidate_selection_strategy:bounded_counted_route_probe_v2") for item in diagnostics)
+    assert any(item.startswith("candidate_pool_filtered:min_postings:") for item in diagnostics)
+
+
 def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tmp_path: Path, monkeypatch: Any) -> None:
     candidates = [
         {
             "route_id": 1,
+            "layer": "hook",
+            "key": "stop",
+            "kind": "hook",
+            "anchor": "stop",
+            "route_signal": "hook:stop",
+        },
+        {
+            "route_id": 2,
             "layer": "hook_health",
             "key": "postcompact",
             "kind": "hook",
@@ -2955,7 +3398,7 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
             "route_signal": "hook_health:postcompact",
         },
         {
-            "route_id": 2,
+            "route_id": 3,
             "layer": "agent_event",
             "key": "assistant_answer",
             "kind": "agent_event",
@@ -2969,7 +3412,7 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
 
     def fake_usage_audit(**kwargs: Any) -> dict[str, Any]:
         anchor = kwargs["anchor"]
-        if anchor == "postcompact":
+        if anchor in {"stop", "postcompact"}:
             event = {
                 "role": "result",
                 "event_type": "COMMAND_OUTPUT",
@@ -3044,12 +3487,21 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
     monkeypatch.setattr(module, "raw_preview_for_usage_event", lambda *_args, **_kwargs: {"status": "available", "line": 1, "text": "ok"})
 
-    audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=2, seed="layer-aware")
+    audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=3, seed="layer-aware")
 
     assert audit["ok"] is True
-    assert audit["quality"]["passed_count"] == 2
+    assert audit["quality"]["passed_count"] == 3
     assert audit["quality"]["warn_count"] == 0
     assert audit["quality"]["failed_count"] == 0
+    assert audit["quality"]["evidence_mode_counts"]["result_only"] == 2
+    assert audit["quality"]["evidence_mode_counts"]["outcome_only"] == 1
+    assert audit["quality"]["quality_flag_counts"]["result_only_evidence"] == 2
+    assert audit["quality"]["quality_flag_counts"]["outcome_only_evidence"] == 1
+    assert {sample["candidate"]["route_signal"]: sample["evidence_mode"] for sample in audit["samples"]} == {
+        "hook:stop": "result_only",
+        "hook_health:postcompact": "result_only",
+        "agent_event:assistant_answer": "outcome_only",
+    }
     assert audit["quality"]["candidate_selection_elapsed_ms"] >= 0
     assert audit["quality"]["sample_total_elapsed_ms"] >= 0
     assert audit["quality"]["audit_total_elapsed_ms"] >= 0
@@ -3058,6 +3510,174 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["quality"]["provider_status"] == "ready"
     assert audit["quality"]["provider_freshness_status"] == "current"
     assert audit["provider_summary"]["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
+
+
+def test_entity_usage_scenario_audit_recovers_kind_from_known_layer(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidates = [
+        {
+            "route_id": 1,
+            "layer": "script",
+            "key": "skill_intelligence",
+            "kind": "auto",
+            "anchor": "skill_intelligence",
+            "route_signal": "script:skill_intelligence",
+        }
+    ]
+    observed_kinds: list[str] = []
+
+    def fake_candidates(**_kwargs: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        return candidates, []
+
+    def fake_usage_audit(**kwargs: Any) -> dict[str, Any]:
+        observed_kinds.append(str(kwargs["kind"]))
+        event = {
+            "role": "usage",
+            "event_type": "COMMAND",
+            "refs": {"raw": "raw:line:30", "session": "session.manifest.json"},
+        }
+        consequence = {
+            "role": "result",
+            "event_type": "COMMAND_OUTPUT",
+            "refs": {"raw": "raw:line:31", "session": "session.manifest.json"},
+        }
+        return {
+            "ok": True,
+            "event_count": 1,
+            "entrypoint_event_count": 0,
+            "usage_event_count": 1,
+            "result_event_count": 0,
+            "outcome_event_count": 0,
+            "context_event_count": 0,
+            "consequence_event_count": 1,
+            "usage_events": [event],
+            "result_events": [],
+            "outcome_events": [],
+            "entrypoint_events": [],
+            "context_events": [],
+            "consequence_events": [consequence],
+            "document_refs": [{"kind": "raw_line", "value": "raw:line:30"}],
+            "quality": {"freshness_counts": {"fresh": 2}},
+            "diagnostics": [],
+        }
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "selected_provider": "portable_sqlite",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
+
+    monkeypatch.setattr(module, "entity_usage_scenario_candidates", fake_candidates)
+    monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "raw_preview_for_usage_event", lambda *_args, **_kwargs: {"status": "available", "line": 1, "text": "ok"})
+
+    audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=1, seed="script-layer-kind")
+
+    assert observed_kinds == ["script"]
+    assert audit["quality"]["passed_count"] == 1
+    assert audit["quality"]["warn_count"] == 0
+    assert audit["samples"][0]["candidate"]["kind"] == "script"
+    assert audit["samples"][0]["evidence_mode"] == "usage_with_consequence"
+
+
+def test_entity_usage_scenario_audit_warns_on_direct_usage_without_consequence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidates = [
+        {
+            "route_id": 1,
+            "layer": "api",
+            "key": "http",
+            "kind": "api",
+            "anchor": "http",
+            "route_signal": "api:http",
+        }
+    ]
+
+    def fake_candidates(**_kwargs: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        return candidates, []
+
+    def fake_usage_audit(**_kwargs: Any) -> dict[str, Any]:
+        usage = {
+            "role": "usage",
+            "event_type": "COMMAND",
+            "refs": {"raw": "raw:line:30", "session": "session.manifest.json"},
+        }
+        result = {
+            "role": "result",
+            "event_type": "COMMAND_OUTPUT",
+            "refs": {"raw": "raw:line:31", "session": "session.manifest.json"},
+        }
+        return {
+            "ok": True,
+            "event_count": 2,
+            "entrypoint_event_count": 0,
+            "usage_event_count": 1,
+            "result_event_count": 1,
+            "outcome_event_count": 0,
+            "context_event_count": 0,
+            "consequence_event_count": 0,
+            "usage_events": [usage],
+            "result_events": [result],
+            "outcome_events": [],
+            "entrypoint_events": [],
+            "context_events": [],
+            "consequence_events": [],
+            "document_refs": [{"kind": "raw_line", "value": "raw:line:30"}],
+            "quality": {"freshness_counts": {"fresh": 2}},
+            "diagnostics": [],
+        }
+
+    def fake_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "selected_provider": "portable_sqlite",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
+
+    monkeypatch.setattr(module, "entity_usage_scenario_candidates", fake_candidates)
+    monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
+    monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "raw_preview_for_usage_event", lambda *_args, **_kwargs: {"status": "available", "line": 1, "text": "ok"})
+
+    audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=1, seed="direct-usage-without-consequence")
+
+    assert audit["ok"] is True
+    assert audit["quality"]["passed_count"] == 0
+    assert audit["quality"]["warn_count"] == 1
+    assert audit["quality"]["failed_count"] == 0
+    assert audit["quality"]["quality_flag_counts"] == {"direct_usage_without_consequence": 1}
+    assert audit["samples"][0]["status"] == "warn"
+    assert audit["samples"][0]["evidence_mode"] == "usage_with_result"
+    assert audit["samples"][0]["quality_flags"] == ["direct_usage_without_consequence"]
+    assert audit["samples"][0]["failure_reasons"] == ["quality_flag:direct_usage_without_consequence"]
 
 
 def test_entity_usage_scenario_audit_compact_cli_keeps_provider_summary(
@@ -3600,6 +4220,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
+    archived_session_label = next(path.name for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
     graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True)
     streaming_graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
@@ -3664,6 +4285,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         assert key not in edge_contrib
 
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=2)
+    compact_neighborhood = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        depth=2,
+        limit=3,
+        edge_limit=5,
+    )
     timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
     config_alias_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="mcp_servers.aoa_session_memory", kind="mcp")
     exact_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="tool")
@@ -3733,6 +4362,44 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         consequence_window=4,
         raw_preview_limit=2,
     )
+    typed_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="aoa-decisions-mcp",
+        kind="mcp",
+        doc_type="event",
+    )
+    error_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="Traceback ValueError literal-query planner failed",
+        doc_type="event",
+        date_from="2026-05-01",
+    )
+    noisy_route_signal_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="aoa session memory hook failure raw_unavailable",
+        doc_type="event",
+    )
+    structured_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="",
+        doc_type="event",
+        agent_event="assistant_answer",
+    )
+    raw_ref_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="raw:line:10",
+        session=archived_session_label,
+    )
+    hook_receipt_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="typing_prompt_bridge_failed",
+        date_from="2026-06-01",
+    )
+    command_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="python3 scripts/aoa_session_memory.py agent-event-audit latest --probe-routes",
+        doc_type="event",
+    )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
     storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
@@ -3764,7 +4431,21 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert neighborhood["graph"]["source"] == "sqlite_graph_store"
     assert neighborhood["evidence_refs"]
     assert any(item.get("refs", {}).get("raw") for item in neighborhood["evidence_refs"] if isinstance(item, dict))
+    assert compact_neighborhood["ok"] is True
+    assert compact_neighborhood["node_count"] <= 3
+    assert compact_neighborhood["edge_count"] <= 5
+    assert compact_neighborhood["node_limit"] == 3
+    assert compact_neighborhood["edge_limit"] == 5
+    assert "truncated" in compact_neighborhood
+    assert "omitted_edge_count" in compact_neighborhood
+    assert "graph-neighborhood" in compact_neighborhood["next_command"]
+    assert "--edge-limit 5" in compact_neighborhood["next_command"]
+    assert "graph-neighborhood" in compact_neighborhood["next_expansion_command"]
+    assert "--depth 3" in compact_neighborhood["next_expansion_command"]
+    assert "--edge-limit" in compact_neighborhood["next_expansion_command"]
     assert timeline["events"]
+    assert "graph-timeline" in timeline["next_command"]
+    assert "graph-timeline" in timeline["next_expansion_command"]
     assert config_alias_timeline["events"]
     assert "aoa_session_memory_mcp" in config_alias_timeline["resolved"]["aliases"]
     assert config_alias_timeline["resolved"]["resolver_strategy"] == "exact_route_node"
@@ -3839,15 +4520,66 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     parser = module.build_parser()
     assert parser.parse_args(["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
+    assert parser.parse_args(["graph-neighborhood", "aoa-session-memory-mcp", "--edge-limit", "5"]).edge_limit == 5
     assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer"]).use_shards is True
     assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer", "--no-shards"]).use_shards is False
     assert parser.parse_args(["answer-neighborhood", "--session", "latest"]).use_shards is True
+    assert parser.parse_args(["answer-neighborhood", "--session", "latest", "--no-explain"]).explain is False
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-shards"]).use_shards is False
+    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--explain"]).explain is True
+    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-explain"]).explain is False
+    assert parser.parse_args(["literal-query-plan", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
     assert scenario_audit["quality"]["sample_count"] == 2
     assert scenario_audit["quality"]["failed_count"] == 0
     assert scenario_audit["quality"]["raw_preview_counts"].get("available", 0) >= 1
+    assert typed_literal_plan["artifact_type"] == "session_memory_literal_query_plan"
+    assert typed_literal_plan["ok"] is True
+    assert typed_literal_plan["primary_route"]["route_id"] == "entity_usage_audit"
+    assert typed_literal_plan["cost_profile"]["structured_first"] is True
+    assert typed_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert any(
+        item.get("route_signal") == "mcp:aoa_decisions_mcp"
+        for item in typed_literal_plan["route_candidates"]
+    )
+    assert error_literal_plan["primary_route"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert error_literal_plan["query_shape"]["primary"] == "error_text"
+    assert error_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is True
+    assert error_literal_plan["cost_profile"]["structured_first"] is False
+    assert noisy_route_signal_literal_plan["query_shape"]["primary"] == "error_text"
+    assert noisy_route_signal_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
+    assert noisy_route_signal_literal_plan["cost_profile"]["structured_first"] is True
+    assert noisy_route_signal_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert noisy_route_signal_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert noisy_route_signal_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is True
+    assert noisy_route_signal_literal_plan["structured_route_signal_candidates"][0]["route_signal"] == "hook_health:raw_unavailable"
+    assert "--route-signal hook_health:raw_unavailable" in noisy_route_signal_literal_plan["next_command"]
+    assert noisy_route_signal_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
+    assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
+    assert raw_ref_literal_plan["primary_route"]["route_id"] == "raw_ref_scoped_verification"
+    assert raw_ref_literal_plan["cost_profile"]["structured_first"] is True
+    assert raw_ref_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert "aoa_session_freshness_check" in raw_ref_literal_plan["next_command"]
+    assert hook_receipt_literal_plan["query_shape"]["primary"] == "hook_receipt"
+    assert hook_receipt_literal_plan["primary_route"]["route_id"] == "hook_receipts"
+    assert hook_receipt_literal_plan["cost_profile"]["structured_first"] is True
+    assert hook_receipt_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert "aoa_session_hook_receipts" in hook_receipt_literal_plan["next_command"]
+    assert command_literal_plan["query_shape"]["primary"] == "command"
+    assert command_literal_plan["query_shape"]["command_anchor"] == "scripts/aoa_session_memory.py"
+    assert command_literal_plan["route_anchor"] == "scripts/aoa_session_memory.py"
+    assert command_literal_plan["primary_route"]["route_id"] == "command_structured_search"
+    assert "--route-signal script:aoa_session_memory" in command_literal_plan["next_command"]
+    assert command_literal_plan["ordered_routes"][1]["route_id"] == "entity_usage_audit"
+    assert "entity-usage-audit scripts/aoa_session_memory.py" in command_literal_plan["ordered_routes"][1]["command"]
+    assert command_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert "agent-event-audit latest --probe-routes" in command_literal_plan["ordered_routes"][-1]["command"]
+    assert command_literal_plan["cost_profile"]["structured_first"] is True
+    assert command_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert command_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])
@@ -3896,6 +4628,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert search_recommendation["status"] == "bounded_policy_recorded"
     assert Path(storage["report_json"]).exists()
     assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
+    assert "graph-cooccurrence" in cooccurrence["next_command"]
+    assert "graph-cooccurrence" in cooccurrence["next_expansion_command"]
     assert packet["ok"] is True
     assert packet["truth_status"] == "rag_graphrag_evidence_packet_not_reviewed_truth"
     assert packet["kind"] == "mcp"
@@ -3991,6 +4725,35 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert Path(dossier["report_json"]).exists()
 
 
+def test_graph_freshness_surfaces_hot_gate_backlog(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "stale",
+            "needs_maintenance": True,
+            "needs_full_rebuild": False,
+            "ledger": {"actionable_count": 17, "deferred_live_source_count": 2, "status_counts": {"dirty": 17}},
+            "diagnostics": ["latest_graph_maintenance_remaining_sources"],
+        },
+    )
+
+    freshness = module.graph_freshness(
+        aoa_root,
+        {"source": "sqlite_graph_store", "generated_at": "2026-06-26T17:31:43Z"},
+    )
+
+    assert freshness["status"] == "graph_store_stale"
+    assert freshness["hot_gate_status"] == "stale"
+    assert freshness["needs_maintenance"] is True
+    assert freshness["actionable_graph_source_count"] == 17
+    assert freshness["deferred_live_source_count"] == 2
+    assert "latest_graph_maintenance_remaining_sources" in freshness["hot_gate_diagnostics"]
+    assert freshness["maintenance_recommendation"]["route"] == "bounded_graph_maintenance"
+
+
 def test_storage_maintenance_checkpoints_sqlite_wal(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     search_path = module.search_db_path(aoa_root)
@@ -4037,8 +4800,10 @@ def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_
     graph_root.mkdir(parents=True)
     tmp_store = graph_root / ".graph.sqlite3.987654.rebuild.tmp"
     tmp_wal = Path(f"{tmp_store}-wal")
+    tmp_journal = Path(f"{tmp_store}-journal")
     tmp_store.write_bytes(b"x" * 1024)
     tmp_wal.write_bytes(b"y" * 512)
+    tmp_journal.write_bytes(b"j" * 256)
     owner = {
         **module.maintenance_owner_packet(
             aoa_root=aoa_root,
@@ -4063,6 +4828,7 @@ def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_
     assert "orphaned_graph_store_rebuild_tmp" in dry_run["diagnostics"]
     assert tmp_store.exists()
     assert tmp_wal.exists()
+    assert tmp_journal.exists()
 
     applied = module.maintenance_cleanup(aoa_root=aoa_root, apply=True, write_report=True)
     state = module.read_maintenance_coordinator_state(aoa_root)
@@ -4072,9 +4838,10 @@ def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_
     assert applied["mutates"] is True
     assert applied["action_counts"]["stale_active_job_cleared"] == 1
     assert applied["action_counts"]["graph_rebuild_tmp_removed"] == 1
-    assert applied["removed_bytes"] == 1536
+    assert applied["removed_bytes"] == 1792
     assert not tmp_store.exists()
     assert not tmp_wal.exists()
+    assert not tmp_journal.exists()
     assert state["active_job"] == {}
     assert state["last_stale_job"]["owner_job"] == "graph-build"
     assert state["last_event"]["status"] == "stale_active_job_cleared"
@@ -4095,6 +4862,31 @@ def test_storage_status_reports_orphaned_graph_rebuild_tmp(tmp_path: Path, monke
     assert storage["graph_rebuild_temps"]["status"] == "cleanup_needed"
     assert storage["graph_rebuild_temps"]["orphaned_count"] == 1
     assert storage["graph_rebuild_temps"]["orphaned_bytes"] == 256
+
+
+def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    tmp_journal = graph_root / ".graph.sqlite3.111222.rebuild.tmp-journal"
+    tmp_journal.write_bytes(b"j" * 128)
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    dry_run = module.maintenance_cleanup(aoa_root=aoa_root, apply=False)
+
+    assert dry_run["status"] == "cleanup_needed"
+    assert dry_run["graph_rebuild_temps"]["orphaned_count"] == 1
+    assert dry_run["graph_rebuild_temps"]["orphaned_bytes"] == 128
+    assert dry_run["graph_rebuild_temps"]["entries"][0]["pid"] == 111222
+    assert str(tmp_journal) in dry_run["graph_rebuild_temps"]["entries"][0]["paths"]
+
+    applied = module.maintenance_cleanup(aoa_root=aoa_root, apply=True)
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["removed_bytes"] == 128
+    assert applied["action_counts"]["graph_rebuild_tmp_removed"] == 1
+    assert not tmp_journal.exists()
 
 
 def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Path) -> None:
@@ -4761,6 +5553,15 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert maintained["post_actionable_count"] == 0
     assert maintained["remaining_count"] == 0
     assert maintained["maintenance_detail"]["post_source_state_refreshed"] is True
+    assert maintained["write_ledger"] is True
+    assert maintained["ledger_update"]["updated_source_count"] >= 1
+    ledger = module.read_graph_source_state_ledger(aoa_root)
+    ledger_sources = ledger.get("sources") if isinstance(ledger.get("sources"), dict) else {}
+    assert any(
+        str(ledger_sources.get(str(item.get("source_key") or ""), {}).get("status") or "") == "clean"
+        for item in maintained["selected"]
+        if isinstance(item, dict)
+    )
     assert Path(maintained["report_json"]).exists()
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (old_node_id,)).fetchone()[0] == 0
@@ -4809,6 +5610,163 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 0
     conn.close()
+
+
+def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    shared_node_id = module.graph_route_node_id("entity", "append_only_shared")
+
+    def contribution(source_key: str, event_suffix: str) -> dict[str, Any]:
+        event_node_id = f"event:append-only-session:001:{event_suffix}"
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": "append-only-session",
+                "session_label": "2026-05-26__001__append-only-session",
+                "segment_id": event_suffix,
+                "source_path": str(aoa_root / f"{source_key}.json"),
+                "source_paths": [str(aoa_root / f"{source_key}.json")],
+                "source_sha": f"sha-{event_suffix}",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {
+                    "id": shared_node_id,
+                    "type": "route_signal",
+                    "label": "entity:append_only_shared",
+                    "route_layer": "entity",
+                    "route_key": "append_only_shared",
+                    "route_signal": "entity:append_only_shared",
+                    "count": 1,
+                },
+                {
+                    "id": event_node_id,
+                    "type": "event",
+                    "label": f"event {event_suffix}",
+                    "count": 1,
+                },
+            ],
+            "edges": [
+                {
+                    "id": module.graph_edge_id(event_node_id, shared_node_id, "event_mentions_registered_entity"),
+                    "source": event_node_id,
+                    "target": shared_node_id,
+                    "type": "event_mentions_registered_entity",
+                    "count": 1,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        first = store.replace_sources([contribution("segment:append-only-session:001", "001")])
+        store.refresh_type_counts(commit=False)
+        second = store.replace_sources([contribution("segment:append-only-session:002", "002")])
+        store.conn.commit()
+        shared_row = store.conn.execute("SELECT count FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()
+        event_count = store.conn.execute("SELECT COUNT(*) FROM nodes WHERE node_type = 'event'").fetchone()[0]
+    finally:
+        store.close()
+
+    assert first["append_only_source_count"] == 1
+    assert first["refreshed_node_count"] == 0
+    assert first["refreshed_edge_count"] == 0
+    assert second["append_only_source_count"] == 1
+    assert second["append_only_node_count"] == 2
+    assert second["append_only_edge_count"] == 1
+    assert second["refreshed_node_count"] == 0
+    assert second["refreshed_edge_count"] == 0
+    assert second["node_refresh"]["row_count"] == 0
+    assert second["edge_refresh"]["row_count"] == 0
+    assert second["results"][0]["aggregate_update"] == "append_only"
+    assert shared_row is not None
+    assert shared_row[0] == 2
+    assert event_count == 2
+
+
+def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    source_key = "segment:metadata-only-session:001"
+    event_node_id = "event:metadata-only-session:001:000001"
+    entity_node_id = module.graph_route_node_id("entity", "metadata_only_probe")
+    edge_id = module.graph_edge_id(event_node_id, entity_node_id, "event_mentions_registered_entity")
+
+    def contribution(*, source_sha: str, event_label: str = "original event") -> dict[str, Any]:
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": "metadata-only-session",
+                "session_label": "2026-05-26__001__metadata-only-session",
+                "segment_id": "001",
+                "source_path": str(aoa_root / "segment.index.json"),
+                "source_paths": [str(aoa_root / "segment.index.json")],
+                "source_sha": source_sha,
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {
+                    "id": event_node_id,
+                    "type": "event",
+                    "label": event_label,
+                    "count": 1,
+                },
+                {
+                    "id": entity_node_id,
+                    "type": "route_signal",
+                    "label": "entity:metadata_only_probe",
+                    "route_layer": "entity",
+                    "route_key": "metadata_only_probe",
+                    "route_signal": "entity:metadata_only_probe",
+                    "count": 1,
+                },
+            ],
+            "edges": [
+                {
+                    "id": edge_id,
+                    "source": event_node_id,
+                    "target": entity_node_id,
+                    "type": "event_mentions_registered_entity",
+                    "count": 1,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        inserted = store.replace_sources([contribution(source_sha="sha-1")])
+        store.conn.commit()
+        metadata_only = store.replace_sources([contribution(source_sha="sha-2")])
+        store.conn.commit()
+        changed_payload = store.replace_sources([contribution(source_sha="sha-3", event_label="changed event")])
+        store.conn.commit()
+        source_row = store.conn.execute("SELECT source_sha FROM graph_sources WHERE source_key = ?", (source_key,)).fetchone()
+    finally:
+        store.close()
+
+    assert inserted["append_only_source_count"] == 1
+    assert metadata_only["metadata_only_source_count"] == 1
+    assert metadata_only["metadata_only_node_count"] == 2
+    assert metadata_only["metadata_only_edge_count"] == 1
+    assert metadata_only["refreshed_node_count"] == 0
+    assert metadata_only["refreshed_edge_count"] == 0
+    assert metadata_only["node_refresh"]["row_count"] == 0
+    assert metadata_only["edge_refresh"]["row_count"] == 0
+    assert metadata_only["results"][0]["aggregate_update"] == "metadata_only"
+    assert changed_payload["metadata_only_source_count"] == 0
+    assert changed_payload["refreshed_node_count"] >= 1
+    assert changed_payload["results"][0]["aggregate_update"] == "refresh"
+    assert source_row is not None
+    assert source_row[0] == "sha-3"
 
 
 def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(tmp_path: Path) -> None:
@@ -5474,7 +6432,9 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     assert heavy_deferred["oversized_source_count"] == 1
     assert heavy_deferred["maintenance_detail"]["matched_source_keys"] == [heavy_source_key]
     assert heavy_deferred["maintenance_detail"]["oversized_plan"][0]["source_key"] == heavy_source_key
-    assert heavy_deferred["unfiltered_source_state"]["source_count"] >= 2
+    assert heavy_deferred["unfiltered_source_state"]["source_key_filter_pushed_down"] is True
+    assert heavy_deferred["unfiltered_source_state"]["source_count"] == 1
+    assert heavy_deferred["unfiltered_source_state"]["out_of_scope_existing_count"] >= 1
 
     with monkeypatch.context() as time_patch:
         ticks = iter([0.0, 1.0, 2.0])
@@ -5655,6 +6615,118 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     ]
     assert "matched_source_keys" not in payload["maintenance_detail"]
     assert observed["source_key_count"] == 9
+    assert observed["committed"] is True
+    assert observed["closed"] is True
+
+
+def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_only(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__graph-missing-pool"
+    session_dir.mkdir(parents=True)
+    observed: dict[str, Any] = {"updated_keys": set()}
+    states = [
+        {
+            "source_key": f"segment:session-1:{index:03d}",
+            "source_type": "segment",
+            "session_id": "session-1",
+            "session_label": "graph-missing-pool",
+            "segment_id": f"{index:03d}",
+            "session_dir": str(session_dir),
+            "status": "missing",
+            "stored_node_count": 0,
+            "stored_edge_count": 0,
+            "source_size_bytes": 1 if index in {10, 11, 12} else 1000 + index,
+        }
+        for index in range(20)
+    ]
+
+    class FakeConn:
+        def commit(self) -> None:
+            observed["committed"] = True
+
+        def rollback(self) -> None:
+            observed["rolled_back"] = True
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.conn = FakeConn()
+
+        def source_contribution_ids(self, source_key: str) -> tuple[set[str], set[str]]:
+            observed.setdefault("source_contribution_ids", []).append(source_key)
+            return set(), set()
+
+        def replace_sources(self, contributions: list[dict[str, Any]], *, budget_deadline: float | None = None) -> dict[str, Any]:
+            updated_keys = {item["source"]["source_key"] for item in contributions}
+            observed["updated_keys"] = updated_keys
+            return {
+                "results": [
+                    {"source_key": source_key, "status": "updated", "diagnostics": [], "aggregate_update": "append_only"}
+                    for source_key in sorted(updated_keys)
+                ],
+                "refreshed_node_count": 0,
+                "refreshed_edge_count": 0,
+                "node_refresh": {"requested_count": 0, "chunk_count": 0, "row_count": 0, "missing_count": 0},
+                "edge_refresh": {"requested_count": 0, "chunk_count": 0, "row_count": 0, "missing_count": 0},
+                "refresh_chunk_size": 64,
+                "append_only_source_count": len(updated_keys),
+                "append_only_node_count": len(updated_keys),
+                "append_only_edge_count": 0,
+                "append_only_inserted_node_count": len(updated_keys),
+                "append_only_inserted_edge_count": 0,
+            }
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    def fake_graph_source_states(**_: Any) -> dict[str, Any]:
+        updated_keys = observed.get("updated_keys", set())
+        post_states = []
+        for state in states:
+            item = dict(state)
+            if item["source_key"] in updated_keys:
+                item["status"] = "clean"
+            post_states.append(item)
+        return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
+
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        keys = sorted(source_keys or [])
+        observed["source_key_count"] = len(keys)
+        observed["source_keys"] = keys
+        return (
+            [
+                {
+                    "source": {"source_key": source_key, "source_type": "segment"},
+                    "nodes": [{"id": f"new:{source_key}"}],
+                    "edges": [],
+                }
+                for source_key in keys
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+    monkeypatch.setattr(module, "graph_contributions_for_record", fake_graph_contributions_for_record)
+
+    payload = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=3)
+    detail = payload["maintenance_detail"]
+
+    assert payload["ok"] is True
+    assert payload["selected_count"] == 3
+    assert payload["remaining_count"] == 17
+    assert payload["state_window"] == "post_apply"
+    assert detail["candidate_pool_count"] == 9
+    assert detail["missing_add_only_fast_plan"] is True
+    assert detail["exact_planning_candidate_count"] == 3
+    assert detail["missing_add_only_fast_plan_deferred_count"] == 6
+    assert detail["batch_deferred_source_count"] == 6
+    assert detail["selected_planned_refresh_node_count"] == 0
+    assert detail["selected_planned_refresh_edge_count"] == 0
+    assert detail["append_only_source_count"] == 3
+    assert observed["source_key_count"] == 3
+    assert observed["source_keys"] == [f"segment:session-1:{index:03d}" for index in (10, 11, 12)]
+    assert observed["source_contribution_ids"] == observed["source_keys"]
     assert observed["committed"] is True
     assert observed["closed"] is True
 
@@ -6085,10 +7157,13 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert all(source_keys for session_id, source_keys in contribution_calls if session_id == "second-graph-source")
     assert inserted["maintenance_detail"]["refresh_chunk_size"] == 2
     assert inserted["maintenance_detail"]["replacement_group_count"] == 1
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] >= 1
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] >= 1
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] >= 1
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] >= 1
+    assert inserted["maintenance_detail"]["append_only_source_count"] >= 2
+    assert inserted["maintenance_detail"]["append_only_node_count"] >= 1
+    assert inserted["maintenance_detail"]["append_only_edge_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] == 0
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] == 0
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] == 0
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] == 0
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
@@ -6982,6 +8057,88 @@ def test_graph_maintenance_deep_mode_scans_sources_even_when_hot_state_is_clean(
     assert payload["maintenance_detail"]["selection_strategy"] == "cheap_first_stored_counts"
 
 
+def test_graph_maintenance_queue_filters_sources_before_hashing(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-21__001__queue-filter"
+    segments_dir = session_dir / "segments"
+    segments_dir.mkdir(parents=True)
+    segments = [
+        {"segment_id": "000", "index": "segments/000.index.json"},
+        {"segment_id": "001", "index": "segments/001.index.json"},
+        {"segment_id": "002", "index": "segments/002.index.json"},
+    ]
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "queue-filter",
+            "session_label": session_dir.name,
+            "display": {"label": session_dir.name},
+            "segments": segments,
+        },
+    )
+    module.write_json(session_dir / module.SESSION_INDEX_JSON, {"segments": segments})
+    for segment in segments:
+        module.write_json(segments_dir / f"{segment['segment_id']}.index.json", {"events": [{"id": segment["segment_id"]}]})
+    target_key = module.graph_source_key("segment", "queue-filter", "001")
+    module.write_graph_maintenance_queue(
+        aoa_root,
+        {
+            "items": {
+                target_key: {
+                    "source_key": target_key,
+                    "session_id": "queue-filter",
+                    "session_dir": str(session_dir),
+                    "segment_id": "001",
+                    "status": "dirty",
+                }
+            }
+        },
+    )
+
+    payload = module.graph_maintenance(aoa_root=aoa_root, use_queue=True, batch_limit=5)
+
+    assert payload["use_queue"] is True
+    assert payload["source_state"]["source_count"] == 1
+    assert payload["selected_count"] == 1
+    assert payload["maintenance_detail"]["matched_source_keys"] == [target_key]
+    assert payload["source_hash_cache"]["computed"] == 3
+    assert payload["source_hash_cache"]["persistent_miss"] == 3
+
+
+def test_graph_maintenance_mutating_scan_writes_hash_cache_by_default(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-21__001__hash-cache-write"
+    segments_dir = session_dir / "segments"
+    segments_dir.mkdir(parents=True)
+    segment = {"segment_id": "000", "index": "segments/000.index.json"}
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "hash-cache-write",
+            "session_label": session_dir.name,
+            "display": {"label": session_dir.name},
+            "segments": [segment],
+        },
+    )
+    module.write_json(session_dir / module.SESSION_INDEX_JSON, {"segments": [segment]})
+    module.write_json(segments_dir / "000.index.json", {"events": [{"id": "000"}]})
+    record = {"session_id": "hash-cache-write", "session_label": session_dir.name, "path": str(session_dir)}
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        selected_records=[record],
+        selected_records_global=False,
+        write_queue=True,
+        write_ledger=True,
+        batch_limit=5,
+    )
+
+    assert payload["write_hash_cache"] is True
+    assert payload["source_hash_cache_update"]["updated_count"] == 3
+    warmed = module.read_graph_source_hash_cache(aoa_root)
+    assert len(warmed["entries"]) == 3
+
+
 def test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     source_a = tmp_path / "session.manifest.json"
@@ -7124,6 +8281,135 @@ def test_graph_hot_state_defers_recent_live_queue_items(tmp_path: Path, monkeypa
     assert state["queue"]["queued_count"] == 2
     assert state["queue"]["actionable_count"] == 0
     assert state["queue"]["deferred_live_source_count"] == 2
+
+
+def test_graph_hot_state_defers_old_source_when_live_transcript_recent(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / "graph"
+    graph_root.mkdir(parents=True)
+    (graph_root / "graph.sqlite3").write_text("", encoding="utf-8")
+    session_dir = aoa_root / "sessions" / "2026-06-15__002__long-live"
+    session_dir.mkdir(parents=True)
+    (session_dir / "raw").mkdir(parents=True)
+    codex_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "15" / "rollout-2026-06-15T00-00-00-long-live.jsonl"
+    codex_transcript.parent.mkdir(parents=True)
+    codex_transcript.write_text("{}\n", encoding="utf-8")
+    source_path = tmp_path / "old-segment.index.json"
+    source_path.write_text("{}", encoding="utf-8")
+    (session_dir / "raw" / module.RAW_SOURCE_JSON).write_text(
+        json.dumps({"source_path": str(codex_transcript)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    now_ts = time.time()
+    old_ts = now_ts - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 3600
+    os.utime(codex_transcript, (now_ts, now_ts))
+    os.utime(source_path, (old_ts, old_ts))
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                "segment:long-live:000": {
+                    "source_key": "segment:long-live:000",
+                    "source_type": "segment",
+                    "session_id": "long-live",
+                    "session_label": "long live session",
+                    "session_dir": str(session_dir),
+                    "source_path": str(source_path),
+                    "status": "dirty",
+                    "reasons": ["source_sha_mismatch"],
+                },
+                "segment:long-live:001": {
+                    "source_key": "segment:long-live:001",
+                    "source_type": "segment",
+                    "session_id": "long-live",
+                    "session_label": "long live session",
+                    "session_dir": str(session_dir),
+                    "source_path": str(session_dir / "segments" / "001__compaction-to-latest.index.json"),
+                    "status": "missing",
+                    "reasons": ["graph_source_missing"],
+                },
+            }
+        },
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    class FakeStore:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def metadata(self) -> dict[str, str]:
+            return {
+                "graph_store_schema_version": str(module.GRAPH_STORE_SCHEMA_VERSION),
+                "graph_schema_version": str(module.GRAPH_SCHEMA_VERSION),
+            }
+
+        def state_counts(self) -> dict[str, int]:
+            return {"node_count": 10, "edge_count": 12, "source_count": 1}
+
+        def source_count(self) -> int:
+            return 1
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "GraphSqliteStore", FakeStore)
+
+    state = module.graph_store_hot_state(aoa_root)
+
+    assert state["status"] == "current_with_deferred_live_sources"
+    assert state["needs_maintenance"] is False
+    assert state["ledger"]["actionable_count"] == 0
+    assert state["ledger"]["deferred_live_source_count"] == 2
+    assert state["ledger"]["live_transcript_lookup_mode"] == "session_dir_cached"
+    assert state["ledger"]["live_transcript_session_cache_count"] == 1
+    assert "maintenance_queue_empty_but_ledger_actionable_sources_present" not in state["diagnostics"]
+
+
+def test_graph_recent_live_source_summary_caches_live_transcript_lookup(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-18__001__live-cache"
+    session_dir.mkdir(parents=True)
+    source_a = session_dir / "segments" / "000__initial-to-compaction.index.json"
+    source_b = session_dir / "segments" / "001__compaction-to-latest.index.json"
+    source_a.parent.mkdir(parents=True)
+    source_a.write_text("{}", encoding="utf-8")
+    source_b.write_text("{}", encoding="utf-8")
+    now_ts = time.time()
+    old_ts = now_ts - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 3600
+    os.utime(source_a, (old_ts, old_ts))
+    os.utime(source_b, (old_ts, old_ts))
+    calls: list[str] = []
+
+    def fake_live_transcript_mtime(item: dict[str, Any]) -> tuple[float, str]:
+        calls.append(str(item.get("source_key") or ""))
+        return now_ts, "/tmp/live-session.raw.jsonl"
+
+    monkeypatch.setattr(module, "graph_state_item_live_transcript_mtime", fake_live_transcript_mtime)
+
+    summary = module.graph_recent_live_source_summary(
+        [
+            {
+                "source_key": "segment:live-cache:000",
+                "session_dir": str(session_dir),
+                "source_path": str(source_a),
+                "status": "dirty",
+            },
+            {
+                "source_key": "segment:live-cache:001",
+                "session_dir": str(session_dir),
+                "source_path": str(source_b),
+                "status": "missing",
+            },
+        ],
+        now_ts=now_ts,
+    )
+
+    assert calls == ["segment:live-cache:000"]
+    assert summary["source_count"] == 2
+    assert summary["deferred_live_source_count"] == 2
+    assert summary["actionable_source_count"] == 0
+    assert summary["live_transcript_session_cache_count"] == 1
+    assert summary["live_transcript_lookup_mode"] == "session_dir_cached"
 
 
 def test_graph_hot_state_detects_stale_graph_source_versions_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
@@ -9880,6 +11166,156 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
 
 
+def test_maintenance_status_surfaces_search_shard_tail_as_agent_action(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_db.parent.mkdir(parents=True)
+    shard_db.write_bytes(b"existing structured shard")
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {
+            "ok": True,
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready",
+                    "count_mode": "not_counted_hot",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "raw_lexical_policy": {
+                        "mode": module.SEARCH_RAW_LEXICAL_POLICY_MODE,
+                        "effective_max_raw_bytes": module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+                        "unbounded": False,
+                    },
+                    "freshness": {
+                        "status": "current",
+                        "actionable_dirty_session_count": 0,
+                        "deferred_live_session_count": 0,
+                        "dirty_session_count": 0,
+                        "missing_freshness_state_count": 0,
+                        "reasons": [],
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": [],
+            "graph_store": {
+                "status": "current",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "source_count": 3,
+                "source_state": {"source_count": 3, "status_counts": {"clean": 3}},
+                "ledger": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "queue": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "diagnostics": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 3, "diagnostics": []},
+    )
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {
+            "status": "incomplete",
+            "shard_count": 3,
+            "materialized_shard_count": 2,
+            "current_shard_count": 2,
+            "stale_shard_count": 1,
+            "missing_shard_count": 0,
+            "noncurrent_shard_count": 1,
+            "actionable_noncurrent_shard_count": 1,
+            "deferred_live_session_count": 3,
+            "combined_search_projection_total_bytes": 42,
+            "combined_search_projection_total_human": "42 B",
+            "shard_db_total_bytes": 21,
+            "shard_db_total_human": "21 B",
+            "monolith_db_total_bytes": 21,
+            "monolith_db_total_human": "21 B",
+            "actionable_noncurrent_shards": [
+                {
+                    "shard": "month/2026-06",
+                    "shard_db_path": str(shard_db),
+                    "status": "stale",
+                    "materialized": False,
+                    "stale_session_count": 7,
+                    "missing_session_count": 0,
+                    "deferred_live_session_count": 3,
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                }
+            ],
+            "noncurrent_shards": [
+                {
+                    "shard": "month/2026-06",
+                    "shard_db_path": str(shard_db),
+                    "status": "stale",
+                    "materialized": False,
+                    "stale_session_count": 7,
+                    "missing_session_count": 0,
+                    "deferred_live_session_count": 3,
+                }
+            ],
+            "latest_materialization": {"exists": False},
+            "fast_path_defaults": {"agent_event_routes": {"default_use_shards": True}},
+            "raw_text_fallback_dependency": {
+                "status": "monolith_required_for_raw_text_query",
+                "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                "next_route": "use scoped full-text only when explicitly needed",
+            },
+            "raw_text_query_route": "structured shards use monolith fallback for raw-text queries unless materialized with --full-text",
+            "exact_refresh_command": f"python3 scripts/aoa_session_memory.py search-catalog --aoa-root {aoa_root} --refresh",
+            "exact_materialize_command": f"python3 scripts/aoa_session_memory.py search-shards all --aoa-root {aoa_root} --write-report",
+            "truth_status": "generated_search_catalog_and_shard_files_are_navigation_not_raw_archive_truth",
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root)
+    compact = module.compact_maintenance_status_payload(payload)
+
+    assert payload["recommendation"] == "run_maintenance"
+    assert payload["next_actions"][0]["id"] == "refresh_search_shard_structured"
+    assert payload["next_actions"][0]["route_kind"] == "search_shard_structured_dirty_only"
+    assert payload["next_actions"][0]["shard"] == "month/2026-06"
+    assert payload["next_actions"][0]["shard_db_exists"] is True
+    command_text = module.shlex.join(payload["next_actions"][0]["command"])
+    assert "search-shards all" in command_text
+    assert "--shard month/2026-06" in command_text
+    assert "--no-rebuild --dirty-only" in command_text
+    assert "--full-text" not in command_text
+    assert payload["exact_next_command"] == command_text
+    assert payload["agent_route"]["search_shards_status"] == "incomplete"
+    assert payload["agent_route"]["search_shard_action_pending"] is True
+    assert payload["agent_route"]["search_shard_next_action"]["shard"] == "month/2026-06"
+    assert compact["next_actions"][0]["id"] == "refresh_search_shard_structured"
+    assert compact["next_actions"][0]["shard"] == "month/2026-06"
+    assert compact["next_actions"][0]["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
+
+
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -9998,12 +11434,15 @@ def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path
         apply=True,
         write_report=True,
         reason="timer_backlog",
+        graph_drip_on_block=False,
     )
 
     assert payload["ok"] is False
     assert payload["status"] == "resource_blocked"
     assert payload["mutates"] is False
     assert payload["recommended_exit_code"] == 0
+    assert payload["graph_drip_on_block"] is False
+    assert payload["graph_drip_on_block_source"] == "explicit"
     assert payload["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
     assert "resource_blocked:indexing_unattended_swap_used_pressure" in payload["diagnostics"]
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
@@ -10012,6 +11451,338 @@ def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path
     assert "timer_backlog" in calls["command"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_catchup_auto_maintenance_resource_defaults_to_index_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "generated_at": "2026-06-26T00:00:00-06:00",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "generated_at": "2026-06-26T00:00:10-06:00",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {
+                        "ok": True,
+                        "returncode": 0,
+                        "stdout_tail": "{\"ok\": true, \"search_dirty_session_count\": 119}",
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        write_report=True,
+        reason="timer_catchup",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_blocked_index_drip_completed"
+    assert payload["mutates"] is True
+    assert payload["recommended_exit_code"] == 0
+    assert payload["index_drip_on_block"] is True
+    assert payload["index_drip_on_block_source"] == "profile_default"
+    assert payload["fallback_index_drip"]["ok"] is True
+    assert payload["fallback_index_drip"]["status"] == "completed"
+    assert payload["fallback_index_drip"]["repair_limit"] == 12
+    assert calls[0][3:5] == ["--class", "medium"]
+    assert calls[1][3:5] == ["--class", "probe"]
+    assert "index-maintenance" in calls[1]
+    assert "graph-maintenance" not in calls[1]
+    assert "--skip-token-accounting" in calls[1]
+    assert "--skip-graph-repair" in calls[1]
+    assert "--repair-limit" in calls[1]
+    assert "12" in calls[1]
+    assert "index_drip_fallback_completed" in payload["diagnostics"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_index_drip_fallback_reports_child_lock_conflict(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            child = {
+                "schema_version": 1,
+                "artifact_type": "session_memory_maintenance_lock_conflict",
+                "ok": True,
+                "status": "skipped_lock_held",
+                "mutates": False,
+                "target": "all",
+                "diagnostics": ["lock_held"],
+            }
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {
+                        "ok": True,
+                        "returncode": 0,
+                        "stdout_tail": json.dumps(child),
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        reason="timer_catchup",
+    )
+
+    assert payload["status"] == "resource_blocked_index_drip_failed"
+    assert payload["mutates"] is False
+    assert payload["fallback_index_drip"]["ok"] is False
+    assert payload["fallback_index_drip"]["status"] == "skipped_lock_held"
+    assert payload["fallback_index_drip"]["child"]["status"] == "skipped_lock_held"
+    assert "lock_held" in payload["fallback_index_drip"]["diagnostics"]
+    assert "index_drip_fallback_skipped_lock_held" in payload["diagnostics"]
+
+
+def test_backlog_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "generated_at": "2026-06-26T00:00:00-06:00",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "generated_at": "2026-06-26T00:00:10-06:00",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {"ok": True, "returncode": 0},
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        write_report=True,
+        reason="timer_backlog",
+    )
+
+    settings = module.AUTO_MAINTENANCE_PROFILES["backlog"]
+    assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["graph_drip_on_block"] is True
+    assert payload["graph_drip_on_block_source"] == "profile_default"
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"]["batch_limit"] == settings["graph_drip_batch_limit"]
+    assert payload["fallback_graph_drip"]["budget_seconds"] == settings["graph_drip_budget_seconds"]
+    assert payload["fallback_graph_drip"]["refresh_chunk_size"] == settings["graph_drip_refresh_chunk_size"]
+    assert payload["fallback_graph_drip"]["max_refresh_nodes"] == settings["graph_drip_max_refresh_nodes"]
+    assert payload["fallback_graph_drip"]["max_refresh_edges"] == settings["graph_drip_max_refresh_edges"]
+    assert payload["fallback_graph_drip"]["candidate_pool_limit"] == settings["graph_drip_candidate_pool_limit"]
+    assert calls[0][3:5] == ["--class", "medium"]
+    assert calls[1][3:5] == ["--class", "probe"]
+    assert "graph-maintenance" in calls[1]
+    assert calls[1][calls[1].index("--batch-limit") + 1] == str(settings["graph_drip_batch_limit"])
+    assert calls[1][calls[1].index("--budget-seconds") + 1] == str(float(settings["graph_drip_budget_seconds"]))
+    assert calls[1][calls[1].index("--candidate-pool-limit") + 1] == str(settings["graph_drip_candidate_pool_limit"])
+    assert "graph_drip_fallback_completed" in payload["diagnostics"]
+
+
+def test_graph_drip_fallback_does_not_mutate_without_apply(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_plan_v1",
+                "ok": False,
+                "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {"ok": None, "returncode": None},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=False,
+        reason="timer_backlog",
+    )
+
+    assert payload["status"] == "resource_blocked"
+    assert payload["graph_drip_on_block"] is True
+    assert payload["mutates"] is False
+    assert payload["fallback_graph_drip"] == {}
+    assert len(calls) == 1
+
+
+def test_session_memory_timer_status_flags_stale_graph_drip_overrides(monkeypatch: Any) -> None:
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["/usr/bin/systemctl", "--user", "list-timers"]:
+            stdout = (
+                "Fri 2026-06-26 19:54:03 CST 1h Fri 2026-06-26 18:18:45 CST 14min ago "
+                "aoa-session-memory-backlog-maintenance.timer aoa-session-memory-backlog-maintenance.service\n"
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command == ["/usr/bin/systemctl", "--user", "cat", "aoa-session-memory-backlog-maintenance.service"]:
+            stdout = "\n".join(
+                [
+                    "[Service]",
+                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 25 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 75",
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.session_memory_timer_status()
+
+    assert payload["ok"] is False
+    assert payload["status"] == "available_with_unit_drift"
+    assert any("systemd_unit_stale_graph_drip_override:graph_drip_batch_limit" in item for item in payload["diagnostics"])
+    contract = payload["unit_contracts"][0]
+    assert contract["service"] == "aoa-session-memory-backlog-maintenance.service"
+    assert contract["profile"] == "backlog"
+    assert contract["status"] == "drift"
+    assert contract["explicit_graph_drip_overrides"]["graph_drip_batch_limit"] == "25"
+    assert contract["mismatched_graph_drip_overrides"][0]["expected"] == module.AUTO_MAINTENANCE_PROFILES["backlog"]["graph_drip_batch_limit"]
+
+
+def test_session_memory_timer_status_accepts_profile_default_graph_drip(monkeypatch: Any) -> None:
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["/usr/bin/systemctl", "--user", "list-timers"]:
+            stdout = (
+                "Fri 2026-06-26 19:54:03 CST 1h Fri 2026-06-26 18:18:45 CST 14min ago "
+                "aoa-session-memory-backlog-maintenance.timer aoa-session-memory-backlog-maintenance.service\n"
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command == ["/usr/bin/systemctl", "--user", "cat", "aoa-session-memory-backlog-maintenance.service"]:
+            stdout = "\n".join(
+                [
+                    "[Service]",
+                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.session_memory_timer_status()
+
+    assert payload["ok"] is True
+    assert payload["status"] == "available"
+    assert payload["diagnostics"] == []
+    assert payload["unit_contracts"][0]["status"] == "current"
+
+
+def test_session_memory_timer_status_uses_unit_file_fallback_when_systemctl_probe_fails(tmp_path: Path, monkeypatch: Any) -> None:
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "aoa-session-memory-backlog-maintenance.service").write_text(
+        "\n".join(
+            [
+                "[Service]",
+                "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[:3] == ["/usr/bin/systemctl", "--user", "list-timers"]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda _cls: tmp_path))
+
+    payload = module.session_memory_timer_status()
+
+    assert payload["ok"] is True
+    assert payload["status"] == "unit_file_fallback"
+    assert payload["systemctl_returncode"] == 1
+    assert payload["warnings"] == ["systemctl_timer_probe_unavailable:1"]
+    assert payload["diagnostics"] == []
+    assert payload["unit_contracts"][0]["service"] == "aoa-session-memory-backlog-maintenance.service"
+    assert payload["unit_contracts"][0]["status"] == "current"
 
 
 def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
@@ -10084,6 +11855,70 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_graph_drip_fallback_reports_child_lock_conflict_without_status(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            child = {
+                "schema_version": 1,
+                "artifact_type": "session_memory_maintenance_lock_conflict",
+                "ok": True,
+                "mutates": False,
+                "target": "all",
+                "diagnostics": ["lock_held"],
+            }
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {
+                        "ok": True,
+                        "returncode": 0,
+                        "stdout_tail": json.dumps(child),
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=True,
+    )
+
+    assert payload["status"] == "resource_blocked_graph_drip_failed"
+    assert payload["mutates"] is False
+    assert payload["fallback_graph_drip"]["ok"] is False
+    assert payload["fallback_graph_drip"]["status"] == "skipped_lock_held"
+    assert payload["fallback_graph_drip"]["child"]["mutates"] is False
+    assert "lock_held" in payload["fallback_graph_drip"]["diagnostics"]
+    assert "graph_drip_fallback_skipped_lock_held" in payload["diagnostics"]
+
+
 def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -10133,6 +11968,9 @@ def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path
     assert payload["graph_drip_on_block"] is True
     assert payload["graph_drip_on_block_source"] == "profile_default"
     assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"]["batch_limit"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["graph_drip_batch_limit"]
+    assert payload["fallback_graph_drip"]["budget_seconds"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["graph_drip_budget_seconds"]
+    assert payload["fallback_graph_drip"]["candidate_pool_limit"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["graph_drip_candidate_pool_limit"]
     assert calls[0][3:5] == ["--class", "heavy"]
     assert calls[1][3:5] == ["--class", "probe"]
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
@@ -10756,6 +12594,73 @@ def test_live_sync_updates_search_catalog_deferred_shard_state(tmp_path: Path) -
     assert "search_shards_not_current" not in warning_codes
 
 
+def test_search_shard_next_action_ignores_stale_rows_covered_by_deferred_live_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard)
+    shard_db.parent.mkdir(parents=True)
+    shard_db.touch()
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "ok": True,
+            "artifact_type": "session_memory_search_catalog",
+            "status": "current",
+            "generated_at": "2026-06-27T02:00:00Z",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "session_count": 61,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "shards": [
+                {
+                    "shard": shard,
+                    "materialized": True,
+                    "status": "stale",
+                    "session_count": 61,
+                    "current_session_count": 60,
+                    "stale_session_count": 1,
+                    "missing_session_count": 0,
+                    "freshness_counts": {"deferred_live": 2},
+                    "document_count": 100,
+                    "storage_mode": "structured_route_preview_only_no_compressed_body",
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "expected_storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                    "shard_db_path": str(shard_db),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    summary = module.session_memory_search_shard_projection_summary(aoa_root)
+
+    assert summary["status"] == "current_with_deferred_live_updates"
+    assert summary["actionable_noncurrent_shard_count"] == 0
+    assert summary["deferred_live_session_count"] == 2
+    assert (
+        module.session_memory_search_shard_next_action(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search_shards=summary,
+        )
+        is None
+    )
+
+    ops = module.session_memory_operations_summary(
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 2},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0, "retired_count": 0},
+        entity_registry={"status": "current", "needs_maintenance": False, "entity_count": 1},
+        coordinator={"active": False},
+        storage=module.maintenance_storage_status(aoa_root),
+    )
+    warning_codes = {item["code"] for item in ops["warnings"]}
+    assert "search_shards_not_current" not in warning_codes
+
+
 def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
@@ -10831,7 +12736,7 @@ def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) ->
         conn.close()
 
 
-def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) -> None:
+def test_recent_problem_jobs_do_not_ignore_resource_graph_drip_lock_conflict(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
     diagnostics.mkdir(parents=True)
@@ -10858,6 +12763,42 @@ def test_recent_problem_jobs_ignore_handled_resource_graph_drip(tmp_path: Path) 
             },
             "diagnostics": [
                 "graph_drip_fallback_completed",
+                "resource_blocked:indexing_unattended_swap_used_pressure",
+            ],
+        },
+    )
+
+    assert module.diagnostic_report_problem(module.read_json(report, {})) is True
+    problems = module.recent_problem_maintenance_reports(aoa_root)
+    assert len(problems) == 1
+    assert problems[0]["status"] == "resource_blocked_graph_drip_completed"
+
+
+def test_recent_problem_jobs_ignore_handled_resource_index_drip(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    report = diagnostics / "20260626T000040Z__auto-maintenance-resource-catchup.json"
+    module.write_json(
+        report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-06-26T00:00:40Z",
+            "ok": False,
+            "status": "resource_blocked_index_drip_completed",
+            "profile": "catchup",
+            "resource_ok": False,
+            "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+            "fallback_index_drip": {
+                "ok": True,
+                "status": "completed",
+                "resource_ok": True,
+                "repair_limit": 12,
+                "execution": {"ok": True, "returncode": 0},
+            },
+            "diagnostics": [
+                "index_drip_fallback_completed",
                 "resource_blocked:indexing_unattended_swap_used_pressure",
             ],
         },
@@ -11320,6 +13261,59 @@ def test_catchup_auto_maintenance_batches_index_repair_without_graph(tmp_path: P
     assert calls["maintenance"]["repair_limit"] == module.AUTO_MAINTENANCE_PROFILES["catchup"]["repair_limit"]
     assert calls["maintenance"]["repair_graph"] is False
     assert len(calls["freshness"]) == 2
+
+
+def test_catchup_auto_maintenance_treats_route_readiness_remaining_as_expected_backlog(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 285,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": False,
+            "diagnostics": ["index_maintenance_needed"],
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 285,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "repair_limit": kwargs["repair_limit"],
+            "search_repair_limited": False,
+            "search_repair_remaining_count": 0,
+            "atlas_repair_limited": False,
+            "atlas_repair_remaining_count": 0,
+            "action_counts": {"applied": 5, "remaining": 1, "deferred": 1},
+            "actions": [
+                {
+                    "id": "route_readiness",
+                    "needed": True,
+                    "status": "remaining",
+                    "dirty_count": 212,
+                    "result": {"ok": False, "remaining_count": 1},
+                }
+            ],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="catchup", apply=True)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_remaining_backlog"
+    assert payload["expected_catchup_remaining"] is True
+    assert payload["hard_diagnostics"] == []
+    assert "index_maintenance_needed" in payload["diagnostics"]
 
 
 def test_catchup_auto_maintenance_defers_full_search_rebuild_to_deep(tmp_path: Path, monkeypatch: Any) -> None:
@@ -13045,6 +15039,8 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
             {"timestamp": "2026-06-13T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю shard route."}]}},
             {"timestamp": "2026-06-13T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Почти готово, проверка shard route заканчивается."}]}},
             *stream_rows,
+            {"timestamp": "2026-06-13T00:00:18Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Here is the first ordinary routed answer."}]}},
+            {"timestamp": "2026-06-13T00:00:19Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Here is the later ordinary routed answer."}]}},
         ],
     )
     module.handle_hook_event(
@@ -13077,6 +15073,8 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert answers["cost_profile"]["uses_fts"] is False
     assert answers["cost_profile"]["hydrates_body"] is False
     assert answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+    assert answers["quality"]["ordered_by"] == "query_rank_then_session_date_then_event_position_desc"
+    assert answers["quality"]["raw_ref_present_count"] == answers["result_count"]
     monolith_answers = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
@@ -13088,6 +15086,21 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert monolith_answers["search_projection"] == {}
     assert monolith_answers["cost_profile"].get("uses_shards") is not True
     assert monolith_answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+
+    latest_session_answers = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session="agent-progress-shard",
+        agent_events=["assistant_answer"],
+        limit=2,
+        use_shards=True,
+        explain=True,
+    )
+    assert latest_session_answers["ok"] is True
+    assert [item["event_id"] for item in latest_session_answers["results"]] == ["000020", "000019"]
+    assert latest_session_answers["quality"]["latest_result"]["event_id"] == "000020"
+    assert latest_session_answers["quality"]["agent_event_counts"] == {"assistant_answer": 2}
+    assert latest_session_answers["quality"]["source_counts"] == {"response_item": 2}
+    assert latest_session_answers["quality"]["freshness_counts"] == {"fresh": 2}
 
     progress = module.agent_event_route_search(
         aoa_root=aoa_root,
@@ -14222,6 +16235,458 @@ def test_index_maintenance_can_skip_token_accounting_planning(tmp_path: Path, mo
     assert payload["token_backfill"]["skipped"] is True
     assert payload["token_backfill"]["skip_reason"] == "token_accounting_backfill_skipped_by_profile"
     assert actions.get("token_accounting_backfill", {}).get("needed", False) is False
+
+
+def test_token_accounting_backfill_respects_budget(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / "AbyssOS" / ".aoa"
+    records = [
+        {"session_id": "token-budget-1", "session_label": "token-budget-1", "session_dir": str(tmp_path / "s1")},
+        {"session_id": "token-budget-2", "session_label": "token-budget-2", "session_dir": str(tmp_path / "s2")},
+        {"session_id": "token-budget-3", "session_label": "token-budget-3", "session_dir": str(tmp_path / "s3")},
+    ]
+    ticks = iter([0.0, 0.5, 1.1, 1.2])
+
+    def fake_monotonic() -> float:
+        return next(ticks, 1.2)
+
+    def fake_candidate(_aoa_root: Path, record: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        return {"session_id": record["session_id"], "session_label": record["session_label"], "status": "planned", "diagnostics": []}
+
+    monkeypatch.setattr(module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(module, "token_accounting_backfill_candidate", fake_candidate)
+
+    payload = module.token_accounting_backfill(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=records,
+        budget_seconds=1.0,
+    )
+
+    assert payload["ok"] is False
+    assert payload["budget_exhausted"] is True
+    assert payload["selected_count"] == 3
+    assert payload["processed_count"] == 1
+    assert payload["remaining_count"] == 2
+    assert payload["counts"] == {"planned": 1}
+    assert "token_accounting_backfill_budget_exhausted" in payload["diagnostics"]
+
+
+def test_index_maintenance_reports_token_planning_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__token-budget-planning"
+    session_dir.mkdir(parents=True)
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "token-budget-planning",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+        },
+    )
+    record = {
+        "session_id": "token-budget-planning",
+        "session_label": session_dir.name,
+        "path": str(session_dir),
+        "navigation_path": str(session_dir),
+    }
+    seen_budget: list[float | None] = []
+
+    def fake_token_backfill(**kwargs: Any) -> dict[str, Any]:
+        seen_budget.append(kwargs.get("budget_seconds"))
+        return {
+            "ok": False,
+            "selected_count": 1,
+            "processed_count": 0,
+            "remaining_count": 1,
+            "budget_seconds": kwargs.get("budget_seconds"),
+            "elapsed_ms": 1000,
+            "budget_exhausted": True,
+            "counts": {},
+            "diagnostics": ["token_accounting_backfill_budget_exhausted"],
+            "resource_limits": {},
+        }
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, _records: (100.0, [str(session_dir / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "token_accounting_backfill", fake_token_backfill)
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda _records: [])
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []},
+    )
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        budget_seconds=1.0,
+        selected_records=[record],
+    )
+    actions = {action["id"]: action for action in payload["actions"]}
+
+    assert seen_budget and seen_budget[0] is not None and seen_budget[0] <= 1.0
+    assert payload["ok"] is False
+    assert payload["budget_exhausted"] is True
+    assert "token_accounting_backfill_budget_exhausted" in payload["diagnostics"]
+    assert payload["token_backfill"]["budget_exhausted"] is True
+    assert actions["token_accounting_backfill"]["needed"] is True
+    assert actions["token_accounting_backfill"]["dirty_count"] == 1
+
+
+def test_index_maintenance_reports_search_planning_budget_exhausted_when_token_skipped(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__search-budget-planning"
+    session_dir.mkdir(parents=True)
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "search-budget-planning",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+        },
+    )
+    record = {
+        "session_id": "search-budget-planning",
+        "session_label": session_dir.name,
+        "path": str(session_dir),
+        "navigation_path": str(session_dir),
+    }
+    ticks = iter([0.0, 0.1, 1.1, 1.2, 1.3])
+
+    def fake_monotonic() -> float:
+        return next(ticks, 1.3)
+
+    monkeypatch.setattr(module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, _records: (100.0, [str(session_dir / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda _records: [])
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {"status": "stale", "needs_refresh": True, "dirty_session_ids": ["search-budget-planning"], "dirty_sessions": [record], "reasons": ["session_projection_dirty"], "diagnostics": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: (_ for _ in ()).throw(AssertionError("atlas state should be deferred after planning budget exhaustion")),
+    )
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        repair_token_accounting=False,
+        budget_seconds=1.0,
+        selected_records=[record],
+    )
+
+    assert payload["ok"] is False
+    assert payload["budget_exhausted"] is True
+    assert "index_maintenance_planning_budget_exhausted" in payload["diagnostics"]
+    assert payload["search_index"]["status"] == "stale"
+    assert payload["atlas_index"]["status"] == "deferred_budget_exhausted"
+    assert payload["post_maintenance_states"]["final_freshness_snapshot"]["status"] == "skipped_budget_exhausted"
+
+
+def test_index_maintenance_skips_final_freshness_snapshot_when_budget_guarded(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__budgeted-final-snapshot"
+    session_dir.mkdir(parents=True)
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "budgeted-final-snapshot",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+        },
+    )
+    record = {
+        "session_id": "budgeted-final-snapshot",
+        "session_label": session_dir.name,
+        "path": str(session_dir),
+        "navigation_path": str(session_dir),
+    }
+    projection = {
+        "session_id": "budgeted-final-snapshot",
+        "session_label": session_dir.name,
+        "session_dir": str(session_dir),
+        "fingerprint": "search-fp",
+        "latest_source_mtime": 100.0,
+    }
+
+    def fake_search_state(
+        _aoa_root: Path,
+        _latest: float,
+        selected: list[dict[str, Any]] | None = None,
+        projection_fingerprints: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        assert selected == [record]
+        assert projection_fingerprints == [projection]
+        return {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []}
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, _records: (100.0, [str(session_dir / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda selected: [projection] if selected else [])
+    monkeypatch.setattr(module, "sqlite_search_index_state", fake_search_state)
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "atlas_index_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("budgeted final snapshot should not run exact atlas state")),
+    )
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        repair_token_accounting=False,
+        budget_seconds=5.0,
+        selected_records=[record],
+    )
+
+    assert payload["post_maintenance_states"]["final_freshness_snapshot"]["status"] == "skipped_budget_guard"
+    assert payload["final_search_index"]["status"] == "current"
+    assert payload["final_atlas_index"]["status"] == "current"
+
+
+def test_route_index_drift_uses_lightweight_header_for_schema_mismatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__route-header-drift"
+    session_dir.mkdir(parents=True)
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "route-header-drift",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+        },
+    )
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{\n"
+        '  "schema_version": 1,\n'
+        f'  "route_signal_schema_version": {module.ROUTE_SIGNAL_SCHEMA_VERSION},\n'
+        f'  "route_signal_classifier_version": {module.ROUTE_SIGNAL_CLASSIFIER_VERSION},\n'
+        f'  "agent_event_schema_version": {module.AGENT_EVENT_SCHEMA_VERSION},\n'
+        f'  "task_episode_schema_version": {module.TASK_EPISODE_SCHEMA_VERSION},\n'
+        f'  "goal_lifecycle_schema_version": {module.GOAL_LIFECYCLE_SCHEMA_VERSION - 1},\n'
+        '  "large_payload": "not parsed by the lightweight stale probe"\n',
+        encoding="utf-8",
+    )
+    record = {
+        "session_id": "route-header-drift",
+        "session_label": session_dir.name,
+        "path": str(session_dir),
+        "navigation_path": str(session_dir),
+    }
+
+    drift = module.route_index_drift_records([record])
+
+    assert len(drift) == 1
+    assert drift[0]["session_id"] == "route-header-drift"
+    assert drift[0]["reasons"] == ["goal_lifecycle_schema_mismatch"]
+
+
+def test_projection_fingerprint_pair_matches_individual_modes(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__projection-pair"
+    segment_dir = session_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    segment_index = segment_dir / "001.index.json"
+    segment_md = segment_dir / "001.md"
+    segment_index.write_text('{"events": [{"event_id": "1"}]}\n', encoding="utf-8")
+    segment_md.write_text("# Segment\n\nRendered text.\n", encoding="utf-8")
+    (session_dir / module.SESSION_INDEX_MARKDOWN).write_text("# Session\n", encoding="utf-8")
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    write_jsonl(raw_path, [{"timestamp": "2026-06-13T00:00:00Z", "type": "session_meta", "payload": {"id": "projection-pair"}}])
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "projection-pair",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+            "raw": {"path": str(raw_path), "sha256": "declared"},
+            "display": {"date": "2026-06-13", "label": session_dir.name},
+            "segments": [{"index": str(segment_index), "markdown": str(segment_md)}],
+        },
+    )
+    write_json(session_dir / module.SESSION_INDEX_JSON, {"route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION})
+    record = {"session_id": "projection-pair", "session_label": session_dir.name, "path": str(session_dir), "navigation_path": str(session_dir)}
+
+    search_pair, atlas_pair = module.session_projection_fingerprint_pair(record)
+
+    assert search_pair == module.session_projection_fingerprint(record, include_rendered_markdown=False)
+    assert atlas_pair == module.session_projection_fingerprint(record, include_rendered_markdown=True)
+    assert str(segment_md) not in search_pair["source_paths"]
+    assert str(segment_md) in atlas_pair["source_paths"]
+
+
+def test_index_maintenance_uses_combined_projection_planning_when_hot_state_is_dirty(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-13__001__combined-projection"
+    session_dir.mkdir(parents=True)
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "combined-projection",
+            "session_label": session_dir.name,
+            "archive_status": "indexed",
+        },
+    )
+    record = {"session_id": "combined-projection", "session_label": session_dir.name, "path": str(session_dir), "navigation_path": str(session_dir)}
+    search_projection = {"session_id": "combined-projection", "session_label": session_dir.name, "session_dir": str(session_dir), "fingerprint": "search-fp", "latest_source_mtime": 100.0}
+    atlas_projection = {"session_id": "combined-projection", "session_label": session_dir.name, "session_dir": str(session_dir), "fingerprint": "atlas-fp", "latest_source_mtime": 100.0}
+    calls = {"pair": 0, "search_records": []}
+
+    def fake_pair(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        calls["pair"] += 1
+        assert records == [record]
+        return [search_projection], [atlas_projection]
+
+    def fake_search_projection(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        calls["search_records"].append(list(records))
+        return []
+
+    def fake_atlas_state(_aoa_root: Path, _latest: float, records: list[dict[str, Any]] | None = None, projection_fingerprints: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        assert records == [record]
+        if projection_fingerprints is None:
+            return {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []}
+        assert projection_fingerprints == [atlas_projection]
+        return {"status": "stale", "needs_refresh": True, "dirty_session_ids": ["combined-projection"], "dirty_sessions": [atlas_projection], "reasons": ["session_projection_dirty"], "diagnostics": []}
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, _records: (100.0, [str(session_dir / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"status": "stale", "needs_refresh": True, "reasons": ["session_projection_dirty"], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "session_projection_fingerprint_pairs_for_records", fake_pair)
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", fake_search_projection)
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {"status": "stale", "needs_refresh": True, "dirty_session_ids": ["combined-projection"], "dirty_sessions": [search_projection], "reasons": ["session_projection_dirty"], "diagnostics": []},
+    )
+    monkeypatch.setattr(module, "atlas_index_state", fake_atlas_state)
+    monkeypatch.setattr(module, "refreshable_search_projection_records", lambda *_args, **_kwargs: ([], [record]))
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        repair_token_accounting=False,
+        selected_records=[record],
+    )
+
+    assert calls["pair"] == 1
+    assert not any(records == [record] for records in calls["search_records"])
+    assert payload["search_dirty_session_count"] == 1
+    assert payload["atlas_dirty_session_count"] == 1
+
+
+def test_index_maintenance_uses_hot_dirty_projection_scope_for_short_budget(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    records: list[dict[str, Any]] = []
+    for label in ("2026-06-13__001__dirty-projection", "2026-06-13__002__clean-projection"):
+        session_dir = aoa_root / "sessions" / label
+        session_dir.mkdir(parents=True)
+        write_json(
+            session_dir / "session.manifest.json",
+            {
+                "session_id": label,
+                "session_label": label,
+                "archive_status": "indexed",
+            },
+        )
+        records.append({"session_id": label, "session_label": label, "path": str(session_dir), "navigation_path": str(session_dir)})
+    dirty_record = records[0]
+    dirty_projection = {
+        "session_id": dirty_record["session_id"],
+        "session_label": dirty_record["session_label"],
+        "session_dir": dirty_record["path"],
+        "fingerprint": "dirty-search-fp",
+        "latest_source_mtime": 100.0,
+    }
+    dirty_atlas_projection = {**dirty_projection, "fingerprint": "dirty-atlas-fp"}
+    calls: dict[str, list[list[dict[str, Any]]]] = {"search": [], "atlas": []}
+
+    def fake_search_projection(selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        calls["search"].append(list(selected))
+        return [dirty_projection] if selected else []
+
+    def fake_atlas_projection(selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        calls["atlas"].append(list(selected))
+        return [dirty_atlas_projection] if selected else []
+
+    def fake_search_state(
+        _aoa_root: Path,
+        _latest: float,
+        selected: list[dict[str, Any]] | None = None,
+        projection_fingerprints: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if projection_fingerprints is None:
+            return {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []}
+        assert selected == [dirty_record]
+        assert projection_fingerprints == [dirty_projection]
+        return {"status": "stale", "needs_refresh": True, "dirty_session_ids": [dirty_record["session_id"]], "dirty_sessions": [dirty_projection], "reasons": ["session_projection_dirty"], "diagnostics": []}
+
+    def fake_atlas_state(
+        _aoa_root: Path,
+        _latest: float,
+        selected: list[dict[str, Any]] | None = None,
+        projection_fingerprints: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if projection_fingerprints is None:
+            return {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []}
+        assert selected == [dirty_record]
+        assert projection_fingerprints == [dirty_atlas_projection]
+        return {"status": "stale", "needs_refresh": True, "dirty_session_ids": [dirty_record["session_id"]], "dirty_sessions": [dirty_atlas_projection], "reasons": ["session_projection_dirty"], "diagnostics": []}
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda _aoa_root, _records: (100.0, [str(Path(dirty_record["path"]) / "SESSION.md")]))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"status": "stale", "needs_refresh": True, "reasons": ["session_projection_dirty"], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"status": "current", "needs_refresh": False, "dirty_session_ids": [], "dirty_sessions": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "search_freshness_actionable_dirty_session_ids", lambda _aoa_root: {"ok": True, "session_ids": [dirty_record["session_id"]], "session_id_count": 1, "diagnostics": []})
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", fake_search_projection)
+    monkeypatch.setattr(module, "projection_fingerprints_for_records", fake_atlas_projection)
+    monkeypatch.setattr(module, "sqlite_search_index_state", fake_search_state)
+    monkeypatch.setattr(module, "atlas_index_state", fake_atlas_state)
+    monkeypatch.setattr(module, "refreshable_search_projection_records", lambda *_args, **_kwargs: ([], [dirty_record]))
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_graph=False,
+        repair_token_accounting=False,
+        selected_records=records,
+        budget_seconds=5.0,
+    )
+
+    assert calls["search"][0] == [dirty_record]
+    assert calls["atlas"][0] == [dirty_record]
+    assert payload["projection_planning"]["mode"] == "hot_dirty_budgeted"
+    assert payload["projection_planning"]["selected_record_count"] == 2
+    assert payload["projection_planning"]["search_projection_record_count"] == 1
+    assert payload["projection_planning"]["atlas_projection_record_count"] == 1
+    assert payload["search_dirty_session_count"] == 1
+    assert payload["atlas_dirty_session_count"] == 1
 
 
 def test_search_provider_status_hot_route_reports_missing_freshness_state(tmp_path: Path) -> None:
@@ -16821,6 +19286,7 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["Portable hook examples cover required lifecycle events"] == "covered"
     assert statuses["Search provider config keeps portable SQLite authoritative and host backends optional"] == "covered"
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
+    assert statuses["Approved user-level session-memory skill sources are available"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
 
     maintenance = module.session_memory_maintenance_status(
@@ -16914,6 +19380,28 @@ def test_install_user_skill_symlinks_router_and_is_idempotent(tmp_path: Path) ->
     assert second["installed"] is False
 
 
+def test_installable_user_skill_states_report_sources_and_install_status(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    skills_dir = tmp_path / "skills"
+
+    partial = module.installable_user_skill_states(source_aoa, skills_dir)
+
+    assert set(partial["skills"]) == set(module.USER_LEVEL_INSTALLABLE_SKILL_NAMES)
+    assert partial["source_ok"] is True
+    assert partial["all_installed"] is False
+    assert partial["skills"][module.USER_LEVEL_SKILL_NAME]["source_skill_exists"] is True
+    assert partial["skills"]["aoa-session-memory-evidence-route"]["source_skill_exists"] is True
+
+    for skill_name in module.USER_LEVEL_INSTALLABLE_SKILL_NAMES:
+        installed = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir, skill_name=skill_name)
+        assert installed["ok"] is True
+
+    complete = module.installable_user_skill_states(source_aoa, skills_dir)
+
+    assert complete["source_ok"] is True
+    assert complete["all_installed"] is True
+
+
 def test_install_user_skill_backs_up_conflicting_target_on_force(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     skills_dir = tmp_path / "skills"
@@ -16951,6 +19439,41 @@ def test_install_user_skill_accepts_relative_aoa_root(tmp_path: Path, monkeypatc
     assert payload["ok"] is True
     assert target.is_symlink()
     assert target.resolve() == source.resolve()
+
+
+def test_install_user_skill_symlinks_named_evidence_route(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    skills_dir = tmp_path / "skills"
+    skill_name = "aoa-session-memory-evidence-route"
+    source_skill = source_aoa / "skills" / skill_name
+
+    payload = module.install_user_skill(aoa_root=source_aoa, skills_dir=skills_dir, skill_name=skill_name)
+
+    target = skills_dir / skill_name
+    assert payload["ok"] is True
+    assert payload["skill_name"] == skill_name
+    assert payload["installed"] is True
+    assert target.is_symlink()
+    assert target.resolve() == source_skill.resolve()
+    state = module.user_skill_install_state(source_aoa, skills_dir, skill_name)
+    assert state["ok"] is True
+    assert state["linked_to_source"] is True
+
+
+def test_install_user_skill_rejects_unknown_named_skill(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    skills_dir = tmp_path / "skills"
+
+    payload = module.install_user_skill(
+        aoa_root=source_aoa,
+        skills_dir=skills_dir,
+        skill_name="../not-a-skill",
+    )
+
+    assert payload["ok"] is False
+    assert payload["installed"] is False
+    assert "unsupported user-level skill" in payload["error"]
+    assert not (skills_dir / "..").exists()
 
 
 def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
@@ -17328,6 +19851,7 @@ def test_completion_audit_reports_covered_segments_and_remaining_live_hooks(tmp_
     assert statuses["Real Codex compaction boundaries are detected from raw transcripts"] == "covered"
     assert statuses["Segment topology matches raw compaction boundaries"] == "covered"
     assert statuses["User-level router skill is installed for the current Codex user"] == "remaining"
+    assert statuses["Approved user-level session-memory skill sources are available"] == "remaining"
     assert statuses["Live PreCompact and PostCompact hook receipts observed in archived sessions"] == "remaining"
 
 

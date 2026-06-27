@@ -89,7 +89,7 @@ SESSION_ACT_SCHEMA_VERSION = 1
 AGENT_EVENT_SCHEMA_VERSION = 2
 TASK_EPISODE_SCHEMA_VERSION = 2
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
-GOAL_LIFECYCLE_SCHEMA_VERSION = 1
+GOAL_LIFECYCLE_SCHEMA_VERSION = 2
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_CLASSIFIER_VERSION = 28
@@ -103,6 +103,9 @@ SEARCH_SCHEMA_VERSION = 13
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
 ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
+MAINTENANCE_PLANNING_PHASE_MIN_SECONDS = 1.0
+MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS = 8.0
+MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS = 8.0
 SEARCH_PROVIDER_SCHEMA_VERSION = 1
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 2
 SEARCH_PROJECTION_FINGERPRINT_MODE = "search_sources_without_rendered_markdown_v1"
@@ -246,7 +249,7 @@ GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT = 8
 GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT = 4
 GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT = 5
 GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT = 3
-GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 25
+GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT = 75
 GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
@@ -296,6 +299,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "probe",
         "resource_kind": "indexing",
         "timeout_sec": 900,
+        "index_drip_on_block": False,
         "graph_drip_on_block": False,
     },
     "backlog": {
@@ -317,7 +321,14 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 3600,
-        "graph_drip_on_block": False,
+        "index_drip_on_block": False,
+        "graph_drip_on_block": True,
+        "graph_drip_batch_limit": 75,
+        "graph_drip_budget_seconds": 300,
+        "graph_drip_refresh_chunk_size": 64,
+        "graph_drip_max_refresh_nodes": 60000,
+        "graph_drip_max_refresh_edges": 180000,
+        "graph_drip_candidate_pool_limit": 225,
     },
     "catchup": {
         "since_days": None,
@@ -338,6 +349,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 1800,
+        "index_drip_on_block": True,
         "graph_drip_on_block": False,
     },
     "deep": {
@@ -359,8 +371,29 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "heavy",
         "resource_kind": "indexing",
         "timeout_sec": 7200,
+        "index_drip_on_block": False,
         "graph_drip_on_block": True,
+        "graph_drip_batch_limit": 100,
+        "graph_drip_budget_seconds": 600,
+        "graph_drip_refresh_chunk_size": 128,
+        "graph_drip_max_refresh_nodes": 120000,
+        "graph_drip_max_refresh_edges": 360000,
+        "graph_drip_candidate_pool_limit": 300,
     },
+}
+SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS = {
+    "aoa-session-memory-auto-maintenance.service": "hot",
+    "aoa-session-memory-backlog-maintenance.service": "backlog",
+    "aoa-session-memory-catchup-maintenance.service": "catchup",
+    "aoa-session-memory-deep-maintenance.service": "deep",
+}
+SESSION_MEMORY_GRAPH_DRIP_OVERRIDE_FLAGS = {
+    "--graph-drip-batch-limit": "graph_drip_batch_limit",
+    "--graph-drip-budget-seconds": "graph_drip_budget_seconds",
+    "--graph-drip-refresh-chunk-size": "graph_drip_refresh_chunk_size",
+    "--graph-drip-max-refresh-nodes": "graph_drip_max_refresh_nodes",
+    "--graph-drip-max-refresh-edges": "graph_drip_max_refresh_edges",
+    "--graph-drip-candidate-pool-limit": "graph_drip_candidate_pool_limit",
 }
 GRAPH_QUALITY_CORPUS_PATH = Path("config/graph-quality-regression-corpus.json")
 ATLAS_POLICY_PATH = Path("config/atlas-policy.json")
@@ -524,6 +557,10 @@ CODEX_APP_EVENT_NAMES = {
 }
 CODEX_HOOK_OUTPUT_FIELDS = {"continue", "stopReason", "suppressOutput", "systemMessage", "hookSpecificOutput"}
 USER_LEVEL_SKILL_NAME = "aoa-session-memory-global-route"
+USER_LEVEL_INSTALLABLE_SKILL_NAMES = (
+    USER_LEVEL_SKILL_NAME,
+    "aoa-session-memory-evidence-route",
+)
 PORTABLE_BUNDLE_ITEMS = [
     ".gitignore",
     "AGENTS.md",
@@ -1055,21 +1092,44 @@ def default_user_skills_dir() -> Path:
     return Path.home() / ".codex" / "skills"
 
 
-def user_level_skill_source(aoa_root: Path) -> Path:
-    return aoa_root.expanduser().resolve(strict=False) / "skills" / USER_LEVEL_SKILL_NAME
+def normalize_user_level_skill_name(skill_name: str | None = None) -> str:
+    normalized = str(skill_name or USER_LEVEL_SKILL_NAME).strip()
+    if normalized not in USER_LEVEL_INSTALLABLE_SKILL_NAMES:
+        allowed = ", ".join(USER_LEVEL_INSTALLABLE_SKILL_NAMES)
+        raise ValueError(f"unsupported user-level skill {normalized!r}; allowed: {allowed}")
+    return normalized
 
 
-def user_level_skill_target(skills_dir: Path | None = None) -> Path:
-    return (skills_dir or default_user_skills_dir()).expanduser() / USER_LEVEL_SKILL_NAME
+def user_level_skill_source(aoa_root: Path, skill_name: str | None = None) -> Path:
+    selected = normalize_user_level_skill_name(skill_name)
+    return aoa_root.expanduser().resolve(strict=False) / "skills" / selected
+
+
+def user_level_skill_target(skills_dir: Path | None = None, skill_name: str | None = None) -> Path:
+    selected = normalize_user_level_skill_name(skill_name)
+    return (skills_dir or default_user_skills_dir()).expanduser() / selected
 
 
 def resolve_non_strict(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
 
-def user_skill_install_state(aoa_root: Path, skills_dir: Path | None = None) -> dict[str, Any]:
-    source = user_level_skill_source(aoa_root)
-    target = user_level_skill_target(skills_dir)
+def user_skill_install_state(
+    aoa_root: Path,
+    skills_dir: Path | None = None,
+    skill_name: str | None = None,
+) -> dict[str, Any]:
+    try:
+        selected = normalize_user_level_skill_name(skill_name)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "skill_name": str(skill_name or ""),
+            "error": str(exc),
+        }
+    source = user_level_skill_source(aoa_root, selected)
+    target = user_level_skill_target(skills_dir, selected)
     source_skill = source / "SKILL.md"
     target_skill = target / "SKILL.md"
     target_exists = target.exists() or target.is_symlink()
@@ -1081,7 +1141,7 @@ def user_skill_install_state(aoa_root: Path, skills_dir: Path | None = None) -> 
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": source_exists and linked_to_source and target_skill_exists,
-        "skill_name": USER_LEVEL_SKILL_NAME,
+        "skill_name": selected,
         "source": str(source),
         "source_skill_exists": source_exists,
         "skills_dir": str((skills_dir or default_user_skills_dir()).expanduser()),
@@ -1094,24 +1154,53 @@ def user_skill_install_state(aoa_root: Path, skills_dir: Path | None = None) -> 
     }
 
 
+def installable_user_skill_states(
+    aoa_root: Path,
+    skills_dir: Path | None = None,
+) -> dict[str, Any]:
+    skills = {
+        skill_name: user_skill_install_state(aoa_root, skills_dir, skill_name)
+        for skill_name in USER_LEVEL_INSTALLABLE_SKILL_NAMES
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "skill_names": list(USER_LEVEL_INSTALLABLE_SKILL_NAMES),
+        "skill_count": len(USER_LEVEL_INSTALLABLE_SKILL_NAMES),
+        "source_ok": all(bool(state.get("source_skill_exists")) for state in skills.values()),
+        "all_installed": all(bool(state.get("ok")) for state in skills.values()),
+        "skills": skills,
+    }
+
+
 def install_user_skill(
     *,
     aoa_root: Path,
     skills_dir: Path | None = None,
     force: bool = False,
+    skill_name: str | None = None,
 ) -> dict[str, Any]:
-    source = user_level_skill_source(aoa_root)
-    target = user_level_skill_target(skills_dir)
+    try:
+        selected = normalize_user_level_skill_name(skill_name)
+    except ValueError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "installed": False,
+            "skill_name": str(skill_name or ""),
+            "error": str(exc),
+        }
+    source = user_level_skill_source(aoa_root, selected)
+    target = user_level_skill_target(skills_dir, selected)
     source_skill = source / "SKILL.md"
     if not source_skill.exists():
         return {
-            **user_skill_install_state(aoa_root, skills_dir),
+            **user_skill_install_state(aoa_root, skills_dir, selected),
             "ok": False,
             "installed": False,
             "error": f"missing source skill: {source_skill}",
         }
 
-    before = user_skill_install_state(aoa_root, skills_dir)
+    before = user_skill_install_state(aoa_root, skills_dir, selected)
     if before["ok"]:
         return {**before, "installed": False, "already_installed": True, "backup_path": None}
 
@@ -1129,7 +1218,7 @@ def install_user_skill(
         shutil.move(str(target), str(backup_path))
 
     target.symlink_to(source, target_is_directory=True)
-    after = user_skill_install_state(aoa_root, skills_dir)
+    after = user_skill_install_state(aoa_root, skills_dir, selected)
     return {
         **after,
         "installed": bool(after["ok"]),
@@ -3890,6 +3979,87 @@ def entity_registry_entries_from_route_terms(
     return entries
 
 
+def entity_registry_lookup_entries_from_route_terms(
+    aoa_root: Path,
+    *,
+    aliases: Iterable[str],
+    kinds: Iterable[str],
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    db_path = db_path or search_db_path(aoa_root)
+    if not db_path.exists():
+        return []
+    route_layer_keys: dict[str, set[str]] = defaultdict(set)
+    for alias in aliases:
+        alias_key = route_key_slug(alias, fallback="")
+        if not alias_key:
+            continue
+        for kind in kinds:
+            normalized_kind = "mcp_service" if kind == "mcp" else route_key_slug(kind, fallback="")
+            if not normalized_kind:
+                continue
+            route_layer = entity_registry_route_layer(normalized_kind)
+            if route_layer:
+                route_layer_keys[route_layer].add(alias_key)
+    if not route_layer_keys:
+        return []
+    entries: dict[str, dict[str, Any]] = {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        for layer, keys in sorted(route_layer_keys.items()):
+            if not keys:
+                continue
+            placeholders = ",".join("?" for _ in sorted(keys))
+            rows = conn.execute(
+                f"""
+                SELECT route_terms.key AS key, route_terms.route_signal AS route_signal,
+                       COUNT(*) AS signal_count, COUNT(DISTINCT documents.session_id) AS session_count,
+                       MAX(documents.session_date) AS latest_session_date
+                FROM route_terms
+                JOIN document_routes ON document_routes.route_id = route_terms.id
+                JOIN documents ON documents.rowid = document_routes.doc_rowid
+                WHERE route_terms.layer = ?
+                  AND route_terms.key IN ({placeholders})
+                  AND documents.doc_type <> 'entity_registry'
+                GROUP BY route_terms.key, route_terms.route_signal
+                ORDER BY signal_count DESC, session_count DESC, key ASC
+                """,
+                (layer, *sorted(keys)),
+            ).fetchall()
+            for row in rows:
+                key = str(row["key"] or "")
+                if not key:
+                    continue
+                kind = "mcp_tool" if layer == "tool" and entity_registry_tool_key_is_mcp_tool(key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
+                entry = entity_registry_make_entry(
+                    kind=kind,
+                    key=key,
+                    aliases=[str(row["route_signal"] or "")],
+                    source_refs=[
+                        {
+                            "source_type": "search_route_terms",
+                            "path": str(db_path),
+                            "status": "observed",
+                            "latest_session_date": row["latest_session_date"],
+                        }
+                    ],
+                    source_surface="archived_route_terms",
+                    owner="aoa-session-memory",
+                    status="observed",
+                    signal_count=int_value(row["signal_count"]),
+                    session_count=int_value(row["session_count"]),
+                )
+                entity_registry_merge_entry(entries, entry)
+    except sqlite3.Error:
+        return list(entries.values())
+    finally:
+        if conn is not None:
+            conn.close()
+    return sorted(entries.values(), key=lambda item: (str(item.get("kind") or ""), str(item.get("canonical_key") or "")))
+
+
 def entity_registry_current_mcp_config_paths(aoa_root: Path) -> set[str]:
     return {str(path) for path in entity_registry_codex_config_paths(aoa_root)}
 
@@ -4188,6 +4358,14 @@ def entity_registry_lookup(
             entry = index.get(("skill", skill_key or ""))
             if entry:
                 matches[str(entry.get("entity_id") or "")] = entry
+    if not matches:
+        observed_entries = entity_registry_lookup_entries_from_route_terms(
+            aoa_root,
+            aliases=aliases,
+            kinds=search_kinds,
+        )
+        for entry in observed_entries:
+            matches[str(entry.get("entity_id") or "")] = entry
     entries = [entry for key, entry in matches.items() if key]
     if not entries and include_unknown:
         guessed_kind = normalized_kind
@@ -7473,6 +7651,37 @@ def goal_usage_fields_from_output_event(event: RawEvent) -> dict[str, Any]:
     return {}
 
 
+def goal_state_fields_from_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    selected: dict[str, Any] = {}
+    candidates: list[dict[str, Any]] = []
+    goal = value.get("goal")
+    if isinstance(goal, dict):
+        candidates.append(goal)
+    candidates.append(value)
+    for candidate in candidates:
+        for key in ("threadId", "objective", "status", "createdAt", "updatedAt"):
+            if key not in selected and key in candidate and compact_value_present(candidate.get(key)):
+                selected[key] = candidate.get(key)
+    return selected
+
+
+def goal_state_fields_from_output_event(event: RawEvent) -> dict[str, Any]:
+    if not isinstance(event.parsed, dict):
+        return {}
+    payload = event.parsed.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    output = payload.get("output")
+    if isinstance(output, str):
+        parsed_output = json_object_from_string(output)
+        return goal_state_fields_from_mapping(parsed_output)
+    if isinstance(output, dict):
+        return goal_state_fields_from_mapping(output)
+    return {}
+
+
 def goal_event_ref(
     event: RawEvent,
     segments: list[dict[str, Any]],
@@ -7558,6 +7767,9 @@ def new_goal_lifecycle(
         "graph_refs": [],
         "usage": {},
         "usage_observations": [],
+        "observed_goal": {},
+        "state_observations": [],
+        "objective_source": "",
         "ambiguity_flags": list(flags or []),
     }
 
@@ -7601,6 +7813,7 @@ def append_goal_lifecycle_event(lifecycle: dict[str, Any], event: dict[str, Any]
     objective = str(event.get("objective") or "").strip()
     if objective and not lifecycle.get("objective"):
         lifecycle["objective"] = objective
+        lifecycle["objective_source"] = "goal_tool_args"
     usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
     if usage:
         observations = lifecycle.setdefault("usage_observations", [])
@@ -7609,6 +7822,61 @@ def append_goal_lifecycle_event(lifecycle: dict[str, Any], event: dict[str, Any]
         merged_usage = lifecycle.setdefault("usage", {})
         if isinstance(merged_usage, dict):
             merged_usage.update({key: value for key, value in usage.items() if compact_value_present(value)})
+
+
+def append_goal_lifecycle_output_observation(
+    lifecycle: dict[str, Any],
+    raw_event: RawEvent,
+    *,
+    segments: list[dict[str, Any]],
+    session_id: str,
+    task_episodes: list[dict[str, Any]],
+    usage_output: dict[str, Any],
+    state_output: dict[str, Any],
+) -> None:
+    task_episode_id = task_episode_id_for_event(raw_event, task_episodes)
+    ref = goal_event_ref(raw_event, segments, session_id=session_id, task_episode_id=task_episode_id)
+    if usage_output:
+        observations = lifecycle.setdefault("usage_observations", [])
+        if isinstance(observations, list):
+            observations.append(
+                {
+                    "source": "goal_tool_output",
+                    "event_id": raw_event.event_id,
+                    "usage": usage_output,
+                    "refs": ref,
+                }
+            )
+        merged_usage = lifecycle.setdefault("usage", {})
+        if isinstance(merged_usage, dict):
+            merged_usage.update({key: value for key, value in usage_output.items() if compact_value_present(value)})
+    if not state_output:
+        return
+    observations = lifecycle.setdefault("state_observations", [])
+    if isinstance(observations, list):
+        observations.append(
+            {
+                "source": "goal_tool_output",
+                "event_id": raw_event.event_id,
+                "state": state_output,
+                "refs": ref,
+            }
+        )
+    observed_goal = lifecycle.setdefault("observed_goal", {})
+    if isinstance(observed_goal, dict):
+        for key, value in state_output.items():
+            if compact_value_present(value):
+                observed_goal[key] = value
+    objective = str(state_output.get("objective") or "").strip()
+    if objective and not lifecycle.get("objective"):
+        lifecycle["objective"] = objective
+        lifecycle["objective_source"] = "goal_tool_output"
+        goal_lifecycle_add_flag(lifecycle, "objective_from_goal_inspection")
+    status = str(state_output.get("status") or "").strip().lower()
+    if status in {"active", "complete", "blocked"} and lifecycle.get("status") in {"unknown", "inspected"}:
+        lifecycle["status"] = status
+    if state_output.get("createdAt") and "missing_create" in lifecycle.get("ambiguity_flags", []):
+        goal_lifecycle_add_flag(lifecycle, "create_time_from_goal_inspection")
 
 
 def goal_lifecycle_add_flag(lifecycle: dict[str, Any], flag: str) -> None:
@@ -7645,14 +7913,18 @@ def generated_goal_lifecycles_for_events(
 
     for raw_event in events:
         usage_output = goal_usage_fields_from_output_event(raw_event)
-        if usage_output and raw_event.correlation_id in correlation_to_lifecycle:
+        state_output = goal_state_fields_from_output_event(raw_event)
+        if (usage_output or state_output) and raw_event.correlation_id in correlation_to_lifecycle:
             lifecycle = correlation_to_lifecycle[raw_event.correlation_id]
-            observations = lifecycle.setdefault("usage_observations", [])
-            if isinstance(observations, list):
-                observations.append({"source": "goal_tool_output", "event_id": raw_event.event_id, "usage": usage_output})
-            merged_usage = lifecycle.setdefault("usage", {})
-            if isinstance(merged_usage, dict):
-                merged_usage.update({key: value for key, value in usage_output.items() if compact_value_present(value)})
+            append_goal_lifecycle_output_observation(
+                lifecycle,
+                raw_event,
+                segments=segments,
+                session_id=session_id,
+                task_episodes=task_episodes,
+                usage_output=usage_output,
+                state_output=state_output,
+            )
             continue
 
         goal_event = goal_event_from_raw_event(
@@ -14824,7 +15096,11 @@ def session_record_has_stale_route_index(record: dict[str, Any]) -> bool:
     archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "") if isinstance(manifest, dict) else ""
     if archive_status not in {"indexed", "raw_mirrored_index_deferred"}:
         return False
-    session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+    session_index_path = session_dir / SESSION_INDEX_JSON
+    fast_reasons = generated_session_index_stale_reasons_from_file(session_index_path)
+    if fast_reasons is not None:
+        return bool(fast_reasons)
+    session_index = read_json(session_index_path, {})
     if not isinstance(session_index, dict) or not session_index:
         return True
     return bool(generated_session_index_stale_reasons(session_index))
@@ -14855,6 +15131,68 @@ def generated_session_index_stale_reasons(session_index: dict[str, Any]) -> list
     return reasons
 
 
+SESSION_INDEX_VERSION_REASON_FIELDS = (
+    ("route_signal_schema_version", ROUTE_SIGNAL_SCHEMA_VERSION, "route_signal_schema_mismatch"),
+    ("route_signal_classifier_version", ROUTE_SIGNAL_CLASSIFIER_VERSION, "route_signal_classifier_mismatch"),
+    ("agent_event_schema_version", AGENT_EVENT_SCHEMA_VERSION, "agent_event_schema_mismatch"),
+    ("task_episode_schema_version", TASK_EPISODE_SCHEMA_VERSION, "task_episode_schema_mismatch"),
+    ("goal_lifecycle_schema_version", GOAL_LIFECYCLE_SCHEMA_VERSION, "goal_lifecycle_schema_mismatch"),
+)
+SESSION_INDEX_REQUIRED_KEYS = (
+    ("agent_event_counts", "agent_event_counts_missing"),
+    ("task_episode_counts", "task_episode_counts_missing"),
+    ("task_episodes", "task_episodes_missing"),
+    ("goal_lifecycle_counts", "goal_lifecycle_counts_missing"),
+    ("goal_event_counts", "goal_event_counts_missing"),
+    ("goal_lifecycles", "goal_lifecycles_missing"),
+    ("goal_events", "goal_events_missing"),
+)
+
+
+def generated_session_index_stale_reasons_from_file(index_path: Path) -> list[str] | None:
+    """Fast conservative stale probe; return None when a full JSON parse is needed."""
+    if not index_path.is_file():
+        return ["missing_session_index"]
+    try:
+        with index_path.open("rb") as handle:
+            head = handle.read(256 * 1024)
+    except OSError:
+        return None
+    if not head.strip():
+        return ["missing_session_index"]
+    head_text = head.decode("utf-8", errors="ignore")
+    reasons: list[str] = []
+    for field, expected, reason in SESSION_INDEX_VERSION_REASON_FIELDS:
+        match = re.search(rf'"{re.escape(field)}"\s*:\s*(-?\d+)', head_text)
+        if not match:
+            return None
+        if int_value(match.group(1)) != expected:
+            reasons.append(reason)
+    if reasons:
+        return reasons
+
+    missing = {key: reason for key, reason in SESSION_INDEX_REQUIRED_KEYS if f'"{key}"'.encode("utf-8") not in head}
+    if not missing:
+        return []
+    max_key_len = max(len(key.encode("utf-8")) for key in missing)
+    overlap = head[-max_key_len:]
+    try:
+        with index_path.open("rb") as handle:
+            handle.seek(len(head))
+            while missing:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                window = overlap + chunk
+                for key in list(missing):
+                    if f'"{key}"'.encode("utf-8") in window:
+                        missing.pop(key, None)
+                overlap = window[-max_key_len:]
+    except OSError:
+        return None
+    return [reason for _key, reason in SESSION_INDEX_REQUIRED_KEYS if _key in missing]
+
+
 def reindex_sessions(
     *,
     aoa_root: Path,
@@ -14871,7 +15209,7 @@ def reindex_sessions(
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
-    deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
+    deadline = started + max(0.0, budget_seconds) if budget_seconds is not None else None
     try:
         if target and target != "all":
             records = [resolve_session_record(aoa_root, target)]
@@ -15529,8 +15867,11 @@ def token_accounting_backfill(
     force: bool = False,
     write_report: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
+    budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
+    started = time.monotonic()
+    deadline = started + max(0.0, budget_seconds) if budget_seconds is not None else None
     try:
         if selected_records is not None:
             records = selected_records
@@ -15555,7 +15896,11 @@ def token_accounting_backfill(
 
     counts: Counter[str] = Counter()
     results: list[dict[str, Any]] = []
+    budget_exhausted = False
     for record in records:
+        if deadline is not None and time.monotonic() >= deadline:
+            budget_exhausted = True
+            break
         result = token_accounting_backfill_candidate(
             aoa_root,
             record,
@@ -15575,11 +15920,15 @@ def token_accounting_backfill(
             if item
         }
     )
+    if budget_exhausted:
+        diagnostics.append("token_accounting_backfill_budget_exhausted")
+    processed_count = len(results)
+    remaining_count = max(0, len(records) - processed_count)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "token_accounting_backfill",
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
-        "ok": counts.get("diagnostic", 0) == 0,
+        "ok": counts.get("diagnostic", 0) == 0 and not budget_exhausted,
         "generated_at": now,
         "aoa_root": str(aoa_root),
         "target": target,
@@ -15591,6 +15940,11 @@ def token_accounting_backfill(
         "max_raw_bytes": max_raw_bytes,
         "force": force,
         "selected_count": len(records),
+        "processed_count": processed_count,
+        "remaining_count": remaining_count,
+        "budget_seconds": budget_seconds,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "budget_exhausted": budget_exhausted,
         "counts": dict(counts),
         "diagnostics": diagnostics,
         "resource_limits": {"max_raw_bytes": max_raw_bytes},
@@ -15657,7 +16011,12 @@ def projection_path_from_ref(value: Any, *, base: Path) -> Path:
     return path if path.is_absolute() else base / path
 
 
-def index_source_paths_for_record(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> list[Path]:
+def index_source_paths_for_manifest(
+    record: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    include_rendered_markdown: bool = True,
+) -> list[Path]:
     session_dir = session_dir_from_record(record)
     paths: list[Path] = [
         session_dir / "session.manifest.json",
@@ -15665,7 +16024,6 @@ def index_source_paths_for_record(record: dict[str, Any], *, include_rendered_ma
     ]
     if include_rendered_markdown:
         paths.append(session_dir / SESSION_INDEX_MARKDOWN)
-    manifest = read_json(session_dir / "session.manifest.json", {})
     if isinstance(manifest, dict):
         for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
             if not isinstance(segment, dict):
@@ -15688,30 +16046,59 @@ def index_source_paths_for_record(record: dict[str, Any], *, include_rendered_ma
     return unique
 
 
-def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> dict[str, Any]:
+def index_source_paths_for_record(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> list[Path]:
     session_dir = session_dir_from_record(record)
-    manifest_path = session_dir / "session.manifest.json"
-    manifest = read_json(manifest_path, {})
-    manifest_dict = manifest if isinstance(manifest, dict) else {}
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    return index_source_paths_for_manifest(record, manifest if isinstance(manifest, dict) else {}, include_rendered_markdown=include_rendered_markdown)
+
+
+def projection_file_state(path: Path, cache: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    key = str(path)
+    if cache is not None and key in cache:
+        return dict(cache[key])
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    state = {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(path),
+    }
+    if cache is not None:
+        cache[key] = state
+    return dict(state)
+
+
+def session_projection_fingerprint_from_manifest(
+    record: dict[str, Any],
+    manifest_dict: dict[str, Any],
+    *,
+    include_rendered_markdown: bool = True,
+    file_state_cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest_dict = manifest_dict if isinstance(manifest_dict, dict) else {}
     display = manifest_dict.get("display") if isinstance(manifest_dict.get("display"), dict) else {}
     raw = manifest_dict.get("raw") if isinstance(manifest_dict.get("raw"), dict) else {}
     raw_path = projection_path_from_ref(raw.get("path"), base=session_dir) if raw.get("path") else session_dir / "raw" / "session.raw.jsonl"
     source_files: list[dict[str, Any]] = []
     latest_mtime = 0.0
-    for path in index_source_paths_for_record(record, include_rendered_markdown=include_rendered_markdown):
-        if not path.exists() or not path.is_file():
+    for path in index_source_paths_for_manifest(record, manifest_dict, include_rendered_markdown=include_rendered_markdown):
+        state = projection_file_state(path, file_state_cache)
+        if state is None:
             continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        latest_mtime = max(latest_mtime, stat.st_mtime)
+        latest_mtime = max(latest_mtime, float(state.get("mtime") or 0.0))
         source_files.append(
             {
-                "path": str(path),
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "sha256": sha256_file(path),
+                "path": str(state.get("path") or path),
+                "size": state.get("size"),
+                "mtime_ns": state.get("mtime_ns"),
+                "sha256": state.get("sha256"),
             }
         )
     raw_state: dict[str, Any] = {
@@ -15750,6 +16137,37 @@ def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_m
         "source_path_count": len(source_files),
         "source_paths": [item["path"] for item in source_files[:12]],
     }
+
+
+def session_projection_fingerprint(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> dict[str, Any]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    manifest_dict = manifest if isinstance(manifest, dict) else {}
+    return session_projection_fingerprint_from_manifest(
+        record,
+        manifest_dict,
+        include_rendered_markdown=include_rendered_markdown,
+    )
+
+
+def session_projection_fingerprint_pair(record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    session_dir = session_dir_from_record(record)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    manifest_dict = manifest if isinstance(manifest, dict) else {}
+    file_state_cache: dict[str, dict[str, Any]] = {}
+    search_projection = session_projection_fingerprint_from_manifest(
+        record,
+        manifest_dict,
+        include_rendered_markdown=False,
+        file_state_cache=file_state_cache,
+    )
+    atlas_projection = session_projection_fingerprint_from_manifest(
+        record,
+        manifest_dict,
+        include_rendered_markdown=True,
+        file_state_cache=file_state_cache,
+    )
+    return search_projection, atlas_projection
 
 
 def session_projection_activity_state(record: dict[str, Any], *, include_rendered_markdown: bool = True) -> dict[str, Any]:
@@ -15802,6 +16220,18 @@ def session_projection_fingerprints_for_records(
                 records,
             )
         )
+
+
+def session_projection_fingerprint_pairs_for_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not records:
+        return [], []
+    if len(records) < 8 or SESSION_PROJECTION_FINGERPRINT_WORKERS <= 1:
+        pairs = [session_projection_fingerprint_pair(record) for record in records]
+    else:
+        worker_count = max(1, min(SESSION_PROJECTION_FINGERPRINT_WORKERS, len(records)))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            pairs = list(executor.map(session_projection_fingerprint_pair, records))
+    return [pair[0] for pair in pairs], [pair[1] for pair in pairs]
 
 
 def projection_fingerprints_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -15991,13 +16421,23 @@ def latest_graph_source_mtime(aoa_root: Path, records: list[dict[str, Any]]) -> 
 def route_index_drift_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     drift: list[dict[str, Any]] = []
     for record in records:
-        if not session_record_has_stale_route_index(record):
-            continue
         session_dir = session_dir_from_record(record)
-        session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
         manifest = read_json(session_dir / "session.manifest.json", {})
-        reasons = generated_session_index_stale_reasons(session_index if isinstance(session_index, dict) else {})
-        if not isinstance(session_index, dict) or not session_index:
+        archive_status = str(manifest.get("archive_status") or record.get("archive_status") or "") if isinstance(manifest, dict) else ""
+        if archive_status not in {"indexed", "raw_mirrored_index_deferred"}:
+            continue
+        session_index_path = session_dir / SESSION_INDEX_JSON
+        fast_reasons = generated_session_index_stale_reasons_from_file(session_index_path)
+        if fast_reasons is None:
+            session_index = read_json(session_index_path, {})
+            reasons = generated_session_index_stale_reasons(session_index if isinstance(session_index, dict) else {})
+            if not isinstance(session_index, dict) or not session_index:
+                reasons = ["missing_session_index"]
+        else:
+            reasons = fast_reasons
+        if not reasons:
+            continue
+        if "missing_session_index" in reasons:
             reasons = ["missing_session_index"]
         drift.append(
             {
@@ -16556,6 +16996,48 @@ def sqlite_search_freshness_summary(conn: sqlite3.Connection, *, db_path: Path) 
         "db_mtime": path_mtime(db_path),
         "reasons": reasons,
         "truth_status": "hot_persisted_search_freshness_state_no_source_scan",
+    }
+
+
+def search_freshness_actionable_dirty_session_ids(aoa_root: Path) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {"ok": False, "session_ids": [], "diagnostics": ["search_index_missing"]}
+    diagnostics: list[str] = []
+    session_ids: set[str] = set()
+    try:
+        conn = connect_existing_search_db(db_path)
+        if not sqlite_table_exists(conn, "search_freshness_state"):
+            conn.close()
+            return {"ok": False, "session_ids": [], "diagnostics": ["search_freshness_state_missing"]}
+        for row in conn.execute(
+            """
+            SELECT session_id
+            FROM search_freshness_state
+            WHERE status NOT IN ('current', 'deferred_live')
+              AND COALESCE(session_id, '') <> ''
+            """
+        ).fetchall():
+            session_ids.add(str(row["session_id"]))
+        if sqlite_table_exists(conn, "session_index_state"):
+            for row in conn.execute(
+                """
+                SELECT s.session_id
+                FROM session_index_state AS s
+                LEFT JOIN search_freshness_state AS f ON f.session_id = s.session_id
+                WHERE f.session_id IS NULL
+                  AND COALESCE(s.session_id, '') <> ''
+                """
+            ).fetchall():
+                session_ids.add(str(row["session_id"]))
+        conn.close()
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    return {
+        "ok": not diagnostics,
+        "session_ids": sorted(session_ids),
+        "session_id_count": len(session_ids),
+        "diagnostics": diagnostics,
     }
 
 
@@ -17695,6 +18177,20 @@ def maintain_indexes(
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
     diagnostics: list[str] = []
+
+    def budget_remaining() -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    def has_budget() -> bool:
+        remaining = budget_remaining()
+        return remaining is None or remaining > 0
+
+    def has_planning_phase_budget(min_seconds: float = MAINTENANCE_PLANNING_PHASE_MIN_SECONDS) -> bool:
+        remaining = budget_remaining()
+        return remaining is None or remaining >= min_seconds
+
     try:
         records = (
             list(selected_records)
@@ -17718,6 +18214,11 @@ def maintain_indexes(
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
     route_drift = route_index_drift_records(records)
     effective_token_max_raw_bytes = token_max_raw_bytes if token_max_raw_bytes is not None else max_raw_bytes
+    planning_budget_exhausted = False
+    if not has_budget():
+        planning_budget_exhausted = True
+        if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+            diagnostics.append("index_maintenance_planning_budget_exhausted")
     if repair_token_accounting:
         token_backfill_state = token_accounting_backfill(
             aoa_root=aoa_root,
@@ -17728,11 +18229,15 @@ def maintain_indexes(
             apply=False,
             max_raw_bytes=effective_token_max_raw_bytes,
             selected_records=records,
+            budget_seconds=budget_remaining(),
         )
     else:
         token_backfill_state = {
             "ok": True,
             "selected_count": len(records),
+            "processed_count": 0,
+            "remaining_count": 0,
+            "budget_exhausted": False,
             "counts": {"planned": 0, "backfilled": 0, "current": 0, "skipped": 0},
             "diagnostics": [],
             "resource_limits": {"skipped_by_profile": True},
@@ -17740,7 +18245,15 @@ def maintain_indexes(
             "skip_reason": "token_accounting_backfill_skipped_by_profile",
         }
     token_backfill_counts = token_backfill_state.get("counts") if isinstance(token_backfill_state.get("counts"), dict) else {}
-    token_backfill_needed = repair_token_accounting and int(token_accounting_int(token_backfill_counts.get("planned")) or 0) > 0
+    token_backfill_planned_count = int(token_accounting_int(token_backfill_counts.get("planned")) or 0)
+    token_backfill_budget_exhausted = bool(token_backfill_state.get("budget_exhausted"))
+    if token_backfill_budget_exhausted:
+        planning_budget_exhausted = True
+        if "token_accounting_backfill_budget_exhausted" not in diagnostics:
+            diagnostics.append("token_accounting_backfill_budget_exhausted")
+        if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+            diagnostics.append("index_maintenance_planning_budget_exhausted")
+    token_backfill_needed = repair_token_accounting and (token_backfill_planned_count > 0 or token_backfill_budget_exhausted)
     deferred_sessions = [
         {
             "session": str(record.get("session_label") or record.get("session_id") or session_dir_from_record(record).name),
@@ -17750,18 +18263,133 @@ def maintain_indexes(
         for record in records
         if str(read_json(session_dir_from_record(record) / "session.manifest.json", {}).get("archive_status") or record.get("archive_status") or "") == "raw_mirrored_index_deferred"
     ]
-    search_projection_fingerprints = search_projection_fingerprints_for_records(records)
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=search_projection_fingerprints)
     atlas_projection_fingerprints: list[dict[str, Any]] = []
-    atlas_state = atlas_index_hot_state(aoa_root)
-    search_session_projection_dirty = "session_projection_dirty" in {
-        str(reason) for reason in search_state.get("reasons", []) if reason
+    search_hot_state_for_projection_planning: dict[str, Any] = {}
+    atlas_hot_state_for_projection_planning: dict[str, Any] = {}
+    if not planning_budget_exhausted and repair_indexes:
+        search_hot_state_for_projection_planning = sqlite_search_index_hot_state(aoa_root)
+    remaining_for_combined_projection = budget_remaining()
+    if (
+        not planning_budget_exhausted
+        and repair_indexes
+        and (
+            remaining_for_combined_projection is None
+            or remaining_for_combined_projection >= MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS
+        )
+    ):
+        atlas_hot_state_for_projection_planning = atlas_index_hot_state(aoa_root)
+    budgeted_search_projection_records: list[dict[str, Any]] = []
+    hot_search_reasons = {
+        str(reason)
+        for reason in search_hot_state_for_projection_planning.get("reasons", [])
+        if reason
     }
-    if repair_indexes and (bool(atlas_state.get("needs_refresh")) or search_session_projection_dirty):
-        atlas_projection_fingerprints = projection_fingerprints_for_records(records)
-        atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records, projection_fingerprints=atlas_projection_fingerprints)
+    if (
+        not planning_budget_exhausted
+        and repair_indexes
+        and deadline is not None
+        and remaining_for_combined_projection is not None
+        and remaining_for_combined_projection < MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS
+        and bool(search_hot_state_for_projection_planning.get("needs_refresh"))
+        and hot_search_reasons
+        and hot_search_reasons <= {"session_projection_dirty", "recent_live_projection_updates_deferred"}
+    ):
+        dirty_id_state = search_freshness_actionable_dirty_session_ids(aoa_root)
+        if dirty_id_state.get("ok") and dirty_id_state.get("session_ids"):
+            budgeted_search_projection_records = records_matching_projection_states(
+                records,
+                [str(item) for item in dirty_id_state.get("session_ids", []) if item],
+            )
+    combined_projection_planning_allowed = (
+        not planning_budget_exhausted
+        and repair_indexes
+        and not budgeted_search_projection_records
+        and (
+            remaining_for_combined_projection is None
+            or remaining_for_combined_projection >= MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS
+        )
+        and (
+            bool(search_hot_state_for_projection_planning.get("needs_refresh"))
+            or bool(atlas_hot_state_for_projection_planning.get("needs_refresh"))
+        )
+    )
+    if planning_budget_exhausted:
+        search_projection_fingerprints = []
+        search_state = {
+            "status": "deferred_budget_exhausted",
+            "needs_refresh": None,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": ["planning_budget_exhausted"],
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+        }
+        atlas_state = {
+            "status": "deferred_budget_exhausted",
+            "needs_refresh": None,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": ["planning_budget_exhausted"],
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+        }
+    else:
+        if combined_projection_planning_allowed:
+            search_projection_fingerprints, atlas_projection_fingerprints = session_projection_fingerprint_pairs_for_records(records)
+        else:
+            search_projection_records = budgeted_search_projection_records or records
+            search_projection_fingerprints = search_projection_fingerprints_for_records(search_projection_records)
+        search_state_records = budgeted_search_projection_records or records
+        search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, search_state_records, projection_fingerprints=search_projection_fingerprints)
+        if not has_budget():
+            planning_budget_exhausted = True
+            if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+                diagnostics.append("index_maintenance_planning_budget_exhausted")
+            atlas_state = {
+                "status": "deferred_budget_exhausted",
+                "needs_refresh": None,
+                "dirty_session_ids": [],
+                "dirty_sessions": [],
+                "reasons": ["planning_budget_exhausted"],
+                "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+            }
+        else:
+            atlas_state = atlas_hot_state_for_projection_planning or atlas_index_hot_state(aoa_root)
+            search_session_projection_dirty = "session_projection_dirty" in {
+                str(reason) for reason in search_state.get("reasons", []) if reason
+            }
+            if repair_indexes and (bool(atlas_state.get("needs_refresh")) or search_session_projection_dirty):
+                if not has_planning_phase_budget():
+                    planning_budget_exhausted = True
+                    if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+                        diagnostics.append("index_maintenance_planning_budget_exhausted")
+                    atlas_state = {
+                        "status": "deferred_budget_exhausted",
+                        "needs_refresh": None,
+                        "dirty_session_ids": [],
+                        "dirty_sessions": [],
+                        "reasons": ["planning_budget_exhausted"],
+                        "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+                    }
+                else:
+                    if not atlas_projection_fingerprints:
+                        atlas_projection_records = budgeted_search_projection_records or records
+                        atlas_projection_fingerprints = projection_fingerprints_for_records(atlas_projection_records)
+                    else:
+                        atlas_projection_records = records
+                    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, atlas_projection_records, projection_fingerprints=atlas_projection_fingerprints)
+                    if not has_budget():
+                        planning_budget_exhausted = True
+                        if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+                            diagnostics.append("index_maintenance_planning_budget_exhausted")
     stable_selected_records_global = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
-    if repair_graph:
+    if planning_budget_exhausted and repair_graph:
+        graph_state = {
+            "status": "deferred_budget_exhausted",
+            "needs_maintenance": None,
+            "needs_full_rebuild": False,
+            "reasons": ["planning_budget_exhausted"],
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+        }
+    elif repair_graph:
         graph_state = graph_store_state(
             aoa_root=aoa_root,
             target=target,
@@ -17779,8 +18407,17 @@ def maintain_indexes(
             "reasons": ["graph_state_check_skipped_by_profile"],
             "diagnostics": [],
         }
-    entity_registry_state = entity_registry_maintenance_status(aoa_root)
-    entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
+    if planning_budget_exhausted:
+        entity_registry_state = {
+            "status": "deferred_budget_exhausted",
+            "needs_maintenance": None,
+            "reasons": ["planning_budget_exhausted"],
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"],
+        }
+        entity_registry_repair_needed = False
+    else:
+        entity_registry_state = entity_registry_maintenance_status(aoa_root)
+        entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
     effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(1, min(int_value(graph_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     effective_graph_max_refresh_nodes = None if graph_max_refresh_nodes is None or int_value(graph_max_refresh_nodes) <= 0 else int_value(graph_max_refresh_nodes)
@@ -17791,6 +18428,7 @@ def maintain_indexes(
         or bool(atlas_state.get("needs_refresh"))
         or token_backfill_needed
         or entity_registry_repair_needed
+        or planning_budget_exhausted
     )
     graph_repair_needed = (
         bool(graph_state.get("needs_maintenance"))
@@ -17838,7 +18476,6 @@ def maintain_indexes(
     search_reindex_candidate_records = search_dirty_records
     search_reasons = set(str(reason) for reason in search_state.get("reasons", []) if reason)
     search_non_projection_repair_needed = bool(search_reasons - {"session_projection_dirty"})
-    planning_budget_exhausted = False
     if not search_rebuild_required and not route_drift and not token_backfill_needed and search_dirty_records:
         try:
             search_state_refresh_candidate_records, search_reindex_candidate_records = refreshable_search_projection_records(
@@ -17857,6 +18494,10 @@ def maintain_indexes(
                 search_reindex_candidate_records = search_dirty_records
             else:
                 raise
+        if not has_budget():
+            planning_budget_exhausted = True
+            if "index_maintenance_planning_budget_exhausted" not in diagnostics:
+                diagnostics.append("index_maintenance_planning_budget_exhausted")
     remaining_repair_slots = effective_repair_limit
     if remaining_repair_slots is None:
         search_state_refresh_records = search_state_refresh_candidate_records
@@ -17903,6 +18544,7 @@ def maintain_indexes(
             command=base
             + ["token-accounting-backfill", target, *root_args]
             + (["--max-raw-mb", token_max_raw_mb_text] if token_max_raw_mb_text else [])
+            + (["--budget-seconds", budget_seconds_text] if budget_seconds_text else [])
             + ["--apply", "--write-report"],
         ),
         maintenance_action(
@@ -17969,6 +18611,7 @@ def maintain_indexes(
                 *(["--max-refresh-edges", str(effective_graph_max_refresh_edges)] if effective_graph_max_refresh_edges is not None else []),
                 *(["--budget-seconds", budget_seconds_text] if budget_seconds_text else []),
                 "--write-report",
+                "--write-hash-cache",
             ],
         ),
         maintenance_action(
@@ -18016,7 +18659,7 @@ def maintain_indexes(
         "token_accounting_backfill": {
             "action_kind": "state_reconcile",
             "selection_count": len(records),
-            "dirty_count": int_value(token_backfill_counts.get("planned")),
+            "dirty_count": token_backfill_planned_count if token_backfill_planned_count else (1 if token_backfill_budget_exhausted else 0),
         },
         "reindex_route_indexes": {
             "action_kind": "incremental_update",
@@ -18079,15 +18722,6 @@ def maintain_indexes(
     budget_exhausted = planning_budget_exhausted
     post_maintenance_states: dict[str, Any] = {}
 
-    def budget_remaining() -> float | None:
-        if deadline is None:
-            return None
-        return max(0.0, deadline - time.monotonic())
-
-    def has_budget() -> bool:
-        remaining = budget_remaining()
-        return remaining is None or remaining > 0
-
     if apply:
         reindex_ran = False
         token_backfill_ran = False
@@ -18110,12 +18744,18 @@ def maintain_indexes(
                     max_raw_bytes=effective_token_max_raw_bytes,
                     write_report=write_report,
                     selected_records=records,
+                    budget_seconds=budget_remaining(),
                 )
-                token_action["status"] = "applied" if result.get("ok") else "failed"
-                token_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "counts", "report_json", "report_markdown", "diagnostics")}
+                token_action["status"] = (
+                    "applied"
+                    if result.get("ok")
+                    else ("applied_partial_budget_exhausted" if result.get("budget_exhausted") and result.get("processed_count") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed"))
+                )
+                token_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "remaining_count", "budget_seconds", "elapsed_ms", "budget_exhausted", "counts", "report_json", "report_markdown", "diagnostics")}
                 action_results.append(token_action)
                 result_counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
                 token_backfill_ran = int(token_accounting_int(result_counts.get("backfilled")) or 0) > 0
+                budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if reindex_action["needed"]:
@@ -18630,27 +19270,45 @@ def maintain_indexes(
     final_atlas_state = atlas_state
     final_graph_state = graph_state
     final_entity_registry_state = entity_registry_state
-    try:
-        final_records = current_selected_records()
-        final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
-        final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
-        final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
-        final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
-        final_graph_state = (
-            graph_store_state(
-                aoa_root=aoa_root,
-                target=target,
-                since=since,
-                until=until,
-                limit=limit,
-                selected_records=final_records,
-                selected_records_global=stable_selected_records_global,
+    final_snapshot_budget_remaining = budget_remaining()
+    if deadline is not None and final_snapshot_budget_remaining is not None and final_snapshot_budget_remaining <= 0:
+        budget_exhausted = True
+        post_maintenance_states["final_freshness_snapshot"] = {
+            "status": "skipped_budget_exhausted",
+            "budget_remaining": final_snapshot_budget_remaining,
+        }
+    elif (
+        deadline is not None
+        and final_snapshot_budget_remaining is not None
+        and final_snapshot_budget_remaining < MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS
+    ):
+        post_maintenance_states["final_freshness_snapshot"] = {
+            "status": "skipped_budget_guard",
+            "budget_remaining": final_snapshot_budget_remaining,
+            "min_seconds": MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS,
+        }
+    else:
+        try:
+            final_records = current_selected_records()
+            final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
+            final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
+            final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
+            final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
+            final_graph_state = (
+                graph_store_state(
+                    aoa_root=aoa_root,
+                    target=target,
+                    since=since,
+                    until=until,
+                    limit=limit,
+                    selected_records=final_records,
+                    selected_records_global=stable_selected_records_global,
+                )
+                if repair_graph
+                else graph_state
             )
-            if repair_graph
-            else graph_state
-        )
-    except ValueError as exc:
-        diagnostics.append(f"final_freshness_snapshot_failed:{exc}")
+        except ValueError as exc:
+            diagnostics.append(f"final_freshness_snapshot_failed:{exc}")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "index_maintenance",
@@ -18681,6 +19339,23 @@ def maintain_indexes(
         "budget_seconds": budget_seconds,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "budget_exhausted": budget_exhausted,
+        "projection_planning": {
+            "mode": (
+                "deferred_budget_exhausted"
+                if planning_budget_exhausted and not search_projection_fingerprints
+                else (
+                    "hot_dirty_budgeted"
+                    if budgeted_search_projection_records
+                    else ("combined_search_atlas" if combined_projection_planning_allowed else "search_first")
+                )
+            ),
+            "selected_record_count": len(records),
+            "search_projection_record_count": len(budgeted_search_projection_records or records) if search_projection_fingerprints else 0,
+            "atlas_projection_record_count": len(atlas_projection_fingerprints),
+            "combined_projection_planning": combined_projection_planning_allowed,
+            "hot_dirty_budgeted": bool(budgeted_search_projection_records),
+            "hot_search_reasons": sorted(hot_search_reasons),
+        },
         "latest_source_mtime": latest_source_mtime,
         "latest_source_paths": latest_source_paths,
         "final_latest_source_mtime": final_latest_source_mtime,
@@ -18688,6 +19363,11 @@ def maintain_indexes(
         "token_backfill": {
             "ok": token_backfill_state.get("ok"),
             "selected_count": token_backfill_state.get("selected_count"),
+            "processed_count": token_backfill_state.get("processed_count"),
+            "remaining_count": token_backfill_state.get("remaining_count"),
+            "budget_seconds": token_backfill_state.get("budget_seconds"),
+            "elapsed_ms": token_backfill_state.get("elapsed_ms"),
+            "budget_exhausted": token_backfill_state.get("budget_exhausted"),
             "counts": token_backfill_state.get("counts"),
             "diagnostics": token_backfill_state.get("diagnostics", []),
             "resource_limits": token_backfill_state.get("resource_limits", {}),
@@ -20155,6 +20835,8 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- apply: `{payload.get('apply')}`",
         f"- mutates: `{payload.get('mutates')}`",
         f"- reason: `{payload.get('reason')}`",
+        f"- index_drip_on_block: `{payload.get('index_drip_on_block')}`",
+        f"- index_drip_on_block_source: `{payload.get('index_drip_on_block_source')}`",
         f"- graph_drip_on_block: `{payload.get('graph_drip_on_block')}`",
         f"- graph_drip_on_block_source: `{payload.get('graph_drip_on_block_source')}`",
         f"- resource_class: `{payload.get('resource_class')}`",
@@ -20181,6 +20863,25 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
     if denied_reasons:
         lines.extend(["", "## Denied Reasons", ""])
         lines.extend(f"- `{item}`" for item in denied_reasons)
+    index_fallback = payload.get("fallback_index_drip") if isinstance(payload.get("fallback_index_drip"), dict) else {}
+    if index_fallback:
+        lines.extend(
+            [
+                "",
+                "## Fallback Index Drip",
+                "",
+                f"- ok: `{index_fallback.get('ok')}`",
+                f"- status: `{index_fallback.get('status')}`",
+                f"- repair_limit: `{index_fallback.get('repair_limit')}`",
+                f"- budget_seconds: `{index_fallback.get('budget_seconds')}`",
+                f"- elapsed_ms: `{index_fallback.get('elapsed_ms')}`",
+                f"- resource_ok: `{index_fallback.get('resource_ok')}`",
+                "",
+                "```bash",
+                str(index_fallback.get("exact_command") or ""),
+                "```",
+            ]
+        )
     fallback = payload.get("fallback_graph_drip") if isinstance(payload.get("fallback_graph_drip"), dict) else {}
     if fallback:
         lines.extend(
@@ -20227,6 +20928,36 @@ def parse_json_object_from_stdout(text: str) -> dict[str, Any]:
             except json.JSONDecodeError:
                 return {}
     return {}
+
+
+def maintenance_child_defer_status(child_payload: dict[str, Any]) -> str:
+    if not isinstance(child_payload, dict) or not child_payload:
+        return ""
+    status = str(child_payload.get("status") or "").strip()
+    if status:
+        return status
+    diagnostics = (
+        [str(item) for item in child_payload.get("diagnostics", []) if item]
+        if isinstance(child_payload.get("diagnostics"), list)
+        else []
+    )
+    artifact_type = str(child_payload.get("artifact_type") or "")
+    conflict_kind = str(child_payload.get("conflict_kind") or child_payload.get("deferred_reason") or "").strip()
+    if artifact_type == "session_memory_maintenance_lock_conflict" or "lock_held" in diagnostics:
+        if conflict_kind == "hot_deferred_for_bulk_lease":
+            return "deferred_conflicting_lease"
+        return "skipped_lock_held"
+    return ""
+
+
+def resource_fallback_child_status(fallback: dict[str, Any]) -> str:
+    if not isinstance(fallback, dict):
+        return ""
+    child_payload = fallback.get("child") if isinstance(fallback.get("child"), dict) else {}
+    if not child_payload:
+        execution = fallback.get("execution") if isinstance(fallback.get("execution"), dict) else {}
+        child_payload = parse_json_object_from_stdout(str(execution.get("stdout_tail") or ""))
+    return maintenance_child_defer_status(child_payload)
 
 
 def auto_maintenance_cli_extra_args(
@@ -20298,13 +21029,16 @@ def auto_maintenance_resource_launch(
     fail_on_block: bool = False,
     resource_force: bool = False,
     resource_binary: str = "abyss-machine",
+    index_drip_on_block: bool | None = None,
+    index_drip_repair_limit: int = 12,
+    index_drip_budget_seconds: float = 180.0,
     graph_drip_on_block: bool | None = None,
-    graph_drip_batch_limit: int = 25,
-    graph_drip_budget_seconds: float = 180.0,
-    graph_drip_refresh_chunk_size: int = 64,
-    graph_drip_max_refresh_nodes: int | None = 20000,
-    graph_drip_max_refresh_edges: int | None = 60000,
-    graph_drip_candidate_pool_limit: int | None = GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT,
+    graph_drip_batch_limit: int | None = None,
+    graph_drip_budget_seconds: float | None = None,
+    graph_drip_refresh_chunk_size: int | None = None,
+    graph_drip_max_refresh_nodes: int | None = None,
+    graph_drip_max_refresh_edges: int | None = None,
+    graph_drip_candidate_pool_limit: int | None = None,
     since: str | None = None,
     since_days: int | None = None,
     until: str | None = None,
@@ -20325,7 +21059,58 @@ def auto_maintenance_resource_launch(
     progress_every: int | None = None,
 ) -> dict[str, Any]:
     settings = auto_maintenance_profile(profile)
+    effective_index_drip_on_block = bool(settings.get("index_drip_on_block")) if index_drip_on_block is None else bool(index_drip_on_block)
     effective_graph_drip_on_block = bool(settings.get("graph_drip_on_block")) if graph_drip_on_block is None else bool(graph_drip_on_block)
+    profile_graph_drip_batch_limit = int_value(
+        settings.get("graph_drip_batch_limit"),
+        int_value(settings.get("graph_batch_limit"), 25),
+    )
+    if profile_graph_drip_batch_limit <= 0:
+        profile_graph_drip_batch_limit = 25
+    effective_graph_drip_batch_limit = max(1, int_value(graph_drip_batch_limit, profile_graph_drip_batch_limit))
+    effective_graph_drip_budget_seconds = max(
+        1.0,
+        float(
+            graph_drip_budget_seconds
+            if graph_drip_budget_seconds is not None
+            else settings.get("graph_drip_budget_seconds") or 180.0
+        ),
+    )
+    profile_graph_drip_refresh_chunk_size = int_value(
+        settings.get("graph_drip_refresh_chunk_size"),
+        int_value(settings.get("graph_refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
+    )
+    effective_graph_drip_refresh_chunk_size = max(
+        1,
+        int_value(graph_drip_refresh_chunk_size, profile_graph_drip_refresh_chunk_size),
+    )
+    profile_graph_drip_max_refresh_nodes = settings.get("graph_drip_max_refresh_nodes")
+    if profile_graph_drip_max_refresh_nodes is None:
+        profile_graph_drip_max_refresh_nodes = settings.get("graph_max_refresh_nodes", 20000)
+    profile_graph_drip_max_refresh_edges = settings.get("graph_drip_max_refresh_edges")
+    if profile_graph_drip_max_refresh_edges is None:
+        profile_graph_drip_max_refresh_edges = settings.get("graph_max_refresh_edges", 60000)
+    effective_graph_drip_max_refresh_nodes = (
+        graph_drip_max_refresh_nodes
+        if graph_drip_max_refresh_nodes is not None
+        else int_value(profile_graph_drip_max_refresh_nodes, 20000)
+    )
+    effective_graph_drip_max_refresh_edges = (
+        graph_drip_max_refresh_edges
+        if graph_drip_max_refresh_edges is not None
+        else int_value(profile_graph_drip_max_refresh_edges, 60000)
+    )
+    profile_graph_drip_candidate_pool_limit = settings.get("graph_drip_candidate_pool_limit")
+    if profile_graph_drip_candidate_pool_limit is None:
+        profile_graph_drip_candidate_pool_limit = max(
+            GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT,
+            effective_graph_drip_batch_limit * 3,
+        )
+    effective_graph_drip_candidate_pool_limit = (
+        graph_drip_candidate_pool_limit
+        if graph_drip_candidate_pool_limit is not None
+        else int_value(profile_graph_drip_candidate_pool_limit, GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT)
+    )
     extra_args = auto_maintenance_cli_extra_args(
         since=since,
         since_days=since_days,
@@ -20431,8 +21216,8 @@ def auto_maintenance_resource_launch(
     else:
         status = "resource_launcher_no_json"
         diagnostics.append("resource_launcher_no_json")
-    fallback_graph_drip: dict[str, Any] = {}
-    if status == "resource_blocked" and effective_graph_drip_on_block:
+    fallback_index_drip: dict[str, Any] = {}
+    if status == "resource_blocked" and effective_index_drip_on_block and apply and repair_indexes is not False:
         fallback_command = [
             resource_binary,
             "resource",
@@ -20443,7 +21228,153 @@ def auto_maintenance_resource_launch(
             str(settings["resource_kind"]),
             "--unattended",
             "--timeout",
-            str(max(60, int(float(graph_drip_budget_seconds) + 300))),
+            str(max(60, int(float(index_drip_budget_seconds) + 300))),
+            "--success-on-block",
+            "--json",
+            "--",
+            "python3",
+            str(Path(__file__).resolve()),
+            "index-maintenance",
+            target,
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--repair-limit",
+            str(max(1, int_value(index_drip_repair_limit, 12))),
+            "--skip-token-accounting",
+            "--skip-graph-repair",
+            "--budget-seconds",
+            str(max(1.0, float(index_drip_budget_seconds))),
+            "--reason",
+            f"auto_maintenance_resource:{profile}:index_drip_on_block:{reason}",
+            "--write-report",
+        ]
+        if since:
+            fallback_command.extend(["--since", since])
+        elif since_days is not None:
+            fallback_command.extend(["--since-days", str(since_days)])
+        if until:
+            fallback_command.extend(["--until", until])
+        if limit is not None:
+            fallback_command.extend(["--limit", str(limit)])
+        if max_raw_mb is not None:
+            fallback_command.extend(["--max-raw-mb", str(max_raw_mb)])
+        fallback_started = time.monotonic()
+        fallback_stdout = ""
+        fallback_stderr = ""
+        fallback_returncode: int | None = None
+        fallback_payload: dict[str, Any] = {}
+        fallback_diagnostics: list[str] = []
+        try:
+            fallback_completed = subprocess.run(
+                fallback_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(120, int(float(index_drip_budget_seconds) + 360)),
+            )
+            fallback_returncode = fallback_completed.returncode
+            fallback_stdout = fallback_completed.stdout or ""
+            fallback_stderr = fallback_completed.stderr or ""
+            fallback_payload = parse_json_object_from_stdout(fallback_stdout)
+        except FileNotFoundError as exc:
+            fallback_diagnostics.append(f"resource_launcher_missing:{exc.filename or resource_binary}")
+        except subprocess.TimeoutExpired as exc:
+            fallback_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            fallback_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            fallback_diagnostics.append("index_drip_resource_launcher_timeout")
+        fallback_elapsed_ms = int((time.monotonic() - fallback_started) * 1000)
+        fallback_blocked_reasons = fallback_payload.get("blocked_reasons") if isinstance(fallback_payload.get("blocked_reasons"), list) else []
+        fallback_denied_reasons = fallback_payload.get("denied_reasons") if isinstance(fallback_payload.get("denied_reasons"), list) else []
+        fallback_execution = fallback_payload.get("execution") if isinstance(fallback_payload.get("execution"), dict) else {}
+        fallback_execution_ok = fallback_execution.get("ok") if isinstance(fallback_execution, dict) else None
+        fallback_execution_returncode = fallback_execution.get("returncode") if isinstance(fallback_execution, dict) else None
+        fallback_child_payload = parse_json_object_from_stdout(str(fallback_execution.get("stdout_tail") or "")) if isinstance(fallback_execution, dict) else {}
+        fallback_child_status = maintenance_child_defer_status(fallback_child_payload)
+        fallback_child_diagnostics = (
+            [str(item) for item in fallback_child_payload.get("diagnostics", []) if item]
+            if isinstance(fallback_child_payload.get("diagnostics"), list)
+            else []
+        )
+        if fallback_blocked_reasons:
+            fallback_status = "resource_blocked"
+            fallback_diagnostics.extend(f"resource_blocked:{item}" for item in fallback_blocked_reasons)
+        elif fallback_denied_reasons:
+            fallback_status = "resource_denied"
+            fallback_diagnostics.extend(f"resource_denied:{item}" for item in fallback_denied_reasons)
+        elif "index_drip_resource_launcher_timeout" in fallback_diagnostics:
+            fallback_status = "resource_launcher_timeout"
+        elif fallback_diagnostics:
+            fallback_status = "resource_launcher_failed"
+        elif fallback_child_status in {"skipped_lock_held", "deferred_conflicting_lease"}:
+            fallback_status = fallback_child_status
+            fallback_diagnostics.extend(fallback_child_diagnostics or [fallback_child_status])
+        elif fallback_child_payload and fallback_child_payload.get("ok") is False:
+            fallback_status = "child_failed"
+            fallback_diagnostics.extend(fallback_child_diagnostics or ["index_drip_child_failed"])
+        elif fallback_payload.get("ok") is True and (fallback_execution_ok is True or fallback_execution_returncode == 0):
+            fallback_status = "completed"
+        elif fallback_payload.get("ok") is True:
+            fallback_status = "completed_without_execution_summary"
+        elif fallback_payload:
+            fallback_status = "resource_failed"
+            fallback_diagnostics.append("resource_launcher_returned_not_ok")
+        else:
+            fallback_status = "resource_launcher_no_json"
+            fallback_diagnostics.append("resource_launcher_no_json")
+        fallback_ok = fallback_status in {"completed", "completed_without_execution_summary"}
+        fallback_index_drip = {
+            "enabled": True,
+            "ok": fallback_ok,
+            "status": fallback_status,
+            "resource_class": "probe",
+            "resource_kind": settings.get("resource_kind"),
+            "repair_limit": max(1, int_value(index_drip_repair_limit, 12)),
+            "budget_seconds": max(1.0, float(index_drip_budget_seconds)),
+            "returncode": fallback_returncode,
+            "elapsed_ms": fallback_elapsed_ms,
+            "resource_ok": fallback_payload.get("ok"),
+            "blocked_reasons": fallback_blocked_reasons,
+            "denied_reasons": fallback_denied_reasons,
+            "execution": {
+                "ok": fallback_execution_ok,
+                "returncode": fallback_execution_returncode,
+                "stderr_tail": fallback_execution.get("stderr_tail") if isinstance(fallback_execution, dict) else None,
+                "stdout_tail": fallback_execution.get("stdout_tail") if isinstance(fallback_execution, dict) else None,
+                "systemd": fallback_execution.get("systemd") if isinstance(fallback_execution, dict) else None,
+            },
+            "child": {
+                key: fallback_child_payload.get(key)
+                for key in ("ok", "status", "mutates", "target", "action_counts", "diagnostics")
+                if key in fallback_child_payload
+            },
+            "command": fallback_command,
+            "exact_command": shlex.join(fallback_command),
+            "stdout_tail": fallback_stdout[-4000:],
+            "stderr_tail": fallback_stderr[-4000:],
+            "diagnostics": sorted(set(fallback_diagnostics)),
+        }
+        if fallback_ok:
+            status = "resource_blocked_index_drip_completed"
+            diagnostics.append("index_drip_fallback_completed")
+        else:
+            status = "resource_blocked_index_drip_failed"
+            diagnostics.append(f"index_drip_fallback_{fallback_status}")
+    fallback_graph_drip: dict[str, Any] = {}
+    if status == "resource_blocked" and effective_graph_drip_on_block and apply and repair_graph is not False:
+        fallback_command = [
+            resource_binary,
+            "resource",
+            "launch",
+            "--class",
+            "probe",
+            "--kind",
+            str(settings["resource_kind"]),
+            "--unattended",
+            "--timeout",
+            str(max(60, int(effective_graph_drip_budget_seconds + 300))),
             "--success-on-block",
             "--json",
             "--",
@@ -20457,19 +21388,20 @@ def auto_maintenance_resource_launch(
             str(aoa_root),
             "--apply",
             "--batch-limit",
-            str(max(1, int_value(graph_drip_batch_limit, 25))),
+            str(effective_graph_drip_batch_limit),
             "--budget-seconds",
-            str(max(1.0, float(graph_drip_budget_seconds))),
+            str(effective_graph_drip_budget_seconds),
             "--refresh-chunk-size",
-            str(max(1, int_value(graph_drip_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE))),
+            str(effective_graph_drip_refresh_chunk_size),
             "--write-report",
+            "--write-hash-cache",
         ]
-        if graph_drip_max_refresh_nodes is not None and int_value(graph_drip_max_refresh_nodes) > 0:
-            fallback_command.extend(["--max-refresh-nodes", str(int_value(graph_drip_max_refresh_nodes))])
-        if graph_drip_max_refresh_edges is not None and int_value(graph_drip_max_refresh_edges) > 0:
-            fallback_command.extend(["--max-refresh-edges", str(int_value(graph_drip_max_refresh_edges))])
-        if graph_drip_candidate_pool_limit is not None and int_value(graph_drip_candidate_pool_limit) > 0:
-            fallback_command.extend(["--candidate-pool-limit", str(max(1, int_value(graph_drip_candidate_pool_limit)))])
+        if effective_graph_drip_max_refresh_nodes is not None and int_value(effective_graph_drip_max_refresh_nodes) > 0:
+            fallback_command.extend(["--max-refresh-nodes", str(int_value(effective_graph_drip_max_refresh_nodes))])
+        if effective_graph_drip_max_refresh_edges is not None and int_value(effective_graph_drip_max_refresh_edges) > 0:
+            fallback_command.extend(["--max-refresh-edges", str(int_value(effective_graph_drip_max_refresh_edges))])
+        if effective_graph_drip_candidate_pool_limit is not None and int_value(effective_graph_drip_candidate_pool_limit) > 0:
+            fallback_command.extend(["--candidate-pool-limit", str(max(1, int_value(effective_graph_drip_candidate_pool_limit)))])
         fallback_started = time.monotonic()
         fallback_stdout = ""
         fallback_stderr = ""
@@ -20482,7 +21414,7 @@ def auto_maintenance_resource_launch(
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=max(120, int(float(graph_drip_budget_seconds) + 360)),
+                timeout=max(120, int(effective_graph_drip_budget_seconds + 360)),
             )
             fallback_returncode = fallback_completed.returncode
             fallback_stdout = fallback_completed.stdout or ""
@@ -20500,6 +21432,13 @@ def auto_maintenance_resource_launch(
         fallback_execution = fallback_payload.get("execution") if isinstance(fallback_payload.get("execution"), dict) else {}
         fallback_execution_ok = fallback_execution.get("ok") if isinstance(fallback_execution, dict) else None
         fallback_execution_returncode = fallback_execution.get("returncode") if isinstance(fallback_execution, dict) else None
+        fallback_child_payload = parse_json_object_from_stdout(str(fallback_execution.get("stdout_tail") or "")) if isinstance(fallback_execution, dict) else {}
+        fallback_child_status = maintenance_child_defer_status(fallback_child_payload)
+        fallback_child_diagnostics = (
+            [str(item) for item in fallback_child_payload.get("diagnostics", []) if item]
+            if isinstance(fallback_child_payload.get("diagnostics"), list)
+            else []
+        )
         if fallback_blocked_reasons:
             fallback_status = "resource_blocked"
             fallback_diagnostics.extend(f"resource_blocked:{item}" for item in fallback_blocked_reasons)
@@ -20510,6 +21449,12 @@ def auto_maintenance_resource_launch(
             fallback_status = "resource_launcher_timeout"
         elif fallback_diagnostics:
             fallback_status = "resource_launcher_failed"
+        elif fallback_child_status in {"skipped_lock_held", "deferred_conflicting_lease"}:
+            fallback_status = fallback_child_status
+            fallback_diagnostics.extend(fallback_child_diagnostics or [fallback_child_status])
+        elif fallback_child_payload and fallback_child_payload.get("ok") is False:
+            fallback_status = "child_failed"
+            fallback_diagnostics.extend(fallback_child_diagnostics or ["graph_drip_child_failed"])
         elif fallback_payload.get("ok") is True and (fallback_execution_ok is True or fallback_execution_returncode == 0):
             fallback_status = "completed"
         elif fallback_payload.get("ok") is True:
@@ -20527,12 +21472,12 @@ def auto_maintenance_resource_launch(
             "status": fallback_status,
             "resource_class": "probe",
             "resource_kind": settings.get("resource_kind"),
-            "batch_limit": max(1, int_value(graph_drip_batch_limit, 25)),
-            "budget_seconds": max(1.0, float(graph_drip_budget_seconds)),
-            "refresh_chunk_size": max(1, int_value(graph_drip_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE)),
-            "max_refresh_nodes": graph_drip_max_refresh_nodes,
-            "max_refresh_edges": graph_drip_max_refresh_edges,
-            "candidate_pool_limit": graph_drip_candidate_pool_limit,
+            "batch_limit": effective_graph_drip_batch_limit,
+            "budget_seconds": effective_graph_drip_budget_seconds,
+            "refresh_chunk_size": effective_graph_drip_refresh_chunk_size,
+            "max_refresh_nodes": effective_graph_drip_max_refresh_nodes,
+            "max_refresh_edges": effective_graph_drip_max_refresh_edges,
+            "candidate_pool_limit": effective_graph_drip_candidate_pool_limit,
             "returncode": fallback_returncode,
             "elapsed_ms": fallback_elapsed_ms,
             "resource_ok": fallback_payload.get("ok"),
@@ -20544,6 +21489,11 @@ def auto_maintenance_resource_launch(
                 "stderr_tail": fallback_execution.get("stderr_tail") if isinstance(fallback_execution, dict) else None,
                 "stdout_tail": fallback_execution.get("stdout_tail") if isinstance(fallback_execution, dict) else None,
                 "systemd": fallback_execution.get("systemd") if isinstance(fallback_execution, dict) else None,
+            },
+            "child": {
+                key: fallback_child_payload.get(key)
+                for key in ("ok", "status", "mutates", "target", "selected_count", "remaining_count", "diagnostics")
+                if key in fallback_child_payload
             },
             "command": fallback_command,
             "exact_command": shlex.join(fallback_command),
@@ -20557,8 +21507,13 @@ def auto_maintenance_resource_launch(
         else:
             status = "resource_blocked_graph_drip_failed"
             diagnostics.append(f"graph_drip_fallback_{fallback_status}")
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     payload_ok = status in {"completed", "completed_without_execution_summary"}
-    fallback_ok = bool(fallback_graph_drip.get("ok")) if fallback_graph_drip else False
+    fallback_ok = (
+        bool(fallback_index_drip.get("ok"))
+        if fallback_index_drip
+        else (bool(fallback_graph_drip.get("ok")) if fallback_graph_drip else False)
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "auto_maintenance_resource_launch",
@@ -20571,6 +21526,9 @@ def auto_maintenance_resource_launch(
         "target": target,
         "reason": reason,
         "live_tail_fast_path": live_tail_fast_path,
+        "index_drip_on_block": effective_index_drip_on_block,
+        "index_drip_on_block_source": "profile_default" if index_drip_on_block is None else "explicit",
+        "fallback_index_drip": fallback_index_drip,
         "graph_drip_on_block": effective_graph_drip_on_block,
         "graph_drip_on_block_source": "profile_default" if graph_drip_on_block is None else "explicit",
         "fallback_graph_drip": fallback_graph_drip,
@@ -20961,7 +21919,7 @@ def process_is_alive(pid: int) -> bool:
 
 def graph_rebuild_tmp_pid(path: Path) -> int:
     name = path.name
-    for suffix in ("-wal", "-shm"):
+    for suffix in ("-wal", "-shm", "-journal"):
         if name.endswith(suffix):
             name = name[: -len(suffix)]
             break
@@ -20980,7 +21938,7 @@ def graph_rebuild_tmp_entries(aoa_root: Path) -> list[dict[str, Any]]:
             continue
         name = path.name
         base_name = name
-        for suffix in ("-wal", "-shm"):
+        for suffix in ("-wal", "-shm", "-journal"):
             if base_name.endswith(suffix):
                 base_name = base_name[: -len(suffix)]
                 break
@@ -21340,6 +22298,24 @@ def expected_catchup_remaining_diagnostic(diagnostic: str) -> bool:
     return diagnostic.endswith(":route_signal_classifier_mismatch")
 
 
+def auto_maintenance_has_remaining_route_readiness_backlog(maintenance: dict[str, Any]) -> bool:
+    action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
+    if int_value(action_counts.get("remaining")) <= 0:
+        return False
+    actions = maintenance.get("actions") if isinstance(maintenance.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("id") or "") != "route_readiness":
+            continue
+        if str(action.get("status") or "") != "remaining":
+            continue
+        result = action.get("result") if isinstance(action.get("result"), dict) else {}
+        if int_value(result.get("remaining_count")) > 0 or int_value(action.get("dirty_count")) > 0:
+            return True
+    return False
+
+
 SEARCH_FULL_REBUILD_STATUSES = {"missing", "empty", "sqlite_error"}
 SEARCH_FULL_REBUILD_REASONS = {"search_schema_mismatch", "search_route_index_empty", "search_route_terms_empty"}
 
@@ -21372,6 +22348,7 @@ def auto_maintenance_expected_catchup_remaining(
         or maintenance.get("atlas_repair_limited")
         or int_value(maintenance.get("search_repair_remaining_count")) > 0
         or int_value(maintenance.get("atlas_repair_remaining_count")) > 0
+        or auto_maintenance_has_remaining_route_readiness_backlog(maintenance)
     )
     if not expected_remaining:
         return False, diagnostics
@@ -25616,42 +26593,72 @@ def agent_event_shape_sample(
 
 def agent_event_audit_route_probe(aoa_root: Path, session_label: str, *, limit: int = 5) -> list[dict[str, Any]]:
     probes: list[dict[str, Any]] = []
-    for route, classes in [
-        ("agent-responses", None),
-        ("agent-progress-updates", ["assistant_progress_update"]),
-        ("agent-closeouts", ["assistant_final_closeout"]),
+    for route, classes, route_kind in [
+        ("agent-responses", None, "event_route"),
+        ("agent-progress-updates", ["assistant_progress_update"], "event_route"),
+        ("agent-closeouts", ["assistant_final_closeout"], "event_route"),
+        ("agent-reasoning-windows", ["assistant_reasoning_boundary"], "window_route"),
     ]:
         started = time.monotonic()
-        payload = agent_event_route_search(
-            aoa_root=aoa_root,
-            session=session_label,
-            agent_events=classes,
-            limit=limit,
-            include_stream_copies=False,
-            explain=False,
-        )
+        if route_kind == "window_route":
+            payload = agent_event_windows(
+                aoa_root=aoa_root,
+                session=session_label,
+                agent_events=classes,
+                limit=limit,
+                before=1,
+                after=2,
+                include_stream_copies=False,
+                explain=False,
+            )
+        else:
+            payload = agent_event_route_search(
+                aoa_root=aoa_root,
+                session=session_label,
+                agent_events=classes,
+                limit=limit,
+                include_stream_copies=False,
+                explain=False,
+            )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        windows = payload.get("windows") if isinstance(payload.get("windows"), list) else []
         stream_sources = [item for item in results if isinstance(item, dict) and item.get("agent_event_source") == "event_msg_stream"]
+        if route_kind == "window_route":
+            sample_refs = [
+                {
+                    "event_id": item.get("event_id"),
+                    "agent_event": (item.get("anchor") or {}).get("agent_event") if isinstance(item.get("anchor"), dict) else "",
+                    "agent_event_source": "",
+                    "raw_ref": (item.get("refs") or {}).get("raw") if isinstance(item.get("refs"), dict) else "",
+                    "segment_index": (item.get("refs") or {}).get("segment_index") if isinstance(item.get("refs"), dict) else "",
+                }
+                for item in windows[: min(3, len(windows))]
+                if isinstance(item, dict)
+            ]
+        else:
+            sample_refs = [
+                {
+                    "event_id": item.get("event_id"),
+                    "agent_event": item.get("agent_event"),
+                    "agent_event_source": item.get("agent_event_source"),
+                    "raw_ref": (item.get("refs") or {}).get("raw") if isinstance(item.get("refs"), dict) else "",
+                    "segment_index": (item.get("refs") or {}).get("segment_index") if isinstance(item.get("refs"), dict) else "",
+                }
+                for item in results[: min(3, len(results))]
+                if isinstance(item, dict)
+            ]
         probes.append(
             {
                 "route": route,
+                "route_kind": route_kind,
                 "ok": bool(payload.get("ok")),
                 "elapsed_ms": elapsed_ms,
                 "result_count": len(results),
+                "window_count": len(windows),
                 "stream_copy_result_count": len(stream_sources),
                 "agent_event_sources": sorted({str(item.get("agent_event_source") or "") for item in results if isinstance(item, dict)}),
-                "sample_refs": [
-                    {
-                        "event_id": item.get("event_id"),
-                        "agent_event": item.get("agent_event"),
-                        "agent_event_source": item.get("agent_event_source"),
-                        "raw_ref": (item.get("refs") or {}).get("raw") if isinstance(item.get("refs"), dict) else "",
-                        "segment_index": (item.get("refs") or {}).get("segment_index") if isinstance(item.get("refs"), dict) else "",
-                    }
-                    for item in results[: min(3, len(results))]
-                    if isinstance(item, dict)
-                ],
+                "sample_refs": sample_refs,
             }
         )
     return probes
@@ -31906,13 +32913,33 @@ def search_shard_overlaps_date_filter(shard_key: str, date_from: str | None, dat
     return True
 
 
-def search_result_order_key(result: dict[str, Any], *, query: str) -> tuple[float, int, str]:
+def search_result_event_sort_value(result: dict[str, Any]) -> int:
+    for key in ("raw_line", "line"):
+        value = int_value(result.get(key), 0)
+        if value > 0:
+            return value
+    event_id = str(result.get("event_id") or "")
+    if event_id.isdigit():
+        return int(event_id)
+    doc_id = str(result.get("doc_id") or "")
+    match = re.search(r":(\d+):(\d+)$", doc_id)
+    if match:
+        return int(match.group(1)) * 1_000_000 + int(match.group(2))
+    return 0
+
+
+def search_result_order_key(result: dict[str, Any], *, query: str) -> tuple[float, int, int, str]:
     try:
         rank = float(result.get("rank") or 0.0)
     except (TypeError, ValueError):
         rank = 0.0
     rank_key = rank if fts_query_from_user(query) else 0.0
-    return (rank_key, -ymd_sort_value(result.get("session_date")), str(result.get("doc_id") or ""))
+    return (
+        rank_key,
+        -ymd_sort_value(result.get("session_date")),
+        -search_result_event_sort_value(result),
+        str(result.get("doc_id") or ""),
+    )
 
 
 def search_shard_fanout_unavailable_payload(
@@ -33431,6 +34458,54 @@ def search_agent_event_documents(
     }
 
 
+def agent_event_route_quality_summary(results: list[dict[str, Any]], *, query: str) -> dict[str, Any]:
+    agent_event_counts: Counter[str] = Counter()
+    freshness_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    raw_ref_present_count = 0
+    segment_ref_present_count = 0
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        agent_event_counts[str(result.get("agent_event") or "unknown")] += 1
+        freshness = result.get("freshness") if isinstance(result.get("freshness"), dict) else {}
+        freshness_counts[str(freshness.get("status") or "unverifiable")] += 1
+        source_counts[str(result.get("agent_event_source") or "unknown")] += 1
+        refs = result.get("refs") if isinstance(result.get("refs"), dict) else {}
+        if refs.get("raw") or result.get("raw_ref"):
+            raw_ref_present_count += 1
+        if refs.get("segment") or result.get("segment_ref"):
+            segment_ref_present_count += 1
+    latest = results[0] if results else {}
+    latest_refs = latest.get("refs") if isinstance(latest.get("refs"), dict) else {}
+    return {
+        "result_count": len(results),
+        "ordered_by": "query_rank_then_session_date_then_event_position_desc",
+        "query_rank_active": bool(fts_query_from_user(query)),
+        "agent_event_counts": dict(sorted(agent_event_counts.items())),
+        "freshness_counts": dict(sorted(freshness_counts.items())),
+        "fresh_result_count": int_value(freshness_counts.get("fresh")),
+        "stale_result_count": int_value(freshness_counts.get("stale")),
+        "unverifiable_result_count": int_value(freshness_counts.get("unverifiable")),
+        "stale_result_present": int_value(freshness_counts.get("stale")) > 0,
+        "source_counts": dict(sorted(source_counts.items())),
+        "raw_ref_present_count": raw_ref_present_count,
+        "segment_ref_present_count": segment_ref_present_count,
+        "latest_result": {
+            "event_id": latest.get("event_id") if isinstance(latest, dict) else None,
+            "segment_id": latest.get("segment_id") if isinstance(latest, dict) else None,
+            "agent_event": latest.get("agent_event") if isinstance(latest, dict) else None,
+            "freshness": (
+                (latest.get("freshness") or {}).get("status")
+                if isinstance(latest, dict) and isinstance(latest.get("freshness"), dict)
+                else None
+            ),
+            "raw": latest_refs.get("raw") if isinstance(latest_refs, dict) else latest.get("raw_ref") if isinstance(latest, dict) else None,
+            "segment": latest_refs.get("segment") if isinstance(latest_refs, dict) else latest.get("segment_ref") if isinstance(latest, dict) else None,
+        },
+    }
+
+
 def agent_event_route_search(
     *,
     aoa_root: Path,
@@ -33483,6 +34558,7 @@ def agent_event_route_search(
         "bounded_timeout": route_payload.get("bounded_timeout") if isinstance(route_payload.get("bounded_timeout"), dict) else {},
         "result_count": len(results),
         "results": results,
+        "quality": agent_event_route_quality_summary(results, query=query),
         "diagnostics": route_payload.get("diagnostics", []),
         "next_route": "Use refs.segment_index/raw for authority; this route only narrows assistant event evidence.",
     }
@@ -33574,6 +34650,7 @@ def agent_event_windows(
     before: int = 3,
     after: int = 6,
     provider: str = "portable_sqlite",
+    explain: bool = True,
     include_stream_copies: bool = False,
     use_shards: bool = True,
     max_shards: int = 24,
@@ -33588,7 +34665,7 @@ def agent_event_windows(
         task_episode_id=task_episode_id,
         agent_events=classes,
         provider=provider,
-        explain=True,
+        explain=explain,
         include_stream_copies=include_stream_copies,
         use_shards=use_shards,
         max_shards=max_shards,
@@ -33617,7 +34694,7 @@ def agent_event_windows(
             task_episode_id=task_episode_id,
             agent_events=AGENT_RESPONSE_ROUTE_CLASSES,
             provider=provider,
-            explain=True,
+            explain=explain,
             include_stream_copies=include_stream_copies,
             use_shards=use_shards,
             max_shards=max_shards,
@@ -33832,12 +34909,20 @@ def compact_goal_lifecycle(lifecycle: dict[str, Any], *, session_label: str, ses
         "goal_instance_id": lifecycle.get("goal_instance_id"),
         "status": lifecycle.get("status"),
         "objective": lifecycle.get("objective"),
+        "objective_source": lifecycle.get("objective_source", ""),
+        "observed_goal": lifecycle.get("observed_goal", {}),
         "event_count": lifecycle.get("event_count"),
         "event_kinds": lifecycle.get("event_kinds", []),
         "event_ids": lifecycle.get("event_ids", []),
         "task_episode_ids": lifecycle.get("task_episode_ids", []),
         "ambiguity_flags": lifecycle.get("ambiguity_flags", []),
         "usage": lifecycle.get("usage", {}),
+        "state_observations": lifecycle.get("state_observations", [])[:8]
+        if isinstance(lifecycle.get("state_observations"), list)
+        else [],
+        "usage_observations": lifecycle.get("usage_observations", [])[:8]
+        if isinstance(lifecycle.get("usage_observations"), list)
+        else [],
         "refs": {
             "first": lifecycle.get("first_ref", {}),
             "last": lifecycle.get("last_ref", {}),
@@ -34541,6 +35626,657 @@ def trace_route(
     return payload
 
 
+LITERAL_QUERY_KIND_EXACT_PHRASE = "exact_phrase"
+LITERAL_QUERY_KIND_PATH = "path"
+LITERAL_QUERY_KIND_RAW_REF = "raw_ref"
+LITERAL_QUERY_KIND_SESSION_ID = "session_id"
+LITERAL_QUERY_KIND_COMMAND = "command"
+LITERAL_QUERY_KIND_HOOK_RECEIPT = "hook_receipt"
+LITERAL_QUERY_KIND_ERROR_TEXT = "error_text"
+LITERAL_QUERY_KIND_ENTITY_ANCHOR = "entity_anchor"
+LITERAL_QUERY_KIND_HUMAN_PHRASE = "human_phrase"
+LITERAL_QUERY_KIND_EMPTY = "empty"
+
+LITERAL_QUERY_ROUTE_SIGNAL_LAYER_PRIORITY = {
+    "hook_health": 0,
+    "mcp": 1,
+    "skill": 2,
+    "tool": 3,
+    "api": 4,
+    "agent_event": 5,
+    "goal": 6,
+    "script": 7,
+    "validator": 8,
+    "test": 9,
+    "eval": 10,
+    "graph": 11,
+    "memory": 12,
+    "failure_mode": 13,
+    "mutation_surface": 14,
+    "decision_thread": 15,
+    "git": 16,
+    "github": 17,
+    "delivery_state": 18,
+    "external_snapshot": 19,
+    "plugin": 20,
+    "agent": 21,
+    "playbook": 22,
+    "technique": 23,
+    "mechanic": 24,
+    "path": 25,
+    "entity": 26,
+}
+LITERAL_QUERY_ROUTE_SIGNAL_LAYERS = set(LITERAL_QUERY_ROUTE_SIGNAL_LAYER_PRIORITY)
+LITERAL_QUERY_ROUTE_SIGNAL_CONFIDENCE_PRIORITY = {
+    "high": 0,
+    "medium": 1,
+    "low": 2,
+}
+LITERAL_QUERY_COMMAND_EXECUTABLES = {
+    "bash",
+    "cat",
+    "gh",
+    "git",
+    "node",
+    "npm",
+    "pip",
+    "pnpm",
+    "pytest",
+    "python",
+    "python3",
+    "rg",
+    "sed",
+    "sh",
+    "uv",
+}
+
+
+def literal_query_looks_like_path(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        "/" in text
+        or re.search(
+            r"\.(?:md|py|json|toml|ya?ml|txt|sh|mjs|ts|tsx|js|jsx|rs|go|java|rb|sql)(?::\d+)?(?:$|::)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def literal_query_command_anchor(query: str) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    if not parts:
+        return ""
+    executable = Path(parts[0]).name.casefold()
+    if executable not in LITERAL_QUERY_COMMAND_EXECUTABLES:
+        return ""
+    if executable in {"python", "python3", "pytest", "node", "bash", "sh"}:
+        for part in parts[1:]:
+            if part.startswith("-"):
+                continue
+            if literal_query_looks_like_path(part):
+                return part.split("::", 1)[0]
+            break
+    return executable
+
+
+def literal_query_structured_route_signal_candidates(
+    query: str,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    query_slug = route_key_slug(query, fallback="")
+    term_count = len(str(query or "").split())
+    path_like_query = literal_query_looks_like_path(query)
+    selected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not trace_route_candidate_is_specific(candidate):
+            continue
+        route_signal = str(candidate.get("route_signal") or "")
+        layer = str(candidate.get("layer") or "")
+        key = str(candidate.get("key") or "")
+        source = str(candidate.get("source") or "")
+        if not route_signal or layer not in LITERAL_QUERY_ROUTE_SIGNAL_LAYERS:
+            continue
+        if term_count > 3 and key == query_slug and source in {"canonical_alias", "failure_alias", "named_entity_alias"}:
+            continue
+        if layer == "entity" and term_count > 3 and source in {"canonical_alias", "named_entity_alias"}:
+            continue
+        if path_like_query and source == "tool_alias":
+            continue
+        selected.append(candidate)
+    selected.sort(
+        key=lambda item: (
+            LITERAL_QUERY_ROUTE_SIGNAL_CONFIDENCE_PRIORITY.get(str(item.get("confidence") or ""), 3),
+            LITERAL_QUERY_ROUTE_SIGNAL_LAYER_PRIORITY.get(str(item.get("layer") or ""), 99),
+            str(item.get("route_signal") or ""),
+        )
+    )
+    return selected
+
+
+def literal_query_shape(query: str) -> dict[str, Any]:
+    text = str(query or "").strip()
+    lowered = text.casefold()
+    signals: list[str] = []
+
+    def add(signal: str) -> None:
+        if signal not in signals:
+            signals.append(signal)
+
+    if not text:
+        add(LITERAL_QUERY_KIND_EMPTY)
+    if re.fullmatch(r"raw:(?:line|block):[A-Za-z0-9_.:/#-]+", text):
+        add(LITERAL_QUERY_KIND_RAW_REF)
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text):
+        add(LITERAL_QUERY_KIND_SESSION_ID)
+    command_anchor = literal_query_command_anchor(text)
+    if command_anchor:
+        add(LITERAL_QUERY_KIND_COMMAND)
+    if "/" in text or re.search(r"\.(?:md|py|json|toml|ya?ml|txt|sh|mjs|ts|tsx|js|jsx|rs|go|java|rb|sql)(?::\d+)?$", text, flags=re.IGNORECASE):
+        add(LITERAL_QUERY_KIND_PATH)
+    if (
+        "receipt" in lowered
+        or "userpromptsubmit" in lowered
+        or "sessionstart" in lowered
+        or "precompact" in lowered
+        or "postcompact" in lowered
+        or "typing_prompt_bridge" in lowered
+        or "typing_bridge" in lowered
+        or "prompt_hook" in lowered
+    ):
+        add(LITERAL_QUERY_KIND_HOOK_RECEIPT)
+    if has_failed_command_or_test_signal(text) or re.search(r"\b(traceback|exception|error|failed|failure|timeout|timed out)\b", lowered):
+        add(LITERAL_QUERY_KIND_ERROR_TEXT)
+    if text and len(text.split()) <= 4 and any(
+        marker in lowered
+        for marker in (
+            "mcp",
+            "skill",
+            "hook",
+            "tool",
+            "api",
+            "graph",
+            "goal",
+            "eval",
+            "validator",
+            "playbook",
+            "technique",
+            "mechanic",
+            "memory",
+        )
+    ):
+        add(LITERAL_QUERY_KIND_ENTITY_ANCHOR)
+    if text and not signals:
+        add(LITERAL_QUERY_KIND_EXACT_PHRASE if len(text.split()) <= 8 else LITERAL_QUERY_KIND_HUMAN_PHRASE)
+    if text and signals == [LITERAL_QUERY_KIND_EMPTY]:
+        signals = [LITERAL_QUERY_KIND_EXACT_PHRASE]
+    primary = LITERAL_QUERY_KIND_COMMAND if LITERAL_QUERY_KIND_COMMAND in signals else (signals[0] if signals else LITERAL_QUERY_KIND_HUMAN_PHRASE)
+    return {
+        "primary": primary,
+        "signals": signals,
+        "command_anchor": command_anchor,
+        "query_chars": len(text),
+        "term_count": len(text.split()) if text else 0,
+    }
+
+
+def literal_query_command_line(
+    *,
+    aoa_root: Path,
+    query: str,
+    session: str | None = None,
+    doc_type: str | None = None,
+    route_layer: str | None = None,
+    route_signal: str | None = None,
+    agent_event: str | None = None,
+    usage_role: str | None = None,
+    task_episode_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    use_shards: bool = False,
+    max_shards: int | None = None,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
+) -> str:
+    command = ["python3", "scripts/aoa_session_memory.py", "search", "--aoa-root", str(aoa_root), "--query", query]
+    for flag, value in (
+        ("--session", session),
+        ("--doc-type", doc_type),
+        ("--route-layer", route_layer),
+        ("--route-signal", route_signal),
+        ("--agent-event", agent_event),
+        ("--usage-role", usage_role),
+        ("--task-episode-id", task_episode_id),
+        ("--date-from", date_from),
+        ("--date-to", date_to),
+    ):
+        if value:
+            command.extend([flag, str(value)])
+    if use_shards:
+        command.append("--use-shards")
+    if max_shards is not None:
+        command.extend(["--max-shards", str(max_shards)])
+    if query_timeout_ms is not None:
+        command.extend(["--query-timeout-ms", str(query_timeout_ms)])
+    command.append("--explain")
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def literal_query_mcp_call(tool_name: str, **kwargs: Any) -> str:
+    rendered = ", ".join(f"{key}={value!r}" for key, value in kwargs.items() if value not in (None, "", [], {}))
+    return f"mcp:{tool_name}({rendered})"
+
+
+def literal_query_plan(
+    *,
+    aoa_root: Path,
+    query: str = "",
+    kind: str = "auto",
+    session: str | None = None,
+    doc_type: str | None = None,
+    route_layer: str | None = None,
+    route_signal: str | None = None,
+    agent_event: str | None = None,
+    usage_role: str | None = None,
+    task_episode_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    max_shards: int = 24,
+    query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
+) -> dict[str, Any]:
+    now = utc_now()
+    text = str(query or "").strip()
+    normalized_kind = normalize_trace_route_kind(kind)
+    if normalized_kind not in TRACE_ROUTE_KINDS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_literal_query_plan",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "query": text,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "diagnostics": [f"unknown trace kind: {kind}"],
+        }
+    shape = literal_query_shape(text)
+    command_anchor = str(shape.get("command_anchor") or "")
+    route_anchor_text = command_anchor if command_anchor else text
+    diagnostics = trace_identity_diagnostics(text, kind=normalized_kind) if text else []
+    route_candidates = trace_route_lookup_candidates(
+        trace_route_candidates(route_anchor_text, kind=normalized_kind),
+        suppress_generic=bool(diagnostics),
+    ) if route_anchor_text else []
+    specific_route_candidates = [
+        candidate
+        for candidate in route_candidates
+        if trace_route_candidate_is_specific(candidate)
+    ]
+    structured_route_signal_candidates = literal_query_structured_route_signal_candidates(route_anchor_text, route_candidates) if route_anchor_text else []
+    structured_route_signal_candidate = structured_route_signal_candidates[0] if structured_route_signal_candidates else {}
+    lookup = entity_registry_lookup(
+        aoa_root=aoa_root,
+        anchor=route_anchor_text,
+        kind=normalized_kind,
+        include_unknown=False,
+    ) if route_anchor_text else {"match_count": 0, "entries": []}
+    registry_entries = lookup.get("entries") if isinstance(lookup.get("entries"), list) else []
+    registered_anchor = bool(registry_entries)
+    fts_query = fts_query_from_user(text)
+    has_literal_text = bool(fts_query)
+    typed_anchor_shape = shape.get("primary") in {
+        LITERAL_QUERY_KIND_ENTITY_ANCHOR,
+        LITERAL_QUERY_KIND_PATH,
+        LITERAL_QUERY_KIND_COMMAND,
+        LITERAL_QUERY_KIND_RAW_REF,
+        LITERAL_QUERY_KIND_SESSION_ID,
+    }
+    typed_route_allowed = bool(
+        registered_anchor
+        or (
+            specific_route_candidates
+            and (normalized_kind != "auto" or typed_anchor_shape)
+        )
+    )
+    structured_filters = {
+        "session": session or "",
+        "doc_type": doc_type or "",
+        "route_layer": route_layer or "",
+        "route_signal": route_signal or "",
+        "agent_event": agent_event or "",
+        "usage_role": usage_role or "",
+        "task_episode_id": task_episode_id or "",
+        "date_from": date_from or "",
+        "date_to": date_to or "",
+    }
+    has_structured_filters = any(bool(value) for value in structured_filters.values())
+    catalog = read_search_catalog(aoa_root)
+    shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
+    scoped_by_date_or_session = bool(session or date_from or date_to)
+    candidate_shards = [
+        item
+        for item in shards
+        if isinstance(item, dict)
+        and search_shard_overlaps_date_filter(str(item.get("shard") or ""), date_from, date_to)
+    ]
+    if session:
+        try:
+            record = resolve_session_record(aoa_root, session)
+            session_shard = search_shard_key_for_session(
+                str(record.get("session_label") or ""),
+                session_record_date(record),
+            )
+            candidate_shards = [item for item in candidate_shards if str(item.get("shard") or "") == session_shard]
+        except ValueError as exc:
+            diagnostics.append(str(exc))
+    raw_text_fallback = search_raw_text_fallback_route_packet(
+        aoa_root=aoa_root,
+        shard_rows=candidate_shards,
+        candidate_shard_count=len(candidate_shards),
+        queried_shard_count=min(len(candidate_shards), max(1, int_value(max_shards, 24))),
+    )
+
+    routes: list[dict[str, Any]] = []
+
+    def add_route(route_id: str, reason: str, command: str, *, cost: str = "low", authority: str = "route_refs") -> None:
+        if any(item.get("route_id") == route_id for item in routes):
+            return
+        routes.append(
+            {
+                "route_id": route_id,
+                "reason": reason,
+                "estimated_cost": cost,
+                "authority": authority,
+                "command": command,
+            }
+        )
+
+    if agent_event and not has_literal_text:
+        add_route(
+            "agent_event_route",
+            "agent_event filter can use the dedicated answer/progress/reasoning route without raw-text FTS",
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query="",
+                session=session,
+                doc_type=doc_type or "event",
+                agent_event=agent_event,
+                task_episode_id=task_episode_id,
+                max_shards=max_shards,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+        )
+    if task_episode_id and not has_literal_text:
+        add_route(
+            "task_episode_route",
+            "task_episode_id is a structured generated route; avoid literal FTS first",
+            f"python3 scripts/aoa_session_memory.py task-episodes all --aoa-root {shlex.quote(str(aoa_root))} --task-episode-id {shlex.quote(task_episode_id)}",
+            cost="low",
+        )
+    if LITERAL_QUERY_KIND_RAW_REF in shape.get("signals", []) and text:
+        add_route(
+            "raw_ref_scoped_verification",
+            "raw refs are session-scoped evidence coordinates; verify through refs with an explicit session before raw-text fallback",
+            literal_query_mcp_call(
+                "aoa_session_freshness_check",
+                refs=[text],
+                session=session or "<required-session-label-or-id>",
+            ),
+            cost="low",
+            authority="raw_segment_refs",
+        )
+    if LITERAL_QUERY_KIND_HOOK_RECEIPT in shape.get("signals", []) and text:
+        likely_error = bool(
+            re.search(r"\b(error|failed|failure|timeout|timed out)\b", text.casefold())
+            or "typing_prompt_bridge_failed" in text.casefold()
+        )
+        event_name = "UserPromptSubmit" if "prompt" in text.casefold() or "userpromptsubmit" in text.casefold() else ""
+        add_route(
+            "hook_receipts",
+            "query looks like hook receipt action/status evidence; inspect receipt records before full-text search",
+            literal_query_mcp_call(
+                "aoa_session_hook_receipts",
+                event_name=event_name or "UserPromptSubmit",
+                session=session,
+                date_from=date_from,
+                only_errors=likely_error,
+                limit=20,
+            ),
+            cost="low",
+            authority="hook_receipt_refs",
+        )
+    if LITERAL_QUERY_KIND_COMMAND in shape.get("signals", []) and structured_route_signal_candidate:
+        candidate_route_signal = str(structured_route_signal_candidate.get("route_signal") or "")
+        add_route(
+            "command_structured_search",
+            "query is a command literal; inspect structured refs for the command anchor before exact raw-text recall",
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query="",
+                session=session,
+                doc_type=doc_type or "event",
+                route_signal=candidate_route_signal,
+                date_from=date_from,
+                date_to=date_to,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+            authority="generated_search_refs",
+        )
+    if typed_route_allowed and text:
+        route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+        add_route(
+            "entity_usage_audit",
+            "query resolves to a typed operational anchor; inspect structured usage/consequence before raw-text fallback",
+            " ".join(
+                shlex.quote(part)
+                for part in [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "entity-usage-audit",
+                    route_anchor_text,
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--kind",
+                    route_kind,
+                ]
+                + (["--session", session] if session else [])
+                + ["--limit", "8", "--per-route-limit", "12"]
+            ),
+            cost="low",
+        )
+        add_route(
+            "trace_route",
+            "route candidates are available; trace exact route refs without opening raw text",
+            " ".join(
+                shlex.quote(part)
+                for part in [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "trace-route",
+                    route_anchor_text,
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--kind",
+                    route_kind,
+                    "--doc-type",
+                    doc_type or "event",
+                    "--limit",
+                    "20",
+                    "--per-route-limit",
+                    "8",
+                ]
+                + (["--session", session] if session else [])
+            ),
+            cost="low",
+        )
+        add_route(
+            "graph_neighborhood",
+            "graph topology can show nearby skills/MCP/hooks/tools/events after typed anchor resolution",
+            " ".join(
+                shlex.quote(part)
+                for part in [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "graph-neighborhood",
+                    route_anchor_text,
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--kind",
+                    route_kind,
+                    "--depth",
+                    "1",
+                    "--limit",
+                    "20",
+                ]
+            ),
+            cost="medium",
+        )
+    if structured_route_signal_candidate:
+        candidate_route_signal = str(structured_route_signal_candidate.get("route_signal") or "")
+        add_route(
+            "route_signal_structured_search",
+            "query resolves to a concrete route signal; inspect structured route/search refs before literal raw-text fallback",
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query="",
+                session=session,
+                doc_type=doc_type or "event",
+                route_signal=candidate_route_signal,
+                date_from=date_from,
+                date_to=date_to,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+            authority="generated_search_refs",
+        )
+    if has_structured_filters and not has_literal_text:
+        add_route(
+            "structured_search",
+            "structured filters can read route/search indexes without FTS or body hydration",
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query="",
+                session=session,
+                doc_type=doc_type,
+                route_layer=route_layer,
+                route_signal=route_signal,
+                agent_event=agent_event,
+                usage_role=usage_role,
+                task_episode_id=task_episode_id,
+                date_from=date_from,
+                date_to=date_to,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+        )
+    if has_literal_text:
+        use_shards = scoped_by_date_or_session and raw_text_fallback.get("status") == "shard_full_text_ready"
+        route_id = "scoped_shard_full_text" if use_shards else "monolith_raw_text_fallback"
+        reason = (
+            "scoped full-text shard is ready for this bounded literal query"
+            if use_shards
+            else "literal raw-text recall needs bounded monolith fallback unless a scoped full-text shard is materialized"
+        )
+        add_route(
+            route_id,
+            reason,
+            literal_query_command_line(
+                aoa_root=aoa_root,
+                query=text,
+                session=session,
+                doc_type=doc_type,
+                route_layer=route_layer,
+                route_signal=route_signal,
+                agent_event=agent_event,
+                usage_role=usage_role,
+                task_episode_id=task_episode_id,
+                date_from=date_from,
+                date_to=date_to,
+                use_shards=use_shards,
+                max_shards=max_shards if use_shards else None,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="medium" if use_shards else "high",
+            authority="generated_search_refs",
+        )
+    if not routes:
+        add_route(
+            "empty_or_unresolved_route",
+            "no literal text, typed anchor, or structured filter was provided",
+            "python3 scripts/aoa_session_memory.py search --aoa-root "
+            + shlex.quote(str(aoa_root))
+            + " --query '' --limit 20 --explain",
+            cost="low",
+        )
+
+    primary_route = routes[0]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_literal_query_plan",
+        "generated_at": now,
+        "ok": True,
+        "mutates": False,
+        "truth_status": "literal_query_plan_is_route_advice_not_evidence_truth",
+        "query": text,
+        "normalized_query": fts_query,
+        "route_anchor": route_anchor_text,
+        **trace_kind_payload_fields(kind, normalized_kind),
+        "query_shape": shape,
+        "structured_filters": structured_filters,
+        "inferred_kinds": infer_trace_route_kinds(text, normalized_kind) if text else [],
+        "entity_registry": {
+            "match_count": len(registry_entries),
+            "entries": registry_entries[:5],
+            "omitted_entry_count": max(0, len(registry_entries) - 5),
+        },
+        "route_candidates": route_candidates[:12],
+        "omitted_route_candidate_count": max(0, len(route_candidates) - 12),
+        "structured_route_signal_candidates": structured_route_signal_candidates[:5],
+        "omitted_structured_route_signal_candidate_count": max(0, len(structured_route_signal_candidates) - 5),
+        "primary_route": primary_route,
+        "ordered_routes": routes,
+        "search_projection": {
+            "catalog_status": catalog.get("status"),
+            "active_projection": catalog.get("active_projection") or SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "shard_strategy": catalog.get("shard_strategy") or SEARCH_SHARD_STRATEGY,
+            "candidate_shard_count": len(candidate_shards),
+            "max_shards": max(1, int_value(max_shards, 24)),
+            "raw_text_fallback": raw_text_fallback,
+        },
+        "cost_profile": {
+            "structured_first": primary_route.get("route_id") in {
+                "entity_usage_audit",
+                "trace_route",
+                "structured_search",
+                "route_signal_structured_search",
+                "agent_event_route",
+                "task_episode_route",
+                "raw_ref_scoped_verification",
+                "hook_receipts",
+                "command_structured_search",
+            },
+            "uses_fts_first": primary_route.get("route_id") in {"scoped_shard_full_text", "monolith_raw_text_fallback"},
+            "monolith_fallback_first": primary_route.get("route_id") == "monolith_raw_text_fallback",
+            "query_timeout_ms": normalized_search_fts_query_timeout_ms(query_timeout_ms) if has_literal_text else 0,
+            "exact_recall_preserved_by_fallback": bool(has_literal_text),
+        },
+        "next_command": primary_route.get("command"),
+        "next_expansion_command": raw_text_fallback.get("scoped_full_text_next_commands", [{}])[0].get("command")
+        if primary_route.get("route_id") == "monolith_raw_text_fallback"
+        and raw_text_fallback.get("scoped_full_text_next_commands")
+        else "",
+        "authority_boundary": "This planner chooses a cheap first route; raw transcript and segment indexes remain evidence authority.",
+        "diagnostics": diagnostics,
+    }
+    return payload
+
+
 def graph_paths(aoa_root: Path) -> dict[str, Path]:
     root = aoa_root / GRAPH_ROOT
     return {
@@ -34830,7 +36566,7 @@ def graph_sidecar_artifact_paths(aoa_root: Path) -> dict[str, Path]:
 
 
 def sqlite_companion_paths(path: Path) -> list[Path]:
-    return [Path(f"{path}-wal"), Path(f"{path}-shm")]
+    return [Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal")]
 
 
 def remove_existing_paths(paths: Iterable[Path]) -> list[str]:
@@ -36361,10 +38097,83 @@ class GraphSqliteStore:
             )
         return node_ids, edge_ids
 
-    def _add_aggregate_node(self, node: dict[str, Any]) -> None:
+    def _expected_contrib_row_maps(
+        self,
+        contribution: dict[str, Any],
+    ) -> tuple[dict[str, tuple[str, str, int]], dict[str, tuple[str, str, str, str, int]]]:
+        node_rows: dict[str, tuple[str, str, int]] = {}
+        edge_rows: dict[str, tuple[str, str, str, str, int]] = {}
+        for node in contribution.get("nodes", []) if isinstance(contribution.get("nodes"), list) else []:
+            if not isinstance(node, dict) or not node.get("id"):
+                continue
+            original = dict(node)
+            node_id = str(original.get("id") or "")
+            node_type = str(original.get("type") or "unknown")
+            payload = graph_compact_contribution_payload(original, kind="node")
+            payload["count"] = int_value(payload.get("count"), 1)
+            node_rows[node_id] = (node_type, graph_json(payload), int_value(payload.get("count"), 1))
+        for edge in contribution.get("edges", []) if isinstance(contribution.get("edges"), list) else []:
+            if not isinstance(edge, dict) or not edge.get("source") or not edge.get("target"):
+                continue
+            original = dict(edge)
+            source_node = str(original.get("source") or "")
+            target_node = str(original.get("target") or "")
+            edge_type = str(original.get("type") or "")
+            edge_id = str(original.get("id") or graph_edge_id(source_node, target_node, edge_type))
+            payload = graph_compact_contribution_payload(original, kind="edge")
+            payload["count"] = int_value(payload.get("count"), 1)
+            edge_rows[edge_id] = (
+                edge_type or "unknown",
+                source_node,
+                target_node,
+                graph_json(payload),
+                int_value(payload.get("count"), 1),
+            )
+        return node_rows, edge_rows
+
+    def source_contribution_payloads_match(self, contribution: dict[str, Any]) -> dict[str, Any]:
+        source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
+        source_key = str(source.get("source_key") or "")
+        if not source_key:
+            return {"matches": False, "reason": "missing_source_key"}
+        expected_nodes, expected_edges = self._expected_contrib_row_maps(contribution)
+        current_nodes = {
+            str(row["node_id"]): (str(row["node_type"] or "unknown"), str(row["payload_json"]), int_value(row["count"], 1))
+            for row in self.conn.execute(
+                "SELECT node_id, node_type, payload_json, count FROM node_contribs WHERE source_key = ?",
+                (source_key,),
+            ).fetchall()
+        }
+        current_edges = {
+            str(row["edge_id"]): (
+                str(row["edge_type"] or "unknown"),
+                str(row["source_node"] or ""),
+                str(row["target_node"] or ""),
+                str(row["payload_json"]),
+                int_value(row["count"], 1),
+            )
+            for row in self.conn.execute(
+                "SELECT edge_id, edge_type, source_node, target_node, payload_json, count FROM edge_contribs WHERE source_key = ?",
+                (source_key,),
+            ).fetchall()
+        }
+        node_match = current_nodes == expected_nodes
+        edge_match = current_edges == expected_edges
+        return {
+            "matches": node_match and edge_match,
+            "source_key": source_key,
+            "node_match": node_match,
+            "edge_match": edge_match,
+            "node_count": len(expected_nodes),
+            "edge_count": len(expected_edges),
+            "current_node_count": len(current_nodes),
+            "current_edge_count": len(current_edges),
+        }
+
+    def _add_aggregate_node(self, node: dict[str, Any]) -> tuple[bool, str]:
         node_id = str(node.get("id") or "")
         if not node_id:
-            return
+            return False, ""
         payload = dict(node)
         payload["count"] = int_value(payload.get("count"), 1)
         node_type = str(payload.get("type") or "unknown")
@@ -36375,13 +38184,15 @@ class GraphSqliteStore:
         )
         if cursor.rowcount == 0:
             self.conn.execute("UPDATE nodes SET count = count + ? WHERE id = ?", (int_value(payload.get("count"), 1), node_id))
+            return False, node_type
+        return True, node_type
 
-    def _add_aggregate_edge(self, edge: dict[str, Any]) -> None:
+    def _add_aggregate_edge(self, edge: dict[str, Any]) -> tuple[bool, str]:
         source = str(edge.get("source") or "")
         target = str(edge.get("target") or "")
         edge_type = str(edge.get("type") or "")
         if not source or not target or not edge_type:
-            return
+            return False, ""
         payload = dict(edge)
         payload["id"] = str(payload.get("id") or graph_edge_id(source, target, edge_type))
         payload["count"] = int_value(payload.get("count"), 1)
@@ -36392,6 +38203,50 @@ class GraphSqliteStore:
         )
         if cursor.rowcount == 0:
             self.conn.execute("UPDATE edges SET count = count + ? WHERE id = ?", (int_value(payload.get("count"), 1), payload["id"]))
+            return False, edge_type
+        return True, edge_type
+
+    def _append_aggregate_contribution(
+        self,
+        contribution: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        projection_ready = self.type_counts_projection_ready()
+        inserted_node_counts: Counter[str] = Counter()
+        inserted_edge_counts: Counter[str] = Counter()
+        node_count = 0
+        edge_count = 0
+        for node in contribution.get("nodes", []) if isinstance(contribution.get("nodes"), list) else []:
+            if not isinstance(node, dict):
+                continue
+            if node_count and node_count % 1000 == 0:
+                graph_check_budget(budget_deadline)
+            inserted, node_type = self._add_aggregate_node(node)
+            if node.get("id"):
+                node_count += 1
+            if projection_ready and inserted and node_type:
+                inserted_node_counts[node_type] += 1
+        for edge in contribution.get("edges", []) if isinstance(contribution.get("edges"), list) else []:
+            if not isinstance(edge, dict):
+                continue
+            if edge_count and edge_count % 1000 == 0:
+                graph_check_budget(budget_deadline)
+            inserted, edge_type = self._add_aggregate_edge(edge)
+            if edge.get("source") and edge.get("target"):
+                edge_count += 1
+            if projection_ready and inserted and edge_type:
+                inserted_edge_counts[edge_type] += 1
+        if projection_ready:
+            self._apply_type_count_delta("node", Counter(), inserted_node_counts)
+            self._apply_type_count_delta("edge", Counter(), inserted_edge_counts)
+        return {
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "inserted_node_count": sum(inserted_node_counts.values()),
+            "inserted_edge_count": sum(inserted_edge_counts.values()),
+            "type_counts_projection_ready": projection_ready,
+        }
 
     def _refresh_nodes(self, node_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, int]:
         stats = {"requested_count": len({value for value in node_ids if value}), "chunk_count": 0, "row_count": 0, "missing_count": 0}
@@ -36543,6 +38398,14 @@ class GraphSqliteStore:
     ) -> dict[str, Any]:
         touched_node_ids: set[str] = set()
         touched_edge_ids: set[str] = set()
+        append_only_source_count = 0
+        append_only_node_count = 0
+        append_only_edge_count = 0
+        append_only_inserted_node_count = 0
+        append_only_inserted_edge_count = 0
+        metadata_only_source_count = 0
+        metadata_only_node_count = 0
+        metadata_only_edge_count = 0
         results: list[dict[str, Any]] = []
         for contribution in contributions:
             graph_check_budget(budget_deadline)
@@ -36552,19 +38415,65 @@ class GraphSqliteStore:
                 results.append({"source_key": "", "status": "skipped", "diagnostics": ["missing_source_key"]})
                 continue
             old_node_ids, old_edge_ids = self.source_contribution_ids(source_key)
+            if source.get("status") != "blocked" and (old_node_ids or old_edge_ids):
+                payload_match = self.source_contribution_payloads_match(contribution)
+                if payload_match.get("matches"):
+                    self._insert_source_row(contribution, status="current")
+                    metadata_only_source_count += 1
+                    metadata_only_node_count += int_value(payload_match.get("node_count"))
+                    metadata_only_edge_count += int_value(payload_match.get("edge_count"))
+                    results.append(
+                        {
+                            "source_key": source_key,
+                            "status": "updated",
+                            "node_count": int_value(payload_match.get("node_count")),
+                            "edge_count": int_value(payload_match.get("edge_count")),
+                            "diagnostics": [],
+                            "aggregate_update": "metadata_only",
+                        }
+                    )
+                    continue
             self.conn.execute("DELETE FROM node_contribs WHERE source_key = ?", (source_key,))
             self.conn.execute("DELETE FROM edge_contribs WHERE source_key = ?", (source_key,))
-            touched_node_ids.update(old_node_ids)
-            touched_edge_ids.update(old_edge_ids)
             if source.get("status") == "blocked":
+                touched_node_ids.update(old_node_ids)
+                touched_edge_ids.update(old_edge_ids)
                 self._insert_source_row(contribution, status="blocked")
                 results.append({"source_key": source_key, "status": "blocked", "diagnostics": source.get("diagnostics", [])})
                 continue
             node_ids, edge_ids = self._insert_contrib_rows(contribution)
             self._insert_source_row(contribution, status="current")
-            touched_node_ids.update(node_ids)
-            touched_edge_ids.update(edge_ids)
-            results.append({"source_key": source_key, "status": "updated", "node_count": len(node_ids), "edge_count": len(edge_ids), "diagnostics": []})
+            append_only = not old_node_ids and not old_edge_ids
+            if append_only:
+                append_stats = self._append_aggregate_contribution(contribution, budget_deadline=budget_deadline)
+                append_only_source_count += 1
+                append_only_node_count += int_value(append_stats.get("node_count"))
+                append_only_edge_count += int_value(append_stats.get("edge_count"))
+                append_only_inserted_node_count += int_value(append_stats.get("inserted_node_count"))
+                append_only_inserted_edge_count += int_value(append_stats.get("inserted_edge_count"))
+                results.append(
+                    {
+                        "source_key": source_key,
+                        "status": "updated",
+                        "node_count": len(node_ids),
+                        "edge_count": len(edge_ids),
+                        "diagnostics": [],
+                        "aggregate_update": "append_only",
+                    }
+                )
+                continue
+            touched_node_ids.update(old_node_ids | node_ids)
+            touched_edge_ids.update(old_edge_ids | edge_ids)
+            results.append(
+                {
+                    "source_key": source_key,
+                    "status": "updated",
+                    "node_count": len(node_ids),
+                    "edge_count": len(edge_ids),
+                    "diagnostics": [],
+                    "aggregate_update": "refresh",
+                }
+            )
         graph_check_budget(budget_deadline)
         node_refresh, edge_refresh = self._refresh_touched_aggregates_with_type_counts(
             touched_node_ids,
@@ -36585,6 +38494,14 @@ class GraphSqliteStore:
             "refresh_chunk_size": self.refresh_chunk_size,
             "node_refresh": node_refresh,
             "edge_refresh": edge_refresh,
+            "append_only_source_count": append_only_source_count,
+            "append_only_node_count": append_only_node_count,
+            "append_only_edge_count": append_only_edge_count,
+            "append_only_inserted_node_count": append_only_inserted_node_count,
+            "append_only_inserted_edge_count": append_only_inserted_edge_count,
+            "metadata_only_source_count": metadata_only_source_count,
+            "metadata_only_node_count": metadata_only_node_count,
+            "metadata_only_edge_count": metadata_only_edge_count,
         }
 
     def remove_sources(
@@ -38197,12 +40114,15 @@ def raw_unavailable_recovery_audit_markdown(payload: dict[str, Any]) -> str:
 def graph_source_candidates_for_record(
     record: dict[str, Any],
     *,
+    source_key_filters: Iterable[str] | None = None,
     source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
     source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
     source_hash_stats: dict[str, int] | None = None,
     source_hash_mode: str = "cached",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
+    source_filter = {str(item) for item in source_key_filters or [] if str(item)}
+    include_all_sources = not source_filter
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     session_index_path = session_dir / SESSION_INDEX_JSON
@@ -38218,33 +40138,39 @@ def graph_source_candidates_for_record(
     session_title = str(manifest.get("session_title") or record.get("session_title") or display.get("title") or session_label)
     work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else session_index.get("work_context")
     route_signal_counts = session_index.get("route_signal_counts") if isinstance(session_index.get("route_signal_counts"), dict) else {}
-    candidates = [
-        {
-            **graph_source_metadata(
-                source_type="session",
-                session_id=session_id,
-                session_label=session_label,
-                source_paths=[manifest_path, session_index_path],
-                identity={
-                    "session_title": session_title,
-                    "work_context": work_context if isinstance(work_context, dict) else {},
-                    "route_signal_counts": route_signal_counts,
-                    "goal_lifecycle_counts": session_index.get("goal_lifecycle_counts"),
-                },
-                source_hash_cache_entries=source_hash_cache_entries,
-                source_hash_cache_updates=source_hash_cache_updates,
-                source_hash_stats=source_hash_stats,
-                source_hash_mode=source_hash_mode,
-            ),
-            "session_dir": str(session_dir),
-        }
-    ]
+    candidates: list[dict[str, Any]] = []
+    session_source_key = graph_source_key("session", session_id)
+    if include_all_sources or session_source_key in source_filter:
+        candidates.append(
+            {
+                **graph_source_metadata(
+                    source_type="session",
+                    session_id=session_id,
+                    session_label=session_label,
+                    source_paths=[manifest_path, session_index_path],
+                    identity={
+                        "session_title": session_title,
+                        "work_context": work_context if isinstance(work_context, dict) else {},
+                        "route_signal_counts": route_signal_counts,
+                        "goal_lifecycle_counts": session_index.get("goal_lifecycle_counts"),
+                    },
+                    source_hash_cache_entries=source_hash_cache_entries,
+                    source_hash_cache_updates=source_hash_cache_updates,
+                    source_hash_stats=source_hash_stats,
+                    source_hash_mode=source_hash_mode,
+                ),
+                "session_dir": str(session_dir),
+            }
+        )
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else session_index.get("segments")
     for segment in segments if isinstance(segments, list) else []:
         if not isinstance(segment, dict):
             continue
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id:
+            continue
+        segment_source_key = graph_source_key("segment", session_id, segment_id)
+        if not include_all_sources and segment_source_key not in source_filter:
             continue
         segment_index_path = graph_path_from_ref(segment.get("index"), base=session_dir) if segment.get("index") else session_dir / "segments" / f"{segment_id}.index.json"
         candidates.append(
@@ -38275,6 +40201,7 @@ def graph_source_candidates(
     until: str | None = None,
     limit: int | None = None,
     selected_records: list[dict[str, Any]] | None = None,
+    source_key_filters: Iterable[str] | None = None,
     source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
     source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
     source_hash_stats: dict[str, int] | None = None,
@@ -38286,9 +40213,11 @@ def graph_source_candidates(
     else:
         records, diagnostics = graph_session_records(aoa_root, target=target, since=since, until=until, limit=limit)
     candidates: list[dict[str, Any]] = []
+    normalized_source_key_filters = normalize_graph_source_key_filters(source_key_filters)
     for record in records:
         record_candidates, record_diagnostics = graph_source_candidates_for_record(
             record,
+            source_key_filters=normalized_source_key_filters,
             source_hash_cache_entries=source_hash_cache_entries,
             source_hash_cache_updates=source_hash_cache_updates,
             source_hash_stats=source_hash_stats,
@@ -38598,7 +40527,7 @@ def graph_source_maintenance_recommendation(
         return (
             "python3 scripts/aoa_session_memory.py graph-maintenance all "
             f"{root_args} --apply --batch-limit {batch_limit} --budget-seconds 300 "
-            f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report"
+            f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report --write-hash-cache"
         )
 
     def graph_store_only_rebuild_command() -> str:
@@ -38616,7 +40545,7 @@ def graph_source_maintenance_recommendation(
     def graph_ledger_catchup_command() -> str:
         return (
             "python3 scripts/aoa_session_memory.py graph-maintenance all "
-            f"{root_args} --mode deep --write-ledger --write-report"
+            f"{root_args} --mode deep --write-ledger --write-report --write-hash-cache"
         )
 
     mostly_missing_partial_store = (
@@ -38725,6 +40654,7 @@ def graph_source_states(
     limit: int | None = None,
     selected_records: list[dict[str, Any]] | None = None,
     selected_records_global: bool | None = None,
+    source_key_filters: Iterable[str] | None = None,
     source_hash_cache_entries: dict[str, dict[str, Any]] | None = None,
     source_hash_cache_updates: dict[str, dict[str, Any]] | None = None,
     source_hash_stats: dict[str, int] | None = None,
@@ -38737,6 +40667,7 @@ def graph_source_states(
         until=until,
         limit=limit,
         selected_records=selected_records,
+        source_key_filters=source_key_filters,
         source_hash_cache_entries=source_hash_cache_entries,
         source_hash_cache_updates=source_hash_cache_updates,
         source_hash_stats=source_hash_stats,
@@ -38747,6 +40678,7 @@ def graph_source_states(
     diagnostics.extend(existing_diagnostics if existing_diagnostics != ["graph_store_missing"] else [])
     states: list[dict[str, Any]] = []
     candidate_keys = {str(item.get("source_key") or "") for item in candidates}
+    source_key_filter_set = set(normalize_graph_source_key_filters(source_key_filters))
     selected_session_ids = {str(record.get("session_id") or "") for record in records if record.get("session_id")}
     global_selection = (
         bool(selected_records_global)
@@ -38792,6 +40724,7 @@ def graph_source_states(
                 "segment_id": candidate.get("segment_id"),
                 "session_dir": candidate.get("session_dir"),
                 "source_path": candidate.get("source_path"),
+                "source_size_bytes": graph_maintenance_source_size_bytes(candidate),
                 "source_sha": candidate.get("source_sha"),
                 "source_mtime": candidate.get("source_mtime"),
                 "stored_node_count": int_value(row.get("node_count")) if isinstance(row, dict) else 0,
@@ -38807,6 +40740,9 @@ def graph_source_states(
     for source_key, row in sorted(existing.items()):
         if source_key in candidate_keys:
             continue
+        if source_key_filter_set and source_key not in source_key_filter_set:
+            out_of_scope_existing_count += 1
+            continue
         if not global_selection and str(row.get("session_id") or "") not in selected_session_ids:
             out_of_scope_existing_count += 1
             continue
@@ -38819,6 +40755,7 @@ def graph_source_states(
                 "segment_id": row.get("segment_id"),
                 "session_dir": "",
                 "source_path": row.get("source_path"),
+                "source_size_bytes": graph_maintenance_source_size_bytes(row),
                 "source_sha": row.get("source_sha"),
                 "source_mtime": row.get("source_mtime"),
                 "stored_node_count": int_value(row.get("node_count")),
@@ -38855,6 +40792,8 @@ def graph_source_states(
         "workspace_root": workspace_root,
         "aoa_root": str(aoa_root),
         "selection_scope": "global" if global_selection else "selected_sessions",
+        "source_key_filter_pushed_down": bool(source_key_filter_set),
+        "source_key_filter_count": len(source_key_filter_set),
         "selected_session_count": len(records),
         "source_count": len(candidates),
         "existing_source_count": len(existing),
@@ -39035,8 +40974,9 @@ def graph_maintenance_plan_entry(
     contribution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     new_node_ids, new_edge_ids = graph_contribution_id_sets(contribution)
-    refresh_node_ids = set(old_node_ids) | set(new_node_ids)
-    refresh_edge_ids = set(old_edge_ids) | set(new_edge_ids)
+    append_only_aggregate = operation == "replace" and not old_node_ids and not old_edge_ids
+    refresh_node_ids = set() if append_only_aggregate else set(old_node_ids) | set(new_node_ids)
+    refresh_edge_ids = set() if append_only_aggregate else set(old_edge_ids) | set(new_edge_ids)
     source_key = str(state.get("source_key") or "")
     return {
         "source_key": source_key,
@@ -39054,6 +40994,9 @@ def graph_maintenance_plan_entry(
         "new_edge_ids": new_edge_ids,
         "refresh_node_ids": refresh_node_ids,
         "refresh_edge_ids": refresh_edge_ids,
+        "append_only_aggregate": append_only_aggregate,
+        "append_node_count": len(new_node_ids) if append_only_aggregate else 0,
+        "append_edge_count": len(new_edge_ids) if append_only_aggregate else 0,
         "old_node_count": len(old_node_ids),
         "old_edge_count": len(old_edge_ids),
         "new_node_count": len(new_node_ids),
@@ -39078,6 +41021,10 @@ def graph_maintenance_plan_summary(entry: dict[str, Any]) -> dict[str, Any]:
         "new_edge_count": entry.get("new_edge_count"),
         "planned_refresh_node_count": entry.get("planned_refresh_node_count"),
         "planned_refresh_edge_count": entry.get("planned_refresh_edge_count"),
+        "append_only_aggregate": entry.get("append_only_aggregate"),
+        "append_node_count": entry.get("append_node_count"),
+        "append_edge_count": entry.get("append_edge_count"),
+        "source_size_bytes": graph_maintenance_source_size_bytes(entry.get("state") if isinstance(entry.get("state"), dict) else entry),
     }
 
 
@@ -39090,6 +41037,50 @@ def graph_maintenance_plan_sort_key(entry: dict[str, Any]) -> tuple[int, int, in
         operation_rank,
         str(entry.get("source_key") or ""),
     )
+
+
+def graph_maintenance_source_size_bytes(state: dict[str, Any]) -> int:
+    explicit_size = int_value(state.get("source_size_bytes"), -1)
+    if explicit_size >= 0:
+        return explicit_size
+    source_path = str(state.get("source_path") or "")
+    if not source_path:
+        return 0
+    try:
+        return int(Path(source_path).stat().st_size)
+    except OSError:
+        return 0
+
+
+def graph_maintenance_actionable_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+    return (
+        int_value(item.get("stored_edge_count")),
+        int_value(item.get("stored_node_count")),
+        graph_maintenance_source_size_bytes(item) if str(item.get("status") or "") == "missing" else 0,
+        str(item.get("source_key") or ""),
+    )
+
+
+def graph_maintenance_missing_add_only_batch_summary(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_key": state.get("source_key"),
+        "source_type": state.get("source_type"),
+        "session_id": state.get("session_id"),
+        "session_label": state.get("session_label"),
+        "segment_id": state.get("segment_id"),
+        "status": state.get("status"),
+        "operation": "replace",
+        "old_node_count": 0,
+        "old_edge_count": 0,
+        "new_node_count": None,
+        "new_edge_count": None,
+        "planned_refresh_node_count": 0,
+        "planned_refresh_edge_count": 0,
+        "append_only_aggregate": True,
+        "append_node_count": None,
+        "append_edge_count": None,
+        "source_size_bytes": graph_maintenance_source_size_bytes(state),
+    }
 
 
 def bounded_graph_source_keys(states: list[dict[str, Any]], *, limit: int = 40) -> list[str]:
@@ -39147,6 +41138,8 @@ def graph_source_state_summary(
                 "reason_group_counts",
                 "reason_examples",
                 "maintenance_recommendation",
+                "source_key_filter_pushed_down",
+                "source_key_filter_count",
             )
         }
     counts = dict(Counter(str(item.get("status") or "unknown") for item in states if isinstance(item, dict)))
@@ -39179,6 +41172,8 @@ def graph_source_state_summary(
             aoa_root=str(states_payload.get("aoa_root") or "/path/to/workspace/.aoa"),
         ),
         "filtered_by_source_key": True,
+        "source_key_filter_pushed_down": states_payload.get("source_key_filter_pushed_down"),
+        "source_key_filter_count": states_payload.get("source_key_filter_count"),
     }
 
 
@@ -39502,6 +41497,7 @@ def graph_maintenance(
                 next_route="Cached hot state shows no actionable graph maintenance; use graph-maintenance all --mode deep for a full source audit.",
                 write_report=write_report,
             )
+    write_hash_cache = bool(write_hash_cache or apply or write_queue or write_ledger)
     source_hash_cache_payload = read_graph_source_hash_cache(aoa_root) if hash_mode == "cached" or write_hash_cache else empty_graph_source_hash_cache()
     source_hash_cache_entries = (
         source_hash_cache_payload.get("entries")
@@ -39524,6 +41520,7 @@ def graph_maintenance(
         limit=limit,
         selected_records=selected_records,
         selected_records_global=selected_records_global,
+        source_key_filters=requested_source_keys,
         source_hash_cache_entries=source_hash_cache_entries if hash_mode == "cached" else None,
         source_hash_cache_updates=source_hash_cache_updates if write_hash_cache else None,
         source_hash_stats=source_hash_stats,
@@ -39540,10 +41537,11 @@ def graph_maintenance(
     refresh_chunk_size = max(1, min(int_value(refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     max_refresh_nodes = None if max_refresh_nodes is None or int_value(max_refresh_nodes) <= 0 else int_value(max_refresh_nodes)
     max_refresh_edges = None if max_refresh_edges is None or int_value(max_refresh_edges) <= 0 else int_value(max_refresh_edges)
+    explicit_candidate_pool_limit = candidate_pool_limit is not None and int_value(candidate_pool_limit) > 0
     candidate_pool_limit = None if candidate_pool_limit is None or int_value(candidate_pool_limit) <= 0 else max(batch_limit, int_value(candidate_pool_limit))
     cheap_sorted_actionable = sorted(
         actionable,
-        key=lambda item: (int_value(item.get("stored_edge_count")), int_value(item.get("stored_node_count")), str(item.get("source_key") or "")),
+        key=graph_maintenance_actionable_sort_key,
     )
     selected = cheap_sorted_actionable[:batch_limit]
     if apply:
@@ -39575,6 +41573,20 @@ def graph_maintenance(
     candidate_pool_limit = min(len(cheap_sorted_actionable), candidate_pool_requested_limit)
     candidate_pool = cheap_sorted_actionable[:candidate_pool_limit]
     candidate_pool_truncated_count = max(0, len(cheap_sorted_actionable) - candidate_pool_limit)
+    missing_add_only_fast_plan = (
+        apply
+        and not plan_refresh_costs
+        and not explicit_candidate_pool_limit
+        and len(candidate_pool) > batch_limit
+        and all(
+            str(item.get("status") or "") == "missing"
+            and int_value(item.get("stored_node_count")) == 0
+            and int_value(item.get("stored_edge_count")) == 0
+            for item in candidate_pool[:batch_limit]
+        )
+    )
+    planning_candidate_pool = candidate_pool[:batch_limit] if missing_add_only_fast_plan else candidate_pool
+    missing_add_only_batch_deferred = candidate_pool[batch_limit:] if missing_add_only_fast_plan else []
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     diagnostics.extend(f"requested_graph_source_not_found:{source_key}" for source_key in missing_requested_source_keys)
     results: list[dict[str, Any]] = []
@@ -39595,6 +41607,9 @@ def graph_maintenance(
         "queue_selected_source_count": len(queue_selected_source_keys),
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "candidate_pool_policy": candidate_pool_policy,
+        "explicit_candidate_pool_limit": explicit_candidate_pool_limit,
+        "missing_add_only_fast_plan": missing_add_only_fast_plan,
+        "exact_planning_candidate_count": len(planning_candidate_pool),
         "candidate_pool_requested_limit": candidate_pool_requested_limit,
         "candidate_pool_hard_limit": candidate_pool_hard_limit,
         "candidate_pool_actionable_count": len(cheap_sorted_actionable),
@@ -39655,9 +41670,9 @@ def graph_maintenance(
             store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
             try:
                 plan_entries: list[dict[str, Any]] = []
-                for state_index, state in enumerate(candidate_pool):
+                for state_index, state in enumerate(planning_candidate_pool):
                     if not has_time_budget():
-                        defer_for_time_budget(candidate_pool[state_index:])
+                        defer_for_time_budget(planning_candidate_pool[state_index:])
                         break
                     if state.get("status") != "orphaned":
                         continue
@@ -39673,7 +41688,7 @@ def graph_maintenance(
                     )
 
                 grouped_states: dict[str, list[dict[str, Any]]] = {}
-                for state in candidate_pool:
+                for state in planning_candidate_pool:
                     if state.get("status") == "orphaned":
                         continue
                     session_dir_value = str(state.get("session_dir") or "")
@@ -39741,6 +41756,13 @@ def graph_maintenance(
                 planned_node_ids: set[str] = set()
                 planned_edge_ids: set[str] = set()
                 sorted_plan_entries = sorted(plan_entries, key=graph_maintenance_plan_sort_key)
+                if missing_add_only_batch_deferred:
+                    for state in missing_add_only_batch_deferred:
+                        source_key = str(state.get("source_key") or "")
+                        if not source_key:
+                            continue
+                        batch_deferred_source_keys.append(source_key)
+                        batch_deferred_plan.append(graph_maintenance_missing_add_only_batch_summary(state))
                 for entry_index, entry in enumerate(sorted_plan_entries):
                     if not has_time_budget():
                         defer_for_time_budget(sorted_plan_entries[entry_index:])
@@ -39812,6 +41834,10 @@ def graph_maintenance(
                         "candidate_pool_hard_limit": candidate_pool_hard_limit,
                         "candidate_pool_actionable_count": len(cheap_sorted_actionable),
                         "candidate_pool_truncated_count": candidate_pool_truncated_count,
+                        "explicit_candidate_pool_limit": explicit_candidate_pool_limit,
+                        "missing_add_only_fast_plan": missing_add_only_fast_plan,
+                        "exact_planning_candidate_count": len(planning_candidate_pool),
+                        "missing_add_only_fast_plan_deferred_count": len(missing_add_only_batch_deferred),
                         "selected_planned_refresh_node_count": len(planned_node_ids),
                         "selected_planned_refresh_edge_count": len(planned_edge_ids),
                         "selected_sources": [str(entry.get("source_key") or "") for entry in selected_plan[:40]],
@@ -39846,6 +41872,14 @@ def graph_maintenance(
                             maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
                             maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
                             maintenance_detail["replacement_group_count"] = replacement_group_count
+                            maintenance_detail["append_only_source_count"] = replaced.get("append_only_source_count", 0)
+                            maintenance_detail["append_only_node_count"] = replaced.get("append_only_node_count", 0)
+                            maintenance_detail["append_only_edge_count"] = replaced.get("append_only_edge_count", 0)
+                            maintenance_detail["append_only_inserted_node_count"] = replaced.get("append_only_inserted_node_count", 0)
+                            maintenance_detail["append_only_inserted_edge_count"] = replaced.get("append_only_inserted_edge_count", 0)
+                            maintenance_detail["metadata_only_source_count"] = replaced.get("metadata_only_source_count", 0)
+                            maintenance_detail["metadata_only_node_count"] = replaced.get("metadata_only_node_count", 0)
+                            maintenance_detail["metadata_only_edge_count"] = replaced.get("metadata_only_edge_count", 0)
                         if export_sidecar:
                             graph_check_budget(deadline)
                             sidecar = store.write_sidecar()
@@ -39916,6 +41950,7 @@ def graph_maintenance(
             limit=limit,
             selected_records=selected_records,
             selected_records_global=selected_records_global,
+            source_key_filters=requested_source_keys,
             source_hash_cache_entries=source_hash_cache_entries if hash_mode == "cached" else None,
             source_hash_cache_updates=source_hash_cache_updates if write_hash_cache else None,
             source_hash_stats=source_hash_stats,
@@ -39966,7 +42001,8 @@ def graph_maintenance(
     ledger_update: dict[str, Any] = {}
     queue_update: dict[str, Any] = {}
     source_hash_cache_update: dict[str, Any] = {}
-    if write_ledger:
+    effective_write_ledger = bool(write_ledger or mutation_applied)
+    if effective_write_ledger:
         ledger_update = update_graph_source_state_ledger_from_states(
             aoa_root,
             state_rows_for_persistence,
@@ -39995,7 +42031,7 @@ def graph_maintenance(
         "apply": apply,
         "use_queue": bool(use_queue),
         "write_queue": bool(write_queue),
-        "write_ledger": bool(write_ledger),
+        "write_ledger": bool(effective_write_ledger),
         "target": target,
         "since": since,
         "until": until,
@@ -40143,6 +42179,10 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- missing_source_keys: `{json.dumps(detail.get('missing_source_keys', []), ensure_ascii=False)}`",
                 f"- planned_candidate_count: `{detail.get('planned_candidate_count')}`",
                 f"- candidate_pool_policy: `{detail.get('candidate_pool_policy')}`",
+                f"- explicit_candidate_pool_limit: `{detail.get('explicit_candidate_pool_limit')}`",
+                f"- missing_add_only_fast_plan: `{detail.get('missing_add_only_fast_plan')}`",
+                f"- exact_planning_candidate_count: `{detail.get('exact_planning_candidate_count')}`",
+                f"- missing_add_only_fast_plan_deferred_count: `{detail.get('missing_add_only_fast_plan_deferred_count')}`",
                 f"- candidate_pool_count: `{detail.get('candidate_pool_count')}`",
                 f"- candidate_pool_limit: `{detail.get('candidate_pool_limit')}`",
                 f"- candidate_pool_requested_limit: `{detail.get('candidate_pool_requested_limit')}`",
@@ -40151,6 +42191,14 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- candidate_pool_truncated_count: `{detail.get('candidate_pool_truncated_count')}`",
                 f"- selected_planned_refresh_node_count: `{detail.get('selected_planned_refresh_node_count')}`",
                 f"- selected_planned_refresh_edge_count: `{detail.get('selected_planned_refresh_edge_count')}`",
+                f"- append_only_source_count: `{detail.get('append_only_source_count')}`",
+                f"- append_only_node_count: `{detail.get('append_only_node_count')}`",
+                f"- append_only_edge_count: `{detail.get('append_only_edge_count')}`",
+                f"- append_only_inserted_node_count: `{detail.get('append_only_inserted_node_count')}`",
+                f"- append_only_inserted_edge_count: `{detail.get('append_only_inserted_edge_count')}`",
+                f"- metadata_only_source_count: `{detail.get('metadata_only_source_count')}`",
+                f"- metadata_only_node_count: `{detail.get('metadata_only_node_count')}`",
+                f"- metadata_only_edge_count: `{detail.get('metadata_only_edge_count')}`",
                 f"- selected_sources: `{json.dumps(detail.get('selected_sources', []), ensure_ascii=False)}`",
                 f"- rolled_back_sources: `{json.dumps(detail.get('rolled_back_sources', []), ensure_ascii=False)}`",
                 f"- budget_deferred_sources: `{json.dumps(detail.get('budget_deferred_sources', []), ensure_ascii=False)}`",
@@ -42549,13 +44597,51 @@ def graph_freshness(aoa_root: Path, graph: dict[str, Any]) -> dict[str, Any]:
         status = "fresh"
     else:
         status = "unverifiable"
-    return {
+    payload = {
         "status": status,
         "graph_source": source,
         "graph_generated_at": graph_generated_at,
         "search_index_generated_at": search_generated_at,
         "law": "freshness is a routing check; raw/segment refs remain stronger than graph packets",
     }
+    if source.startswith("sqlite_graph_store"):
+        try:
+            hot_state = graph_store_hot_state(aoa_root)
+            hot_status = graph_maintenance_status_from_state(
+                hot_state,
+                workspace_root=aoa_root.parent,
+                aoa_root=aoa_root,
+            )
+            hot_diagnostics = (
+                [str(item) for item in hot_state.get("diagnostics", []) if item]
+                if isinstance(hot_state.get("diagnostics"), list)
+                else []
+            )
+            payload.update(
+                {
+                    "hot_gate_status": hot_state.get("status"),
+                    "needs_maintenance": bool(hot_state.get("needs_maintenance")),
+                    "needs_full_rebuild": bool(hot_state.get("needs_full_rebuild")),
+                    "actionable_graph_source_count": hot_status.get("actionable_count"),
+                    "deferred_live_source_count": hot_status.get("deferred_live_source_count"),
+                    "ledger_store_missing_count": hot_status.get("ledger_store_missing_count"),
+                    "latest_maintenance_remaining_count": hot_status.get("latest_maintenance_remaining_count"),
+                    "hot_gate_diagnostics": hot_diagnostics,
+                    "maintenance_recommendation": hot_status.get("maintenance_recommendation", {}),
+                }
+            )
+            if hot_state.get("needs_maintenance") or hot_state.get("needs_full_rebuild") or hot_diagnostics:
+                payload["status"] = "graph_store_stale"
+                payload["warning"] = "graph store has stale or incomplete hot-gate state; use graph packet as partial topology and verify through raw/segment refs"
+        except Exception as exc:
+            payload.update(
+                {
+                    "status": "graph_store_freshness_unverified",
+                    "hot_gate_status": "unavailable",
+                    "hot_gate_diagnostics": [f"graph_hot_gate_check_failed:{type(exc).__name__}"],
+                }
+            )
+    return payload
 
 
 def graph_store_query_state(aoa_root: Path) -> dict[str, Any]:
@@ -42901,6 +44987,7 @@ def graph_from_store_neighborhood(
     kind: str = "auto",
     depth: int = 1,
     limit: int = 40,
+    edge_limit: int | None = None,
 ) -> dict[str, Any] | None:
     state = graph_store_query_state(aoa_root)
     if state.get("status") != "current":
@@ -42933,11 +45020,14 @@ def graph_from_store_neighborhood(
             return None
         depth = max(0, min(int_value(depth, 1), 3))
         limit = max(1, min(int_value(limit, 40), 200))
-        max_edges = max(80, min(limit * 12, 1200))
+        default_edge_limit = max(24, min(limit * 4, 160))
+        max_edges = max(1, min(int_value(edge_limit, default_edge_limit), 2000))
         selected_nodes: list[str] = []
         selected_edges: list[str] = []
         seen_nodes: set[str] = set()
         seen_edges: set[str] = set()
+        omitted_node_count = 0
+        omitted_edge_count = 0
         queue_nodes: deque[tuple[str, int]] = deque((node_id, 0) for node_id in resolved["start_node_ids"])
         while queue_nodes and len(selected_nodes) < limit:
             node_id, distance = queue_nodes.popleft()
@@ -42975,9 +45065,14 @@ def graph_from_store_neighborhood(
                 if edge_id not in seen_edges and len(selected_edges) < max_edges:
                     seen_edges.add(edge_id)
                     selected_edges.append(edge_id)
+                elif edge_id not in seen_edges:
+                    seen_edges.add(edge_id)
+                    omitted_edge_count += 1
                 neighbor = str(row["target_node"] if row["source_node"] == node_id else row["source_node"])
                 if neighbor not in seen_nodes and len(selected_nodes) + len(queue_nodes) < limit:
                     queue_nodes.append((neighbor, distance + 1))
+                elif neighbor not in seen_nodes:
+                    omitted_node_count += 1
         nodes = graph_store_fetch_payloads(conn, "nodes", selected_nodes)
         edges = graph_store_fetch_payloads(conn, "edges", selected_edges)
         conn.close()
@@ -42994,6 +45089,11 @@ def graph_from_store_neighborhood(
         "aoa_root": str(aoa_root),
         "node_count": len(nodes),
         "edge_count": len(edges),
+        "node_limit": limit,
+        "edge_limit": max_edges,
+        "truncated": bool(queue_nodes or omitted_node_count or omitted_edge_count),
+        "omitted_node_count": omitted_node_count + len(queue_nodes),
+        "omitted_edge_count": omitted_edge_count,
         "nodes": nodes,
         "edges": edges,
         "resolved": resolved,
@@ -43191,12 +45291,16 @@ def graph_expand_node_ids(
     edges: list[dict[str, Any]],
     depth: int,
     max_nodes: int,
-) -> tuple[list[str], list[str]]:
+    max_edges: int | None = None,
+) -> tuple[list[str], list[str], dict[str, int | bool]]:
     adjacency = graph_adjacency(edges)
     selected_nodes: list[str] = []
     selected_edges: list[str] = []
     seen_nodes: set[str] = set()
     seen_edges: set[str] = set()
+    edge_budget = max(1, min(int_value(max_edges, max(24, min(max_nodes * 4, 160))), 2000))
+    omitted_node_count = 0
+    omitted_edge_count = 0
     queue: deque[tuple[str, int]] = deque((node_id, 0) for node_id in start_node_ids)
     while queue and len(selected_nodes) < max_nodes:
         node_id, distance = queue.popleft()
@@ -43207,12 +45311,22 @@ def graph_expand_node_ids(
         if distance >= depth:
             continue
         for neighbor, edge_id in adjacency.get(node_id, []):
-            if edge_id and edge_id not in seen_edges:
+            if edge_id and edge_id not in seen_edges and len(selected_edges) < edge_budget:
                 seen_edges.add(edge_id)
                 selected_edges.append(edge_id)
+            elif edge_id and edge_id not in seen_edges:
+                seen_edges.add(edge_id)
+                omitted_edge_count += 1
             if neighbor not in seen_nodes and len(selected_nodes) + len(queue) < max_nodes:
                 queue.append((neighbor, distance + 1))
-    return selected_nodes, selected_edges
+            elif neighbor not in seen_nodes:
+                omitted_node_count += 1
+    return selected_nodes, selected_edges, {
+        "edge_limit": edge_budget,
+        "truncated": bool(queue or omitted_node_count or omitted_edge_count),
+        "omitted_node_count": omitted_node_count + len(queue),
+        "omitted_edge_count": omitted_edge_count,
+    }
 
 
 def graph_collect_evidence(
@@ -43519,6 +45633,46 @@ def graph_from_search_results(
     }
 
 
+def graph_packet_cli_kind(kind: str, route_kind: str) -> str:
+    requested = str(kind or "").strip()
+    if requested in TRACE_ROUTE_KIND_CHOICES:
+        return requested
+    if route_kind in TRACE_ROUTE_KIND_CHOICES:
+        return route_kind
+    return "auto"
+
+
+def graph_packet_expanded_limit(value: Any, *, default: int, maximum: int) -> int:
+    current = int_value(value, default)
+    current = max(1, current)
+    return min(maximum, max(current + max(8, current // 2), current * 2))
+
+
+def graph_packet_command_line(
+    *,
+    aoa_root: Path,
+    command_name: str,
+    anchors: list[str],
+    kind: str,
+    route_kind: str,
+    limit: int | None = None,
+    depth: int | None = None,
+    edge_limit: int | None = None,
+    max_depth: int | None = None,
+) -> str:
+    command = ["python3", "scripts/aoa_session_memory.py", command_name, *[str(anchor) for anchor in anchors], "--aoa-root", str(aoa_root)]
+    command.extend(["--kind", graph_packet_cli_kind(kind, route_kind)])
+    if depth is not None:
+        command.extend(["--depth", str(max(0, min(int_value(depth, 1), 3)))])
+    if limit is not None:
+        command.extend(["--limit", str(max(1, int_value(limit, 40)))])
+    if edge_limit is not None:
+        command.extend(["--edge-limit", str(max(1, int_value(edge_limit, 24)))])
+    if max_depth is not None:
+        command.extend(["--max-depth", str(max(1, min(int_value(max_depth, 4), 8)))])
+    return " ".join(shlex.quote(part) for part in command)
+
+
 def graph_neighborhood(
     *,
     aoa_root: Path,
@@ -43526,6 +45680,7 @@ def graph_neighborhood(
     kind: str = "auto",
     depth: int = 1,
     limit: int = 40,
+    edge_limit: int | None = None,
 ) -> dict[str, Any]:
     normalized_kind = normalize_trace_route_kind(kind)
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
@@ -43535,12 +45690,34 @@ def graph_neighborhood(
         kind=route_kind,
         depth=depth,
         limit=limit,
+        edge_limit=edge_limit,
     )
     if store_graph is not None and (store_graph.get("ok") or (isinstance(store_graph.get("resolved"), dict) and store_graph["resolved"].get("resolver_strategy") == "identity_diagnostic_no_route")):
         nodes = store_graph.get("nodes", []) if isinstance(store_graph.get("nodes"), list) else []
         edges = store_graph.get("edges", []) if isinstance(store_graph.get("edges"), list) else []
-        evidence_refs = graph_collect_evidence(nodes, edges)
+        evidence_ref_limit = max(12, min(int_value(store_graph.get("edge_limit"), 24) * 2, 50))
+        evidence_refs = graph_collect_evidence(nodes, edges, limit=evidence_ref_limit)
         resolved = store_graph.get("resolved") if isinstance(store_graph.get("resolved"), dict) else {}
+        current_command = graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-neighborhood",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            depth=max(0, min(int_value(depth, 1), 3)),
+            limit=int_value(store_graph.get("node_limit"), limit),
+            edge_limit=int_value(store_graph.get("edge_limit")) if store_graph.get("edge_limit") is not None else None,
+        )
+        expansion_command = graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-neighborhood",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            depth=min(max(0, min(int_value(depth, 1), 3)) + 1, 3),
+            limit=graph_packet_expanded_limit(store_graph.get("node_limit"), default=limit, maximum=200),
+            edge_limit=graph_packet_expanded_limit(store_graph.get("edge_limit"), default=edge_limit or 24, maximum=400),
+        )
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "session_memory_graph_neighborhood",
@@ -43561,6 +45738,12 @@ def graph_neighborhood(
             },
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "node_limit": store_graph.get("node_limit"),
+            "edge_limit": store_graph.get("edge_limit"),
+            "truncated": bool(store_graph.get("truncated")),
+            "omitted_node_count": store_graph.get("omitted_node_count"),
+            "omitted_edge_count": store_graph.get("omitted_edge_count"),
+            "evidence_ref_limit": evidence_ref_limit,
             "nodes": [graph_compact_node_for_packet(node) for node in nodes],
             "edges": [graph_compact_edge_for_packet(edge) for edge in edges],
             "evidence_refs": evidence_refs,
@@ -43570,6 +45753,9 @@ def graph_neighborhood(
                 *(resolved.get("diagnostics", []) if isinstance(resolved.get("diagnostics"), list) else []),
             ],
             "next_route": "verify important claims through raw_ref, segment_ref, and session_ref before promotion",
+            "next_command": current_command,
+            "next_expansion_command": expansion_command,
+            "next_expansion_reason": "Increase bounded graph depth/limits when the packet is truncated or more neighboring relations are needed.",
         }
     trace = trace_route(
         aoa_root=aoa_root,
@@ -43599,15 +45785,37 @@ def graph_neighborhood(
         resolved["start_node_ids"] = [str(node.get("id")) for node in graph.get("nodes", [])[: max(1, min(limit, 20))] if isinstance(node, dict)]
     depth = max(0, min(int_value(depth, 1), 3))
     limit = max(1, min(int_value(limit, 40), 200))
-    selected_node_ids, selected_edge_ids = graph_expand_node_ids(
+    selected_node_ids, selected_edge_ids, expansion_quality = graph_expand_node_ids(
         resolved["start_node_ids"],
         edges=graph.get("edges", []) if isinstance(graph.get("edges"), list) else [],
         depth=depth,
         max_nodes=limit,
+        max_edges=edge_limit,
     )
     nodes = [node_map[node_id] for node_id in selected_node_ids if node_id in node_map]
     edges = [edge_map[edge_id] for edge_id in selected_edge_ids if edge_id in edge_map]
-    evidence_refs = graph_collect_evidence(nodes, edges)
+    evidence_ref_limit = max(12, min(int_value(expansion_quality.get("edge_limit"), 24) * 2, 50))
+    evidence_refs = graph_collect_evidence(nodes, edges, limit=evidence_ref_limit)
+    current_command = graph_packet_command_line(
+        aoa_root=aoa_root,
+        command_name="graph-neighborhood",
+        anchors=[anchor],
+        kind=kind,
+        route_kind=route_kind,
+        depth=depth,
+        limit=limit,
+        edge_limit=expansion_quality.get("edge_limit"),
+    )
+    expansion_command = graph_packet_command_line(
+        aoa_root=aoa_root,
+        command_name="graph-neighborhood",
+        anchors=[anchor],
+        kind=kind,
+        route_kind=route_kind,
+        depth=min(depth + 1, 3),
+        limit=graph_packet_expanded_limit(limit, default=limit, maximum=200),
+        edge_limit=graph_packet_expanded_limit(expansion_quality.get("edge_limit"), default=edge_limit or 24, maximum=400),
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_neighborhood",
@@ -43628,6 +45836,12 @@ def graph_neighborhood(
         },
         "node_count": len(nodes),
         "edge_count": len(edges),
+        "node_limit": limit,
+        "edge_limit": expansion_quality.get("edge_limit"),
+        "truncated": bool(expansion_quality.get("truncated")),
+        "omitted_node_count": expansion_quality.get("omitted_node_count"),
+        "omitted_edge_count": expansion_quality.get("omitted_edge_count"),
+        "evidence_ref_limit": evidence_ref_limit,
         "nodes": [graph_compact_node_for_packet(node) for node in nodes],
         "edges": [graph_compact_edge_for_packet(edge) for edge in edges],
         "evidence_refs": evidence_refs,
@@ -43642,6 +45856,9 @@ def graph_neighborhood(
             *(resolved.get("diagnostics", []) if isinstance(resolved.get("diagnostics"), list) else []),
         ],
         "next_route": "verify important claims through raw_ref, segment_ref, and session_ref before promotion",
+        "next_command": current_command,
+        "next_expansion_command": expansion_command,
+        "next_expansion_reason": "Increase bounded graph depth/limits when the packet is truncated or more neighboring relations are needed.",
     }
 
 
@@ -43809,6 +46026,24 @@ def graph_timeline(
         "evidence_refs": evidence_refs,
         "freshness": freshness,
         "diagnostics": diagnostics,
+        "next_route": "verify important claims through raw_ref, segment_ref, and session_ref before promotion",
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-timeline",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=event_limit,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-timeline",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=graph_packet_expanded_limit(event_limit, default=event_limit, maximum=200),
+        ),
+        "next_expansion_reason": "Increase the bounded timeline limit when more event ordering evidence is needed.",
     }
     if provider_summary:
         payload["provider"] = provider_summary
@@ -43899,6 +46134,24 @@ def graph_shortest_path(
         "evidence_refs": evidence_refs,
         "freshness": graph_freshness(aoa_root, graph),
         "diagnostics": graph.get("diagnostics", []),
+        "next_route": "verify path claims through raw_ref, segment_ref, and session_ref before promotion",
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-shortest-path",
+            anchors=[source_anchor, target_anchor],
+            kind=kind,
+            route_kind=route_kind,
+            max_depth=max_depth,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-shortest-path",
+            anchors=[source_anchor, target_anchor],
+            kind=kind,
+            route_kind=route_kind,
+            max_depth=min(max_depth + 1, 8),
+        ),
+        "next_expansion_reason": "Increase bounded max depth when no bridge is found or a longer relation chain is acceptable.",
     }
 
 
@@ -43967,6 +46220,7 @@ def graph_cooccurrence_from_packet(
         route_node = node_map.get(route_id, {})
         selected.append({"node": graph_compact_node_for_packet(route_node), "count": count, "samples": samples.get(route_id, [])})
     evidence_nodes = [node_map[event_id] for event_id in anchor_events if event_id in node_map]
+    selected_limit = max(1, min(int_value(limit, 30), 100))
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_cooccurrence",
@@ -43984,6 +46238,24 @@ def graph_cooccurrence_from_packet(
         "evidence_refs": graph_collect_evidence(evidence_nodes, [], limit=80),
         "freshness": packet.get("freshness") if isinstance(packet.get("freshness"), dict) else graph_freshness(aoa_root, graph),
         "diagnostics": graph.get("diagnostics", []),
+        "next_route": "verify cooccurrence claims through raw_ref, segment_ref, and session_ref before promotion",
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=selected_limit,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=graph_packet_expanded_limit(selected_limit, default=selected_limit, maximum=100),
+        ),
+        "next_expansion_reason": "Increase the bounded cooccurrence limit when more neighboring route signals are needed.",
     }
 
 
@@ -45888,6 +48160,141 @@ def latest_diagnostic_summary(aoa_root: Path, glob_pattern: str, *, exclude_mark
     }
 
 
+def systemd_unit_execstart_lines(unit_text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in str(unit_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith("ExecStart="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value:
+            lines.append(value)
+    return lines
+
+
+def argv_flag_value(argv: list[str], flag: str) -> str | None:
+    if flag not in argv:
+        return None
+    index = argv.index(flag)
+    if index + 1 >= len(argv):
+        return ""
+    return str(argv[index + 1])
+
+
+def numeric_graph_drip_values_match(observed: str | None, expected: Any) -> bool:
+    if observed is None:
+        return True
+    try:
+        return float(observed) == float(expected)
+    except (TypeError, ValueError):
+        return str(observed) == str(expected)
+
+
+def session_memory_resource_unit_contract(service: str, unit_text: str) -> dict[str, Any]:
+    profile = SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS.get(service)
+    if not profile:
+        return {
+            "service": service,
+            "status": "not_session_memory_resource_unit",
+            "diagnostics": [],
+        }
+    settings = AUTO_MAINTENANCE_PROFILES.get(profile, {})
+    diagnostics: list[str] = []
+    execstart_lines = systemd_unit_execstart_lines(unit_text)
+    command_line = next((line for line in execstart_lines if "auto-maintenance-resource" in line), "")
+    argv: list[str] = []
+    observed_profile = ""
+    if not command_line:
+        diagnostics.append("systemd_unit_missing_auto_maintenance_resource_execstart")
+    else:
+        try:
+            argv = shlex.split(command_line)
+        except ValueError as exc:
+            diagnostics.append(f"systemd_unit_execstart_parse_failed:{exc}")
+        if argv and "auto-maintenance-resource" in argv:
+            index = argv.index("auto-maintenance-resource")
+            observed_profile = argv[index + 1] if index + 1 < len(argv) else ""
+            if observed_profile != profile:
+                diagnostics.append(f"systemd_unit_profile_mismatch:{observed_profile or 'missing'}")
+        elif argv:
+            diagnostics.append("systemd_unit_missing_auto_maintenance_resource_command")
+
+    expected_graph_drip_on_block = bool(settings.get("graph_drip_on_block"))
+    if argv:
+        if "--no-graph-drip-on-block" in argv and expected_graph_drip_on_block:
+            diagnostics.append("systemd_unit_disables_profile_graph_drip")
+        if "--graph-drip-on-block" in argv and not expected_graph_drip_on_block:
+            diagnostics.append("systemd_unit_enables_graph_drip_against_profile")
+
+    observed_overrides: dict[str, str] = {}
+    mismatched_overrides: list[dict[str, Any]] = []
+    for flag, key in SESSION_MEMORY_GRAPH_DRIP_OVERRIDE_FLAGS.items():
+        value = argv_flag_value(argv, flag) if argv else None
+        if value is None:
+            continue
+        observed_overrides[key] = value
+        expected = settings.get(key)
+        if expected is None:
+            diagnostics.append(f"systemd_unit_unexpected_graph_drip_override:{key}")
+            mismatched_overrides.append({"key": key, "observed": value, "expected": None})
+        elif not numeric_graph_drip_values_match(value, expected):
+            diagnostics.append(f"systemd_unit_stale_graph_drip_override:{key}")
+            mismatched_overrides.append({"key": key, "observed": value, "expected": expected})
+
+    return {
+        "service": service,
+        "profile": profile,
+        "status": "drift" if diagnostics else "current",
+        "command_line": command_line,
+        "observed_profile": observed_profile,
+        "expected_graph_drip_on_block": expected_graph_drip_on_block,
+        "explicit_graph_drip_overrides": observed_overrides,
+        "mismatched_graph_drip_overrides": mismatched_overrides,
+        "profile_graph_drip_defaults": {
+            key: settings.get(key)
+            for key in SESSION_MEMORY_GRAPH_DRIP_OVERRIDE_FLAGS.values()
+            if key in settings
+        },
+        "diagnostics": diagnostics,
+        "truth_status": "installed_systemd_unit_contract_projection",
+    }
+
+
+def session_memory_unit_file_contracts(unit_dir: Path | None = None) -> list[dict[str, Any]]:
+    root = unit_dir or (Path.home() / ".config" / "systemd" / "user")
+    contracts: list[dict[str, Any]] = []
+    for service in sorted(SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS):
+        path = root / service
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            contracts.append(
+                {
+                    "service": service,
+                    "status": "probe_failed",
+                    "path": str(path),
+                    "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+                }
+            )
+            continue
+        contract = session_memory_resource_unit_contract(service, text)
+        contract["path"] = str(path)
+        contract["probe_source"] = "unit_file"
+        contracts.append(contract)
+    return contracts
+
+
+def session_memory_unit_contract_diagnostics(contracts: list[dict[str, Any]]) -> list[str]:
+    diagnostics: list[str] = []
+    for contract in contracts:
+        service = str(contract.get("service") or "")
+        for diagnostic in contract.get("diagnostics", []) if isinstance(contract.get("diagnostics"), list) else []:
+            diagnostics.append(f"{service}:{diagnostic}" if service else str(diagnostic))
+    return diagnostics
+
+
 def session_memory_timer_status() -> dict[str, Any]:
     executable = shutil.which("systemctl")
     if not executable:
@@ -45906,14 +48313,69 @@ def session_memory_timer_status() -> dict[str, Any]:
         unit = next((part for part in parts if part.endswith(".timer")), "")
         service = next((part for part in parts if part.endswith(".service")), "")
         timers.append({"line": stripped, "unit": unit, "service": service})
+    unit_contracts: list[dict[str, Any]] = []
+    contract_diagnostics: list[str] = []
+    if completed.returncode != 0:
+        unit_contracts = session_memory_unit_file_contracts()
+        contract_diagnostics = session_memory_unit_contract_diagnostics(unit_contracts)
+        fallback_status = "unit_file_fallback_with_unit_drift" if contract_diagnostics else "unit_file_fallback"
+        return {
+            "ok": not contract_diagnostics,
+            "status": fallback_status,
+            "command": shlex.join(command),
+            "timer_count": 0,
+            "timers": [],
+            "unit_contracts": unit_contracts,
+            "stderr": (completed.stderr or "").strip()[:500],
+            "systemctl_returncode": completed.returncode,
+            "warnings": [f"systemctl_timer_probe_unavailable:{completed.returncode}"],
+            "diagnostics": contract_diagnostics,
+        }
+    else:
+        services = sorted(
+            {
+                str(timer.get("service") or "")
+                for timer in timers
+                if str(timer.get("service") or "") in SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS
+            }
+        )
+        for service in services:
+            cat_command = [executable, "--user", "cat", service]
+            try:
+                cat_completed = subprocess.run(cat_command, check=False, capture_output=True, text=True, timeout=3)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                unit_contracts.append(
+                    {
+                        "service": service,
+                        "status": "probe_failed",
+                        "command": shlex.join(cat_command),
+                        "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+                    }
+                )
+                contract_diagnostics.append(f"systemd_unit_contract_probe_failed:{service}")
+                continue
+            contract = session_memory_resource_unit_contract(service, cat_completed.stdout or "")
+            contract["command"] = shlex.join(cat_command)
+            contract["cat_returncode"] = cat_completed.returncode
+            contract["stderr"] = (cat_completed.stderr or "").strip()[:500]
+            if cat_completed.returncode != 0:
+                contract["status"] = "probe_failed"
+                contract.setdefault("diagnostics", []).append(f"systemctl_cat_returncode:{cat_completed.returncode}")
+            unit_contracts.append(contract)
+        contract_diagnostics = session_memory_unit_contract_diagnostics(unit_contracts)
+    diagnostics = list(contract_diagnostics)
+    status = "systemctl_error"
+    if completed.returncode == 0:
+        status = "available_with_unit_drift" if contract_diagnostics else "available"
     return {
-        "ok": completed.returncode == 0,
-        "status": "available" if completed.returncode == 0 else "systemctl_error",
+        "ok": completed.returncode == 0 and not contract_diagnostics,
+        "status": status,
         "command": shlex.join(command),
         "timer_count": len(timers),
         "timers": timers[:12],
+        "unit_contracts": unit_contracts,
         "stderr": (completed.stderr or "").strip()[:500],
-        "diagnostics": [] if completed.returncode == 0 else [f"systemctl_returncode:{completed.returncode}"],
+        "diagnostics": diagnostics,
     }
 
 
@@ -45934,8 +48396,15 @@ def graph_maintenance_status_from_state(
         else ledger.get("status_counts") if isinstance(ledger.get("status_counts"), dict) else {}
     )
     source_version_mismatch_count = int_value(source_version_state.get("version_mismatch_source_count"))
-    ledger_store_missing_count = int_value(ledger.get("store_missing_source_estimate"))
-    latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
+    ledger_store_missing_total_count = int_value(ledger.get("store_missing_source_estimate"))
+    ledger_store_missing_count = int_value(
+        ledger.get("actionable_store_missing_source_estimate", ledger_store_missing_total_count)
+    )
+    ledger_store_missing_deferred_count = int_value(ledger.get("deferred_store_missing_source_estimate"))
+    latest_remaining_total_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
+    latest_remaining_count = int_value(
+        latest_maintenance.get("actionable_remaining_count", latest_remaining_total_count)
+    )
     dirty_count = int_value(source_state.get("dirty_count")) + source_version_mismatch_count
     missing_count = max(int_value(source_state.get("missing_count")) + ledger_store_missing_count, latest_remaining_count)
     blocked_count = int_value(source_state.get("blocked_count"))
@@ -45992,7 +48461,10 @@ def graph_maintenance_status_from_state(
         "actionable_count": actionable_count,
         "queued_count": int_value(queue.get("queued_count")),
         "ledger_store_missing_count": ledger_store_missing_count,
+        "ledger_store_missing_total_count": ledger_store_missing_total_count,
+        "deferred_ledger_store_missing_count": ledger_store_missing_deferred_count,
         "latest_maintenance_remaining_count": latest_remaining_count,
+        "latest_maintenance_remaining_total_count": latest_remaining_total_count,
         "deferred_live_source_count": deferred_live_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
@@ -46271,7 +48743,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
             item.get("status") == "stale"
             and int_value(item.get("missing_session_count")) == 0
             and int_value(item.get("stale_session_count")) > 0
-            and int_value(item.get("stale_session_count")) == int_value(item.get("deferred_live_session_count"))
+            and int_value(item.get("stale_session_count")) <= int_value(item.get("deferred_live_session_count"))
         )
     ]
     monolith_entry = maintenance_light_sqlite_size(search_db_path(aoa_root))
@@ -46449,6 +48921,8 @@ def maintenance_coordinator_brief(job: dict[str, Any]) -> dict[str, Any]:
 def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
     coordinator = maintenance_report_coordinator(report)
     maintenance = report.get("maintenance") if isinstance(report.get("maintenance"), dict) else {}
+    fallback_index_drip = report.get("fallback_index_drip") if isinstance(report.get("fallback_index_drip"), dict) else {}
+    fallback_index_execution = fallback_index_drip.get("execution") if isinstance(fallback_index_drip.get("execution"), dict) else {}
     fallback_graph_drip = report.get("fallback_graph_drip") if isinstance(report.get("fallback_graph_drip"), dict) else {}
     fallback_execution = fallback_graph_drip.get("execution") if isinstance(fallback_graph_drip.get("execution"), dict) else {}
     return {
@@ -46468,6 +48942,18 @@ def maintenance_report_brief(report: dict[str, Any]) -> dict[str, Any]:
         "blocked_reasons": report.get("blocked_reasons", []) if isinstance(report.get("blocked_reasons"), list) else [],
         "denied_reasons": report.get("denied_reasons", []) if isinstance(report.get("denied_reasons"), list) else [],
         "execution": resource_launch_execution_brief(report),
+        "fallback_index_drip": {
+            "ok": fallback_index_drip.get("ok"),
+            "status": fallback_index_drip.get("status"),
+            "repair_limit": fallback_index_drip.get("repair_limit"),
+            "budget_seconds": fallback_index_drip.get("budget_seconds"),
+            "elapsed_ms": fallback_index_drip.get("elapsed_ms"),
+            "resource_ok": fallback_index_drip.get("resource_ok"),
+            "blocked_reasons": fallback_index_drip.get("blocked_reasons", []) if isinstance(fallback_index_drip.get("blocked_reasons"), list) else [],
+            "execution_stderr_tail": fallback_index_execution.get("stderr_tail"),
+        }
+        if fallback_index_drip
+        else {},
         "fallback_graph_drip": {
             "ok": fallback_graph_drip.get("ok"),
             "status": fallback_graph_drip.get("status"),
@@ -46612,11 +49098,20 @@ def latest_auto_maintenance_resource_reports(aoa_root: Path) -> dict[str, Any]:
 def diagnostic_report_handled_resource_fallback(report: dict[str, Any]) -> bool:
     if str(report.get("artifact_type") or "") != "auto_maintenance_resource_launch":
         return False
-    if str(report.get("status") or "") != "resource_blocked_graph_drip_completed":
-        return False
-    fallback = report.get("fallback_graph_drip") if isinstance(report.get("fallback_graph_drip"), dict) else {}
+    status = str(report.get("status") or "")
     diagnostics = report.get("diagnostics") if isinstance(report.get("diagnostics"), list) else []
-    return fallback.get("ok") is True and "graph_drip_fallback_completed" in {str(item) for item in diagnostics}
+    diagnostic_set = {str(item) for item in diagnostics}
+    if status == "resource_blocked_graph_drip_completed":
+        fallback = report.get("fallback_graph_drip") if isinstance(report.get("fallback_graph_drip"), dict) else {}
+        if resource_fallback_child_status(fallback) in {"skipped_lock_held", "deferred_conflicting_lease"}:
+            return False
+        return fallback.get("ok") is True and "graph_drip_fallback_completed" in diagnostic_set
+    if status == "resource_blocked_index_drip_completed":
+        fallback = report.get("fallback_index_drip") if isinstance(report.get("fallback_index_drip"), dict) else {}
+        if resource_fallback_child_status(fallback) in {"skipped_lock_held", "deferred_conflicting_lease"}:
+            return False
+        return fallback.get("ok") is True and "index_drip_fallback_completed" in diagnostic_set
+    return False
 
 
 def diagnostic_report_operational_key(report: dict[str, Any]) -> str:
@@ -47515,6 +50010,7 @@ def session_memory_live_tail_catchup_route(
             "--use-queue",
             "--apply",
             "--write-report",
+            "--write-hash-cache",
         ]
         return {
             "command": command,
@@ -47684,6 +50180,7 @@ def session_memory_maintenance_next_actions(
                         "--refresh-chunk-size",
                         "64",
                         "--write-report",
+                        "--write-hash-cache",
                     ],
                     "note": "The graph store is a generated projection and is empty; recover it through bounded incremental batches instead of retrying a full in-place rebuild after an OOM-style failure.",
                 }
@@ -47732,6 +50229,7 @@ def session_memory_maintenance_next_actions(
                         "--refresh-chunk-size",
                         str(GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
                         "--write-report",
+                        "--write-hash-cache",
                     ],
                     "note": "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers.",
                 }
@@ -47741,7 +50239,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_graph_queue",
                 "reason": "graph_dirty_or_missing_sources",
-                "command": ["python3", "scripts/aoa_session_memory.py", "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report"],
+                "command": ["python3", "scripts/aoa_session_memory.py", "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report", "--write-hash-cache"],
             }
         )
     if not actions and (int_value(search.get("deferred_live_session_count")) > 0 or int_value(graph.get("deferred_live_source_count")) > 0):
@@ -47764,6 +50262,92 @@ def session_memory_maintenance_next_actions(
             "command": ["python3", "scripts/aoa_session_memory.py", "search", "", *root_args, "--limit", "20"],
         }
     ]
+
+
+def session_memory_search_shard_next_action(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    search_shards: dict[str, Any],
+) -> dict[str, Any] | None:
+    status = str(search_shards.get("status") or "")
+    if status in {"current", "empty", "current_with_deferred_live_updates"}:
+        return None
+
+    root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    materialized_shard_count = int_value(search_shards.get("materialized_shard_count"))
+    if status == "catalog_not_current":
+        if not search_catalog_path(aoa_root).exists() or materialized_shard_count <= 0:
+            return None
+        return {
+            "id": "refresh_search_catalog",
+            "reason": "search_catalog_not_current",
+            "route_kind": "search_catalog_refresh",
+            "command": ["python3", "scripts/aoa_session_memory.py", "search-catalog", *root_args, "--refresh"],
+            "note": "Refresh the generated search catalog before shard materialization; this does not change raw evidence.",
+        }
+
+    actionable = (
+        search_shards.get("actionable_noncurrent_shards")
+        if isinstance(search_shards.get("actionable_noncurrent_shards"), list)
+        else []
+    )
+    noncurrent = search_shards.get("noncurrent_shards") if isinstance(search_shards.get("noncurrent_shards"), list) else []
+    candidates = actionable or [
+        item
+        for item in noncurrent
+        if isinstance(item, dict)
+        and (int_value(item.get("stale_session_count")) > 0 or int_value(item.get("missing_session_count")) > 0)
+        and (
+            int_value(item.get("missing_session_count")) > 0
+            or int_value(item.get("stale_session_count")) > int_value(item.get("deferred_live_session_count"))
+        )
+    ]
+    selected = next((item for item in candidates if isinstance(item, dict) and item.get("shard")), None)
+    if selected is None:
+        return None
+
+    shard = str(selected.get("shard"))
+    shard_db_value = str(selected.get("shard_db_path") or "")
+    shard_db_path = Path(shard_db_value) if shard_db_value else search_shard_db_path(aoa_root, shard)
+    shard_db_exists = shard_db_path.exists()
+    materialized = bool(selected.get("materialized"))
+    if not shard_db_exists and materialized_shard_count <= 0:
+        return None
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "search-shards",
+        "all",
+        *root_args,
+        "--shard",
+        shard,
+        "--budget-seconds",
+        "300",
+        "--write-report",
+    ]
+    route_kind = "search_shard_structured_rebuild"
+    if materialized or shard_db_exists:
+        command.extend(["--no-rebuild", "--dirty-only"])
+        route_kind = "search_shard_structured_dirty_only"
+
+    return {
+        "id": "refresh_search_shard_structured",
+        "reason": "search_shards_not_current",
+        "route_kind": route_kind,
+        "shard": shard,
+        "status": selected.get("status"),
+        "stale_session_count": selected.get("stale_session_count"),
+        "missing_session_count": selected.get("missing_session_count"),
+        "deferred_live_session_count": selected.get("deferred_live_session_count"),
+        "storage_profile": selected.get("storage_profile"),
+        "raw_text_query_support": selected.get("raw_text_query_support"),
+        "shard_db_exists": shard_db_exists,
+        "budget_seconds": 300,
+        "blocked_by_live_tail": False,
+        "command": command,
+        "note": "Refresh this generated structured shard without --full-text; deferred_live rows stay on the live-tail route unless explicitly included.",
+    }
 
 
 def session_memory_agent_route_status(
@@ -48041,8 +50625,50 @@ def session_memory_maintenance_status(
         storage=storage,
     )
     operations_search_shards = operations.get("search_shards") if isinstance(operations.get("search_shards"), dict) else {}
+    search_shard_next_action = None
+    if not portable_clean_runtime.get("ok"):
+        search_shard_next_action = session_memory_search_shard_next_action(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            search_shards=operations_search_shards,
+        )
+    if search_shard_next_action is not None:
+        if next_actions and next_actions[0].get("id") == "use_graph_search":
+            next_actions = [search_shard_next_action]
+            recommendation = "run_maintenance"
+            agent_route = session_memory_agent_route_status(
+                recommendation=recommendation,
+                search=search,
+                graph=graph,
+                route=route,
+                live_tail=live_tail,
+            )
+            agent_route["entity_registry_status"] = entity_registry.get("status")
+            agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
+            agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, script, validator, test, eval, graph, or memory entity."
+        elif not any(isinstance(action, dict) and action.get("id") == search_shard_next_action.get("id") for action in next_actions):
+            next_actions.append(search_shard_next_action)
+    timers_status = session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": [], "diagnostics": []}
     if isinstance(operations_search_shards.get("fast_path_defaults"), dict):
         agent_route["fast_path_defaults"] = operations_search_shards["fast_path_defaults"]
+    agent_route["search_shards_status"] = operations_search_shards.get("status")
+    agent_route["search_shard_action_pending"] = bool(search_shard_next_action)
+    if search_shard_next_action is not None:
+        agent_route["search_shard_next_action"] = {
+            key: search_shard_next_action.get(key)
+            for key in (
+                "id",
+                "reason",
+                "route_kind",
+                "shard",
+                "stale_session_count",
+                "missing_session_count",
+                "deferred_live_session_count",
+                "shard_db_exists",
+                "budget_seconds",
+            )
+            if key in search_shard_next_action
+        }
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
@@ -48073,7 +50699,7 @@ def session_memory_maintenance_status(
         "next_actions": next_actions,
         "exact_next_command": shlex.join(next_actions[0]["command"]) if next_actions and isinstance(next_actions[0].get("command"), list) else "",
         "latest_reports": latest_reports,
-        "timers": session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": []},
+        "timers": timers_status,
         "mcp_boundary": "MCP may expose this packet read-only; repair/reindex/maintenance commands stay outside MCP.",
         "diagnostics": []
         if portable_clean_runtime.get("ok")
@@ -48085,6 +50711,7 @@ def session_memory_maintenance_status(
                     *route.get("diagnostics", []),
                     *entity_registry.get("diagnostics", []),
                     *coordinator.get("diagnostics", []),
+                    *timers_status.get("diagnostics", []),
                 ]
             )
         ),
@@ -48206,6 +50833,24 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "timers": [
             {key: item.get(key) for key in ("unit", "service") if key in item}
             for item in timers.get("timers", [])[:8]
+            if isinstance(item, dict)
+        ],
+        "unit_contracts": [
+            {
+                key: item.get(key)
+                for key in (
+                    "service",
+                    "profile",
+                    "status",
+                    "observed_profile",
+                    "expected_graph_drip_on_block",
+                    "explicit_graph_drip_overrides",
+                    "mismatched_graph_drip_overrides",
+                    "diagnostics",
+                )
+                if key in item
+            }
+            for item in timers.get("unit_contracts", [])[:8]
             if isinstance(item, dict)
         ],
         "diagnostics": timers.get("diagnostics", []),
@@ -48710,6 +51355,17 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 for key in (
                     "id",
                     "reason",
+                    "route_kind",
+                    "shard",
+                    "status",
+                    "stale_session_count",
+                    "missing_session_count",
+                    "deferred_live_session_count",
+                    "storage_profile",
+                    "raw_text_query_support",
+                    "shard_db_exists",
+                    "budget_seconds",
+                    "blocked_by_live_tail",
                     "command",
                     "note",
                     "live_tail_status",
@@ -48944,14 +51600,27 @@ def graph_recent_live_source_summary(
     threshold = now_value - max(0.0, float(quiet_seconds))
     deferred: list[dict[str, Any]] = []
     actionable_count = 0
+    deferred_status_counts: Counter[str] = Counter()
+    actionable_status_counts: Counter[str] = Counter()
+    live_transcript_mtime_cache: dict[str, tuple[float, str]] = {}
     total = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         total += 1
+        status = str(item.get("status") or "unknown")
         mtime = graph_state_item_source_mtime(item)
-        live_transcript_mtime, live_transcript_path = graph_state_item_live_transcript_mtime(item)
-        if mtime > threshold and live_transcript_mtime > threshold:
+        session_dir = graph_state_item_session_dir(item)
+        if session_dir is not None:
+            cache_key = str(session_dir)
+            if cache_key not in live_transcript_mtime_cache:
+                live_transcript_mtime_cache[cache_key] = graph_state_item_live_transcript_mtime(item)
+            live_transcript_mtime, live_transcript_path = live_transcript_mtime_cache[cache_key]
+        else:
+            live_transcript_mtime, live_transcript_path = graph_state_item_live_transcript_mtime(item)
+        latest_activity_mtime = max(mtime, live_transcript_mtime)
+        if live_transcript_mtime > threshold:
+            deferred_status_counts[status] += 1
             if len(deferred) < max(0, sample_limit):
                 deferred.append(
                     {
@@ -48962,11 +51631,13 @@ def graph_recent_live_source_summary(
                         "source_mtime": mtime,
                         "live_transcript_path": live_transcript_path,
                         "live_transcript_mtime": live_transcript_mtime,
-                        "age_seconds": max(0.0, now_value - mtime),
+                        "latest_activity_mtime": latest_activity_mtime,
+                        "age_seconds": max(0.0, now_value - latest_activity_mtime),
                     }
                 )
             continue
         actionable_count += 1
+        actionable_status_counts[status] += 1
     deferred_count = total - actionable_count
     return {
         "quiet_seconds": quiet_seconds,
@@ -48975,7 +51646,11 @@ def graph_recent_live_source_summary(
         "source_count": total,
         "deferred_live_source_count": deferred_count,
         "actionable_source_count": actionable_count,
+        "deferred_status_counts": dict(deferred_status_counts),
+        "actionable_status_counts": dict(actionable_status_counts),
         "deferred_live_sources_sample": deferred,
+        "live_transcript_session_cache_count": len(live_transcript_mtime_cache),
+        "live_transcript_lookup_mode": "session_dir_cached",
     }
 
 
@@ -48994,6 +51669,15 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     ledger_coverage_gap_count = int_value(ledger.get("store_untracked_source_estimate"))
     latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
     queued_count = int_value(queue.get("queued_count"))
+    dirty_count = int_value(status_counts.get("dirty")) + source_version_mismatch_count
+    missing_base_count = int_value(status_counts.get("missing")) + ledger_store_missing_count
+    orphaned_count = int_value(status_counts.get("orphaned"))
+    ledger_actionable_total = ledger_actionable_count + queued_count + source_version_mismatch_count + ledger_store_missing_count
+    if ledger_actionable_total or orphaned_count:
+        missing_count = missing_base_count
+    else:
+        missing_count = max(missing_base_count, latest_remaining_count)
+    actionable_count = max(0, max(ledger_actionable_total + orphaned_count, latest_remaining_count))
     if ledger_actionable_count and not queued_count:
         reason_group_counts["ledger_actionable_sources_not_queued"] = ledger_actionable_count
     if ledger_store_missing_count:
@@ -49021,9 +51705,9 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
     recommendation = graph_source_maintenance_recommendation(
         source_count=max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
         existing_source_count=int_value(hot_state.get("source_count")),
-        dirty_count=int_value(status_counts.get("dirty")) + source_version_mismatch_count,
-        missing_count=max(int_value(status_counts.get("missing")) + ledger_store_missing_count, latest_remaining_count),
-        orphaned_count=int_value(status_counts.get("orphaned")),
+        dirty_count=dirty_count,
+        missing_count=missing_count,
+        orphaned_count=orphaned_count,
         blocked_count=int_value(status_counts.get("blocked")),
         reason_group_counts=reason_group_counts,
         workspace_root=str(aoa_root.parent),
@@ -49033,12 +51717,13 @@ def graph_hot_source_state_summary(aoa_root: Path, graph_hot_state: dict[str, An
         "source_count": max(int_value(ledger.get("source_count")), int_value(source_version_state.get("source_count"))),
         "existing_source_count": int_value(hot_state.get("source_count")),
         "status_counts": dict(status_counts),
-        "dirty_count": int_value(status_counts.get("dirty")) + source_version_mismatch_count,
-        "missing_count": max(int_value(status_counts.get("missing")) + ledger_store_missing_count, latest_remaining_count),
+        "dirty_count": dirty_count,
+        "missing_count": missing_count,
         "blocked_count": int_value(status_counts.get("blocked")),
         "retired_count": graph_retired_source_count_from_counts(status_counts),
         "partial_evidence_count": graph_partial_evidence_count_from_counts(status_counts),
-        "orphaned_count": int_value(status_counts.get("orphaned")),
+        "orphaned_count": orphaned_count,
+        "actionable_count": actionable_count,
         "queued_count": queued_count,
         "ledger_store_missing_count": ledger_store_missing_count,
         "ledger_coverage_gap_count": ledger_coverage_gap_count,
@@ -49170,8 +51855,26 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
     queued_actionable_count = int_value(queue_live_summary.get("actionable_source_count"))
     ledger_actionable_count = int_value(ledger_live_summary.get("actionable_source_count"))
     deferred_live_source_count = int_value(queue_live_summary.get("deferred_live_source_count")) + int_value(ledger_live_summary.get("deferred_live_source_count"))
+    ledger_deferred_status_counts = (
+        ledger_live_summary.get("deferred_status_counts")
+        if isinstance(ledger_live_summary.get("deferred_status_counts"), dict)
+        else {}
+    )
+    deferred_store_missing_count = min(ledger_store_missing_count, int_value(ledger_deferred_status_counts.get("missing")))
+    actionable_store_missing_count = max(0, ledger_store_missing_count - deferred_store_missing_count)
     queued_count = len(queue_items)
     latest_remaining_count = int_value(latest_maintenance.get("remaining_count")) if latest_maintenance.get("usable_for_hot_gate") else 0
+    source_version_maintenance_count = int_value(source_version_state.get("version_mismatch_source_count"))
+    latest_remaining_actionable_count = latest_remaining_count
+    if (
+        latest_remaining_count
+        and deferred_live_source_count
+        and not queued_actionable_count
+        and not ledger_actionable_count
+        and not actionable_store_missing_count
+        and not source_version_maintenance_count
+    ):
+        latest_remaining_actionable_count = 0
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
         diagnostics.append("graph_store_schema_mismatch")
     if int_value(metadata.get("graph_schema_version")) != GRAPH_SCHEMA_VERSION:
@@ -49180,15 +51883,14 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         diagnostics.append("graph_store_nodes_empty")
     if int_value(counts.get("edge_count")) <= 0:
         diagnostics.append("graph_store_edges_empty")
-    if ledger_store_missing_count:
+    if actionable_store_missing_count:
         diagnostics.append("graph_source_ledger_store_count_mismatch")
     if ledger_coverage_gap_count:
         diagnostics.append("graph_source_ledger_coverage_gap")
-    if latest_remaining_count:
+    if latest_remaining_actionable_count:
         diagnostics.append("latest_graph_maintenance_remaining_sources")
     if ledger_actionable_count and not queued_count:
         diagnostics.append("maintenance_queue_empty_but_ledger_actionable_sources_present")
-    source_version_maintenance_count = int_value(source_version_state.get("version_mismatch_source_count"))
     structural_rebuild_reasons = {
         "graph_store_schema_mismatch",
         "graph_schema_mismatch",
@@ -49196,7 +51898,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         "graph_store_edges_empty",
     }
     needs_full_rebuild = any(item in diagnostics for item in structural_rebuild_reasons)
-    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or ledger_store_missing_count or ledger_coverage_gap_count or latest_remaining_count:
+    if queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or actionable_store_missing_count or ledger_coverage_gap_count or latest_remaining_actionable_count:
         status = "dirty"
     elif queued_count or deferred_live_source_count:
         status = "current_with_deferred_live_sources"
@@ -49212,9 +51914,9 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             queued_actionable_count
             or ledger_actionable_count
             or source_version_maintenance_count
-            or ledger_store_missing_count
+            or actionable_store_missing_count
             or ledger_coverage_gap_count
-            or latest_remaining_count
+            or latest_remaining_actionable_count
             or needs_full_rebuild
         ),
         "needs_full_rebuild": needs_full_rebuild,
@@ -49234,17 +51936,25 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "retired_count": retired_count,
             "non_retired_count": ledger_non_retired_count,
             "store_missing_source_estimate": ledger_store_missing_count,
+            "actionable_store_missing_source_estimate": actionable_store_missing_count,
+            "deferred_store_missing_source_estimate": deferred_store_missing_count,
             "store_untracked_source_estimate": ledger_coverage_gap_count,
             "actionable_count": ledger_actionable_count,
             "deferred_live_source_count": int_value(ledger_live_summary.get("deferred_live_source_count")),
+            "deferred_status_counts": ledger_live_summary.get("deferred_status_counts", {}),
+            "actionable_status_counts": ledger_live_summary.get("actionable_status_counts", {}),
+            "live_transcript_lookup_mode": ledger_live_summary.get("live_transcript_lookup_mode"),
+            "live_transcript_session_cache_count": ledger_live_summary.get("live_transcript_session_cache_count"),
         },
-        "latest_maintenance": latest_maintenance,
+        "latest_maintenance": {**latest_maintenance, "actionable_remaining_count": latest_remaining_actionable_count},
         "queue": {
             "path": str(paths["maintenance_queue"]),
             "exists": queue_exists,
             "queued_count": queued_count,
             "actionable_count": queued_actionable_count,
             "deferred_live_source_count": int_value(queue_live_summary.get("deferred_live_source_count")),
+            "live_transcript_lookup_mode": queue_live_summary.get("live_transcript_lookup_mode"),
+            "live_transcript_session_cache_count": queue_live_summary.get("live_transcript_session_cache_count"),
             "deferred_live_sources_sample": queue_live_summary.get("deferred_live_sources_sample", []),
             "source_keys_sample": sorted(str(key) for key in queue_items)[:40],
         },
@@ -49489,6 +52199,18 @@ ENTITY_USAGE_ROLE_PRIORITY = {
     "entrypoint": 3,
     "context": 4,
 }
+ENTITY_USAGE_FRESHNESS_PRIORITY = {
+    "fresh": 0,
+    "current": 0,
+    "bounded_current": 0,
+    "current_with_deferred_live_updates": 0,
+    "deferred_live": 1,
+    "unverifiable": 1,
+    "unknown": 1,
+    "": 1,
+    "stale": 3,
+    "dirty": 3,
+}
 ENTITY_USAGE_ROUTE_SIGNAL_SAMPLE_LIMIT = 24
 ENTITY_USAGE_DIRECT_TRACE_KINDS = {
     "agent",
@@ -49580,7 +52302,7 @@ def entity_usage_hit_sort_key(hit: dict[str, Any], event: dict[str, Any], origin
     matched_routes = hit.get("matched_routes") if isinstance(hit.get("matched_routes"), list) else []
     text_only_rank = 1 if matched_routes and all(str(item) == "text" for item in matched_routes) else 0
     freshness_status = entity_usage_event_freshness_status(event)
-    freshness_rank = 0 if freshness_status == "fresh" else (1 if freshness_status == "stale" else 2)
+    freshness_rank = ENTITY_USAGE_FRESHNESS_PRIORITY.get(freshness_status, 1)
     return (
         ENTITY_USAGE_ROLE_PRIORITY.get(str(event.get("role") or "context"), 99),
         text_only_rank,
@@ -50184,7 +52906,7 @@ def entity_usage_audit(
 
     if usage_role_fast_path_supported:
         usage_role_fast_path_applied = True
-        usage_role_fast_path_fetch_limit = max(1, min(100, max(limit, per_route_limit)))
+        usage_role_fast_path_fetch_limit = route_fetch_limit
         for candidate in lookup_candidates:
             route_signal_value = str(candidate.get("route_signal") or "")
             route_layer_value = str(candidate.get("layer") or "") if not route_signal_value else None
@@ -50728,7 +53450,21 @@ ENTITY_USAGE_SCENARIO_LAYER_KIND = {
     "mcp": "mcp",
     "tool": "tool",
     "api": "api",
+    "plugin": "plugin",
+    "agent": "agent",
+    "hook": "hook",
     "hook_health": "hook",
+    "script": "script",
+    "validator": "validator",
+    "test": "test",
+    "eval": "eval",
+    "git": "git",
+    "github": "github",
+    "playbook": "playbook",
+    "technique": "technique",
+    "mechanic": "mechanic",
+    "graph": "graph",
+    "memory": "memory",
     "path": "path",
     "goal": "goal",
     "agent_event": "agent_event",
@@ -50741,6 +53477,7 @@ ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS = (
     "agent_event",
     "api",
     "goal",
+    "hook",
     "hook_health",
     "mcp",
     "skill",
@@ -50766,6 +53503,21 @@ ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS = {
     "tool",
     "validator",
 }
+ENTITY_USAGE_SCENARIO_RESULT_EVIDENCE_LAYERS = {
+    "agent_event",
+    "hook",
+    "hook_health",
+    "failure_mode",
+    "decision_thread",
+    "external_snapshot",
+    "delivery_state",
+}
+ENTITY_USAGE_SCENARIO_ACTIONABLE_QUALITY_FLAGS = {
+    "direct_usage_without_consequence",
+    "missing_direct_usage",
+    "missing_hook_result_evidence",
+    "no_role_evidence",
+}
 ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS = (
     "__pycache__",
     "pycache",
@@ -50790,6 +53542,19 @@ ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES = {
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_MULTIPLIER = 8
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_FLOOR = 32
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_CEILING = 256
+ENTITY_USAGE_SCENARIO_PROBE_COUNT_CAP = 64
+
+
+def entity_usage_scenario_candidate_kind(layer: str, kind: str | None = None) -> str:
+    normalized_kind = normalize_trace_route_kind(kind)
+    if normalized_kind != "auto" and normalized_kind in TRACE_ROUTE_KINDS:
+        return normalized_kind
+    normalized_layer = route_key_slug(layer, fallback=layer)
+    mapped_kind = ENTITY_USAGE_SCENARIO_LAYER_KIND.get(normalized_layer, normalized_layer)
+    normalized_mapped_kind = normalize_trace_route_kind(mapped_kind)
+    if normalized_mapped_kind in TRACE_ROUTE_KINDS:
+        return normalized_mapped_kind
+    return "auto"
 
 
 def entity_usage_scenario_anchor(layer: str, key: str) -> str:
@@ -50824,9 +53589,7 @@ def entity_usage_scenario_candidate_reject_reason(candidate: dict[str, Any]) -> 
         return "no_event_documents"
     if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count <= 0:
         return "no_direct_usage_events"
-    if layer == "agent_event" and evidence_count <= 0:
-        return "no_agent_event_evidence"
-    if layer in {"hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"} and evidence_count <= 0:
+    if layer in ENTITY_USAGE_SCENARIO_RESULT_EVIDENCE_LAYERS and evidence_count <= 0:
         return "no_layer_evidence_events"
     return ""
 
@@ -50871,19 +53634,22 @@ def entity_usage_scenario_probe_evidence(
     route_id: int,
     layer: str,
 ) -> dict[str, int]:
+    count_cap = ENTITY_USAGE_SCENARIO_PROBE_COUNT_CAP
     event_document_count = int(
         conn.execute(
             """
-            SELECT 1
-            FROM document_routes
-            JOIN documents ON documents.rowid = document_routes.doc_rowid
-            WHERE document_routes.route_id = ?
-              AND documents.doc_type = 'event'
-            LIMIT 1
+            SELECT COUNT(*)
+            FROM (
+              SELECT 1
+              FROM document_routes
+              JOIN documents ON documents.rowid = document_routes.doc_rowid
+              WHERE document_routes.route_id = ?
+                AND documents.doc_type = 'event'
+              LIMIT ?
+            )
             """,
-            (route_id,),
-        ).fetchone()
-        is not None
+            (route_id, count_cap),
+        ).fetchone()[0]
     )
     usage_event_count = 0
     result_event_count = 0
@@ -50892,60 +53658,73 @@ def entity_usage_scenario_probe_evidence(
         usage_event_count = int(
             conn.execute(
                 """
-                SELECT 1
-                FROM document_routes
-                JOIN documents INDEXED BY idx_documents_doc_type_usage_role_date
-                  ON documents.rowid = document_routes.doc_rowid
-                WHERE document_routes.route_id = ?
-                  AND documents.doc_type = 'event'
-                  AND documents.usage_role = 'usage'
-                LIMIT 1
+                SELECT COUNT(*)
+                FROM (
+                  SELECT 1
+                  FROM document_routes
+                  JOIN documents INDEXED BY idx_documents_doc_type_usage_role_date
+                    ON documents.rowid = document_routes.doc_rowid
+                  WHERE document_routes.route_id = ?
+                    AND documents.doc_type = 'event'
+                    AND documents.usage_role = 'usage'
+                  LIMIT ?
+                )
                 """,
-                (route_id,),
-            ).fetchone()
-            is not None
+                (route_id, count_cap),
+            ).fetchone()[0]
         )
-    if layer in {"agent_event", "hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"}:
+    if layer in ENTITY_USAGE_SCENARIO_RESULT_EVIDENCE_LAYERS:
         result_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_RESULT_TYPES))
         outcome_type_placeholders = ",".join("?" for _ in sorted(ENTITY_USAGE_OUTCOME_TYPES))
         result_event_count = int(
             conn.execute(
                 f"""
-                SELECT 1
-                FROM document_routes
-                JOIN documents INDEXED BY idx_documents_type
-                  ON documents.rowid = document_routes.doc_rowid
-                WHERE document_routes.route_id = ?
-                  AND documents.doc_type = 'event'
-                  AND documents.event_type IN ({result_type_placeholders})
-                LIMIT 1
+                SELECT COUNT(*)
+                FROM (
+                  SELECT 1
+                  FROM document_routes
+                  JOIN documents INDEXED BY idx_documents_type
+                    ON documents.rowid = document_routes.doc_rowid
+                  WHERE document_routes.route_id = ?
+                    AND documents.doc_type = 'event'
+                    AND documents.event_type IN ({result_type_placeholders})
+                  LIMIT ?
+                )
                 """,
-                (route_id, *sorted(ENTITY_USAGE_RESULT_TYPES)),
-            ).fetchone()
-            is not None
+                (route_id, *sorted(ENTITY_USAGE_RESULT_TYPES), count_cap),
+            ).fetchone()[0]
         )
         outcome_event_count = int(
             conn.execute(
                 f"""
-                SELECT 1
-                FROM document_routes
-                JOIN documents INDEXED BY idx_documents_type
-                  ON documents.rowid = document_routes.doc_rowid
-                WHERE document_routes.route_id = ?
-                  AND documents.doc_type = 'event'
-                  AND documents.event_type IN ({outcome_type_placeholders})
-                LIMIT 1
+                SELECT COUNT(*)
+                FROM (
+                  SELECT 1
+                  FROM document_routes
+                  JOIN documents INDEXED BY idx_documents_type
+                    ON documents.rowid = document_routes.doc_rowid
+                  WHERE document_routes.route_id = ?
+                    AND documents.doc_type = 'event'
+                    AND documents.event_type IN ({outcome_type_placeholders})
+                  LIMIT ?
+                )
                 """,
-                (route_id, *sorted(ENTITY_USAGE_OUTCOME_TYPES)),
-            ).fetchone()
-            is not None
+                (route_id, *sorted(ENTITY_USAGE_OUTCOME_TYPES), count_cap),
+            ).fetchone()[0]
         )
     posting_count = int(
         conn.execute(
-            "SELECT 1 FROM document_routes WHERE route_id = ? LIMIT 1",
-            (route_id,),
-        ).fetchone()
-        is not None
+            """
+            SELECT COUNT(*)
+            FROM (
+              SELECT 1
+              FROM document_routes
+              WHERE route_id = ?
+              LIMIT ?
+            )
+            """,
+            (route_id, count_cap),
+        ).fetchone()[0]
     )
     return {
         "posting_count": posting_count,
@@ -51029,7 +53808,7 @@ def entity_usage_scenario_candidates(
             "route_id": int(row["route_id"]),
             "layer": layer,
             "key": key,
-            "kind": ENTITY_USAGE_SCENARIO_LAYER_KIND.get(layer, "auto"),
+            "kind": entity_usage_scenario_candidate_kind(layer),
             "anchor": anchor,
             "route_signal": str(row["route_signal"]),
             "registry_tier": entity_usage_scenario_registry_tier(layer=layer, registry_entry=registry_entry),
@@ -51120,7 +53899,7 @@ def entity_usage_scenario_candidates(
     finally:
         if conn is not None:
             conn.close()
-    diagnostics.append("candidate_selection_strategy:bounded_route_probe_v1")
+    diagnostics.append("candidate_selection_strategy:bounded_counted_route_probe_v2")
     diagnostics.append(f"candidate_probe_count:{probe_count}")
     if probe_count >= probe_budget and len(selected) < requested:
         diagnostics.append(f"candidate_probe_budget_exhausted:{probe_budget}")
@@ -51163,6 +53942,49 @@ def entity_usage_raw_preview_counts(events: list[dict[str, Any]], *, limit: int 
     return dict(sorted(counts.items()))
 
 
+def entity_usage_scenario_evidence_mode(
+    *,
+    usage_count: int,
+    result_count: int,
+    outcome_count: int,
+    entrypoint_count: int,
+    context_count: int,
+    consequence_count: int,
+) -> str:
+    if usage_count > 0 and consequence_count > 0:
+        return "usage_with_consequence"
+    if usage_count > 0 and (result_count > 0 or outcome_count > 0):
+        return "usage_with_result"
+    if usage_count > 0:
+        return "direct_usage_only"
+    if result_count > 0 and outcome_count > 0:
+        return "result_and_outcome"
+    if result_count > 0:
+        return "result_only"
+    if outcome_count > 0:
+        return "outcome_only"
+    if entrypoint_count > 0:
+        return "entrypoint_only"
+    if context_count > 0:
+        return "context_only"
+    return "no_evidence"
+
+
+def entity_usage_scenario_quality_flags(*, layer: str, evidence_mode: str, usage_count: int, consequence_count: int) -> list[str]:
+    flags: list[str] = []
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count <= 0:
+        flags.append("missing_direct_usage")
+    if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count > 0 and consequence_count <= 0:
+        flags.append("direct_usage_without_consequence")
+    if layer in {"hook", "hook_health"} and evidence_mode not in {"result_only", "result_and_outcome", "outcome_only", "usage_with_result", "usage_with_consequence"}:
+        flags.append("missing_hook_result_evidence")
+    if evidence_mode in {"result_only", "outcome_only", "entrypoint_only", "context_only"}:
+        flags.append(f"{evidence_mode}_evidence")
+    if evidence_mode == "no_evidence":
+        flags.append("no_role_evidence")
+    return flags
+
+
 def entity_usage_scenario_sample_status(
     *,
     candidate: dict[str, Any],
@@ -51178,6 +54000,14 @@ def entity_usage_scenario_sample_status(
     context_count = int_value(audit.get("context_event_count"))
     consequence_count = int_value(audit.get("consequence_event_count"))
     event_count = int_value(audit.get("event_count"))
+    evidence_mode = entity_usage_scenario_evidence_mode(
+        usage_count=usage_count,
+        result_count=result_count,
+        outcome_count=outcome_count,
+        entrypoint_count=entrypoint_count,
+        context_count=context_count,
+        consequence_count=consequence_count,
+    )
     evidence_count = usage_count + result_count + outcome_count + entrypoint_count + context_count
     failure_reasons: list[str] = []
     if not audit.get("ok"):
@@ -51194,12 +54024,18 @@ def entity_usage_scenario_sample_status(
     warning_reasons: list[str] = []
     if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and usage_count <= 0:
         warning_reasons.append("no_usage_events")
-    if layer == "agent_event" and outcome_count <= 0 and event_count <= 0:
-        warning_reasons.append("no_agent_event_evidence")
-    if layer in {"hook_health", "failure_mode", "decision_thread", "external_snapshot", "delivery_state"} and evidence_count <= 0:
+    if layer in ENTITY_USAGE_SCENARIO_RESULT_EVIDENCE_LAYERS and evidence_count <= 0:
         warning_reasons.append("no_layer_evidence_events")
     if layer in ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS and consequence_count <= 0 and result_count <= 0 and outcome_count <= 0:
         warning_reasons.append("no_consequence_or_result_events")
+    quality_flags = entity_usage_scenario_quality_flags(
+        layer=layer,
+        evidence_mode=evidence_mode,
+        usage_count=usage_count,
+        consequence_count=consequence_count,
+    )
+    actionable_quality_flags = sorted(set(quality_flags) & ENTITY_USAGE_SCENARIO_ACTIONABLE_QUALITY_FLAGS)
+    warning_reasons.extend(f"quality_flag:{flag}" for flag in actionable_quality_flags)
     if warning_reasons:
         return "warn", warning_reasons
     return "passed", []
@@ -51235,12 +54071,18 @@ def entity_usage_scenario_audit(
     status_counts: Counter[str] = Counter()
     freshness_counts: Counter[str] = Counter()
     raw_preview_totals: Counter[str] = Counter()
+    evidence_mode_counts: Counter[str] = Counter()
+    quality_flag_counts: Counter[str] = Counter()
     sample_total_elapsed_ms = 0
     audit_total_elapsed_ms = 0
     raw_preview_total_elapsed_ms = 0
     for candidate in candidates:
         sample_started = time.monotonic()
         audit_started = time.monotonic()
+        candidate["kind"] = entity_usage_scenario_candidate_kind(
+            str(candidate.get("layer") or ""),
+            str(candidate.get("kind") or "auto"),
+        )
         audit = entity_usage_audit(
             aoa_root=aoa_root,
             anchor=str(candidate["anchor"]),
@@ -51271,10 +54113,28 @@ def entity_usage_scenario_audit(
             preview_counts=preview_counts,
             raw_preview_limit=raw_preview_limit,
         )
+        evidence_mode = entity_usage_scenario_evidence_mode(
+            usage_count=int_value(audit.get("usage_event_count")),
+            result_count=int_value(audit.get("result_event_count")),
+            outcome_count=int_value(audit.get("outcome_event_count")),
+            entrypoint_count=int_value(audit.get("entrypoint_event_count")),
+            context_count=int_value(audit.get("context_event_count")),
+            consequence_count=int_value(audit.get("consequence_event_count")),
+        )
+        quality_flags = entity_usage_scenario_quality_flags(
+            layer=str(candidate.get("layer") or ""),
+            evidence_mode=evidence_mode,
+            usage_count=int_value(audit.get("usage_event_count")),
+            consequence_count=int_value(audit.get("consequence_event_count")),
+        )
+        evidence_mode_counts[evidence_mode] += 1
+        quality_flag_counts.update(quality_flags)
         status_counts[status] += 1
         sample = {
             "status": status,
             "failure_reasons": failure_reasons,
+            "evidence_mode": evidence_mode,
+            "quality_flags": quality_flags,
             "candidate": candidate,
             "elapsed_ms": int((time.monotonic() - sample_started) * 1000),
             "audit_elapsed_ms": audit_elapsed_ms,
@@ -51326,6 +54186,19 @@ def entity_usage_scenario_audit(
         "slowest_sample_route": (slowest_sample.get("candidate") or {}).get("route_signal") if isinstance(slowest_sample.get("candidate"), dict) else None,
         "freshness_counts": dict(sorted(freshness_counts.items())),
         "raw_preview_counts": dict(sorted(raw_preview_totals.items())),
+        "evidence_mode_counts": dict(sorted(evidence_mode_counts.items())),
+        "quality_flag_counts": dict(sorted(quality_flag_counts.items())),
+        "direct_usage_sample_count": sum(
+            count
+            for mode, count in evidence_mode_counts.items()
+            if mode in {"usage_with_consequence", "usage_with_result", "direct_usage_only"}
+        ),
+        "result_only_sample_count": evidence_mode_counts.get("result_only", 0),
+        "non_usage_evidence_sample_count": sum(
+            count
+            for mode, count in evidence_mode_counts.items()
+            if mode in {"result_and_outcome", "result_only", "outcome_only", "entrypoint_only", "context_only"}
+        ),
         "provider_ok": provider_payload.get("ok") if isinstance(provider_payload, dict) else None,
         "provider_status": provider_payload.get("status") if isinstance(provider_payload, dict) else None,
         "provider_freshness_status": provider_freshness.get("status") if isinstance(provider_freshness, dict) else None,
@@ -51394,11 +54267,13 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         f"- slowest_sample: `{quality.get('slowest_sample_route')}` `{quality.get('slowest_sample_elapsed_ms')}` ms",
         f"- route_terms: `{quality.get('search_route_term_count')}`",
         f"- route_postings: `{quality.get('search_route_index_count')}`",
+        f"- evidence_modes: `{json.dumps(quality.get('evidence_mode_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
+        f"- quality_flags: `{json.dumps(quality.get('quality_flag_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
         "",
         "## Samples",
         "",
-        "| status | kind | anchor | route | ms | usage | consequences | refs | raw previews | reasons |",
-        "| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
+        "| status | mode | kind | anchor | route | ms | usage | consequences | refs | raw previews | flags | reasons |",
+        "| --- | --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |",
     ]
     for sample in payload.get("samples", []) if isinstance(payload.get("samples"), list) else []:
         if not isinstance(sample, dict):
@@ -51406,8 +54281,9 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         candidate = sample.get("candidate") if isinstance(sample.get("candidate"), dict) else {}
         previews = sample.get("raw_preview_counts") if isinstance(sample.get("raw_preview_counts"), dict) else {}
         lines.append(
-            "| `{status}` | `{kind}` | `{anchor}` | `{route}` | `{elapsed}` | `{usage}` | `{conseq}` | `{refs}` | `{previews}` | {reasons} |".format(
+            "| `{status}` | `{mode}` | `{kind}` | `{anchor}` | `{route}` | `{elapsed}` | `{usage}` | `{conseq}` | `{refs}` | `{previews}` | {flags} | {reasons} |".format(
                 status=sample.get("status"),
+                mode=sample.get("evidence_mode"),
                 kind=candidate.get("kind"),
                 anchor=markdown_cell(candidate.get("anchor")),
                 route=markdown_cell(candidate.get("route_signal")),
@@ -51416,6 +54292,7 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
                 conseq=sample.get("consequence_event_count"),
                 refs=sample.get("document_ref_count"),
                 previews=markdown_cell(json.dumps(previews, ensure_ascii=False, sort_keys=True)),
+                flags=markdown_cell(", ".join(str(item) for item in sample.get("quality_flags", []) if item)),
                 reasons=markdown_cell(", ".join(str(item) for item in sample.get("failure_reasons", []) if item)),
             )
         )
@@ -52819,6 +55696,7 @@ def command_token_accounting_backfill(args: argparse.Namespace) -> int:
         max_raw_bytes=max_raw_bytes,
         force=args.force,
         write_report=args.write_report,
+        budget_seconds=args.budget_seconds,
     )
     print(json.dumps(token_accounting_backfill_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -52969,6 +55847,9 @@ def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
         fail_on_block=args.fail_on_block,
         resource_force=args.resource_force,
         resource_binary=args.resource_binary,
+        index_drip_on_block=args.index_drip_on_block,
+        index_drip_repair_limit=args.index_drip_repair_limit,
+        index_drip_budget_seconds=args.index_drip_budget_seconds,
         graph_drip_on_block=args.graph_drip_on_block,
         graph_drip_batch_limit=args.graph_drip_batch_limit,
         graph_drip_budget_seconds=args.graph_drip_budget_seconds,
@@ -53250,6 +56131,30 @@ def command_search(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_literal_query_plan(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    query = args.query or args.query_text or ""
+    payload = literal_query_plan(
+        aoa_root=root,
+        query=query,
+        kind=args.kind,
+        session=args.session_filter,
+        doc_type=args.doc_type,
+        route_layer=args.route_layer,
+        route_signal=args.route_signal,
+        agent_event=args.agent_event,
+        usage_role=args.usage_role,
+        task_episode_id=args.task_episode_id,
+        date_from=args.date_from,
+        date_to=args.date_to,
+        max_shards=args.max_shards,
+        query_timeout_ms=args.query_timeout_ms,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_agent_responses(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -53293,6 +56198,7 @@ def command_agent_event_windows(args: argparse.Namespace) -> int:
         before=args.before,
         after=args.after,
         provider=args.provider,
+        explain=bool(getattr(args, "explain", True)),
         include_stream_copies=bool(getattr(args, "include_stream_copies", False)),
         use_shards=bool(getattr(args, "use_shards", True)),
         max_shards=int_value(getattr(args, "max_shards", 24), 24),
@@ -53903,6 +56809,7 @@ def command_graph_neighborhood(args: argparse.Namespace) -> int:
         kind=args.kind,
         depth=args.depth,
         limit=args.limit,
+        edge_limit=args.edge_limit,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -57165,6 +60072,7 @@ def command_install_user_skill(args: argparse.Namespace) -> int:
         aoa_root=root,
         skills_dir=skills_dir,
         force=args.force,
+        skill_name=args.skill,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -57692,6 +60600,7 @@ def completion_audit(
     standalone_remote = git_remote_url(standalone_repo)
     standalone_github_ready = bool(standalone_remote and "github.com" in standalone_remote.lower())
     user_skill_state = user_skill_install_state(aoa_root)
+    installable_user_skills = installable_user_skill_states(aoa_root)
     provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
     provider_config_exists = (aoa_root / SEARCH_PROVIDER_CONFIG_PATH).exists()
     provider_config = read_json(aoa_root / SEARCH_PROVIDER_CONFIG_PATH, {})
@@ -57738,6 +60647,7 @@ def completion_audit(
     user_skill_ok = bool(user_skill_state.get("ok")) if not portable_bundle else (
         (aoa_root / "skills/aoa-session-memory-global-route/SKILL.md").exists()
     )
+    installable_user_skill_sources_ok = bool(installable_user_skills.get("source_ok"))
     live_hook_requirement = (
         "Live user hooks are wired for required lifecycle events"
         if not portable_bundle
@@ -57892,12 +60802,24 @@ def completion_audit(
             "covered" if user_skill_ok else "remaining",
             {
                 **user_skill_state,
+                "installable_user_skills": installable_user_skills,
                 "portable_bundle": portable_bundle,
                 "source_skill": str(aoa_root / "skills/aoa-session-memory-global-route/SKILL.md"),
             },
             None
             if user_skill_ok
             else "Install the user-level router with install-user-skill.",
+        ),
+        checklist_item(
+            "Approved user-level session-memory skill sources are available",
+            "covered" if installable_user_skill_sources_ok else "remaining",
+            {
+                "installable_user_skills": installable_user_skills,
+                "portable_bundle": portable_bundle,
+            },
+            None
+            if installable_user_skill_sources_ok
+            else "Keep every approved user-level skill source under skills/ so install-user-skill can expose it.",
         ),
         checklist_item(
             "Standalone local repository is prepared for the portable bundle",
@@ -58062,6 +60984,7 @@ REQUIRED_ROOT_FILES = [
     "skills/aoa-session-manual-review/SKILL.md",
     "skills/aoa-session-memory-audit/SKILL.md",
     "skills/aoa-session-memory-doctor/SKILL.md",
+    "skills/aoa-session-memory-evidence-route/SKILL.md",
     "skills/aoa-session-memory-global-route/SKILL.md",
     "skills/aoa-session-memory-stress-pass/SKILL.md",
     "skills/aoa-session-naming-wave/SKILL.md",
@@ -58081,6 +61004,59 @@ def configured_hook_events(path: Path) -> set[str]:
     return {str(key) for key, value in hooks.items() if isinstance(value, list)}
 
 
+def doctor_recent_live_tail_state(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    registry_item: dict[str, Any],
+    *,
+    now_ts: float | None = None,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+) -> dict[str, Any]:
+    now_value = time.time() if now_ts is None else float(now_ts)
+    quiet_value = max(0.0, float(quiet_seconds))
+    threshold = now_value - quiet_value
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    candidate_paths = [
+        session_dir / "session.manifest.json",
+        session_dir / SESSION_INDEX_JSON,
+        session_dir / SESSION_INDEX_MARKDOWN,
+        session_dir / "segments",
+        session_dir / "raw" / "blocks",
+        session_dir / "raw" / RAW_SOURCE_JSON,
+        session_dir / "raw" / RAW_BLOCK_INDEX_JSON,
+        session_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL,
+    ]
+    raw_path_text = str(raw.get("path") or "")
+    if raw_path_text:
+        candidate_paths.append(Path(raw_path_text))
+    existing_mtimes = [path_mtime(path) for path in candidate_paths if path.exists()]
+    latest_archive_mtime = max(existing_mtimes) if existing_mtimes else 0.0
+    live_transcript = session_live_transcript_path(session_dir)
+    live_mtime = path_mtime(live_transcript) if live_transcript else 0.0
+    if latest_archive_mtime <= threshold and live_mtime <= threshold:
+        return {}
+    reasons: list[str] = []
+    if latest_archive_mtime > threshold:
+        reasons.append("recent_archive_generated_write")
+    if live_mtime > threshold:
+        reasons.append("recent_live_codex_transcript_update")
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    session_id = str(manifest.get("session_id") or registry_item.get("session_id") or session_dir.name)
+    session_label = str(manifest.get("session_label") or registry_item.get("session_label") or display.get("label") or session_dir.name)
+    latest_seen = max(latest_archive_mtime, live_mtime)
+    return {
+        "session_id": session_id,
+        "session_label": session_label,
+        "session_dir": str(session_dir),
+        "latest_archive_mtime": latest_archive_mtime,
+        "live_transcript_path": str(live_transcript) if live_transcript else "",
+        "live_transcript_mtime": live_mtime,
+        "age_seconds": max(0.0, now_value - latest_seen) if latest_seen else None,
+        "quiet_seconds": quiet_value,
+        "reasons": reasons,
+    }
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -58092,6 +61068,36 @@ def command_doctor(args: argparse.Namespace) -> int:
     allowed_segment_roles = set(policy.get("segment_roles", [])) if isinstance(policy.get("segment_roles"), list) else set()
     problems: list[str] = []
     warnings: list[str] = []
+    deferred_live_problems: list[str] = []
+    deferred_live_problem_sessions: dict[str, dict[str, Any]] = {}
+    doctor_now_ts = time.time()
+    doctor_quiet_seconds = GRAPH_HOT_LIVE_DEFER_SECONDS
+    doctor_live_state_cache: dict[str, dict[str, Any]] = {}
+
+    def add_generated_session_problem(problem: str, session_path: Path, manifest_payload: dict[str, Any], registry_item: dict[str, Any]) -> None:
+        cache_key = str(session_path)
+        if cache_key not in doctor_live_state_cache:
+            doctor_live_state_cache[cache_key] = doctor_recent_live_tail_state(
+                session_path,
+                manifest_payload,
+                registry_item,
+                now_ts=doctor_now_ts,
+                quiet_seconds=doctor_quiet_seconds,
+            )
+        live_state = doctor_live_state_cache[cache_key]
+        if live_state:
+            deferred_live_problems.append(problem)
+            session_key = str(live_state.get("session_id") or live_state.get("session_label") or session_path)
+            existing = deferred_live_problem_sessions.setdefault(
+                session_key,
+                {**live_state, "deferred_problem_count": 0, "sample_problems": []},
+            )
+            existing["deferred_problem_count"] = int_value(existing.get("deferred_problem_count")) + 1
+            samples = existing.setdefault("sample_problems", [])
+            if isinstance(samples, list) and len(samples) < 8:
+                samples.append(problem)
+            return
+        problems.append(problem)
 
     for rel_path in REQUIRED_ROOT_FILES:
         if not (root / rel_path).exists():
@@ -58129,8 +61135,11 @@ def command_doctor(args: argparse.Namespace) -> int:
                 problems.append(f"live user hooks command mismatch for {event_name}: expected {expected_command}")
 
     user_skill_state = user_skill_install_state(root)
+    installable_user_skills = installable_user_skill_states(root)
     if args.check_user_skill and not user_skill_state.get("ok"):
         problems.append(f"user-level router skill is not installed: {user_skill_state}")
+    if getattr(args, "check_installable_user_skills", False) and not installable_user_skills.get("all_installed"):
+        problems.append(f"approved user-level skills are not all installed: {installable_user_skills}")
 
     if args.check_codex_grounding:
         grounding = codex_grounding(workspace_root=workspace_root, aoa_root=root)
@@ -58277,13 +61286,18 @@ def command_doctor(args: argparse.Namespace) -> int:
                     problems.append(f"invalid segment role {role}: {session_path}")
                 raw_block = segment.get("raw_block") if isinstance(segment.get("raw_block"), dict) else {}
                 if raw_blocks_required and not raw_block_payload_available(session_path, raw_block):
-                    problems.append(f"missing segment raw block: {session_path}:{segment.get('segment_id')}")
+                    add_generated_session_problem(
+                        f"missing segment raw block: {session_path}:{segment.get('segment_id')}",
+                        session_path,
+                        manifest_payload,
+                        item,
+                    )
                 md_path = Path(str(segment.get("markdown") or ""))
                 idx_path = Path(str(segment.get("index") or ""))
                 if not md_path.exists():
-                    problems.append(f"missing segment markdown: {md_path}")
+                    add_generated_session_problem(f"missing segment markdown: {md_path}", session_path, manifest_payload, item)
                 if not idx_path.exists():
-                    problems.append(f"missing segment index: {idx_path}")
+                    add_generated_session_problem(f"missing segment index: {idx_path}", session_path, manifest_payload, item)
                     continue
                 segment_index = read_json(idx_path, {})
                 if not isinstance(segment_index, dict):
@@ -58311,16 +61325,43 @@ def command_doctor(args: argparse.Namespace) -> int:
                 problems.append(f"first-pass distilled session missing distillation index: {session_path}")
             if not latest_markdown.exists():
                 problems.append(f"first-pass distilled session missing distillation markdown: {session_path}")
+    if deferred_live_problems:
+        warnings.append(
+            "recent-live generated session gaps are deferred until the quiet window: "
+            + ", ".join(
+                str(item.get("session_label") or item.get("session_id") or "")
+                for item in list(deferred_live_problem_sessions.values())[:4]
+            )
+        )
+    status = "failed" if problems else ("current_with_deferred_live_updates" if deferred_live_problems else "current")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "ok": not problems,
+        "status": status,
+        "truth_status": (
+            "doctor_stable_subset_with_deferred_live_generated_gaps"
+            if deferred_live_problems and not problems
+            else "doctor_full_filesystem_contract"
+        ),
         "aoa_root": str(root),
         "session_count": len(sessions) if isinstance(sessions, list) else 0,
         "archive_dir_count": len(archive_dirs),
         "session_dir_count": len(session_dirs),
         "hook_only_dir_count": len(hook_only_dirs),
         "user_skill": user_skill_state,
+        "installable_user_skills": installable_user_skills,
         "problems": problems,
+        "deferred_live_problem_count": len(deferred_live_problems),
+        "deferred_live_problems": deferred_live_problems[:40],
+        "deferred_live_problems_omitted": max(0, len(deferred_live_problems) - 40),
+        "deferred_live_problem_sessions": list(deferred_live_problem_sessions.values())[:12],
+        "live_tail": {
+            "quiet_seconds": doctor_quiet_seconds,
+            "deferred_live_problem_session_count": len(deferred_live_problem_sessions),
+            "next_route": "wait_for_quiet_window_then_rerun_doctor_or_auto_maintenance"
+            if deferred_live_problems
+            else "",
+        },
         "warnings": warnings,
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -58676,6 +61717,7 @@ def build_parser() -> argparse.ArgumentParser:
     token_backfill.add_argument("--max-raw-mb", type=float, default=16, help="Skip sessions whose raw JSONL is larger than this many MiB.")
     token_backfill.add_argument("--apply", action="store_true", help="Refresh generated manifests/indexes from preserved raw. Default only plans.")
     token_backfill.add_argument("--force", action="store_true", help="Refresh even when generated token ledgers look current.")
+    token_backfill.add_argument("--budget-seconds", type=float, help="Stop after the current session candidate when this wall-clock budget is exhausted.")
     token_backfill.add_argument("--write-report", action="store_true", help="Write JSON and Markdown backfill reports under .aoa/diagnostics.")
     token_backfill.add_argument("--full", action="store_true", help="Print complete backfill results to stdout.")
     token_backfill.set_defaults(func=command_token_accounting_backfill)
@@ -58827,6 +61869,22 @@ def build_parser() -> argparse.ArgumentParser:
     auto_resource_parser.add_argument("--resource-force", action="store_true", help="Pass --force to abyss-machine resource launch.")
     auto_resource_parser.add_argument("--resource-binary", default="abyss-machine", help="Resource launcher binary.")
     auto_resource_parser.add_argument("--fail-on-block", action="store_true", help="Return a non-zero process exit when the resource gate blocks the child.")
+    auto_resource_index_drip_group = auto_resource_parser.add_mutually_exclusive_group()
+    auto_resource_index_drip_group.add_argument(
+        "--index-drip-on-block",
+        dest="index_drip_on_block",
+        action="store_true",
+        default=None,
+        help="When the requested auto-maintenance launch is resource-blocked, try a bounded probe-class index-maintenance fallback.",
+    )
+    auto_resource_index_drip_group.add_argument(
+        "--no-index-drip-on-block",
+        dest="index_drip_on_block",
+        action="store_false",
+        help="Disable the profile's resource-blocked index-maintenance fallback.",
+    )
+    auto_resource_parser.add_argument("--index-drip-repair-limit", type=int, default=12, help="Fallback index-maintenance dirty session repair limit.")
+    auto_resource_parser.add_argument("--index-drip-budget-seconds", type=float, default=180.0, help="Fallback index-maintenance wall-clock budget.")
     auto_resource_drip_group = auto_resource_parser.add_mutually_exclusive_group()
     auto_resource_drip_group.add_argument(
         "--graph-drip-on-block",
@@ -58841,12 +61899,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable the profile's resource-blocked graph-maintenance fallback.",
     )
-    auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, default=25, help="Fallback graph-maintenance source batch size.")
-    auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, default=180.0, help="Fallback graph-maintenance wall-clock budget.")
-    auto_resource_parser.add_argument("--graph-drip-refresh-chunk-size", type=int, default=64, help="Fallback graph-maintenance aggregate refresh chunk size.")
-    auto_resource_parser.add_argument("--graph-drip-max-refresh-nodes", type=int, default=20000, help="Fallback graph-maintenance aggregate node refresh cap; <=0 disables the guard.")
-    auto_resource_parser.add_argument("--graph-drip-max-refresh-edges", type=int, default=60000, help="Fallback graph-maintenance aggregate edge refresh cap; <=0 disables the guard.")
-    auto_resource_parser.add_argument("--graph-drip-candidate-pool-limit", type=int, default=GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT, help="Fallback exact-plan candidate pool before selecting by real refresh cost; <=0 uses graph-maintenance default.")
+    auto_resource_parser.add_argument("--graph-drip-batch-limit", type=int, help="Fallback graph-maintenance source batch size; defaults to profile graph-drip settings.")
+    auto_resource_parser.add_argument("--graph-drip-budget-seconds", type=float, help="Fallback graph-maintenance wall-clock budget; defaults to profile graph-drip settings.")
+    auto_resource_parser.add_argument("--graph-drip-refresh-chunk-size", type=int, help="Fallback graph-maintenance aggregate refresh chunk size; defaults to profile graph-drip settings.")
+    auto_resource_parser.add_argument("--graph-drip-max-refresh-nodes", type=int, help="Fallback graph-maintenance aggregate node refresh cap; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--graph-drip-max-refresh-edges", type=int, help="Fallback graph-maintenance aggregate edge refresh cap; <=0 disables the guard.")
+    auto_resource_parser.add_argument("--graph-drip-candidate-pool-limit", type=int, help="Fallback exact-plan candidate pool before selecting by real refresh cost; <=0 uses graph-maintenance default.")
     auto_resource_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown resource launch reports under .aoa/diagnostics.")
     auto_resource_parser.add_argument("--full", action="store_true", help="Print complete resource launch payload to stdout.")
     auto_resource_parser.set_defaults(func=command_auto_maintenance_resource)
@@ -58874,7 +61932,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_event_audit_parser.add_argument("--order", choices=["chronological", "recent", "longest"], default="chronological", help="Order selected sessions before applying --limit.")
     agent_event_audit_parser.add_argument("--min-events", type=int, help="Select only sessions with at least this many indexed events when session=all.")
     agent_event_audit_parser.add_argument("--sample-limit", type=int, default=3, help="Maximum evidence samples per weak-spot bucket.")
-    agent_event_audit_parser.add_argument("--probe-routes", action="store_true", help="Run bounded live route probes for canonical agent responses/progress/closeouts.")
+    agent_event_audit_parser.add_argument("--probe-routes", action="store_true", help="Run bounded live route probes for canonical agent responses/progress/closeouts/reasoning windows.")
     agent_event_audit_parser.add_argument("--route-probe-limit", type=int, default=5, help="Maximum results per live route probe.")
     agent_event_audit_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown agent-event audit reports under .aoa/diagnostics.")
     agent_event_audit_parser.set_defaults(func=command_agent_event_audit)
@@ -59001,6 +62059,29 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
     search.set_defaults(func=command_search)
 
+    literal_plan = sub.add_parser(
+        "literal-query-plan",
+        aliases=["literal-plan", "query-plan"],
+        help="Plan the cheapest reliable route for a literal query before raw-text FTS fallback.",
+    )
+    literal_plan.add_argument("query_text", nargs="?", default="", help="Search text. Use --query when the text begins with a dash.")
+    literal_plan.add_argument("--query", help="Search text.")
+    literal_plan.add_argument("--workspace-root")
+    literal_plan.add_argument("--aoa-root")
+    literal_plan.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
+    literal_plan.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    literal_plan.add_argument("--doc-type", choices=["session", "segment", "event", "incident", "task_episode", "goal_lifecycle", "entity_registry"])
+    literal_plan.add_argument("--route-layer", help="Structured route-signal layer such as mcp, skill, hook, tool, or goal.")
+    literal_plan.add_argument("--route-signal", help="Structured route signal in layer:key form.")
+    literal_plan.add_argument("--agent-event", help="Generated agent-event class such as assistant_answer or assistant_final_closeout.")
+    literal_plan.add_argument("--usage-role", choices=["usage", "result", "outcome", "entrypoint", "context"])
+    literal_plan.add_argument("--task-episode-id", "--episode", dest="task_episode_id")
+    literal_plan.add_argument("--date-from", help="Filter sessions on or after YYYY-MM-DD.")
+    literal_plan.add_argument("--date-to", help="Filter sessions on or before YYYY-MM-DD.")
+    literal_plan.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs a planned shard fan-out may query.")
+    literal_plan.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS reads when the plan reaches raw text.")
+    literal_plan.set_defaults(func=command_literal_query_plan)
+
     agent_responses = sub.add_parser(
         "agent-responses",
         aliases=["agent-answers"],
@@ -59068,6 +62149,9 @@ def build_parser() -> argparse.ArgumentParser:
     reasoning_windows.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     add_search_shard_route_controls(reasoning_windows)
     reasoning_windows.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
+    reasoning_windows.set_defaults(explain=True)
+    reasoning_windows.add_argument("--explain", dest="explain", action="store_true", help="Include route/freshness explanation for anchor results.")
+    reasoning_windows.add_argument("--no-explain", dest="explain", action="store_false", help="Omit route/freshness explanation for anchor results.")
     reasoning_windows.set_defaults(func=lambda args: command_agent_event_windows(argparse.Namespace(**{**vars(args), "agent_event": ["assistant_reasoning_boundary"]})))
 
     answer_neighborhood = sub.add_parser("answer-neighborhood", help="Find assistant answer-like events and return bounded neighboring events.")
@@ -59085,6 +62169,9 @@ def build_parser() -> argparse.ArgumentParser:
     answer_neighborhood.add_argument("--include-stream-copies", action="store_true", help="Include event_msg stream copies alongside canonical response_item events.")
     add_search_shard_route_controls(answer_neighborhood)
     answer_neighborhood.add_argument("--query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS, help="Bound literal FTS query reads; use 0 only for explicit offline scans.")
+    answer_neighborhood.set_defaults(explain=True)
+    answer_neighborhood.add_argument("--explain", dest="explain", action="store_true", help="Include route/freshness explanation for anchor results.")
+    answer_neighborhood.add_argument("--no-explain", dest="explain", action="store_false", help="Omit route/freshness explanation for anchor results.")
     answer_neighborhood.set_defaults(func=command_agent_event_windows)
 
     task_episodes_parser = sub.add_parser("task-episodes", help="List generated task episodes with status, verification/failure filters, and refs.")
@@ -59390,6 +62477,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_neighborhood_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
     graph_neighborhood_parser.add_argument("--depth", type=int, default=1)
     graph_neighborhood_parser.add_argument("--limit", type=int, default=40)
+    graph_neighborhood_parser.add_argument("--edge-limit", type=int, default=None, help="Maximum edges to include in the compact packet.")
     graph_neighborhood_parser.set_defaults(func=command_graph_neighborhood)
 
     graph_timeline_parser = sub.add_parser("graph-timeline", help="Return event timeline nodes near a graph anchor.")
@@ -59762,10 +62850,16 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--no-hooks-backup", action="store_true", help="Do not back up an existing user hooks file.")
     install.set_defaults(func=command_install)
 
-    install_user_skill = sub.add_parser("install-user-skill", help="Install the global .aoa session-memory router skill for the current Codex user.")
+    install_user_skill = sub.add_parser("install-user-skill", help="Install an approved .aoa session-memory skill for the current Codex user.")
     install_user_skill.add_argument("--workspace-root")
     install_user_skill.add_argument("--aoa-root")
     install_user_skill.add_argument("--skills-dir", help="User skills directory; defaults to ~/.codex/skills.")
+    install_user_skill.add_argument(
+        "--skill",
+        choices=USER_LEVEL_INSTALLABLE_SKILL_NAMES,
+        default=USER_LEVEL_SKILL_NAME,
+        help="Approved user-level skill to install; defaults to the global router.",
+    )
     install_user_skill.add_argument("--force", action="store_true", help="Back up and replace an existing conflicting skill target.")
     install_user_skill.set_defaults(func=command_install_user_skill)
 
@@ -59813,6 +62907,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--aoa-root")
     doctor.add_argument("--check-live-hooks", action="store_true", help="Also require current user-level hooks to cover AoA lifecycle events.")
     doctor.add_argument("--check-user-skill", action="store_true", help="Also require the current user's global .aoa router skill to point at this install.")
+    doctor.add_argument("--check-installable-user-skills", action="store_true", help="Also require every approved current-user .aoa session-memory skill to point at this install.")
     doctor.add_argument("--check-codex-grounding", action="store_true", help="Also require local Codex version/config/hook marker grounding to pass.")
     doctor.set_defaults(func=command_doctor)
     return parser
