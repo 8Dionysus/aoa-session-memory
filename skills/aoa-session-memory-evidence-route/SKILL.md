@@ -30,15 +30,18 @@ Use these first routes when available:
   source entity with zero session hits means “known but not yet observed in
   session usage”, not “missing”.
 - skill, MCP, hook, tool, API, script, validator, test, eval, graph, memory
-  surface, decision, error, receipt, or other operational entity usage:
-  `entity-dossier <anchor> --kind <kind>` first when the question asks how it
-  was used, what happened nearby, which graph/ref context applies, or which
-  expansion route to take next. Use the dossier as a compact route packet, not
-  as owner truth.
+  surface, decision, error, receipt, or other operational entity usage and
+  consequences: `usage-chain <anchor> --kind <kind>` first when the question
+  asks how it was used and what happened after it. This is the compact hot
+  route; it avoids GraphRAG, graph neighborhood, and raw-preview neighborhood
+  expansion by default while preserving raw, segment, and session refs.
+- Use `entity-dossier <anchor> --kind <kind>` when the question also needs the
+  full graph/cooccurrence/timeline dossier, related entities, or a heavier
+  one-packet human card. Use the dossier as a route packet, not as owner truth.
 - skill, MCP, tool, API, script, validator, test, eval, graph, memory surface:
   use `entity-usage-audit`, then `entity-usage-neighborhood` only when the
-  dossier is unavailable, truncated, stale, or too coarse for the needed
-  before/after evidence.
+  usage-chain is unavailable, truncated, stale, or too coarse for the needed
+  source buckets or before/after evidence.
 - hook health or recent hook errors: `hook-receipts` first, then
   `entity-dossier` or `entity-usage-audit` for surrounding session evidence.
 - goal lifecycle: `goal-lifecycles` first, then task or answer routes by refs.
@@ -76,6 +79,7 @@ query is fuzzy:
 
 - literal planner: `aoa_session_literal_query_plan`
 - entity usage dossier: `aoa_session_entity_dossier`
+- entity usage-to-consequence chain: `aoa_session_entity_usage_chain`
 - typed entity inventory: `aoa_session_entity_inventory`
 - source/entity registry lookup: `aoa_session_entity_registry`
 - usage and consequence audit: `aoa_session_entity_usage_audit`
@@ -105,6 +109,7 @@ If configured stdio is green but the current Codex session has no fresh
 MCP freshness proof requires a Codex/MCP restart.
 
 ```bash
+python3 scripts/aoa_session_memory.py usage-chain <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-dossier <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-audit <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind <kind>

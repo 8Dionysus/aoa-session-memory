@@ -36838,8 +36838,28 @@ def literal_query_plan(
     if typed_route_allowed and text:
         route_kind = route_anchor_kind if route_anchor_kind in TRACE_ROUTE_KINDS else "auto"
         add_route(
+            "entity_usage_chain",
+            "query resolves to a typed operational anchor; inspect the compact usage-to-consequence chain before raw-text fallback",
+            " ".join(
+                shlex.quote(part)
+                for part in [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "usage-chain",
+                    route_anchor_text,
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--kind",
+                    route_kind,
+                ]
+                + (["--session", session] if session else [])
+                + ["--limit", "8", "--per-route-limit", "12"]
+            ),
+            cost="low",
+        )
+        add_route(
             "entity_usage_audit",
-            "query resolves to a typed operational anchor; inspect structured usage/consequence before raw-text fallback",
+            "source structured usage audit can expand all event buckets after the compact chain",
             " ".join(
                 shlex.quote(part)
                 for part in [
@@ -37051,6 +37071,7 @@ def literal_query_plan(
                 "entity_inventory",
                 "entity_registry_class",
                 "entity_usage_scenario_audit",
+                "entity_usage_chain",
                 "entity_usage_audit",
                 "trace_route",
                 "structured_search",
@@ -55026,6 +55047,464 @@ def entity_usage_audit_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
+    refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    route_signals, route_signal_count = compact_usage_route_signals(event.get("route_signals"), limit=8)
+    matched_routes = event.get("matched_routes") if isinstance(event.get("matched_routes"), list) else []
+    freshness = event.get("freshness") if isinstance(event.get("freshness"), dict) else {}
+    return {
+        "doc_id": event.get("doc_id"),
+        "source": event.get("source"),
+        "source_doc_id": event.get("source_doc_id"),
+        "distance": event.get("distance"),
+        "relation": event.get("relation"),
+        "role": event.get("role"),
+        "session_id": event.get("session_id"),
+        "session_label": event.get("session_label"),
+        "session_date": event.get("session_date"),
+        "segment_id": event.get("segment_id"),
+        "event_id": event.get("event_id"),
+        "event_type": event.get("event_type"),
+        "family": event.get("family"),
+        "phase": event.get("phase"),
+        "actor": event.get("actor"),
+        "action": event.get("action"),
+        "outcome": event.get("outcome"),
+        "conversation_act": event.get("conversation_act"),
+        "session_act": event.get("session_act"),
+        "matched_routes": matched_routes[:6],
+        "matched_routes_truncated": len(matched_routes) > 6,
+        "route_signals": route_signals,
+        "route_signal_count": event.get("route_signal_count") or route_signal_count,
+        "route_signals_truncated": bool(event.get("route_signals_truncated")) or route_signal_count > len(route_signals),
+        "title": event.get("title"),
+        "snippet": short_text(str(event.get("snippet") or ""), max_chars=220) if event.get("snippet") else None,
+        "refs": {
+            "session": refs.get("session", ""),
+            "segment": refs.get("segment", ""),
+            "segment_index": refs.get("segment_index", ""),
+            "raw": refs.get("raw", ""),
+            "raw_block": refs.get("raw_block", ""),
+        },
+        "freshness": {
+            "status": freshness.get("status"),
+            "reasons": freshness.get("reasons", [])[:3] if isinstance(freshness.get("reasons"), list) else [],
+            "basis": freshness.get("basis"),
+            "live_verification": freshness.get("live_verification"),
+            "segment_index_live_check": freshness.get("segment_index_live_check"),
+        } if freshness else {},
+    }
+
+
+def entity_usage_chain_refs(events: list[dict[str, Any]], document_refs: list[dict[str, Any]], *, limit: int = 24) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, value: Any, event: dict[str, Any] | None = None) -> None:
+        value_text = str(value or "")
+        if not value_text:
+            return
+        key = (kind, value_text)
+        if key in seen:
+            return
+        seen.add(key)
+        item: dict[str, Any] = {"kind": kind, "value": value_text}
+        if isinstance(event, dict):
+            item.update(
+                {
+                    "session_label": event.get("session_label"),
+                    "event_id": event.get("event_id"),
+                    "event_type": event.get("event_type"),
+                    "role": event.get("role"),
+                    "source_doc_id": event.get("doc_id"),
+                }
+            )
+        refs.append(item)
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        refs_payload = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+        add("session_manifest", refs_payload.get("session"), event)
+        add("segment_markdown", refs_payload.get("segment"), event)
+        add("segment_index", refs_payload.get("segment_index"), event)
+        add("raw_line", refs_payload.get("raw"), event)
+        add("raw_block", refs_payload.get("raw_block"), event)
+        if len(refs) >= limit:
+            return refs[:limit]
+    for item in document_refs:
+        if not isinstance(item, dict):
+            continue
+        add(str(item.get("kind") or "document_ref"), item.get("value"))
+        if len(refs) >= limit:
+            break
+    return refs[:limit]
+
+
+def entity_usage_chain_command(
+    command_name: str,
+    *,
+    anchor: str,
+    kind: str,
+    aoa_root: Path,
+    session: str | None = None,
+    limit: int | None = None,
+    per_route_limit: int | None = None,
+    extra: list[str] | None = None,
+) -> str:
+    command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        command_name,
+        anchor,
+        "--aoa-root",
+        str(aoa_root),
+        "--kind",
+        kind,
+    ]
+    if session:
+        command.extend(["--session", session])
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
+    if per_route_limit is not None:
+        command.extend(["--per-route-limit", str(per_route_limit)])
+    if extra:
+        command.extend(extra)
+    return shlex.join(command)
+
+
+def entity_usage_chain(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 6,
+    per_route_limit: int = 12,
+    consequence_window: int = 6,
+    document_limit: int = 24,
+    provider: str = "portable_sqlite",
+    session: str | None = None,
+    include_source_audit: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    now = utc_now()
+    normalized_kind = normalize_trace_route_kind(kind)
+    if normalized_kind not in TRACE_ROUTE_KINDS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_chain",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "diagnostics": [f"unknown trace kind: {kind}"],
+        }
+    limit = max(1, min(int_value(limit, 6), 50))
+    per_route_limit = max(1, min(int_value(per_route_limit, 12), 100))
+    consequence_window = max(1, min(int_value(consequence_window, 6), 24))
+    document_limit = max(0, min(int_value(document_limit, 24), 100))
+    audit = entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor=anchor,
+        kind=normalized_kind,
+        limit=limit,
+        per_route_limit=per_route_limit,
+        consequence_window=consequence_window,
+        document_limit=document_limit,
+        provider=provider,
+        session=session,
+        write_report=False,
+    )
+    entrypoint_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("entrypoint_events", []) if isinstance(event, dict)
+    ][:limit]
+    usage_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("usage_events", []) if isinstance(event, dict)
+    ][:limit]
+    result_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("result_events", []) if isinstance(event, dict)
+    ][:limit]
+    outcome_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("outcome_events", []) if isinstance(event, dict)
+    ][:limit]
+    consequence_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("consequence_events", []) if isinstance(event, dict)
+    ][: max(limit * consequence_window, limit)]
+    context_events = [
+        entity_usage_chain_event(event)
+        for event in audit.get("context_events", []) if isinstance(event, dict)
+    ][:limit]
+    consequences_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    unmatched_consequences: list[dict[str, Any]] = []
+    for event in consequence_events:
+        source_doc_id = str(event.get("source_doc_id") or "")
+        if source_doc_id:
+            consequences_by_source[source_doc_id].append(event)
+        else:
+            unmatched_consequences.append(event)
+    chains: list[dict[str, Any]] = []
+    for event in usage_events:
+        source_doc_id = str(event.get("doc_id") or "")
+        consequences = consequences_by_source.get(source_doc_id, [])
+        chains.append(
+            {
+                "usage_event": event,
+                "result_or_consequence_events": consequences[:consequence_window],
+                "result_or_consequence_count": len(consequences),
+                "has_result_or_consequence": bool(consequences),
+            }
+        )
+    document_refs = [
+        item for item in audit.get("document_refs", []) if isinstance(item, dict)
+    ][:document_limit]
+    all_chain_events = [
+        *entrypoint_events,
+        *usage_events,
+        *result_events,
+        *outcome_events,
+        *consequence_events,
+        *context_events,
+    ]
+    evidence_refs = entity_usage_chain_refs(all_chain_events, document_refs, limit=max(12, document_limit or 12))
+    raw_or_segment_ref_present = any(
+        item.get("kind") in {"raw_line", "raw_block", "segment_markdown", "segment_index"}
+        for item in evidence_refs
+    )
+    quality = audit.get("quality") if isinstance(audit.get("quality"), dict) else {}
+    freshness_counts = quality.get("freshness_counts") if isinstance(quality.get("freshness_counts"), dict) else {}
+    noise_flags: list[str] = []
+    if not usage_events:
+        noise_flags.append("no_direct_usage_events")
+    if not consequence_events and not result_events and not outcome_events:
+        noise_flags.append("no_result_or_consequence_events")
+    if not raw_or_segment_ref_present:
+        noise_flags.append("no_raw_or_segment_refs")
+    if int_value(freshness_counts.get("stale")) > 0:
+        noise_flags.append("stale_event_refs_present")
+    if int_value(freshness_counts.get("unverifiable")) > 0:
+        noise_flags.append("unverifiable_event_refs_present")
+    if not quality.get("text_search_skipped") and quality.get("text_result_count"):
+        noise_flags.append("text_fallback_used")
+    diagnostics = [str(item) for item in audit.get("diagnostics", []) if item]
+    if diagnostics:
+        noise_flags.append("source_audit_diagnostics_present")
+    provider_status = audit.get("provider") if isinstance(audit.get("provider"), dict) else {}
+    provider_payload = provider_status.get("providers", {}).get(provider) if isinstance(provider_status.get("providers"), dict) else {}
+    provider_freshness = provider_payload.get("freshness") if isinstance(provider_payload, dict) and isinstance(provider_payload.get("freshness"), dict) else {}
+    provider_summary = {
+        "provider": provider,
+        "status": provider_payload.get("status") if isinstance(provider_payload, dict) else "",
+        "freshness_status": provider_freshness.get("status"),
+        "has_route_index": provider_payload.get("has_route_index") if isinstance(provider_payload, dict) else None,
+        "has_route_terms": provider_payload.get("has_route_terms") if isinstance(provider_payload, dict) else None,
+        "count_mode": provider_payload.get("count_mode") if isinstance(provider_payload, dict) else None,
+        "diagnostics": provider_payload.get("diagnostics", [])[:3] if isinstance(provider_payload, dict) and isinstance(provider_payload.get("diagnostics"), list) else [],
+        "full_status_route": f"search-provider-status --provider {provider}",
+    } if provider_status else {}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_entity_usage_chain",
+        "generated_at": now,
+        "ok": bool(audit.get("ok")) and int_value(audit.get("event_count")) > 0,
+        "mutates": False,
+        "truth_status": "session_memory_usage_chain_routes_to_evidence_not_reviewed_truth",
+        "anchor": anchor,
+        **trace_kind_payload_fields(kind, normalized_kind),
+        "normalized_entity": {
+            "anchor": anchor,
+            "route_key": route_key_slug(anchor, fallback="entity", max_chars=80),
+            "kind": normalized_kind,
+            "requested_kind": str(kind or "auto"),
+            "route_signal": f"{normalized_kind}:{route_key_slug(anchor, fallback='entity', max_chars=80)}" if normalized_kind != "auto" else "",
+        },
+        "session": session or "",
+        "route_candidates": audit.get("route_candidates", []) if isinstance(audit.get("route_candidates"), list) else [],
+        "usage_chain": {
+            "entrypoint_events": entrypoint_events,
+            "chains": chains,
+            "unmatched_consequence_events": unmatched_consequences[:limit],
+            "result_events": result_events,
+            "outcome_events": outcome_events,
+            "context_events": context_events,
+        },
+        "document_refs": document_refs,
+        "evidence_refs": evidence_refs,
+        "sessions": audit.get("sessions", []) if isinstance(audit.get("sessions"), list) else [],
+        "counts": {
+            "event_count": audit.get("event_count"),
+            "entrypoint_event_count": len(entrypoint_events),
+            "usage_event_count": len(usage_events),
+            "result_event_count": len(result_events),
+            "outcome_event_count": len(outcome_events),
+            "context_event_count": len(context_events),
+            "consequence_event_count": len(consequence_events),
+            "chain_count": len(chains),
+            "chain_with_result_or_consequence_count": sum(1 for item in chains if item.get("has_result_or_consequence")),
+            "document_ref_count": len(document_refs),
+            "evidence_ref_count": len(evidence_refs),
+        },
+        "freshness": {
+            "event_counts": freshness_counts,
+            "provider": provider_summary,
+        },
+        "quality": {
+            "compact_route": True,
+            "source_route": "entity_usage_audit",
+            "direct_usage_present": bool(usage_events),
+            "result_or_consequence_present": bool(consequence_events or result_events or outcome_events),
+            "raw_or_segment_ref_present": raw_or_segment_ref_present,
+            "route_candidate_count": quality.get("route_candidate_count"),
+            "candidate_event_count": quality.get("candidate_event_count"),
+            "candidate_usage_event_count": quality.get("candidate_usage_event_count"),
+            "text_search_skipped": quality.get("text_search_skipped"),
+            "text_search_skip_reason": quality.get("text_search_skip_reason"),
+            "usage_role_fast_path_supported": quality.get("usage_role_fast_path_supported"),
+            "usage_role_fast_path_applied": quality.get("usage_role_fast_path_applied"),
+            "skipped_graph_rag_packet": True,
+            "skipped_graph_neighborhood": True,
+            "skipped_raw_preview_neighborhood": True,
+            "noise_flag_count": len(noise_flags),
+        },
+        "noise_flags": noise_flags,
+        "next_expansion": [
+            {
+                "id": "usage_neighborhood",
+                "command": entity_usage_chain_command(
+                    "entity-usage-neighborhood",
+                    anchor=anchor,
+                    kind=normalized_kind,
+                    aoa_root=aoa_root,
+                    session=session,
+                    limit=min(limit, 6),
+                    per_route_limit=max(per_route_limit, limit),
+                    extra=["--full"],
+                ),
+                "use_when": "local before/after windows or raw previews are needed for one usage event",
+            },
+            {
+                "id": "entity_dossier",
+                "command": entity_usage_chain_command(
+                    "entity-dossier",
+                    anchor=anchor,
+                    kind=normalized_kind,
+                    aoa_root=aoa_root,
+                    session=None,
+                    limit=min(limit, 8),
+                    extra=["--full"],
+                ),
+                "use_when": "full graph/cooccurrence/timeline dossier is worth the heavier route cost",
+            },
+            {
+                "id": "graph_neighborhood",
+                "command": entity_usage_chain_command(
+                    "graph-neighborhood",
+                    anchor=anchor,
+                    kind=normalized_kind,
+                    aoa_root=aoa_root,
+                    session=None,
+                    limit=max(12, limit * 2),
+                    extra=["--edge-limit", str(max(24, limit * 8))],
+                ),
+                "use_when": "topology around adjacent skills/MCP/hooks/tools matters more than usage sequence",
+            },
+            {
+                "id": "source_usage_audit",
+                "command": entity_usage_chain_command(
+                    "entity-usage-audit",
+                    anchor=anchor,
+                    kind=normalized_kind,
+                    aoa_root=aoa_root,
+                    session=session,
+                    limit=max(limit, 8),
+                    per_route_limit=max(per_route_limit, 12),
+                    extra=["--full"],
+                ),
+                "use_when": "all source buckets from the structured audit need inspection",
+            },
+        ],
+        "next_expansion_command": entity_usage_chain_command(
+            "entity-usage-neighborhood",
+            anchor=anchor,
+            kind=normalized_kind,
+            aoa_root=aoa_root,
+            session=session,
+            limit=min(limit, 6),
+            per_route_limit=max(per_route_limit, limit),
+            extra=["--full"],
+        ),
+        "performance_contract": {
+            "default_route": "entity_usage_audit_only",
+            "avoids": ["graph_rag_packet", "graph_neighborhood", "raw_preview_neighborhood"],
+            "intended_use": "first consumer packet for how an operational entity was used and what happened immediately after",
+        },
+        "diagnostics": diagnostics,
+        "authority_boundary": "usage-chain routes session evidence only; owner source files, decisions, evals, skills, and reviewed memory remain stronger.",
+    }
+    if include_source_audit:
+        payload["source_audit"] = audit
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__entity-usage-chain__{route_key_slug(anchor, fallback='anchor', max_chars=80)}"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, entity_usage_chain_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def entity_usage_chain_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Entity Usage Chain",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- anchor: `{payload.get('anchor')}`",
+        f"- kind: `{payload.get('kind')}`",
+        f"- ok: `{payload.get('ok')}`",
+    ]
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    lines.extend(
+        [
+            f"- usage_events: `{counts.get('usage_event_count')}`",
+            f"- consequence_events: `{counts.get('consequence_event_count')}`",
+            f"- evidence_refs: `{counts.get('evidence_ref_count')}`",
+            "",
+            "## Chains",
+            "",
+        ]
+    )
+    usage_chain = payload.get("usage_chain") if isinstance(payload.get("usage_chain"), dict) else {}
+    for item in usage_chain.get("chains", []) if isinstance(usage_chain.get("chains"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        event = item.get("usage_event") if isinstance(item.get("usage_event"), dict) else {}
+        refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+        lines.append(f"- `{event.get('event_type')}` `{event.get('title')}` `{refs.get('raw') or refs.get('segment') or ''}`")
+        for consequence in item.get("result_or_consequence_events", []) if isinstance(item.get("result_or_consequence_events"), list) else []:
+            if isinstance(consequence, dict):
+                c_refs = consequence.get("refs") if isinstance(consequence.get("refs"), dict) else {}
+                lines.append(f"  - `{consequence.get('role')}` `{consequence.get('event_type')}` `{consequence.get('title')}` `{c_refs.get('raw') or c_refs.get('segment') or ''}`")
+    noise_flags = payload.get("noise_flags") if isinstance(payload.get("noise_flags"), list) else []
+    if noise_flags:
+        lines.extend(["", "## Noise Flags", ""])
+        for item in noise_flags:
+            lines.append(f"- `{item}`")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        for item in diagnostics:
+            lines.append(f"- `{item}`")
+    return "\n".join(lines) + "\n"
+
+
 def entity_usage_neighborhood(
     *,
     aoa_root: Path,
@@ -56426,7 +56905,7 @@ def live_scenario_literal_planner_audit(
             "name": "concrete_entity",
             "query": "как агент использовал aoa-session-memory-mcp и к чему это привело",
             "expected_shape": LITERAL_QUERY_KIND_ENTITY_ANCHOR,
-            "expected_primary_route": "entity_usage_audit",
+            "expected_primary_route": "entity_usage_chain",
         },
         {
             "name": "command_literal",
@@ -57987,6 +58466,26 @@ def command_entity_usage_audit(args: argparse.Namespace) -> int:
             if key not in {"entrypoint_events", "context_events"}
         }
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_entity_usage_chain(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = entity_usage_chain(
+        aoa_root=root,
+        anchor=args.anchor,
+        kind=args.kind,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        consequence_window=args.consequence_window,
+        document_limit=args.document_limit,
+        provider=args.provider,
+        session=args.session_filter,
+        include_source_audit=args.full,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -65881,6 +66380,25 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage audit reports under .aoa/diagnostics.")
     entity_usage_parser.add_argument("--full", action="store_true", help="Print complete event buckets.")
     entity_usage_parser.set_defaults(func=command_entity_usage_audit)
+
+    entity_usage_chain_parser = sub.add_parser(
+        "usage-chain",
+        aliases=["entity-usage-chain", "entity-event-chain", "usage-consequence-chain"],
+        help="Return a compact usage-to-consequence chain for a typed operational entity without GraphRAG or raw-preview neighborhoods.",
+    )
+    entity_usage_chain_parser.add_argument("anchor", help="Entity anchor to chain.")
+    entity_usage_chain_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
+    entity_usage_chain_parser.add_argument("--workspace-root")
+    entity_usage_chain_parser.add_argument("--aoa-root")
+    entity_usage_chain_parser.add_argument("--limit", type=int, default=6, help="Maximum direct usage events to chain.")
+    entity_usage_chain_parser.add_argument("--per-route-limit", type=int, default=12, help="Maximum hits fetched for each inferred route candidate.")
+    entity_usage_chain_parser.add_argument("--consequence-window", type=int, default=6, help="Maximum following consequence events kept per usage event.")
+    entity_usage_chain_parser.add_argument("--document-limit", type=int, default=24, help="Maximum evidence and mentioned document refs.")
+    entity_usage_chain_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
+    entity_usage_chain_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_chain_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage chain reports under .aoa/diagnostics.")
+    entity_usage_chain_parser.add_argument("--full", action="store_true", help="Include the source entity-usage-audit packet.")
+    entity_usage_chain_parser.set_defaults(func=command_entity_usage_chain)
 
     entity_usage_neighborhood_parser = sub.add_parser(
         "entity-usage-neighborhood",
