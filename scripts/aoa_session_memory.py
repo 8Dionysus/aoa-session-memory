@@ -4322,6 +4322,54 @@ def load_entity_registry(aoa_root: Path, *, include_runtime: bool = True) -> dic
     return build_entity_registry(aoa_root=aoa_root, write=False, include_runtime=include_runtime)
 
 
+def filter_entity_registry_snapshot(
+    payload: dict[str, Any],
+    *,
+    query: str = "",
+    kind: str = "all",
+    limit: int = 5000,
+) -> dict[str, Any]:
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    selected_kind = route_key_slug(kind, fallback="all")
+    selected_entries = [entry for entry in entries if isinstance(entry, dict)]
+    if selected_kind and selected_kind not in {"all", "auto"}:
+        selected_entries = [entry for entry in selected_entries if str(entry.get("kind") or "") == selected_kind]
+    query_key = route_key_slug(query, fallback="") if query else ""
+    if query_key:
+        selected_entries = [
+            entry
+            for entry in selected_entries
+            if query_key in str(entry.get("canonical_key") or "")
+            or any(query_key in route_key_slug(alias, fallback="") for alias in entry.get("aliases", []) if alias)
+        ]
+    selected_entries = selected_entries[: max(1, int_value(limit, 5000))]
+    return {
+        "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "generated_at": payload.get("generated_at") or utc_now(),
+        "generated_at_epoch": payload.get("generated_at_epoch"),
+        "ok": True,
+        "mutates": False,
+        "aoa_root": payload.get("aoa_root"),
+        "truth_status": "generated_entity_registry_navigation_not_source_truth",
+        "registry_path": payload.get("registry_path"),
+        "source_surfaces": payload.get("source_surfaces", []),
+        "source_truth_surfaces": payload.get("source_truth_surfaces", []),
+        "total_entity_count": len(entries),
+        "entity_count": len(selected_entries),
+        "counts_by_kind": dict(Counter(str(entry.get("kind") or "unknown") for entry in selected_entries)),
+        "counts_by_status": dict(Counter(str(entry.get("status") or "unknown") for entry in selected_entries)),
+        "snapshot_counts_by_kind": payload.get("counts_by_kind", {}),
+        "snapshot_counts_by_status": payload.get("counts_by_status", {}),
+        "query": query,
+        "kind": selected_kind,
+        "entries": selected_entries,
+        "diagnostics": [],
+        "read_mode": "generated_snapshot",
+        "next_route": "Use --lookup for one anchor, trace-route/search/graph/entity-usage-audit for observed use, and --write only when refreshing the generated registry.",
+    }
+
+
 def entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
     payload = load_entity_registry(aoa_root)
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
@@ -54076,6 +54124,7 @@ ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS = (
     "skill",
     "tool",
 )
+ENTITY_USAGE_SCENARIO_DEFAULT_LAYER_MARKERS = {"", "all", "any", "auto", "default", "*"}
 ENTITY_USAGE_SCENARIO_DIRECT_USAGE_LAYERS = {
     "api",
     "entity",
@@ -54136,6 +54185,28 @@ ENTITY_USAGE_SCENARIO_PROBE_BATCH_MULTIPLIER = 8
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_FLOOR = 32
 ENTITY_USAGE_SCENARIO_PROBE_BATCH_CEILING = 256
 ENTITY_USAGE_SCENARIO_PROBE_COUNT_CAP = 64
+
+
+def normalize_entity_usage_scenario_layers(layers: list[str] | None) -> list[str]:
+    if not layers:
+        return list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS)
+    normalized: list[str] = []
+    include_defaults = False
+    for raw_layer in layers:
+        requested = route_key_slug(str(raw_layer or ""), fallback="")
+        if requested in ENTITY_USAGE_SCENARIO_DEFAULT_LAYER_MARKERS:
+            include_defaults = True
+            continue
+        route_layer = ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND.get(requested, requested)
+        if route_layer == "receipt":
+            route_layer = "hook_health"
+        if route_layer and route_layer not in normalized:
+            normalized.append(route_layer)
+    if include_defaults:
+        normalized = [*ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS, *normalized]
+    if not normalized:
+        normalized = list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS)
+    return list(dict.fromkeys(normalized))
 
 
 def entity_usage_scenario_candidate_kind(layer: str, kind: str | None = None) -> str:
@@ -54367,8 +54438,7 @@ def entity_usage_scenario_candidates(
             diagnostics.append("search_schema_mismatch")
         if not sqlite_table_exists(conn, "route_terms") or not sqlite_table_exists(conn, "document_routes"):
             return [], diagnostics + ["search_route_terms_missing"]
-        selected_layers = [route_key_slug(layer, fallback=layer) for layer in (layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS))]
-        selected_layers = [layer for layer in selected_layers if layer]
+        selected_layers = normalize_entity_usage_scenario_layers(layers)
         placeholders = ",".join("?" for _ in selected_layers)
         rows = conn.execute(
             f"""
@@ -54818,7 +54888,7 @@ def entity_usage_scenario_audit(
         "truth_status": "randomized_live_scenario_audit_not_reviewed_truth",
         "seed": seed,
         "sample_size": sample_size,
-        "layers": layers or list(ENTITY_USAGE_SCENARIO_DEFAULT_LAYERS),
+        "layers": normalize_entity_usage_scenario_layers(layers),
         "min_postings": min_postings,
         "quality": quality,
         "samples": samples,
@@ -54895,6 +54965,455 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         for item in diagnostics:
             lines.append(f"- `{item}`")
     return "\n".join(lines) + "\n"
+
+
+def hook_receipt_is_error(receipt: dict[str, Any]) -> bool:
+    if receipt.get("ok") is False:
+        return True
+    errors = receipt.get("errors") if isinstance(receipt.get("errors"), list) else []
+    if errors:
+        return True
+    actions = [str(item).casefold() for item in receipt.get("actions", []) if str(item)]
+    if any("failed" in action or "error" in action or "timeout" in action for action in actions):
+        return True
+    typing_bridge = receipt.get("typing_bridge") if isinstance(receipt.get("typing_bridge"), dict) else {}
+    return bool(typing_bridge and typing_bridge.get("ok") is False)
+
+
+def hook_receipt_route_search(
+    *,
+    aoa_root: Path,
+    event_name: str = "",
+    date_from: str = "",
+    only_errors: bool = False,
+    limit: int = 20,
+    session: str | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    diagnostics: list[str] = []
+    normalized_event_name = str(event_name or "").strip()
+    date_from_dt = parse_utc_timestamp(date_from) if date_from else None
+    try:
+        records = [resolve_session_record(aoa_root, session)] if session else chronological_session_records(aoa_root)
+    except ValueError as exc:
+        records = []
+        diagnostics.append(str(exc))
+    receipts: list[dict[str, Any]] = []
+    scanned_line_count = 0
+    receipt_path_count = 0
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest_path = session_dir / "session.manifest.json"
+        manifest = read_json(manifest_path, {})
+        session_id = str(manifest.get("session_id") or record.get("session_id") or "")
+        session_label = str(manifest.get("session_label") or record.get("session_label") or session_dir.name)
+        path = session_dir / "hooks" / "receipts.jsonl"
+        if not path.exists():
+            continue
+        receipt_path_count += 1
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line_no, line in enumerate(handle, start=1):
+                    text = line.strip()
+                    if not text:
+                        continue
+                    scanned_line_count += 1
+                    try:
+                        row = json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        diagnostics.append(f"{path}:{line_no}: {exc}")
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    timestamp = str(row.get("timestamp") or "")
+                    parsed_timestamp = parse_utc_timestamp(timestamp)
+                    if date_from_dt and (parsed_timestamp is None or parsed_timestamp < date_from_dt):
+                        continue
+                    receipt_event = str(row.get("hook_event_name") or "")
+                    if normalized_event_name and receipt_event != normalized_event_name:
+                        continue
+                    is_error = hook_receipt_is_error(row)
+                    if only_errors and not is_error:
+                        continue
+                    actions = row.get("actions") if isinstance(row.get("actions"), list) else []
+                    errors = row.get("errors") if isinstance(row.get("errors"), list) else []
+                    typing_bridge = row.get("typing_bridge") if isinstance(row.get("typing_bridge"), dict) else {}
+                    receipts.append(
+                        {
+                            "timestamp": timestamp,
+                            "hook_event_name": receipt_event,
+                            "ok": row.get("ok"),
+                            "is_error": is_error,
+                            "session_id": str(row.get("session_id") or session_id),
+                            "session_label": session_label,
+                            "duration_ms": row.get("duration_ms"),
+                            "actions": actions[:12],
+                            "errors": errors[:8],
+                            "typing_bridge": {
+                                key: typing_bridge.get(key)
+                                for key in ("ok", "status", "adapter", "timeout_sec", "typing_status", "capture_gate_decision")
+                                if typing_bridge.get(key) not in (None, "", [], {})
+                            },
+                            "refs": {
+                                "receipt": f"{path}#L{line_no}",
+                                "session": str(manifest_path),
+                            },
+                        }
+                    )
+        except OSError as exc:
+            diagnostics.append(f"{path}: {exc}")
+    receipts.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    bounded_limit = max(1, min(int_value(limit, 20), 200))
+    returned = receipts[:bounded_limit]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_hook_receipts",
+        "generated_at": utc_now(),
+        "ok": True,
+        "mutates": False,
+        "truth_status": "hook_receipt_route_packet_not_reviewed_truth",
+        "event_name": normalized_event_name,
+        "date_from": date_from,
+        "only_errors": only_errors,
+        "session": session or "",
+        "date_semantics": {
+            "filter_basis": "hook_receipt_timestamp",
+            "timezone": "UTC",
+        },
+        "receipt_path_count": receipt_path_count,
+        "scanned_line_count": scanned_line_count,
+        "total_receipt_count": len(receipts),
+        "returned_receipt_count": len(returned),
+        "receipts": returned,
+        "diagnostics": diagnostics,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "next_route": "Use receipt refs for hook-layer evidence; use raw/session refs only for exact transcript verification.",
+    }
+
+
+def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+
+    def walk(item: Any, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if nested in (None, "", [], {}):
+                    continue
+                if key in {"raw", "raw_ref"}:
+                    counts["raw_ref"] += 1
+                elif key in {"segment", "segment_ref", "segment_index"}:
+                    counts["segment_ref"] += 1
+                elif key == "session":
+                    counts["session_ref"] += 1
+                elif key == "receipt":
+                    counts["receipt_ref"] += 1
+                walk(nested, depth + 1)
+        elif isinstance(item, list):
+            for nested in item[:20]:
+                walk(nested, depth + 1)
+
+    walk(value)
+    return dict(counts)
+
+
+def live_scenario_first_ref(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        refs = value.get("refs")
+        if isinstance(refs, dict) and refs:
+            return {key: refs.get(key) for key in ("raw", "segment", "segment_index", "session", "receipt") if refs.get(key)}
+        for nested in value.values():
+            found = live_scenario_first_ref(nested)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for nested in value[:20]:
+            found = live_scenario_first_ref(nested)
+            if found:
+                return found
+    return {}
+
+
+def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: int) -> dict[str, Any]:
+    ok = bool(payload.get("ok", True))
+    counts = live_scenario_evidence_counts(payload)
+    result: dict[str, Any] = {
+        "profile": profile,
+        "status": "passed" if ok else "failed",
+        "ok": ok,
+        "elapsed_ms": elapsed_ms,
+        "evidence_ref_counts": counts,
+        "first_ref": live_scenario_first_ref(payload),
+    }
+    if profile == "entity_usage":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        failed = int_value(quality.get("failed_count"))
+        warned = int_value(quality.get("warn_count"))
+        sample_count = int_value(quality.get("sample_count"))
+        result.update(
+            {
+                "sample_count": sample_count,
+                "passed_count": int_value(quality.get("passed_count")),
+                "warn_count": warned,
+                "failed_count": failed,
+                "raw_preview_counts": quality.get("raw_preview_counts"),
+                "provider_freshness_status": quality.get("provider_freshness_status"),
+            }
+        )
+        if failed:
+            result["status"] = "failed"
+        elif warned or not sample_count:
+            result["status"] = "warn"
+    elif profile == "hook_failure":
+        total = int_value(payload.get("total_receipt_count"))
+        result.update(
+            {
+                "date_from": payload.get("date_from"),
+                "total_receipt_count": total,
+                "returned_receipt_count": int_value(payload.get("returned_receipt_count")),
+                "scanned_line_count": int_value(payload.get("scanned_line_count")),
+                "date_semantics": payload.get("date_semantics"),
+            }
+        )
+        if ok and total == 0:
+            result["status"] = "warn"
+            result["quality_flags"] = ["route_ok_no_recent_hook_errors"]
+    elif profile in {"goal_lifecycle", "agent_closeout"}:
+        result["result_count"] = int_value(payload.get("result_count"), len(payload.get("results") or []))
+        if ok and result["result_count"] == 0:
+            result["status"] = "warn"
+    elif profile == "literal_planner":
+        primary_route = payload.get("primary_route") if isinstance(payload.get("primary_route"), dict) else {}
+        cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+        result.update(
+            {
+                "primary_route_id": primary_route.get("route_id"),
+                "structured_first": cost_profile.get("structured_first"),
+                "monolith_fallback_first": cost_profile.get("monolith_fallback_first"),
+            }
+        )
+        if ok and not primary_route:
+            result["status"] = "warn"
+            result.setdefault("quality_flags", []).append("literal_planner_missing_primary_route")
+        elif ok and cost_profile.get("monolith_fallback_first") is True:
+            result["status"] = "warn"
+            result.setdefault("quality_flags", []).append("literal_planner_used_monolith_fallback_first")
+    elif profile == "graph_neighborhood":
+        result.update(
+            {
+                "node_count": int_value(payload.get("node_count"), len(payload.get("nodes") or [])),
+                "edge_count": int_value(payload.get("edge_count"), len(payload.get("edges") or [])),
+                "evidence_ref_count": int_value(payload.get("evidence_ref_count"), len(payload.get("evidence_refs") or [])),
+            }
+        )
+        if ok and not (result["node_count"] or result["edge_count"] or result["evidence_ref_count"]):
+            result["status"] = "warn"
+    if not counts and profile != "literal_planner":
+        result.setdefault("quality_flags", []).append("no_raw_or_segment_refs_detected")
+        if result["status"] == "passed":
+            result["status"] = "warn"
+    return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def live_scenario_audit_markdown(payload: dict[str, Any]) -> str:
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    lines = [
+        "# Session Memory Live Scenario Audit",
+        "",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- profiles: `{', '.join(payload.get('profiles', []))}`",
+        f"- elapsed_ms: `{quality.get('elapsed_ms')}`",
+        f"- passed: `{quality.get('passed_count')}`",
+        f"- warn: `{quality.get('warn_count')}`",
+        f"- failed: `{quality.get('failed_count')}`",
+        "",
+        "## Scenarios",
+        "",
+    ]
+    for scenario in payload.get("scenarios", []) if isinstance(payload.get("scenarios"), list) else []:
+        lines.append(
+            f"- `{scenario.get('profile')}`: `{scenario.get('status')}` elapsed_ms=`{scenario.get('elapsed_ms')}` first_ref=`{scenario.get('first_ref')}`"
+        )
+    lines.extend(["", "## Next Route", "", str(payload.get("next_route") or ""), ""])
+    return "\n".join(lines)
+
+
+def live_scenario_audit(
+    *,
+    aoa_root: Path,
+    seed: str = "live-scenario-audit",
+    profiles: list[str] | None = None,
+    sample_size: int = 4,
+    recent_days: int = 7,
+    limit: int = 3,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    allowed_profiles = {
+        "entity_usage",
+        "hook_failure",
+        "goal_lifecycle",
+        "agent_closeout",
+        "literal_planner",
+        "graph_neighborhood",
+    }
+    default_profiles = [
+        "entity_usage",
+        "hook_failure",
+        "goal_lifecycle",
+        "agent_closeout",
+        "literal_planner",
+        "graph_neighborhood",
+    ]
+    selected_profiles: list[str] = []
+    diagnostics: list[str] = []
+    for profile in profiles or default_profiles:
+        normalized = route_key_slug(str(profile or ""), fallback="")
+        if normalized in allowed_profiles and normalized not in selected_profiles:
+            selected_profiles.append(normalized)
+        elif normalized:
+            diagnostics.append(f"ignored unsupported live scenario profile {profile!r}")
+    if not selected_profiles:
+        selected_profiles = list(default_profiles)
+    selected_limit = max(1, min(int_value(limit, 3), 10))
+    selected_sample_size = max(1, min(int_value(sample_size, 4), 12))
+    selected_recent_days = max(1, min(int_value(recent_days, 7), 90))
+    date_from = (datetime.now(timezone.utc) - timedelta(days=selected_recent_days)).date().isoformat()
+    started = time.monotonic()
+
+    def run(profile: str, func: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        profile_started = time.monotonic()
+        try:
+            payload = func()
+        except Exception as exc:  # pragma: no cover - defensive route packet
+            return {
+                "profile": profile,
+                "status": "failed",
+                "ok": False,
+                "elapsed_ms": int((time.monotonic() - profile_started) * 1000),
+                "error": str(exc)[:500],
+            }
+        return live_scenario_result(profile, payload, elapsed_ms=int((time.monotonic() - profile_started) * 1000))
+
+    scenarios: list[dict[str, Any]] = []
+    for profile in selected_profiles:
+        if profile == "entity_usage":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: entity_usage_scenario_audit(
+                        aoa_root=aoa_root,
+                        sample_size=selected_sample_size,
+                        seed=seed,
+                        limit=selected_limit,
+                        per_route_limit=selected_limit,
+                        consequence_window=4,
+                        document_limit=max(6, selected_limit * 3),
+                        raw_preview_limit=2,
+                        full=False,
+                    ),
+                )
+            )
+        elif profile == "hook_failure":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: hook_receipt_route_search(
+                        aoa_root=aoa_root,
+                        event_name="UserPromptSubmit",
+                        date_from=date_from,
+                        only_errors=True,
+                        limit=selected_limit,
+                    ),
+                )
+            )
+        elif profile == "goal_lifecycle":
+            scenarios.append(run(profile, lambda: goal_lifecycle_route_search(aoa_root=aoa_root, limit=selected_limit)))
+        elif profile == "agent_closeout":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: agent_event_route_search(
+                        aoa_root=aoa_root,
+                        limit=selected_limit,
+                        agent_events=["assistant_final_closeout"],
+                    ),
+                )
+            )
+        elif profile == "literal_planner":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: literal_query_plan(
+                        aoa_root=aoa_root,
+                        query="aoa session memory hook failure raw_unavailable",
+                        kind="auto",
+                        max_shards=2,
+                    ),
+                )
+            )
+        elif profile == "graph_neighborhood":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_neighborhood(
+                        aoa_root=aoa_root,
+                        anchor="aoa-session-memory-mcp",
+                        kind="mcp",
+                        limit=max(selected_limit, 4),
+                        edge_limit=max(selected_limit * 4, 8),
+                    ),
+                )
+            )
+
+    status_counts = Counter(str(item.get("status") or "unknown") for item in scenarios)
+    quality = {
+        "scenario_count": len(scenarios),
+        "passed_count": status_counts.get("passed", 0),
+        "warn_count": status_counts.get("warn", 0),
+        "failed_count": status_counts.get("failed", 0),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "profile_status_counts": dict(status_counts),
+        "first_useful_packet_ms": min((int_value(item.get("elapsed_ms")) for item in scenarios), default=0),
+        "raw_or_segment_ref_scenario_count": sum(
+            1
+            for item in scenarios
+            if any(
+                int_value((item.get("evidence_ref_counts") or {}).get(key)) > 0
+                for key in ("raw_ref", "segment_ref", "receipt_ref")
+            )
+        ),
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_live_scenario_audit",
+        "generated_at": utc_now(),
+        "ok": quality["failed_count"] == 0,
+        "mutates": False,
+        "truth_status": "bounded_live_scenario_audit_not_reviewed_truth",
+        "seed": seed,
+        "profiles": selected_profiles,
+        "parameters": {
+            "sample_size": selected_sample_size,
+            "recent_days": selected_recent_days,
+            "date_from": date_from,
+            "limit": selected_limit,
+        },
+        "quality": quality,
+        "scenarios": scenarios,
+        "diagnostics": diagnostics,
+        "next_route": "Open first_ref raw/segment/receipt refs for any warn/failed scenario before treating this packet as quality proof.",
+        "authority_boundary": "session-memory routes evidence only; owner layers keep decision/proof/skill authority.",
+    }
+    if write_report:
+        stem = f"{compact_stamp()}__live-scenario-audit"
+        report_json, report_md = reserve_diagnostic_report_paths(aoa_root / DIAGNOSTICS_ROOT, stem)
+        write_json(report_json, payload)
+        write_markdown(report_md, live_scenario_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
 
 
 def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -55592,6 +56111,21 @@ def command_entity_usage_neighborhood(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_hook_receipts(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = hook_receipt_route_search(
+        aoa_root=root,
+        event_name=args.event_name,
+        date_from=args.date_from,
+        only_errors=args.only_errors,
+        limit=args.limit,
+        session=args.session_filter,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_entity_usage_scenario_audit(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -55615,6 +56149,22 @@ def command_entity_usage_scenario_audit(args: argparse.Namespace) -> int:
         if isinstance(summary, dict):
             stdout_payload["provider"] = summary
     print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_live_scenario_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = live_scenario_audit(
+        aoa_root=root,
+        seed=args.seed,
+        profiles=args.profile or None,
+        sample_size=args.sample_size,
+        recent_days=args.recent_days,
+        limit=args.limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 
 
@@ -56845,6 +57395,13 @@ def command_entity_registry(args: argparse.Namespace) -> int:
             anchor=args.lookup,
             kind=args.kind,
             include_unknown=not args.no_unknown,
+        )
+    elif not args.write:
+        payload = filter_entity_registry_snapshot(
+            load_entity_registry(root, include_runtime=not args.no_runtime),
+            query=args.query or "",
+            kind=args.kind,
+            limit=args.limit,
         )
     else:
         payload = build_entity_registry(
@@ -63286,6 +63843,20 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_neighborhood_parser.add_argument("--full", action="store_true", help="Print complete local event windows.")
     entity_usage_neighborhood_parser.set_defaults(func=command_entity_usage_neighborhood)
 
+    hook_receipts_parser = sub.add_parser(
+        "hook-receipts",
+        aliases=["hook-failures"],
+        help="Read bounded hook receipt evidence directly without broad search or graph routes.",
+    )
+    hook_receipts_parser.add_argument("--workspace-root")
+    hook_receipts_parser.add_argument("--aoa-root")
+    hook_receipts_parser.add_argument("--event-name", default="")
+    hook_receipts_parser.add_argument("--date-from", default="")
+    hook_receipts_parser.add_argument("--only-errors", action="store_true")
+    hook_receipts_parser.add_argument("--session", dest="session_filter")
+    hook_receipts_parser.add_argument("--limit", type=int, default=20)
+    hook_receipts_parser.set_defaults(func=command_hook_receipts)
+
     entity_usage_scenario = sub.add_parser(
         "entity-usage-scenario-audit",
         aliases=["usage-scenario-audit", "random-usage-audit"],
@@ -63305,6 +63876,20 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_scenario.add_argument("--write-report", action="store_true", help="Write JSON and Markdown scenario audit reports under .aoa/diagnostics.")
     entity_usage_scenario.add_argument("--full", action="store_true", help="Print nested entity usage packets for every sample.")
     entity_usage_scenario.set_defaults(func=command_entity_usage_scenario_audit)
+
+    live_scenario = sub.add_parser(
+        "live-scenario-audit",
+        help="Run a bounded multi-profile live scenario across entity, hook, goal, answer, literal, and graph routes.",
+    )
+    live_scenario.add_argument("--workspace-root")
+    live_scenario.add_argument("--aoa-root")
+    live_scenario.add_argument("--seed", default="live-scenario-audit")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood.")
+    live_scenario.add_argument("--sample-size", type=int, default=4)
+    live_scenario.add_argument("--recent-days", type=int, default=7)
+    live_scenario.add_argument("--limit", type=int, default=3)
+    live_scenario.add_argument("--write-report", action="store_true")
+    live_scenario.set_defaults(func=command_live_scenario_audit)
 
     performance_parser = sub.add_parser(
         "performance-baseline",
