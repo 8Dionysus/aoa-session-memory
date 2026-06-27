@@ -911,13 +911,14 @@ still evidence-derived route signals, not a hand-authored project registry.
 
 The generated entity registry is the inventory layer above those route
 signals. It merges active local source surfaces (`SKILL.md`, Codex user/plugin
-skills, Codex MCP config, and local MCP service directories) with archived
-route-term evidence for skills, MCP services/tools, hooks, tools, APIs,
-scripts, validators, tests, evals, playbooks, techniques, mechanics, graph, and
-memory surfaces. The registry is written under `maps/entity-registry.json` and
-`.md`; it is a navigation snapshot, not source truth. If a previously active
-skill or MCP source disappears, the entry remains visible as `stale` or
-`removed` while archived use stays available through search and graph routes.
+skills, Codex MCP config, local MCP service directories, and MCP server
+`@*.tool()` functions) with archived route-term evidence for skills, MCP
+services/tools, hooks, tools, APIs, scripts, validators, tests, evals,
+playbooks, techniques, mechanics, graph, and memory surfaces. The registry is
+written under `maps/entity-registry.json` and `.md`; it is a navigation
+snapshot, not source truth. If a previously active skill, MCP service, or MCP
+tool source disappears, the entry remains visible as `stale` or `removed` while
+archived use stays available through search and graph routes.
 
 ```bash
 python3 scripts/aoa_session_memory.py entity-registry \

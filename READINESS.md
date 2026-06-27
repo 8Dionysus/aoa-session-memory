@@ -69,10 +69,12 @@ Build the `.aoa` session-memory mechanism end to end:
   `maps/entity-registry.json`, `doc_type=entity_registry`, active/observed/
   stale/removed/unknown states for skills, MCP services/tools, tools, APIs,
   hooks, scripts, validators, tests, evals, playbooks, techniques, mechanics,
-  graph, and memory surfaces; MCP access is read-only; direct
-  `entity-registry-search-sync` refreshes the generated registry snapshot and
-  SQLite registry docs without selecting an arbitrary session for
-  `search-index --no-rebuild`
+  graph, and memory surfaces; active source discovery includes MCP server
+  `@*.tool()` functions from stack MCP service sources, so newly added MCP
+  tools can be registered before they appear in archived usage; MCP access is
+  read-only; direct `entity-registry-search-sync` refreshes the generated
+  registry snapshot and SQLite registry docs without selecting an arbitrary
+  session for `search-index --no-rebuild`
 - Entity usage-chain consumer route: `usage-chain` is the compact first packet
   for operational entity usage/consequence questions; it returns direct usage,
   result/consequence chains, evidence refs, freshness, noise flags, and next
@@ -885,6 +887,28 @@ Last observed result:
   `sqlite_error:interrupted`; the route now treats `--budget-seconds` as a
   soft observed budget because snapshot and SQLite registry docs are an atomic
   consistency unit.
+- 2026-06-27 MCP tool source discovery proof: after adding a new
+  `aoa-session-memory-mcp` tool, direct `entity-registry-search-sync` refreshed
+  `4183` registry entities in `15.926s`, inserted `125` entity-registry search
+  docs, and raised `mcp_tool` registry coverage to `126`. Lookup for
+  `aoa_session_entity_usage_chain --kind mcp_tool` returned an active
+  `mcp_tool` with source surface `abyss_stack_mcp_tool_source`, proving new MCP
+  tools can be registered from source before they appear in archived usage.
+- 2026-06-27 compact entity-usage scenario ref proof: after source-discovered
+  MCP tools were registered, the live route audit exposed that compact
+  `entity-usage-scenario-audit` samples had raw previews and document refs but
+  did not surface bounded `first_ref` / `evidence_ref_counts` unless the heavy
+  `--full` packet was requested. The compact sample now carries bounded
+  `document_refs`, `evidence_refs`, `evidence_ref_counts`, and `first_ref`.
+  Re-running `entity-usage-scenario-audit --seed
+  mcp-tool-registry-source-scan --sample-size 2 --limit 2 --per-route-limit 12
+  --consequence-window 6 --raw-preview-limit 2 --write-report` returned
+  `2/2` passed, `raw_or_segment_ref_sample_count=2`, and raw previews
+  available for all four checked events. Re-running `live-scenario-audit
+  --profile entity_usage --profile literal_planner --profile graph_bridge
+  --sample-size 2 --limit 2 --seed mcp-tool-registry-source-scan` returned
+  `3/3` passed, `warn_count=0`, `actionable_gap_count=0`, and surfaced a first
+  raw/segment ref directly in the `entity_usage` scenario packet.
 - 2026-06-25 resource live-tail fast-path proof: a timer-driven
   `auto-maintenance-resource catchup all` launched broad
   `auto-maintenance catchup all`, selected `285` sessions, touched

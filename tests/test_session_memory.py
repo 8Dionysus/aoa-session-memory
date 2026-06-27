@@ -2269,7 +2269,19 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
         "[mcp_servers.aoa-kag]\ncommand = \"python3\"\nargs = [\"-m\", \"aoa_kag\"]\n",
         encoding="utf-8",
     )
+    mcp_services_root = tmp_path / "mcp-services"
+    service_dir = mcp_services_root / "aoa-kag-mcp"
+    server_path = service_dir / "src" / "aoa_kag_mcp" / "server.py"
+    server_path.parent.mkdir(parents=True)
+    server_path.write_text(
+        "def build_server():\n"
+        "    @mcp.tool()\n"
+        "    def aoa_kag_lookup(query: str = \"\") -> dict:\n"
+        "        return {\"ok\": True, \"query\": query}\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", str(mcp_services_root))
 
     transcript = tmp_path / "rollout-2026-06-18T00-00-00-entity-registry.jsonl"
     write_jsonl(
@@ -2303,6 +2315,11 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert indexed["entity_registry_document_count"] > 0
     assert entries[("skill", "aoa_live_skill")]["status"] == "active"
     assert entries[("mcp_service", "aoa_kag_mcp")]["status"] == "active"
+    assert entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "active"
+    assert any(
+        ref.get("source_type") == "abyss_stack_mcp_tool_source"
+        for ref in entries[("mcp_tool", "aoa_kag_lookup")]["source_refs"]
+    )
     assert entries[("mcp_tool", "mcp_aoa_kag_mcp_lookup")]["status"] == "observed"
 
     skill_candidates = module.trace_route_candidates("aoa-live-skill", kind="skill")
@@ -2331,6 +2348,10 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-kag-mcp", kind="mcp")
     assert lookup["agent_route_packet"]["registered"] is True
     assert lookup["entries"][0]["status"] == "active"
+    tool_lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-kag-lookup", kind="mcp_tool")
+    assert tool_lookup["agent_route_packet"]["registered"] is True
+    assert tool_lookup["entries"][0]["status"] == "active"
+    assert tool_lookup["entries"][0]["source_surface"] == "abyss_stack_mcp_tool_source"
 
     unknown_lookup = module.entity_registry_lookup(aoa_root=aoa_root, anchor="aoa-never-seen-mcp", kind="mcp")
     assert unknown_lookup["agent_route_packet"]["registered"] is False
@@ -2355,6 +2376,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     moved_codex_home = tmp_path / ".codex-moved"
     moved_codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(moved_codex_home))
+    monkeypatch.delenv("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", raising=False)
     stale_registry = module.build_entity_registry(
         aoa_root=aoa_root,
         write=True,
@@ -2363,11 +2385,16 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     stale_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in stale_registry["entries"]}
     assert stale_entries[("skill", "aoa_live_skill")]["status"] == "stale"
     assert stale_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "stale"
+    assert stale_entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "stale"
 
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     (skill_dir / "SKILL.md").unlink()
     skill_dir.rmdir()
     (codex_home / "config.toml").write_text("# aoa-kag MCP removed\n", encoding="utf-8")
+    server_path.unlink()
+    server_path.parent.rmdir()
+    (service_dir / "src").rmdir()
+    service_dir.rmdir()
     removed_registry = module.build_entity_registry(
         aoa_root=aoa_root,
         write=True,
@@ -2376,7 +2403,8 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     removed_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in removed_registry["entries"]}
     assert removed_entries[("skill", "aoa_live_skill")]["status"] == "removed"
     assert removed_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "removed"
-    assert removed_registry["counts_by_status"]["removed"] >= 2
+    assert removed_entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "removed"
+    assert removed_registry["counts_by_status"]["removed"] >= 3
 
     maintenance = module.entity_registry_maintenance_status(aoa_root)
     assert maintenance["needs_maintenance"] is False
@@ -3835,6 +3863,13 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
         "hook_health:postcompact": "result_only",
         "agent_event:assistant_answer": "outcome_only",
     }
+    assert audit["quality"]["raw_or_segment_ref_sample_count"] == 3
+    for sample in audit["samples"]:
+        assert sample["first_ref"]["raw"].startswith("raw:line:")
+        assert sample["evidence_ref_counts"]["raw_ref"] >= 1
+        assert sample["document_refs"]
+        assert sample["evidence_refs"]
+        assert "audit" not in sample
     assert audit["quality"]["candidate_selection_elapsed_ms"] >= 0
     assert audit["quality"]["sample_total_elapsed_ms"] >= 0
     assert audit["quality"]["audit_total_elapsed_ms"] >= 0
@@ -3926,6 +3961,8 @@ def test_entity_usage_scenario_audit_recovers_kind_from_known_layer(
     assert audit["quality"]["warn_count"] == 0
     assert audit["samples"][0]["candidate"]["kind"] == "script"
     assert audit["samples"][0]["evidence_mode"] == "usage_with_consequence"
+    assert audit["samples"][0]["first_ref"]["raw"] == "raw:line:30"
+    assert audit["samples"][0]["evidence_ref_counts"]["raw_ref"] >= 1
 
 
 def test_entity_usage_scenario_audit_warns_on_direct_usage_without_consequence(
@@ -4274,6 +4311,29 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     assert scenarios["literal_planner"]["primary_route_counts"]["route_signal_structured_search"] == 1
     assert scenarios["literal_planner"]["shape_counts"]["entity_class"] == 1
     assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
+
+
+def test_live_scenario_result_accepts_entity_usage_ref_counts() -> None:
+    result = module.live_scenario_result(
+        "entity_usage",
+        {
+            "ok": True,
+            "quality": {"sample_count": 1, "passed_count": 1, "warn_count": 0, "failed_count": 0},
+            "samples": [
+                {
+                    "status": "passed",
+                    "evidence_ref_counts": {"raw_ref": 1, "segment_ref": 1},
+                    "first_ref": {"raw": "raw:line:1", "segment": "001.md#event-1"},
+                }
+            ],
+        },
+        elapsed_ms=1,
+    )
+
+    assert result["status"] == "passed"
+    assert result["evidence_ref_counts"]["raw_ref"] >= 1
+    assert result["first_ref"]["raw"] == "raw:line:1"
+    assert "no_raw_or_segment_refs_detected" not in result.get("quality_flags", [])
 
 
 def test_live_scenario_audit_fails_empty_entity_dossier_profile(tmp_path: Path, monkeypatch: Any) -> None:
