@@ -2909,6 +2909,70 @@ def test_performance_baseline_agent_event_shard_projection_warning_nonblocking(t
     assert payload["warnings"] == ["search_shard_fanout_using_structured_nonmaterialized_shards:1"]
 
 
+def test_performance_baseline_optional_graphrag_answer_gate_warning_nonblocking(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        module,
+        "entity_registry_lookup",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "entity_registry_lookup",
+            "match_count": 1,
+            "agent_route_packet": {"registered": True, "status": "observed"},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_usage_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "event_count": 1,
+            "usage_event_count": 1,
+            "consequence_event_count": 1,
+            "kind": "mcp",
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_usage_neighborhood",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "session_memory_entity_usage_neighborhood",
+            "quality": {"usage_neighborhood_present": True, "raw_preview_available": True},
+            "kind": "mcp",
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_rag_packet",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "session_memory_graphrag_packet",
+            "kind": "mcp",
+            "diagnostics": ["answer_rule_gate:stale"],
+        },
+    )
+    monkeypatch.setattr(module, "performance_storage_summary", lambda _aoa_root: {})
+
+    payload = module.performance_baseline(
+        aoa_root=aoa_root,
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        limit=2,
+    )
+    steps = {step["id"]: step for step in payload["steps"]}
+
+    assert payload["ok"] is True
+    assert payload["route_family"] == "operational_entity"
+    assert payload["diagnostics"] == []
+    assert payload["warnings"] == ["answer_rule_gate:stale"]
+    assert steps["graphrag_packet"]["diagnostics"] == ["answer_rule_gate:stale"]
+
+
 def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(tmp_path: Path, monkeypatch: Any) -> None:
     result_hits = [
         {

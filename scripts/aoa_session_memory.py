@@ -61552,6 +61552,7 @@ def skipped_performance_step(step_id: str, *, description: str, reason: str, mut
 
 
 PERFORMANCE_BASELINE_WARNING_DIAGNOSTIC_PREFIXES = (
+    "answer_rule_gate:",
     "search_shard_fanout_using_structured_nonmaterialized_shards:",
 )
 

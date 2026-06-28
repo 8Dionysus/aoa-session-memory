@@ -507,7 +507,10 @@ task really needs deeper ordering or a deeper graph path.
 structured `agent-responses`/agent-event shard route and skips entity
 usage/neighborhood/GraphRAG steps by default. Use explicit graph or GraphRAG
 commands when the task needs deep synthesis; do not treat agent answers as
-operational entity usage just to produce a timing report.
+operational entity usage just to produce a timing report. For operational
+entities, answer-rule diagnostics from the optional GraphRAG step are reported
+as warnings so they do not hide a healthy compact evidence route; open the
+GraphRAG route explicitly when that warning is the task.
 
 Audit whether the 22 operational route layers are currently covered by
 session route indexes, source atlas axes, generated atlas entries, and the
