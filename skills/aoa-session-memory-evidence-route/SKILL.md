@@ -58,6 +58,12 @@ Use these first routes when available:
   command anchor for structured routes and preserve the full command text for
   exact recall. For exact session ids, use the planner's rehydrate/session
   search route before global literal fallback.
+- operational route-rollup navigation: when `maintenance-status`,
+  `literal-query-plan`, or another route packet says
+  `use_operational_route_rollup_projection`, use
+  `search-operational-route-rollup-query <query> --layer <layer>` first. This
+  route reads the materialized rollup only; it must not rebuild maintenance,
+  resample shards, open the monolith, use FTS, or hydrate raw body text.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
@@ -88,6 +94,8 @@ query is fuzzy:
 - hook receipts and hook failures: `aoa_session_hook_receipts`
 - graph topology: `aoa_session_graph_neighborhood`
 - graph relation bridge: `aoa_session_graph_bridge`
+- operational route-rollup projection:
+  `aoa_session_operational_route_rollup_query`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
 - reviewed live quality regression gate:
   `aoa_session_live_scenario_corpus_check`
@@ -125,6 +133,7 @@ python3 scripts/aoa_session_memory.py entity-usage-audit <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
+python3 scripts/aoa_session_memory.py search-operational-route-rollup-query "<query>" --layer <layer> --limit 12 --ref-limit 3
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
 python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1
@@ -140,6 +149,8 @@ Prefer packets that expose:
 - normalized entity or route candidates;
 - usage, result, outcome, consequence, graph, and neighborhood counts;
 - freshness, ambiguity, truncation, and omitted counts;
+- cost profile, especially whether a route used materialized projections or
+  expanded into shard search, monolith reads, FTS, or raw hydration;
 - `raw`, `segment`, `segment_index`, and `session` refs;
 - `next_command` or next expansion route.
 
