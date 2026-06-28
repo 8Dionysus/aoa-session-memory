@@ -15064,6 +15064,122 @@ def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path,
     assert plan["candidate_lanes"][0]["id"] == "compact_operational_event_projection"
     assert plan["candidate_lanes"][0]["status"] == "recommended"
     assert "do_not_run_broad_monolith_group_by_on_hot_agent_path" in plan["stop_lines"]
+    measurement_texts = [module.shlex.join(command) for command in plan["next_measurement_routes"]]
+    assert any("search-operational-projection-plan" in command for command in measurement_texts)
+    assert Path(plan["report_json"]).exists()
+    assert Path(plan["report_markdown"]).exists()
+
+
+def test_search_operational_projection_plan_samples_candidate_tail_without_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    conn = module.init_search_db(shard_db, rebuild=True)
+
+    def insert_event(
+        doc_id: str,
+        *,
+        event_type: str,
+        usage_role: str,
+        agent_event: str = "",
+        task_episode_id: str = "",
+        route_signal: str = "",
+        session_act: str = "",
+    ) -> None:
+        module.insert_search_document(
+            conn,
+            {
+                "id": doc_id,
+                "doc_type": "event",
+                "session_id": "projection-session",
+                "session_label": "2026-06-28__001__projection-session",
+                "session_title": "Projection session",
+                "session_date": "2026-06-28",
+                "event_id": doc_id,
+                "event_type": event_type,
+                "usage_role": usage_role,
+                "agent_event": agent_event,
+                "task_episode_id": task_episode_id,
+                "session_act": session_act,
+                "route_layers": module.packed_route_values(["tool"]) if route_signal else "",
+                "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
+                "title": doc_id,
+                "body": doc_id,
+                "raw_ref": f"raw:line:{doc_id}",
+                "segment_ref": "segments/000__initial-to-latest.md",
+                "segment_index_path": "",
+                "payload_json": "{}",
+            },
+            store_raw_text=False,
+            storage_profile=module.search_document_storage_profile(store_raw_text=False),
+        )
+
+    insert_event("usage-doc", event_type="TOOL_CALL", usage_role="usage", session_act="tool_call")
+    insert_event("result-doc", event_type="COMMAND_OUTPUT", usage_role="result", session_act="command_result")
+    insert_event("agent-event-context", event_type="CONTEXT_STATE", usage_role="context", agent_event="assistant_answer")
+    insert_event("task-episode-context", event_type="CONTEXT_STATE", usage_role="context", task_episode_id="task-1")
+    insert_event("protected-type-context", event_type="ASSISTANT_MESSAGE", usage_role="context")
+    insert_event(
+        "candidate-with-route",
+        event_type="CONTEXT_STATE",
+        usage_role="context",
+        route_signal=module.route_signal_token("tool", "exec_command"),
+        session_act="tool_context",
+    )
+    insert_event("candidate-without-route", event_type="CONTEXT_STATE", usage_role="context")
+    conn.commit()
+    conn.close()
+
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_count": 1,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": shard_key,
+                    "shard_db_path": str(shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 7,
+                    "total_with_wal_bytes": shard_db.stat().st_size,
+                    "total_with_wal_human": module.human_size(shard_db.stat().st_size),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    plan = module.session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        write_report=True,
+    )
+
+    assert plan["ok"] is True
+    assert plan["mutates"] is False
+    assert plan["status"] == "candidate_tail_measured"
+    assert plan["sample"]["successful_shard_count"] == 1
+    assert plan["totals"]["event_total"] == 7
+    assert plan["totals"]["direct_actionable_event_count"] == 2
+    assert plan["totals"]["context_event_count"] == 5
+    assert plan["totals"]["protected_context_event_count"] == 3
+    assert plan["totals"]["candidate_context_tail_v1_count"] == 2
+    assert plan["totals"]["candidate_context_tail_with_route_signals_count"] == 1
+    assert plan["totals"]["candidate_context_tail_without_route_signals_count"] == 1
+    assert plan["totals"]["replacement_route_refs_required"] is True
+    assert plan["projection_candidate"]["safe_to_apply_physical_compaction"] is False
+    assert "do_not_drop_candidate_tail_without_route_ref_rehome" in plan["stop_lines"]
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()
 

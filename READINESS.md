@@ -1717,6 +1717,23 @@ Maintenance gates:
   diagnostic for the newest nonmaterialized shard instead of hiding the
   cardinality plan.
 
+- 2026-06-28 operational event projection measurement proof:
+  `search-operational-projection-plan --max-shards 2 --per-shard-timeout 5
+  --write-report` sampled the two largest structured shard DBs in about
+  `4.85s` wall time and wrote
+  `diagnostics/20260628T113120Z__search-operational-projection-plan.json`.
+  The packet returned `status=candidate_tail_measured`, `ok=true`,
+  `mutates=false`, and `successful_shard_count=2`. Across sampled May/June
+  shards it found `1572436` event docs, `996874` direct
+  usage/result/outcome/entrypoint docs, `575562` context docs, and `407178`
+  generic context-tail candidates (`25.8947%` of sampled events). Crucially,
+  `320271` of those candidates still carry route-signal previews
+  (`78.6563%` of the candidate tail), so the next design route is
+  `design_route_ref_preserving_operational_event_rollup`, not row deletion,
+  SQLite vacuum, or full-text shard expansion. Regression proof:
+  `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`
+  and `test_search_projection_plan_uses_cached_projection_summaries`.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

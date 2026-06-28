@@ -128,6 +128,28 @@ SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
 SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT = 1_000_000
 SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT = 500_000
 SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
+SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS = 3
+SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 3.0
+SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES = ("usage", "result", "outcome", "entrypoint")
+SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE = "context"
+SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES = (
+    "USER_INTENT",
+    "ASSISTANT_PLAN",
+    "ASSISTANT_MESSAGE",
+    "DECISION",
+    "ASSUMPTION",
+    "CHECKPOINT",
+    "FINAL_STATE",
+    "PROCESS_LESSON",
+    "OPEN_THREAD",
+    "COMMAND",
+    "FILE_READ",
+    "FILE_WRITE",
+    "DIFF",
+    "TOOL_CALL",
+    "ERROR",
+    "VERIFICATION",
+)
 SEARCH_RAW_LEXICAL_POLICY_MODE = "bounded_raw_lexical_default_v1"
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB = 16
 SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES = SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB * 1024 * 1024
@@ -52137,6 +52159,17 @@ def session_memory_search_projection_plan(
         "next_measurement_routes": [
             [
                 *session_memory_cli_command(aoa_root),
+                "search-operational-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--max-shards",
+                str(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS),
+                "--write-report",
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
                 "performance-baseline",
                 "assistant_answer",
                 "--kind",
@@ -52193,6 +52226,417 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "## Stop Lines", ""])
     for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
         lines.append(f"- `{item}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def search_operational_event_projection_shard_candidates(
+    aoa_root: Path,
+    *,
+    max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    catalog = read_search_catalog(aoa_root)
+    diagnostics: list[str] = []
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in catalog.get("shards", []) if isinstance(catalog.get("shards"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        shard = str(item.get("shard") or "")
+        path_text = str(item.get("shard_db_path") or "")
+        db_path = Path(path_text) if path_text else search_shard_db_path(aoa_root, shard) if shard else Path()
+        if not db_path or not db_path.exists():
+            continue
+        resolved = str(db_path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        size_bytes = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+        candidates.append(
+            {
+                "shard": shard or db_path.parent.name,
+                "db_path": str(db_path),
+                "status": item.get("status"),
+                "materialized": bool(item.get("materialized")),
+                "document_count": int_value(item.get("document_count")),
+                "total_with_wal_bytes": int_value(item.get("total_with_wal_bytes"), size_bytes),
+                "total_with_wal_human": item.get("total_with_wal_human") or human_size(size_bytes),
+                "source": "search_catalog",
+            }
+        )
+    if not candidates:
+        shards_root = aoa_root / SEARCH_ROOT / "shards"
+        for db_path in sorted(shards_root.glob(f"*/{SEARCH_DB_NAME}")):
+            resolved = str(db_path.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            size_bytes = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+            candidates.append(
+                {
+                    "shard": db_path.parent.name.replace("month-", "month/", 1),
+                    "db_path": str(db_path),
+                    "status": "discovered_from_filesystem",
+                    "materialized": True,
+                    "document_count": 0,
+                    "total_with_wal_bytes": size_bytes,
+                    "total_with_wal_human": human_size(size_bytes),
+                    "source": "filesystem_fallback",
+                }
+            )
+        if candidates:
+            diagnostics.append("search_operational_projection_catalog_empty_used_filesystem_shards")
+    candidates.sort(
+        key=lambda item: (
+            int_value(item.get("document_count")),
+            int_value(item.get("total_with_wal_bytes")),
+            str(item.get("shard") or ""),
+        ),
+        reverse=True,
+    )
+    return candidates[: max(1, max_shards)], catalog, diagnostics
+
+
+def search_operational_event_projection_probe_shard(
+    *,
+    db_path: Path,
+    shard: str,
+    per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+    top_context_session_act_limit: int = 8,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = started + max(0.1, float(per_shard_timeout_seconds))
+    payload: dict[str, Any] = {
+        "ok": False,
+        "status": "not_started",
+        "shard": shard,
+        "db_path": str(db_path),
+        "diagnostics": [],
+    }
+    if not db_path.exists():
+        payload.update({"status": "missing", "diagnostics": ["search_shard_db_missing"]})
+        return payload
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path, timeout=min(1.0, max(0.1, float(per_shard_timeout_seconds))))
+        if not sqlite_table_exists(conn, "documents"):
+            payload.update({"status": "missing_documents_table", "diagnostics": ["search_documents_table_missing"]})
+            return payload
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        required_columns = {"doc_type", "event_type", "usage_role", "agent_event", "task_episode_id", "route_signals", "session_act"}
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            payload.update(
+                {
+                    "status": "schema_missing_columns",
+                    "diagnostics": [f"search_operational_projection_missing_columns:{','.join(missing_columns)}"],
+                }
+            )
+            return payload
+        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
+        direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
+        protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
+        aggregate_sql = f"""
+            WITH event_docs AS (
+                SELECT
+                    event_type,
+                    usage_role,
+                    agent_event,
+                    task_episode_id,
+                    route_signals,
+                    session_act,
+                    CASE WHEN COALESCE(usage_role, '') = ? THEN 1 ELSE 0 END AS is_context,
+                    CASE
+                        WHEN COALESCE(usage_role, '') = ?
+                             AND COALESCE(agent_event, '') = ''
+                             AND COALESCE(task_episode_id, '') = ''
+                             AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
+                        THEN 1 ELSE 0
+                    END AS is_candidate_context_tail,
+                    CASE WHEN COALESCE(usage_role, '') IN ({direct_placeholders}) THEN 1 ELSE 0 END AS is_direct_actionable
+                FROM documents
+                WHERE doc_type = 'event'
+            )
+            SELECT
+                COUNT(*) AS event_total,
+                COALESCE(SUM(is_direct_actionable), 0) AS direct_actionable_event_count,
+                COALESCE(SUM(is_context), 0) AS context_event_count,
+                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END), 0) AS context_agent_event_count,
+                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(task_episode_id, '') <> '' THEN 1 ELSE 0 END), 0) AS context_task_episode_count,
+                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(event_type, '') IN ({protected_placeholders}) THEN 1 ELSE 0 END), 0) AS context_protected_event_type_count,
+                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END), 0) AS context_route_signal_preview_count,
+                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(session_act, '') = '' THEN 1 ELSE 0 END), 0) AS context_empty_session_act_count,
+                COALESCE(SUM(is_candidate_context_tail), 0) AS candidate_context_tail_v1_count,
+                COALESCE(SUM(CASE WHEN is_candidate_context_tail = 1 AND COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END), 0) AS candidate_context_tail_with_route_signals_count,
+                COALESCE(SUM(CASE WHEN is_candidate_context_tail = 1 AND COALESCE(route_signals, '') = '' THEN 1 ELSE 0 END), 0) AS candidate_context_tail_without_route_signals_count
+            FROM event_docs
+        """
+        aggregate_params = [
+            SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+            SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+            *SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
+            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+        ]
+        row = conn.execute(aggregate_sql, aggregate_params).fetchone()
+        role_rows = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(usage_role, ''), 'unknown') AS role, COUNT(*) AS count
+            FROM documents
+            WHERE doc_type = 'event'
+            GROUP BY role
+            ORDER BY count DESC, role ASC
+            """
+        ).fetchall()
+        session_act_rows = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(session_act, ''), 'empty') AS session_act, COUNT(*) AS count
+            FROM documents
+            WHERE doc_type = 'event' AND COALESCE(usage_role, '') = ?
+            GROUP BY session_act
+            ORDER BY count DESC, session_act ASC
+            LIMIT ?
+            """,
+            (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, max(1, top_context_session_act_limit)),
+        ).fetchall()
+        result = {key: int_value(row[key]) for key in row.keys()} if row is not None else {}
+        event_total = int_value(result.get("event_total"))
+        candidate_count = int_value(result.get("candidate_context_tail_v1_count"))
+        context_count = int_value(result.get("context_event_count"))
+        payload.update(
+            {
+                "ok": True,
+                "status": "sampled",
+                **result,
+                "protected_context_event_count": max(0, context_count - candidate_count),
+                "candidate_context_tail_v1_ratio": round(candidate_count / event_total, 6) if event_total > 0 else 0.0,
+                "candidate_context_tail_with_route_signals_ratio": round(
+                    int_value(result.get("candidate_context_tail_with_route_signals_count")) / candidate_count,
+                    6,
+                )
+                if candidate_count > 0
+                else 0.0,
+                "role_counts": {str(item["role"]): int_value(item["count"]) for item in role_rows},
+                "top_context_session_acts": [
+                    {"session_act": str(item["session_act"] or "empty"), "count": int_value(item["count"])}
+                    for item in session_act_rows
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+    except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        payload.update(
+            {
+                "ok": False,
+                "status": status,
+                "diagnostics": [f"search_operational_projection_probe_failed:{status}:{exc}"],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
+            conn.close()
+    return payload
+
+
+def session_memory_search_operational_event_projection_plan(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
+    per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
+        aoa_root,
+        max_shards=max_shards,
+    )
+    shard_results = [
+        search_operational_event_projection_probe_shard(
+            db_path=Path(str(item.get("db_path") or "")),
+            shard=str(item.get("shard") or ""),
+            per_shard_timeout_seconds=per_shard_timeout_seconds,
+        )
+        for item in selected_shards
+    ]
+    diagnostics.extend(
+        str(diag)
+        for item in shard_results
+        for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+        if diag
+    )
+    successful = [item for item in shard_results if item.get("ok")]
+    totals: dict[str, int] = {}
+    total_keys = (
+        "event_total",
+        "direct_actionable_event_count",
+        "context_event_count",
+        "context_agent_event_count",
+        "context_task_episode_count",
+        "context_protected_event_type_count",
+        "context_route_signal_preview_count",
+        "context_empty_session_act_count",
+        "protected_context_event_count",
+        "candidate_context_tail_v1_count",
+        "candidate_context_tail_with_route_signals_count",
+        "candidate_context_tail_without_route_signals_count",
+    )
+    for key in total_keys:
+        totals[key] = sum(int_value(item.get(key)) for item in successful)
+    event_total = int_value(totals.get("event_total"))
+    candidate_count = int_value(totals.get("candidate_context_tail_v1_count"))
+    candidate_with_routes = int_value(totals.get("candidate_context_tail_with_route_signals_count"))
+    role_counts: Counter[str] = Counter()
+    for item in successful:
+        for role, count in (item.get("role_counts") if isinstance(item.get("role_counts"), dict) else {}).items():
+            role_counts[str(role)] += int_value(count)
+    if not selected_shards:
+        status = "blocked_by_missing_shard_projection"
+    elif not successful:
+        status = "probe_degraded"
+    elif candidate_count > 0:
+        status = "candidate_tail_measured"
+    else:
+        status = "no_context_tail_seen"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_event_projection_plan",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "ok": bool(successful),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "status": status,
+        "catalog_status": catalog.get("status"),
+        "sample": {
+            "selection": "largest_existing_search_shards",
+            "max_shards": max(1, int(max_shards)),
+            "selected_shard_count": len(selected_shards),
+            "successful_shard_count": len(successful),
+            "per_shard_timeout_seconds": per_shard_timeout_seconds,
+            "selected_shards": selected_shards,
+        },
+        "direct_keep_roles": list(SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES),
+        "context_role": SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+        "protected_context_event_types": list(SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES),
+        "totals": {
+            **totals,
+            "candidate_context_tail_v1_ratio": round(candidate_count / event_total, 6) if event_total > 0 else 0.0,
+            "candidate_context_tail_with_route_signals_ratio": round(candidate_with_routes / candidate_count, 6)
+            if candidate_count > 0
+            else 0.0,
+            "replacement_route_refs_required": candidate_with_routes > 0,
+            "role_counts": dict(sorted(role_counts.items())),
+        },
+        "projection_candidate": {
+            "id": "compact_operational_event_projection_v1",
+            "candidate_predicate": "doc_type=event AND usage_role=context AND agent_event='' AND task_episode_id='' AND event_type NOT IN protected_context_event_types",
+            "direct_keep_predicate": "doc_type=event AND usage_role IN direct_keep_roles",
+            "protected_context_predicates": [
+                "agent_event!=''",
+                "task_episode_id!=''",
+                "event_type IN protected_context_event_types",
+            ],
+            "candidate_tail_count": candidate_count,
+            "candidate_tail_with_route_signals_count": candidate_with_routes,
+            "replacement_route_refs_required": candidate_with_routes > 0,
+            "safe_to_apply_physical_compaction": False,
+            "next_design_route": "design_route_ref_preserving_operational_event_rollup",
+        },
+        "shards": shard_results,
+        "stop_lines": [
+            "do_not_drop_candidate_tail_without_route_ref_rehome",
+            "do_not_compress_agent_event_or_task_episode_context",
+            "do_not_replace_raw_or_segment_refs_with_projection_counts",
+            "do_not_run_unbounded_monolith_group_by_on_hot_agent_path",
+        ],
+        "next_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--max-shards",
+                str(max(1, int(max_shards))),
+                "--write-report",
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--write-report",
+            ],
+        ],
+        "diagnostics": diagnostics,
+        "quality_boundary": "candidate counts are planning evidence only; raw transcripts, segment indexes, and route refs remain authority",
+        "truth_status": "read_only_shard_sample_for_projection_design_not_archive_truth",
+    }
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-operational-projection-plan",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_operational_event_projection_plan_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -> str:
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
+    candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
+    lines = [
+        "# Search Operational Event Projection Plan",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- selected_shards: `{sample.get('selected_shard_count')}`",
+        f"- successful_shards: `{sample.get('successful_shard_count')}`",
+        f"- event_total: `{totals.get('event_total')}`",
+        f"- direct_actionable_event_count: `{totals.get('direct_actionable_event_count')}`",
+        f"- context_event_count: `{totals.get('context_event_count')}`",
+        f"- candidate_context_tail_v1_count: `{totals.get('candidate_context_tail_v1_count')}`",
+        f"- candidate_context_tail_v1_ratio: `{totals.get('candidate_context_tail_v1_ratio')}`",
+        f"- candidate_context_tail_with_route_signals_count: `{totals.get('candidate_context_tail_with_route_signals_count')}`",
+        f"- replacement_route_refs_required: `{totals.get('replacement_route_refs_required')}`",
+        f"- next_design_route: `{candidate.get('next_design_route')}`",
+        "",
+        "## Shards",
+        "",
+        "| shard | status | elapsed_ms | events | candidate_tail | candidate_with_routes |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for item in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"| `{item.get('shard')}` | `{item.get('status')}` | `{item.get('elapsed_ms')}` | "
+            f"`{item.get('event_total')}` | `{item.get('candidate_context_tail_v1_count')}` | "
+            f"`{item.get('candidate_context_tail_with_route_signals_count')}` |"
+        )
+    lines.extend(["", "## Stop Lines", ""])
+    for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
+        lines.append(f"- `{item}`")
+    lines.extend(["", "## Diagnostics", ""])
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
     lines.append("")
     return "\n".join(lines)
 
@@ -61244,6 +61688,21 @@ def command_search_projection_plan(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_operational_projection_plan(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=root,
+        max_shards=args.max_shards,
+        per_shard_timeout_seconds=args.per_shard_timeout,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -67328,6 +67787,18 @@ def build_parser() -> argparse.ArgumentParser:
     search_projection_plan.add_argument("--aoa-root")
     search_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search projection plan reports under .aoa/diagnostics.")
     search_projection_plan.set_defaults(func=command_search_projection_plan)
+
+    search_operational_projection_plan = sub.add_parser(
+        "search-operational-projection-plan",
+        aliases=["search-event-projection-plan", "search-operational-event-projection-plan"],
+        help="Sample structured search shards for the compact operational event projection plan without mutating search/raw/graph.",
+    )
+    search_operational_projection_plan.add_argument("--workspace-root")
+    search_operational_projection_plan.add_argument("--aoa-root")
+    search_operational_projection_plan.add_argument("--max-shards", type=int, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS)
+    search_operational_projection_plan.add_argument("--per-shard-timeout", type=float, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS)
+    search_operational_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational event projection reports under .aoa/diagnostics.")
+    search_operational_projection_plan.set_defaults(func=command_search_operational_projection_plan)
 
     search = sub.add_parser(
         "search",

@@ -1142,7 +1142,20 @@ python3 scripts/aoa_session_memory.py search-projection-plan \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
   --write-report
+
+python3 scripts/aoa_session_memory.py search-operational-projection-plan \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --max-shards 3 \
+  --write-report
 ```
+
+`search-operational-projection-plan` is the bounded follow-up for the compact
+operational event projection lane. It samples existing structured shard DBs,
+separates direct usage/result/outcome/entrypoint rows from protected context
+rows, and reports the generic context tail that could only be reduced after
+route refs and raw/segment refs have a replacement projection. It does not
+mutate search, raw, graph, or session archives.
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query
