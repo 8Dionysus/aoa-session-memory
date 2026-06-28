@@ -1572,6 +1572,17 @@ Maintenance gates:
   profile is `graph_bridge` at `42.082s`; it returned raw, segment, and session
   refs, so the debt is latency rather than evidence loss. Report:
   `diagnostics/20260628T085412Z__live-scenario-corpus-check.json`.
+- The follow-up maintenance snapshot surfaced a separate
+  `search_shards_not_current` warning: monolith search and the catalog were
+  current, but `month/2026-06` had one stale session. This was repaired through
+  scoped incremental shard materialization:
+  `search-shards all --shard month/2026-06 --no-rebuild --dirty-only
+  --write-report --full`, which processed `1` session and `67014` documents in
+  `72.752s` without diagnostics. The next `maintenance-status` reported
+  `search_shards_status=current`, `materialized=3/3`, `noncurrent=0`; remaining
+  warnings were `graph_actionable_sources` and
+  `search_projection_combined_large`. Report:
+  `diagnostics/20260628T085710Z__search-shards.json`.
 
 ## Probe Notes
 
