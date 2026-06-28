@@ -15901,6 +15901,10 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert "rollup-session" in json.loads(row["session_ids_json"])
 
 
+def test_search_operational_route_rollup_default_timeout_is_build_budget() -> None:
+    assert module.SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS >= 120.0
+
+
 def test_live_sync_updates_search_catalog_deferred_shard_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
