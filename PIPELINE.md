@@ -1343,10 +1343,12 @@ python3 scripts/aoa_session_memory.py graph-cooccurrence exec_command --kind too
 explicit deeper relation walk, then verify important claims through raw,
 segment, or session refs.
 `graph-bridge` is the consumer route for relation questions between two
-operational anchors. It wraps shallow source/target neighborhoods, timeline
-samples, freshness/noise flags, evidence refs, and next expansion commands; it
-remains generated route evidence, not reviewed truth. Use the returned
-`shortest_path` expansion when a deeper path is actually needed.
+operational anchors. It wraps shallow source/target neighborhoods, compact
+side-neighborhood event/ref samples, freshness/noise flags, evidence refs,
+phase timings, and next expansion commands; it remains generated route
+evidence, not reviewed truth. Use the returned `graph-timeline` expansion when
+deeper event ordering is needed, and `shortest_path` only when a deeper path is
+actually needed.
 
 GraphRAG combines lexical search entrypoints, optional semantic/rerank overlays,
 graph-store expansion, cooccurrence clusters, evidence refs, and freshness:

@@ -46459,6 +46459,75 @@ def graph_store_resolve_anchor(
     }
 
 
+def graph_store_neighbor_edge_priority(edge_type: str) -> int:
+    return {
+        "registry_entity_has_route_signal": 0,
+        "mentions_route_signal": 1,
+        "segment_has_route_signal": 2,
+        "event_mentions_registered_entity": 3,
+        "session_has_registered_entity": 4,
+        "has_event": 5,
+        "answered_by": 5,
+        "responds_to": 5,
+    }.get(str(edge_type or ""), 6)
+
+
+def graph_store_neighbor_edge_rows(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str,
+    edge_budget: int,
+) -> tuple[list[sqlite3.Row], dict[str, Any]]:
+    compact_unordered = edge_budget <= 64
+    query_limit = max(32, min(200, edge_budget * 8))
+    rows: list[sqlite3.Row] = []
+    seen: set[str] = set()
+    directions: list[dict[str, Any]] = []
+    for column in ("source_node", "target_node"):
+        if compact_unordered:
+            sql = f"""
+                SELECT id, source_node, target_node, edge_type, count
+                FROM edges
+                WHERE {column} = ?
+                LIMIT ?
+                """
+        else:
+            sql = f"""
+                SELECT id, source_node, target_node, edge_type, count
+                FROM edges
+                WHERE {column} = ?
+                ORDER BY
+                  CASE edge_type
+                    WHEN 'registry_entity_has_route_signal' THEN 0
+                    WHEN 'mentions_route_signal' THEN 1
+                    WHEN 'segment_has_route_signal' THEN 2
+                    WHEN 'event_mentions_registered_entity' THEN 3
+                    WHEN 'session_has_registered_entity' THEN 4
+                    WHEN 'has_event' THEN 5
+                    WHEN 'answered_by' THEN 5
+                    WHEN 'responds_to' THEN 5
+                    ELSE 6
+                  END,
+                  count DESC,
+                  id ASC
+                LIMIT ?
+                """
+        fetched = conn.execute(sql, (node_id, query_limit)).fetchall()
+        directions.append({"column": column, "fetched_count": len(fetched), "query_limit": query_limit})
+        for row in fetched:
+            edge_id = str(row["id"])
+            if edge_id in seen:
+                continue
+            seen.add(edge_id)
+            rows.append(row)
+    rows.sort(key=lambda row: (graph_store_neighbor_edge_priority(str(row["edge_type"])), -int_value(row["count"]), str(row["id"])))
+    return rows[: max(query_limit, edge_budget)], {
+        "strategy": "split_unordered_compact" if compact_unordered else "split_ordered",
+        "query_limit": query_limit,
+        "directions": directions,
+    }
+
+
 def graph_from_store_neighborhood(
     *,
     aoa_root: Path,
@@ -46507,6 +46576,7 @@ def graph_from_store_neighborhood(
         seen_edges: set[str] = set()
         omitted_node_count = 0
         omitted_edge_count = 0
+        edge_query_strategies: Counter[str] = Counter()
         queue_nodes: deque[tuple[str, int]] = deque((node_id, 0) for node_id in resolved["start_node_ids"])
         while queue_nodes and len(selected_nodes) < limit:
             node_id, distance = queue_nodes.popleft()
@@ -46516,29 +46586,8 @@ def graph_from_store_neighborhood(
             selected_nodes.append(node_id)
             if distance >= depth:
                 continue
-            edge_rows = conn.execute(
-                """
-                SELECT id, source_node, target_node, edge_type, count
-                FROM edges
-                WHERE source_node = ? OR target_node = ?
-                ORDER BY
-                  CASE edge_type
-                    WHEN 'registry_entity_has_route_signal' THEN 0
-                    WHEN 'mentions_route_signal' THEN 1
-                    WHEN 'segment_has_route_signal' THEN 2
-                    WHEN 'event_mentions_registered_entity' THEN 3
-                    WHEN 'session_has_registered_entity' THEN 4
-                    WHEN 'has_event' THEN 5
-                    WHEN 'answered_by' THEN 5
-                    WHEN 'responds_to' THEN 5
-                    ELSE 6
-                  END,
-                  count DESC,
-                  id ASC
-                LIMIT 200
-                """,
-                (node_id, node_id),
-            ).fetchall()
+            edge_rows, edge_query = graph_store_neighbor_edge_rows(conn, node_id=node_id, edge_budget=max_edges)
+            edge_query_strategies[str(edge_query.get("strategy") or "unknown")] += 1
             for row in edge_rows:
                 edge_id = str(row["id"])
                 if edge_id not in seen_edges and len(selected_edges) < max_edges:
@@ -46576,6 +46625,7 @@ def graph_from_store_neighborhood(
         "nodes": nodes,
         "edges": edges,
         "resolved": resolved,
+        "edge_query_strategies": dict(edge_query_strategies),
         "store_state": state,
         "diagnostics": state.get("diagnostics", []) if isinstance(state.get("diagnostics"), list) else [],
     }
@@ -47222,6 +47272,7 @@ def graph_neighborhood(
             "truncated": bool(store_graph.get("truncated")),
             "omitted_node_count": store_graph.get("omitted_node_count"),
             "omitted_edge_count": store_graph.get("omitted_edge_count"),
+            "edge_query_strategies": store_graph.get("edge_query_strategies") if isinstance(store_graph.get("edge_query_strategies"), dict) else {},
             "evidence_ref_limit": evidence_ref_limit,
             "nodes": [graph_compact_node_for_packet(node) for node in nodes],
             "edges": [graph_compact_edge_for_packet(edge) for edge in edges],
@@ -47896,6 +47947,68 @@ def graph_bridge_compact_freshness(packet: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def graph_bridge_compact_timeline_from_neighborhood(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    requested_kind: str,
+    route_kind: str,
+    neighborhood: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    selected_limit = max(1, min(int_value(limit, 8), 30))
+    nodes = neighborhood.get("nodes") if isinstance(neighborhood.get("nodes"), list) else []
+    events = [node for node in nodes if isinstance(node, dict) and node.get("type") == "event"]
+    events.sort(key=lambda node: (str(node.get("timestamp") or ""), str(node.get("session_label") or ""), int_value(node.get("line")), str(node.get("event_id") or "")))
+    selected_events = events[:selected_limit]
+    evidence_refs = graph_bridge_evidence_refs(
+        [
+            *(neighborhood.get("evidence_refs", []) if isinstance(neighborhood.get("evidence_refs"), list) else []),
+            *graph_collect_evidence(selected_events, [], limit=selected_limit * 4),
+        ],
+        limit=max(selected_limit * 4, selected_limit),
+    )
+    freshness = dict(neighborhood.get("freshness") if isinstance(neighborhood.get("freshness"), dict) else {})
+    freshness["timeline_source"] = "side_neighborhood_compact_sample"
+    freshness["timeline_deferred"] = True
+    freshness["law"] = "graph-bridge first packet uses bounded side-neighborhood refs; run graph-timeline only when deeper ordering is needed."
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_timeline",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(selected_events or evidence_refs),
+        "mutates": False,
+        "truth_status": "graph_timeline_packet_not_reviewed_truth",
+        "anchor": anchor,
+        **trace_kind_payload_fields(requested_kind, route_kind),
+        "timeline_source": "side_neighborhood_compact_sample",
+        "event_count": len(selected_events),
+        "events": selected_events,
+        "resolved": neighborhood.get("resolved") if isinstance(neighborhood.get("resolved"), dict) else {},
+        "evidence_refs": evidence_refs,
+        "freshness": freshness,
+        "diagnostics": neighborhood.get("diagnostics", []) if isinstance(neighborhood.get("diagnostics"), list) else [],
+        "next_route": "Run graph-timeline only when event ordering needs more examples; verify important claims through raw/segment refs.",
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-timeline",
+            anchors=[anchor],
+            kind=requested_kind,
+            route_kind=route_kind,
+            limit=selected_limit,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-timeline",
+            anchors=[anchor],
+            kind=requested_kind,
+            route_kind=route_kind,
+            limit=graph_packet_expanded_limit(selected_limit, default=selected_limit, maximum=200),
+        ),
+    }
+
+
 def graph_bridge(
     *,
     aoa_root: Path,
@@ -47915,48 +48028,75 @@ def graph_bridge(
     target_route_kind = normalized_target_kind if normalized_target_kind in TRACE_ROUTE_KINDS else route_kind
     selected_limit = max(1, min(int_value(limit, 8), 30))
     selected_max_depth = max(1, min(int_value(max_depth, 4), 8))
+    started = time.monotonic()
+    phase_timings: list[dict[str, Any]] = []
+
+    def timed_phase(name: str, func: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        phase_started = time.monotonic()
+        result = func()
+        phase_timings.append({"phase": name, "elapsed_ms": int((time.monotonic() - phase_started) * 1000)})
+        return result
 
     bridge_side_depth = 1
     bridge_node_limit = max(selected_limit, 4)
     bridge_edge_limit = max(selected_limit * 2, 8)
-    source_neighborhood = graph_neighborhood(
-        aoa_root=aoa_root,
-        anchor=source_anchor,
-        kind=source_route_kind,
-        depth=bridge_side_depth,
-        limit=bridge_node_limit,
-        edge_limit=bridge_edge_limit,
+    source_neighborhood = timed_phase(
+        "source_neighborhood",
+        lambda: graph_neighborhood(
+            aoa_root=aoa_root,
+            anchor=source_anchor,
+            kind=source_route_kind,
+            depth=bridge_side_depth,
+            limit=bridge_node_limit,
+            edge_limit=bridge_edge_limit,
+        ),
     )
-    target_neighborhood = graph_neighborhood(
-        aoa_root=aoa_root,
-        anchor=target_anchor,
-        kind=target_route_kind,
-        depth=bridge_side_depth,
-        limit=bridge_node_limit,
-        edge_limit=bridge_edge_limit,
+    target_neighborhood = timed_phase(
+        "target_neighborhood",
+        lambda: graph_neighborhood(
+            aoa_root=aoa_root,
+            anchor=target_anchor,
+            kind=target_route_kind,
+            depth=bridge_side_depth,
+            limit=bridge_node_limit,
+            edge_limit=bridge_edge_limit,
+        ),
     )
-    path = graph_shortest_path_from_packets(
-        aoa_root=aoa_root,
-        source_anchor=source_anchor,
-        target_anchor=target_anchor,
-        source_packet=source_neighborhood,
-        target_packet=target_neighborhood,
-        kind=route_kind,
-        source_kind=source_route_kind,
-        target_kind=target_route_kind,
-        max_depth=selected_max_depth,
+    path = timed_phase(
+        "shortest_path",
+        lambda: graph_shortest_path_from_packets(
+            aoa_root=aoa_root,
+            source_anchor=source_anchor,
+            target_anchor=target_anchor,
+            source_packet=source_neighborhood,
+            target_packet=target_neighborhood,
+            kind=route_kind,
+            source_kind=source_route_kind,
+            target_kind=target_route_kind,
+            max_depth=selected_max_depth,
+        ),
     )
-    source_timeline = graph_timeline(
-        aoa_root=aoa_root,
-        anchor=source_anchor,
-        kind=source_route_kind,
-        limit=selected_limit,
+    source_timeline = timed_phase(
+        "source_compact_timeline",
+        lambda: graph_bridge_compact_timeline_from_neighborhood(
+            aoa_root=aoa_root,
+            anchor=source_anchor,
+            requested_kind=source_kind or route_kind,
+            route_kind=source_route_kind,
+            neighborhood=source_neighborhood,
+            limit=selected_limit,
+        ),
     )
-    target_timeline = graph_timeline(
-        aoa_root=aoa_root,
-        anchor=target_anchor,
-        kind=target_route_kind,
-        limit=selected_limit,
+    target_timeline = timed_phase(
+        "target_compact_timeline",
+        lambda: graph_bridge_compact_timeline_from_neighborhood(
+            aoa_root=aoa_root,
+            anchor=target_anchor,
+            requested_kind=target_kind or route_kind,
+            route_kind=target_route_kind,
+            neighborhood=target_neighborhood,
+            limit=selected_limit,
+        ),
     )
 
     path_nodes = path.get("nodes") if isinstance(path.get("nodes"), list) else []
@@ -48080,6 +48220,8 @@ def graph_bridge(
             "side_neighborhood_depth": bridge_side_depth,
             "side_neighborhood_node_limit": bridge_node_limit,
             "side_neighborhood_edge_limit": bridge_edge_limit,
+            "side_timeline_policy": "side_neighborhood_compact_sample",
+            "side_timelines_deferred": True,
             "source_event_count": int_value(source_timeline.get("event_count"), len(source_events)),
             "target_event_count": int_value(target_timeline.get("event_count"), len(target_events)),
             "source_neighborhood_node_count": int_value(source_neighborhood.get("node_count"), len(source_neighborhood.get("nodes") or [])),
@@ -48097,6 +48239,8 @@ def graph_bridge(
             *(source_neighborhood.get("diagnostics", []) if isinstance(source_neighborhood.get("diagnostics"), list) else []),
             *(target_neighborhood.get("diagnostics", []) if isinstance(target_neighborhood.get("diagnostics"), list) else []),
         ],
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "timings": phase_timings,
         "next_route": "Use graph-bridge as a compact relation route; verify important claims through raw_ref, segment_ref, and owner source surfaces.",
         "next_command": current_command,
         "next_expansion_command": expansion_command,

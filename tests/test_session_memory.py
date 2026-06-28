@@ -5857,6 +5857,125 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert Path(dossier["report_json"]).exists()
 
 
+def test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[str] = []
+
+    def ref(raw_line: int, session_id: str) -> dict[str, Any]:
+        return {
+            "event_id": f"{raw_line:06d}",
+            "refs": {
+                "raw": f"raw:line:{raw_line}",
+                "segment": "000__initial-to-latest.md",
+                "session": f"sessions/test-{session_id}/session.manifest.json",
+            },
+            "segment_id": "000",
+            "session_id": session_id,
+        }
+
+    def fake_graph_neighborhood(
+        *,
+        aoa_root: Path,
+        anchor: str,
+        kind: str = "auto",
+        depth: int = 1,
+        limit: int = 40,
+        edge_limit: int | None = None,
+    ) -> dict[str, Any]:
+        calls.append(f"neighborhood:{anchor}:{kind}")
+        session_id = "source" if anchor == "aoa-session-memory-mcp" else "target"
+        evidence_ref = ref(10 if session_id == "source" else 20, session_id)
+        event_node = {
+            "id": f"event:{session_id}:000:{evidence_ref['event_id']}",
+            "type": "event",
+            "title": f"Tool call for {anchor}",
+            "session_id": session_id,
+            "segment_id": "000",
+            "event_id": evidence_ref["event_id"],
+            "timestamp": "2026-06-28T00:00:00Z",
+            "line": 10 if session_id == "source" else 20,
+            "evidence_refs": [evidence_ref],
+        }
+        return {
+            "ok": True,
+            "anchor": anchor,
+            "kind": kind,
+            "requested_kind": kind,
+            "node_count": 2,
+            "edge_count": 1,
+            "nodes": [{"id": f"route:{kind}:{anchor}", "type": kind, "label": anchor}, event_node],
+            "edges": [{"id": f"edge:{session_id}", "type": "mentions_route_signal", "source": f"route:{kind}:{anchor}", "target": event_node["id"]}],
+            "evidence_refs": [evidence_ref],
+            "resolved": {
+                "anchor": anchor,
+                "kind": kind,
+                "requested_kind": kind,
+                "start_node_ids": [f"route:{kind}:{anchor}"],
+                "resolver_strategy": "exact_route_node",
+            },
+            "freshness": {
+                "status": "graph_store_stale",
+                "graph_source": "sqlite_graph_store",
+                "needs_maintenance": True,
+            },
+            "diagnostics": [],
+        }
+
+    def fake_shortest_path_from_packets(**kwargs: Any) -> dict[str, Any]:
+        calls.append("shortest_path")
+        return {
+            "ok": False,
+            "path_length": 0,
+            "nodes": [],
+            "edges": [],
+            "evidence_refs": [],
+            "source_resolved": kwargs["source_packet"]["resolved"],
+            "target_resolved": kwargs["target_packet"]["resolved"],
+            "freshness": {"status": "bounded_current", "graph_source": "bounded_shortest_path_side_neighborhoods"},
+            "diagnostics": [],
+            "next_expansion_command": "python3 scripts/aoa_session_memory.py graph-shortest-path aoa-session-memory-mcp exec_command",
+        }
+
+    def unexpected_graph_timeline(**_: Any) -> dict[str, Any]:
+        raise AssertionError("graph_bridge first packet should not hydrate graph_timeline")
+
+    monkeypatch.setattr(module, "graph_neighborhood", fake_graph_neighborhood)
+    monkeypatch.setattr(module, "graph_shortest_path_from_packets", fake_shortest_path_from_packets)
+    monkeypatch.setattr(module, "graph_timeline", unexpected_graph_timeline)
+
+    bridge = module.graph_bridge(
+        aoa_root=aoa_root,
+        source_anchor="aoa-session-memory-mcp",
+        target_anchor="exec_command",
+        source_kind="mcp",
+        target_kind="tool",
+        limit=4,
+        max_depth=4,
+    )
+
+    assert calls == ["neighborhood:aoa-session-memory-mcp:mcp", "neighborhood:exec_command:tool", "shortest_path"]
+    assert bridge["ok"] is True
+    assert bridge["evidence_ref_count"] == 2
+    assert bridge["quality"]["raw_or_segment_ref_present"] is True
+    assert bridge["quality"]["side_timeline_policy"] == "side_neighborhood_compact_sample"
+    assert bridge["quality"]["side_timelines_deferred"] is True
+    assert bridge["quality"]["source_event_count"] == 1
+    assert bridge["quality"]["target_event_count"] == 1
+    assert bridge["usage_chain"]["source_events"][0]["refs"]["raw"] == "raw:line:10"
+    assert bridge["usage_chain"]["target_events"][0]["refs"]["raw"] == "raw:line:20"
+    assert {item["phase"] for item in bridge["timings"]} == {
+        "source_neighborhood",
+        "target_neighborhood",
+        "shortest_path",
+        "source_compact_timeline",
+        "target_compact_timeline",
+    }
+    assert any(item.get("id") == "source_timeline" and "graph-timeline" in item.get("command", "") for item in bridge["next_expansion"])
+
+
 def test_graph_freshness_surfaces_hot_gate_backlog(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir(parents=True)

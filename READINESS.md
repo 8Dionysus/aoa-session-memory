@@ -1607,6 +1607,34 @@ Maintenance gates:
   now explicit, not hidden: `graph_actionable_sources` and
   `search_projection_combined_large`, with the next action still
   `repair_graph_queue_drip`.
+- 2026-06-28 dense graph-bridge route proof: the next live consumer-loop slice
+  confirmed that graph-bridge latency was a first-packet route issue, not
+  evidence loss. Baseline `graph-bridge aoa-session-memory-mcp exec_command
+  --source-kind mcp --target-kind tool --limit 4 --max-depth 4` returned
+  refs but took `46.55s`; new packet timings showed `target_neighborhood`
+  alone at `44.555s` against dense `tool:exec_command`. `graph-bridge` now
+  builds its first packet from bounded side-neighborhood refs/events, defers
+  full `graph-timeline` hydration to the returned expansion commands, and
+  records phase timings. The graph-store neighborhood query also avoids the
+  dense `source_node = ? OR target_node = ? ORDER BY ...` path for compact
+  edge budgets, using split bounded edge reads instead. Source sequential proof
+  on the same anchors returned in `1.789s` and `1.739s` internally (`2.4s`
+  wall); installed live proof after copying the script to `.aoa` returned in
+  `1.059s` internally (`1.73s` wall), with `evidence_ref_count=32`,
+  raw/segment/session refs, `side_timelines_deferred=true`, and timeline phases
+  at `0ms`. The reviewed `live-scenario-corpus check --write-report --full`
+  gate passed `4/4` with `actionable_gap_count=0`; the installed
+  `graph_bridge_refs_contract` case dropped to `1.047s` while keeping raw,
+  segment, and session refs. A follow-up dirty-only `month/2026-06`
+  search-shard refresh processed `2` sessions and `97942` documents in
+  `94.061s`, restoring `search_shards_status=current`. Final
+  `maintenance-status --full` kept only the known tails:
+  `graph_actionable_sources` and `search_projection_combined_large`.
+  Regression proof:
+  `test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs`;
+  full suite: `352 passed`. Report:
+  `diagnostics/20260628T093929Z__live-scenario-corpus-check.json`; shard
+  report: `diagnostics/20260628T094708Z__search-shards.json`.
 
 ## Probe Notes
 
