@@ -18637,6 +18637,28 @@ def maintain_indexes(
     else:
         entity_registry_state = entity_registry_maintenance_status(aoa_root)
         entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
+    if planning_budget_exhausted or not repair_indexes:
+        search_shards_state = {
+            "status": "deferred_budget_exhausted" if planning_budget_exhausted else "deferred_not_checked",
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"] if planning_budget_exhausted else [],
+        }
+        operational_route_rollup_state = {
+            "status": "deferred_budget_exhausted" if planning_budget_exhausted else "deferred_not_checked",
+            "needs_refresh": None,
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"] if planning_budget_exhausted else [],
+            "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
+        }
+    else:
+        search_shards_state = session_memory_search_shard_projection_summary(aoa_root)
+        operational_route_rollup_state = session_memory_operational_route_rollup_status(
+            aoa_root=aoa_root,
+            search_shards=search_shards_state,
+        )
+    operational_route_rollup_repair_needed = (
+        repair_indexes
+        and bool(operational_route_rollup_state.get("needs_refresh"))
+        and str(search_shards_state.get("status") or "") in {"current", "current_with_deferred_live_updates"}
+    )
     effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
     effective_graph_refresh_chunk_size = max(1, min(int_value(graph_refresh_chunk_size, GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE), 1000))
     effective_graph_max_refresh_nodes = None if graph_max_refresh_nodes is None or int_value(graph_max_refresh_nodes) <= 0 else int_value(graph_max_refresh_nodes)
@@ -18647,6 +18669,7 @@ def maintain_indexes(
         or bool(atlas_state.get("needs_refresh"))
         or token_backfill_needed
         or entity_registry_repair_needed
+        or operational_route_rollup_repair_needed
         or planning_budget_exhausted
     )
     graph_repair_needed = (
@@ -18749,6 +18772,17 @@ def maintain_indexes(
         + ["entity-registry-search-sync", *root_args]
         + ["--write-report"]
     )
+    operational_route_rollup_command = (
+        base
+        + [
+            "search-operational-route-rollup",
+            *root_args,
+            "--max-shards",
+            str(max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_route_rollup_state.get("shard_count")))),
+            "--apply",
+            "--write-report",
+        ]
+    )
     atlas_command = (
         base
         + ["atlas", "build", "all", *root_args]
@@ -18807,6 +18841,12 @@ def maintain_indexes(
             command=atlas_command,
         ),
         maintenance_action(
+            "refresh_operational_route_rollup",
+            reason="operational_route_rollup_missing_or_stale",
+            needed=operational_route_rollup_repair_needed,
+            command=operational_route_rollup_command,
+        ),
+        maintenance_action(
             "route_readiness",
             reason="post_maintenance_gate",
             needed=repair_indexes and index_repair_needed,
@@ -18849,9 +18889,10 @@ def maintain_indexes(
     search_action = actions[3]
     entity_registry_action = actions[4]
     atlas_action = actions[5]
-    readiness_action = actions[6]
-    graph_action = actions[7]
-    sample_action = actions[8]
+    operational_route_rollup_action = actions[6]
+    readiness_action = actions[7]
+    graph_action = actions[8]
+    sample_action = actions[9]
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -18905,6 +18946,11 @@ def maintain_indexes(
             "selection_count": len(records) if atlas_rebuild_required else len(atlas_repair_records),
             "dirty_count": len(atlas_dirty_records) + (1 if atlas_rebuild_required else 0),
         },
+        "refresh_operational_route_rollup": {
+            "action_kind": "state_reconcile",
+            "selection_count": int_value(operational_route_rollup_state.get("shard_count"), SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS),
+            "dirty_count": 1 if operational_route_rollup_repair_needed else 0,
+        },
         "route_readiness": {
             "action_kind": "state_reconcile",
             "selection_count": len(records),
@@ -18945,6 +18991,7 @@ def maintain_indexes(
         reindex_ran = False
         token_backfill_ran = False
         entity_registry_ran = False
+        operational_route_rollup_ran = False
         post_index_ran = False
         graph_ran = False
         if token_action["needed"]:
@@ -19236,6 +19283,41 @@ def maintain_indexes(
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if operational_route_rollup_action["needed"]:
+            if not has_budget():
+                budget_exhausted = True
+                operational_route_rollup_action["status"] = "deferred_budget_exhausted"
+                action_results.append(operational_route_rollup_action)
+            else:
+                result = session_memory_search_operational_route_rollup(
+                    workspace_root=aoa_root.parent,
+                    aoa_root=aoa_root,
+                    max_shards=max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_route_rollup_state.get("shard_count"))),
+                    per_shard_timeout_seconds=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+                    ref_sample_limit=SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+                    apply=True,
+                    write_report=write_report,
+                )
+                operational_route_rollup_action["status"] = "applied" if result.get("ok") else "failed"
+                operational_route_rollup_action["result"] = {
+                    key: result.get(key)
+                    for key in (
+                        "ok",
+                        "status",
+                        "written",
+                        "target_db",
+                        "write_result",
+                        "totals",
+                        "elapsed_ms",
+                        "report_json",
+                        "report_markdown",
+                        "diagnostics",
+                    )
+                }
+                action_results.append(operational_route_rollup_action)
+                operational_route_rollup_ran = bool(result.get("ok"))
+                if not result.get("ok") and result.get("diagnostics"):
+                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_indexes and has_budget():
             try:
                 refreshed_records = current_selected_records()
@@ -19422,7 +19504,7 @@ def maintain_indexes(
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if readiness_action["needed"] or reindex_ran or token_backfill_ran or entity_registry_ran or post_index_ran or graph_ran:
+        if readiness_action["needed"] or reindex_ran or token_backfill_ran or entity_registry_ran or operational_route_rollup_ran or post_index_ran or graph_ran:
             if not has_budget():
                 budget_exhausted = True
                 readiness_action["status"] = "deferred_budget_exhausted"
@@ -19505,6 +19587,8 @@ def maintain_indexes(
     final_atlas_state = atlas_state
     final_graph_state = graph_state
     final_entity_registry_state = entity_registry_state
+    final_search_shards_state = search_shards_state
+    final_operational_route_rollup_state = operational_route_rollup_state
     final_snapshot_budget_remaining = budget_remaining()
     if deadline is not None and final_snapshot_budget_remaining is not None and final_snapshot_budget_remaining <= 0:
         budget_exhausted = True
@@ -19529,6 +19613,11 @@ def maintain_indexes(
             final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
             final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
             final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
+            final_search_shards_state = session_memory_search_shard_projection_summary(aoa_root)
+            final_operational_route_rollup_state = session_memory_operational_route_rollup_status(
+                aoa_root=aoa_root,
+                search_shards=final_search_shards_state,
+            )
             final_graph_state = (
                 graph_store_state(
                     aoa_root=aoa_root,
@@ -19563,6 +19652,7 @@ def maintain_indexes(
         "index_repair_needed": index_repair_needed,
         "graph_repair_needed": graph_repair_needed,
         "entity_registry_repair_needed": entity_registry_repair_needed,
+        "operational_route_rollup_repair_needed": operational_route_rollup_repair_needed,
         "repair_limit": effective_repair_limit,
         "selected_count": len(records),
         "max_raw_bytes": max_raw_bytes,
@@ -19641,11 +19731,15 @@ def maintain_indexes(
         "search_index": search_state,
         "atlas_index": atlas_state,
         "entity_registry": entity_registry_state,
+        "search_shards": search_shards_state,
+        "operational_route_rollup": operational_route_rollup_state,
         "graph_store": graph_state,
         "post_maintenance_states": post_maintenance_states,
         "final_search_index": final_search_state,
         "final_atlas_index": final_atlas_state,
         "final_entity_registry": final_entity_registry_state,
+        "final_search_shards": final_search_shards_state,
+        "final_operational_route_rollup": final_operational_route_rollup_state,
         "final_graph_store": final_graph_state,
         "action_counts": action_counts,
         "actions": action_results,
@@ -19682,6 +19776,7 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- index_repair_needed: `{payload.get('index_repair_needed')}`",
         f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
         f"- entity_registry_repair_needed: `{payload.get('entity_registry_repair_needed')}`",
+        f"- operational_route_rollup_repair_needed: `{payload.get('operational_route_rollup_repair_needed')}`",
         f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
@@ -19711,10 +19806,12 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- search_index: `{(payload.get('search_index') or {}).get('status') if isinstance(payload.get('search_index'), dict) else ''}`",
         f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
         f"- entity_registry: `{(payload.get('entity_registry') or {}).get('status') if isinstance(payload.get('entity_registry'), dict) else ''}`",
+        f"- operational_route_rollup: `{(payload.get('operational_route_rollup') or {}).get('status') if isinstance(payload.get('operational_route_rollup'), dict) else ''}`",
         f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
         f"- final_search_index: `{(payload.get('final_search_index') or {}).get('status') if isinstance(payload.get('final_search_index'), dict) else ''}`",
         f"- final_atlas_index: `{(payload.get('final_atlas_index') or {}).get('status') if isinstance(payload.get('final_atlas_index'), dict) else ''}`",
         f"- final_entity_registry: `{(payload.get('final_entity_registry') or {}).get('status') if isinstance(payload.get('final_entity_registry'), dict) else ''}`",
+        f"- final_operational_route_rollup: `{(payload.get('final_operational_route_rollup') or {}).get('status') if isinstance(payload.get('final_operational_route_rollup'), dict) else ''}`",
         f"- final_graph_store: `{(payload.get('final_graph_store') or {}).get('status') if isinstance(payload.get('final_graph_store'), dict) else ''}`",
         "",
         "## Actions",

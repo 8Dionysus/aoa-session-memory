@@ -1182,6 +1182,11 @@ or stale, the search projection next-action routes to
 the next-action becomes `use_operational_route_rollup_projection` instead of
 repeating the cardinality plan.
 
+`index-maintenance` also treats a missing or stale operational route-rollup as
+a generated read-model repair when search shards are current. This lets
+`auto-maintenance` refresh the rollup through the normal maintenance pipeline
+without giving the rollup authority over raw transcripts or segment evidence.
+
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query
 targets structured-only shards, `--use-shards` falls back to the monolith with an

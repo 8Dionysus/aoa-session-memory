@@ -1799,6 +1799,18 @@ Maintenance gates:
   `next_route=use_operational_route_rollup_before_physical_shrinkage`, and
   candidate lane `compact_operational_event_projection` with
   `status=route_rollup_ready`.
+  Auto-update proof: `index-maintenance` now plans
+  `refresh_operational_route_rollup` when the generated rollup is missing or
+  stale and search shards are current. A live active-script dry-run
+  `index-maintenance all --skip-graph-repair --skip-token-accounting
+  --budget-seconds 45 --write-report` wrote
+  `diagnostics/20260628T125144Z__index-maintenance.json`, kept
+  `operational_route_rollup_repair_needed=false` because the real rollup was
+  already current, and reported both initial and final rollup status as
+  `current`. The missing/stale apply branch is covered by
+  `test_index_maintenance_refreshes_missing_operational_route_rollup`, which
+  proves the action moves `final_operational_route_rollup.status` to `current`
+  through the normal maintenance pipeline.
 
 ## Probe Notes
 

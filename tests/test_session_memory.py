@@ -12852,6 +12852,80 @@ def test_index_maintenance_refreshes_search_state_without_reindexing_when_docume
     assert refreshed["final_search_index"]["status"] == "current"
 
 
+def test_index_maintenance_refreshes_missing_operational_route_rollup(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-28__001__rollup-maintenance"
+    session_dir.mkdir(parents=True)
+    write_json(session_dir / "session.manifest.json", {"archive_status": "indexed"})
+    record = {
+        "session_id": "rollup-maintenance",
+        "session_label": "2026-06-28__001__rollup-maintenance",
+        "path": str(session_dir),
+    }
+    refreshed = {"value": False}
+
+    def fake_rollup_status(*, aoa_root: Path, search_shards: dict[str, Any] | None = None) -> dict[str, Any]:
+        if refreshed["value"]:
+            return {
+                "status": "current",
+                "needs_refresh": False,
+                "shard_count": 2,
+                "route_rollup_row_count": 10,
+                "candidate_route_posting_count": 25,
+                "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
+            }
+        return {
+            "status": "missing",
+            "needs_refresh": True,
+            "shard_count": 2,
+            "diagnostics": ["operational_route_rollup_missing"],
+            "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
+        }
+
+    def fake_refresh_rollup(**_kwargs: Any) -> dict[str, Any]:
+        refreshed["value"] = True
+        return {
+            "ok": True,
+            "status": "current",
+            "written": True,
+            "target_db": str(aoa_root / "search" / "operational-route-rollup.sqlite3"),
+            "write_result": {"size_human": "24.5 MiB"},
+            "totals": {"route_rollup_row_count": 10, "candidate_route_posting_count": 25},
+            "elapsed_ms": 12,
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda *_args, **_kwargs: (1.0, []))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"needs_refresh": False, "reasons": []})
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"needs_refresh": False, "reasons": []})
+    monkeypatch.setattr(module, "sqlite_search_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_sessions": [], "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_sessions": [], "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "graph_store_state", lambda *_args, **_kwargs: {"status": "current", "needs_maintenance": False, "needs_full_rebuild": False, "diagnostics": []})
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", lambda _aoa_root: {"status": "current", "shard_count": 2, "largest_shards": []})
+    monkeypatch.setattr(module, "session_memory_operational_route_rollup_status", fake_rollup_status)
+    monkeypatch.setattr(module, "session_memory_search_operational_route_rollup", fake_refresh_rollup)
+    monkeypatch.setattr(module, "route_layer_readiness", lambda **_kwargs: {"ok": True, "covered_requirement_count": 0, "required_requirement_count": 0, "remaining": [], "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=True,
+        selected_records=[record],
+        budget_seconds=60,
+    )
+
+    actions = {str(action.get("id")): action for action in payload["actions"]}
+    assert payload["index_repair_needed"] is True
+    assert payload["operational_route_rollup_repair_needed"] is True
+    assert actions["refresh_operational_route_rollup"]["status"] == "applied"
+    assert actions["refresh_operational_route_rollup"]["result"]["totals"]["route_rollup_row_count"] == 10
+    assert actions["route_readiness"]["status"] == "applied"
+    assert payload["final_operational_route_rollup"]["status"] == "current"
+
+
 def test_refresh_search_projection_states_skips_stale_document_refs(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
