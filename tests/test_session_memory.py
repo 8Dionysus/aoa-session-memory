@@ -2375,8 +2375,10 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
 
     moved_codex_home = tmp_path / ".codex-moved"
     moved_codex_home.mkdir()
+    empty_mcp_services_root = tmp_path / "empty-mcp-services"
+    empty_mcp_services_root.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(moved_codex_home))
-    monkeypatch.delenv("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", raising=False)
+    monkeypatch.setenv("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", str(empty_mcp_services_root))
     stale_registry = module.build_entity_registry(
         aoa_root=aoa_root,
         write=True,
@@ -6543,13 +6545,14 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     maintained = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, write_report=True)
     assert maintained["ok"] is True
     assert maintained["selected_count"] >= 1
-    assert maintained["state_window"] == "post_apply"
+    assert maintained["state_window"] == "post_apply_selected_window"
     assert maintained["pre_source_state"]["dirty_count"] >= 1
     assert maintained["post_source_state"]["dirty_count"] == 0
     assert maintained["pre_actionable_count"] >= 1
     assert maintained["post_actionable_count"] == 0
     assert maintained["remaining_count"] == 0
-    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is True
+    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is False
+    assert maintained["maintenance_detail"]["post_source_state_partial"] is True
     assert maintained["write_ledger"] is True
     assert maintained["ledger_update"]["updated_source_count"] >= 1
     ledger = module.read_graph_source_state_ledger(aoa_root)
@@ -7532,10 +7535,11 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     assert maintained["maintenance_detail"]["selection_strategy"] == "cheap_first_exact_refresh_cost"
     assert any(item["source_key"] == light_source_key and item["status"] == "updated" for item in maintained["results"])
     assert not any(item["source_key"] == heavy_source_key and item["status"] == "updated" for item in maintained["results"])
-    assert maintained["state_window"] == "post_apply"
+    assert maintained["state_window"] == "post_apply_selected_window"
     assert maintained["pre_actionable_count"] > maintained["post_actionable_count"]
     assert maintained["post_remaining_count"] == maintained["remaining_count"]
-    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is True
+    assert maintained["maintenance_detail"]["post_source_state_refreshed"] is False
+    assert maintained["maintenance_detail"]["post_source_state_partial"] is True
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "light_cost_anchor"),)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (module.graph_route_node_id("entity", "heavy_cost_anchor_0"),)).fetchone()[0] == 0
@@ -7631,7 +7635,7 @@ def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_pa
     )
     assert heavy_maintained["ok"] is True
     assert heavy_maintained["selected_count"] == 1
-    assert heavy_maintained["state_window"] == "post_apply"
+    assert heavy_maintained["state_window"] == "post_apply_selected_window"
     assert heavy_maintained["pre_actionable_count"] == 1
     assert heavy_maintained["pre_remaining_count"] == 0
     assert heavy_maintained["post_actionable_count"] == 0
@@ -7696,14 +7700,9 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
             observed["closed"] = True
 
     def fake_graph_source_states(**_: Any) -> dict[str, Any]:
-        if observed.get("committed"):
-            post_states = []
-            for index, state in enumerate(states):
-                post_state = dict(state)
-                if index < 3:
-                    post_state["status"] = "clean"
-                post_states.append(post_state)
-            return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
+        observed["source_state_calls"] = int(observed.get("source_state_calls", 0)) + 1
+        if observed["source_state_calls"] > 1:
+            raise AssertionError("graph maintenance apply must not run a second post-apply source scan")
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
     def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
@@ -7730,11 +7729,13 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     assert payload["ok"] is True
     assert payload["selected_count"] == 3
     assert payload["remaining_count"] == 17
-    assert payload["state_window"] == "post_apply"
+    assert payload["state_window"] == "post_apply_selected_window"
     assert payload["pre_actionable_count"] == 20
     assert payload["post_actionable_count"] == 17
     assert payload["pre_remaining_count"] == 17
     assert payload["post_remaining_count"] == 17
+    assert payload["maintenance_detail"]["post_source_state_refreshed"] is False
+    assert payload["maintenance_detail"]["post_source_state_partial"] is True
     assert payload["maintenance_detail"]["candidate_pool_count"] == 9
     assert payload["maintenance_detail"]["matched_source_key_count"] == 20
     assert payload["maintenance_detail"]["matched_source_key_sample"] == [
@@ -7742,6 +7743,7 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     ]
     assert "matched_source_keys" not in payload["maintenance_detail"]
     assert observed["source_key_count"] == 9
+    assert observed["source_state_calls"] == 1
     assert observed["committed"] is True
     assert observed["closed"] is True
 
@@ -7842,7 +7844,7 @@ def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_o
     assert payload["ok"] is True
     assert payload["selected_count"] == 3
     assert payload["remaining_count"] == 17
-    assert payload["state_window"] == "post_apply"
+    assert payload["state_window"] == "post_apply_selected_window"
     assert detail["candidate_pool_count"] == 9
     assert detail["missing_add_only_fast_plan"] is True
     assert detail["exact_planning_candidate_count"] == 3
@@ -8617,6 +8619,46 @@ def test_raw_unavailable_recovery_audit_retires_helper_sources(tmp_path: Path) -
     after = module.graph_store_state(aoa_root=aoa_root)
     assert after["status"] == "current_with_retired_sources"
     assert after["needs_maintenance"] is False
+
+
+def test_graph_source_state_updates_keep_retired_sources_non_actionable(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+    source_key = "segment:removed-session:000"
+    actionable_entry = {
+        "source_key": source_key,
+        "source_type": "segment",
+        "session_id": "removed-session",
+        "segment_id": "000",
+        "status": "orphaned",
+        "reasons": ["source_not_in_current_selection"],
+    }
+    retired_state = {
+        **actionable_entry,
+        "status": "retired_unavailable",
+        "classification": "graph_orphan_removed",
+        "reasons": ["graph_orphan_removed"],
+    }
+    module.write_graph_maintenance_queue(aoa_root, {"items": {source_key: actionable_entry}})
+
+    ledger_update = module.update_graph_source_state_ledger_from_states(
+        aoa_root,
+        [retired_state],
+        reason="graph_maintenance:test",
+    )
+    queue_update = module.update_graph_maintenance_queue_from_states(
+        aoa_root,
+        [retired_state],
+        reason="graph_maintenance:test",
+    )
+
+    assert ledger_update["status_counts"] == {"retired_unavailable": 1}
+    entry = module.read_graph_source_state_ledger(aoa_root)["sources"][source_key]
+    assert entry["status"] == "retired_unavailable"
+    assert entry["retired_at"]
+    assert entry["classification"] == "graph_orphan_removed"
+    assert queue_update["removed_count"] == 1
+    assert module.read_graph_maintenance_queue(aoa_root)["items"] == {}
 
 
 def test_graph_maintenance_queue_drives_hot_gate_and_bounded_update(tmp_path: Path) -> None:
@@ -10128,6 +10170,47 @@ def test_graph_hot_state_keeps_recent_no_progress_report_for_heavy_tail_route(tm
     assert summary["maintenance_recommendation"]["reason"] == "recent_budgeted_graph_maintenance_exhausted_without_progress"
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in summary["maintenance_recommendation"]["command"]
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in summary["maintenance_recommendation"]["command"]
+
+
+def test_recent_no_progress_ignores_stale_lower_remaining_window() -> None:
+    now = time.time()
+    evidence = module.recent_graph_maintenance_no_progress_evidence(
+        [
+            {
+                "_diagnostic_mtime": now,
+                "_diagnostic_path": "/tmp/latest-progress.json",
+                "generated_at": "2026-06-28T04:21:27Z",
+                "apply": True,
+                "target": "all",
+                "selected_count": 3,
+                "remaining_count": 2279,
+                "batch_limit": 3,
+                "candidate_pool_limit": 9,
+                "budget_exhausted": False,
+                "source_state": {"selection_scope": "global"},
+            },
+            {
+                "_diagnostic_mtime": now - 60,
+                "_diagnostic_path": "/tmp/old-rollback.json",
+                "generated_at": "2026-06-28T03:15:44Z",
+                "apply": True,
+                "target": "all",
+                "selected_count": 0,
+                "remaining_count": 2130,
+                "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+                "candidate_pool_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT
+                * module.GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER,
+                "budget_exhausted": True,
+                "maintenance_detail": {"mutation_rolled_back": True},
+                "source_state": {"selection_scope": "global"},
+            },
+        ],
+        current_remaining_count=2279,
+        budgeted_batch_limit=module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        now_ts=now,
+    )
+
+    assert evidence["exists"] is False
 
 
 def test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count(tmp_path: Path) -> None:

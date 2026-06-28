@@ -37316,6 +37316,15 @@ def update_graph_source_state_ledger_from_states(
             continue
         status = str(state.get("status") or "unknown")
         existing = sources.get(source_key) if isinstance(sources.get(source_key), dict) else {}
+        state_evidence_refs = state.get("evidence_refs")
+        existing_evidence_refs = existing.get("evidence_refs")
+        evidence_refs = (
+            state_evidence_refs
+            if isinstance(state_evidence_refs, list)
+            else existing_evidence_refs
+            if isinstance(existing_evidence_refs, list)
+            else []
+        )
         entry = {
             **existing,
             "source_key": source_key,
@@ -37328,21 +37337,25 @@ def update_graph_source_state_ledger_from_states(
             "source_sha": state.get("source_sha"),
             "source_mtime": state.get("source_mtime"),
             "status": status,
+            "classification": state.get("classification") or existing.get("classification"),
             "reason": reason,
             "reasons": state.get("reasons", []) if isinstance(state.get("reasons"), list) else [],
+            "evidence_refs": evidence_refs,
             "last_checked": now,
         }
         if status == "clean":
             entry["last_clean_at"] = now
         elif status in GRAPH_ACTIONABLE_SOURCE_STATUSES:
             entry["last_dirty_at"] = now
+        elif status in GRAPH_RETIRED_SOURCE_STATUSES:
+            entry["retired_at"] = existing.get("retired_at") or now
         if status == "blocked" and graph_source_state_is_retired(existing):
             entry["status"] = str(existing.get("status") or "retired_unavailable")
             entry["retired_at"] = existing.get("retired_at") or now
             entry["classification"] = existing.get("classification") or entry.get("classification")
             entry["evidence_refs"] = existing.get("evidence_refs", [])
             entry["reason"] = existing.get("reason") or entry["reason"]
-        elif status != "blocked":
+        elif status != "blocked" and status not in GRAPH_RETIRED_SOURCE_STATUSES:
             entry.pop("retired_at", None)
         sources[source_key] = entry
         counts[str(entry.get("status") or status)] += 1
@@ -42162,6 +42175,97 @@ def graph_source_state_summary(
     }
 
 
+def graph_maintenance_successful_result_statuses(results: list[dict[str, Any]]) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "")
+        if status not in {"updated", "removed"}:
+            continue
+        source_key = str(item.get("source_key") or "")
+        if source_key:
+            statuses[source_key] = status
+    return statuses
+
+
+def graph_maintenance_post_apply_state_rows(
+    states: list[dict[str, Any]],
+    result_statuses: dict[str, str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        source_key = str(state.get("source_key") or "")
+        result_status = result_statuses.get(source_key)
+        if result_status == "updated":
+            item = dict(state)
+            item["status"] = "clean"
+            item["reasons"] = []
+            item["post_apply_result_status"] = result_status
+            rows.append(item)
+            continue
+        if result_status == "removed":
+            item = dict(state)
+            item["status"] = "retired_unavailable"
+            item["classification"] = item.get("classification") or "graph_orphan_removed"
+            item["reasons"] = ["graph_orphan_removed"]
+            item["stored_node_count"] = 0
+            item["stored_edge_count"] = 0
+            item["post_apply_result_status"] = result_status
+            rows.append(item)
+            continue
+        rows.append(dict(state))
+    return rows
+
+
+def graph_maintenance_bounded_post_source_state_summary(
+    pre_summary: dict[str, Any],
+    states: list[dict[str, Any]],
+    *,
+    states_payload: dict[str, Any],
+    filtered: bool = False,
+) -> dict[str, Any]:
+    counts = dict(Counter(str(item.get("status") or "unknown") for item in states if isinstance(item, dict)))
+    retired_count = graph_retired_source_count_from_counts(counts)
+    partial_evidence_count = graph_partial_evidence_count_from_counts(counts)
+    reason_summary = graph_source_reason_summary(states)
+    source_count = pre_summary.get("source_count")
+    existing_source_count = pre_summary.get("existing_source_count")
+    workspace_root = str(pre_summary.get("workspace_root") or states_payload.get("workspace_root") or "/path/to/workspace")
+    aoa_root = str(pre_summary.get("aoa_root") or states_payload.get("aoa_root") or "/path/to/workspace/.aoa")
+    summary = {
+        **pre_summary,
+        "source_count": source_count,
+        "existing_source_count": existing_source_count,
+        "status_counts": counts,
+        "dirty_count": counts.get("dirty", 0),
+        "missing_count": counts.get("missing", 0),
+        "blocked_count": counts.get("blocked", 0),
+        "retired_count": retired_count,
+        "partial_evidence_count": partial_evidence_count,
+        "orphaned_count": counts.get("orphaned", 0),
+        **reason_summary,
+        "maintenance_recommendation": graph_source_maintenance_recommendation(
+            source_count=int_value(source_count),
+            existing_source_count=int_value(existing_source_count),
+            dirty_count=counts.get("dirty", 0),
+            missing_count=counts.get("missing", 0),
+            orphaned_count=counts.get("orphaned", 0),
+            blocked_count=counts.get("blocked", 0),
+            reason_group_counts=reason_summary.get("reason_group_counts", {}),
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        ),
+        "post_apply_state_window": "selected_window",
+        "truth_status": "bounded_post_apply_selected_window_no_second_source_scan",
+    }
+    if filtered:
+        summary["filtered_by_source_key"] = True
+    return summary
+
+
 def filter_graph_source_states_by_key(
     states: list[dict[str, Any]],
     source_keys: Iterable[str],
@@ -42511,7 +42615,8 @@ def graph_maintenance(
         source_hash_stats=source_hash_stats,
         source_hash_mode=hash_mode,
     )
-    states = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
+    states_all = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
+    states = states_all
     missing_requested_source_keys: list[str] = []
     if requested_source_keys:
         states, missing_requested_source_keys = filter_graph_source_states_by_key(states, requested_source_keys)
@@ -42907,7 +43012,7 @@ def graph_maintenance(
     pre_source_state = graph_source_state_summary(states, states_payload=states_payload, filtered=bool(requested_source_keys))
     pre_unfiltered_source_state = (
         graph_source_state_summary(
-            states_payload.get("states") if isinstance(states_payload.get("states"), list) else [],
+            states_all,
             states_payload=states_payload,
             filtered=False,
         )
@@ -42919,6 +43024,8 @@ def graph_maintenance(
     post_unfiltered_source_state: dict[str, Any] = {}
     post_remaining_count: int | None = None
     post_actionable_count: int | None = None
+    post_states_all: list[dict[str, Any]] = []
+    post_states: list[dict[str, Any]] = []
     state_window = "pre_apply"
     mutation_applied = bool(
         apply
@@ -42927,37 +43034,33 @@ def graph_maintenance(
         and any(item.get("status") in {"updated", "removed"} for item in results if isinstance(item, dict))
     )
     if mutation_applied:
-        post_states_payload = graph_source_states(
-            aoa_root=aoa_root,
-            target=target,
-            since=since,
-            until=until,
-            limit=limit,
-            selected_records=selected_records,
-            selected_records_global=selected_records_global,
-            source_key_filters=requested_source_keys,
-            source_hash_cache_entries=source_hash_cache_entries if hash_mode == "cached" else None,
-            source_hash_cache_updates=source_hash_cache_updates if write_hash_cache else None,
-            source_hash_stats=source_hash_stats,
-            source_hash_mode=hash_mode,
+        result_statuses = graph_maintenance_successful_result_statuses(results)
+        post_states_all = graph_maintenance_post_apply_state_rows(states_all, result_statuses)
+        post_states = (
+            graph_maintenance_post_apply_state_rows(states, result_statuses)
+            if states is not states_all
+            else post_states_all
         )
-        post_states_all = (
-            post_states_payload.get("states")
-            if isinstance(post_states_payload.get("states"), list)
-            else []
-        )
-        post_states = post_states_all
-        if requested_source_keys:
-            post_states, _post_missing_requested_source_keys = filter_graph_source_states_by_key(post_states, requested_source_keys)
         post_source_state = graph_source_state_summary(
+            states,
+            states_payload=states_payload,
+            filtered=bool(requested_source_keys),
+        )
+        post_source_state = graph_maintenance_bounded_post_source_state_summary(
+            post_source_state,
             post_states,
-            states_payload=post_states_payload,
+            states_payload=states_payload,
             filtered=bool(requested_source_keys),
         )
         post_unfiltered_source_state = (
-            graph_source_state_summary(
+            graph_maintenance_bounded_post_source_state_summary(
+                graph_source_state_summary(
+                    states_all,
+                    states_payload=states_payload,
+                    filtered=False,
+                ),
                 post_states_all,
-                states_payload=post_states_payload,
+                states_payload=states_payload,
                 filtered=False,
             )
             if requested_source_keys else {}
@@ -42968,11 +43071,14 @@ def graph_maintenance(
         ]
         post_actionable_count = len(post_actionable)
         post_remaining_count = post_actionable_count
-        state_window = "post_apply"
+        state_window = "post_apply_selected_window"
     maintenance_detail.update(
         {
             "state_window": state_window,
-            "post_source_state_refreshed": mutation_applied,
+            "post_source_state_refreshed": False,
+            "post_source_state_partial": mutation_applied,
+            "post_source_state_refresh_mode": "selected_window_no_second_source_scan" if mutation_applied else "none",
+            "post_state_rows_for_persistence_count": len(post_states_all) if mutation_applied else 0,
             "pre_actionable_count": pre_actionable_count,
             "post_actionable_count": post_actionable_count,
             "pre_remaining_count": pre_remaining_count,
@@ -53445,7 +53551,9 @@ def recent_graph_maintenance_no_progress_evidence(
     if current_remaining <= 0:
         return {"exists": False}
     lower_bound = (time.time() if now_ts is None else float(now_ts)) - GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS
-    near_current_limit = current_remaining + max(1, int_value(budgeted_batch_limit))
+    near_current_window = max(1, int_value(budgeted_batch_limit))
+    near_current_floor = max(1, current_remaining - near_current_window)
+    near_current_limit = current_remaining + near_current_window
     for report in reports:
         if not isinstance(report, dict):
             continue
@@ -53453,7 +53561,7 @@ def recent_graph_maintenance_no_progress_evidence(
         if report_mtime <= 0 or report_mtime < lower_bound:
             continue
         remaining_count = int_value(report.get("remaining_count"))
-        if remaining_count <= 0 or remaining_count > near_current_limit:
+        if remaining_count <= 0 or remaining_count < near_current_floor or remaining_count > near_current_limit:
             continue
         if not graph_maintenance_report_scope_is_global(report):
             continue
