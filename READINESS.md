@@ -1834,6 +1834,20 @@ Maintenance gates:
   `validate ok=true`, standalone `validate ok=true`, and portable-bundle audit
   `ok=true`.
 
+- 2026-06-28 route-rollup consumer scenario proof:
+  `live-scenario-audit --profile route_rollup_query --limit 3` returned
+  `ok=true`, `scenario_count=1`, `passed_count=1`, `elapsed_ms=9`,
+  `raw_or_segment_ref_scenario_count=1`, raw/segment/session ref counts of
+  `3/3/3`, `freshness_status=current`, `uses_materialized_route_rollup=true`,
+  and `resamples_shards=false`, `opens_monolith=false`, `uses_fts=false`,
+  `hydrates_body=false`. The reviewed live scenario corpus now includes
+  `route_rollup_query_materialized_contract`; `live-scenario-corpus check
+  --case-limit 12` returned `12/12` passed with `actionable_gap_count=0`.
+  The `aoa-session-memory-evidence-route` skill also routes
+  `use_operational_route_rollup_projection` to
+  `search-operational-route-rollup-query` / `aoa_session_operational_route_rollup_query`
+  before broad search or raw expansion.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

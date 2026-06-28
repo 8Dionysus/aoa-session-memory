@@ -60186,10 +60186,16 @@ def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
                     continue
                 if key in {"raw", "raw_ref"}:
                     counts["raw_ref"] += 1
+                elif key in {"raw_refs", "raw_ref_list"} and isinstance(nested, list):
+                    counts["raw_ref"] += sum(1 for ref in nested if ref)
                 elif key in {"segment", "segment_ref", "segment_index"}:
                     counts["segment_ref"] += 1
+                elif key in {"segment_refs", "segment_ref_list"} and isinstance(nested, list):
+                    counts["segment_ref"] += sum(1 for ref in nested if ref)
                 elif key == "session":
                     counts["session_ref"] += 1
+                elif key in {"session_ids", "session_refs"} and isinstance(nested, list):
+                    counts["session_ref"] += sum(1 for ref in nested if ref)
                 elif key == "receipt":
                     counts["receipt_ref"] += 1
                 walk(nested, depth + 1)
@@ -60213,6 +60219,17 @@ def live_scenario_first_ref(value: Any) -> dict[str, Any]:
         refs = value.get("refs")
         if isinstance(refs, dict) and refs:
             return {key: refs.get(key) for key in ("raw", "segment", "segment_index", "session", "receipt") if refs.get(key)}
+        for list_key, target_key in (
+            ("raw_refs", "raw"),
+            ("segment_refs", "segment"),
+            ("session_ids", "session"),
+            ("session_refs", "session"),
+        ):
+            values = value.get(list_key)
+            if isinstance(values, list):
+                first = next((ref for ref in values if ref), "")
+                if first:
+                    return {target_key: first}
         for nested in value.values():
             found = live_scenario_first_ref(nested)
             if found:
@@ -61123,6 +61140,43 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         )
         if ok and not result["evidence_ref_count"]:
             result["status"] = "warn"
+    elif profile == "route_rollup_query":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+        totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+        counts = live_scenario_evidence_counts(payload)
+        result_count = int_value(payload.get("result_count"), len(payload.get("results") or []))
+        result.update(
+            {
+                "result_count": result_count,
+                "matched_group_count": int_value(totals.get("matched_group_count")),
+                "omitted_group_count": int_value(totals.get("omitted_group_count")),
+                "raw_or_segment_ref_present": quality.get("raw_or_segment_ref_present"),
+                "freshness_status": quality.get("freshness_status"),
+                "needs_refresh": quality.get("needs_refresh"),
+                "uses_materialized_route_rollup": cost_profile.get("uses_materialized_route_rollup"),
+                "resamples_shards": cost_profile.get("resamples_shards"),
+                "opens_monolith": cost_profile.get("opens_monolith"),
+                "uses_fts": cost_profile.get("uses_fts"),
+                "hydrates_body": cost_profile.get("hydrates_body"),
+                "evidence_ref_counts": counts,
+                "first_ref": live_scenario_first_ref(payload),
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if result_count <= 0:
+            quality_flags.append("route_rollup_query_no_results")
+        if quality.get("raw_or_segment_ref_present") is not True:
+            quality_flags.append("route_rollup_query_missing_raw_or_segment_ref")
+        if str(quality.get("freshness_status") or "") != "current" or quality.get("needs_refresh") is True:
+            quality_flags.append("route_rollup_query_not_current")
+        if cost_profile.get("uses_materialized_route_rollup") is not True:
+            quality_flags.append("route_rollup_query_not_materialized_rollup")
+        for key in ("resamples_shards", "opens_monolith", "uses_fts", "hydrates_body"):
+            if cost_profile.get(key) is True:
+                quality_flags.append(f"route_rollup_query_{key}")
+        if ok and quality_flags:
+            result["status"] = "warn"
     if not ok:
         result["status"] = "failed"
     if not counts and profile not in {"literal_planner", "entity_registry_lookup"}:
@@ -61186,6 +61240,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Open the receipt ref, then rerun hook-receipts with the same event/date filter."
     if profile in {"graph_neighborhood", "graph_bridge"}:
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
+    if profile == "route_rollup_query":
+        return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
     if first_ref:
         return "Open the first raw/segment/receipt ref, then rerun this live-scenario profile with --write-report."
     return "Rerun this live-scenario profile with --write-report and inspect diagnostics before treating it as proof."
@@ -61274,6 +61330,7 @@ def live_scenario_audit(
         "literal_planner",
         "graph_neighborhood",
         "graph_bridge",
+        "route_rollup_query",
     }
     default_profiles = [
         "entity_registry_lookup",
@@ -61285,6 +61342,7 @@ def live_scenario_audit(
         "literal_planner",
         "graph_neighborhood",
         "graph_bridge",
+        "route_rollup_query",
     ]
     selected_profiles: list[str] = []
     diagnostics: list[str] = []
@@ -61423,6 +61481,20 @@ def live_scenario_audit(
                     ),
                 )
             )
+        elif profile == "route_rollup_query":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: session_memory_search_operational_route_rollup_query(
+                        workspace_root=aoa_root.parent,
+                        aoa_root=aoa_root,
+                        query="exec_command",
+                        layer="tool",
+                        limit=max(selected_limit, 3),
+                        ref_limit=3,
+                    ),
+                )
+            )
 
     status_counts = Counter(str(item.get("status") or "unknown") for item in scenarios)
     actionable_gaps = live_scenario_actionable_gaps(scenarios)
@@ -61535,6 +61607,16 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "edge_count": scenario.get("edge_count"),
             "evidence_ref_count": scenario.get("evidence_ref_count"),
             "path_found": scenario.get("path_found"),
+            "matched_group_count": scenario.get("matched_group_count"),
+            "omitted_group_count": scenario.get("omitted_group_count"),
+            "raw_or_segment_ref_present": scenario.get("raw_or_segment_ref_present"),
+            "freshness_status": scenario.get("freshness_status"),
+            "needs_refresh": scenario.get("needs_refresh"),
+            "uses_materialized_route_rollup": scenario.get("uses_materialized_route_rollup"),
+            "resamples_shards": scenario.get("resamples_shards"),
+            "opens_monolith": scenario.get("opens_monolith"),
+            "uses_fts": scenario.get("uses_fts"),
+            "hydrates_body": scenario.get("hydrates_body"),
         }
         profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
     return {

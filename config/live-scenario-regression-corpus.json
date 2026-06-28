@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-28T15:20:00Z",
+  "generated_at": "2026-06-28T18:30:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 11,
+  "case_count": 12,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -500,6 +500,42 @@
             "min_segment_ref_count": 1,
             "min_session_ref_count": 1,
             "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "route_rollup_query_materialized_contract",
+      "profiles": [
+        "route_rollup_query"
+      ],
+      "seed": "corpus-route-rollup-query",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Route-rollup query must stay the fast consumer route over the materialized projection: no maintenance rebuild, shard resampling, monolith read, FTS, or raw hydration; returned refs remain the evidence handoff."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "route_rollup_query",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_result_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_session_ref_count": 1,
+            "max_elapsed_ms": 10000
           }
         ]
       }

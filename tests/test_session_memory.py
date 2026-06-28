@@ -4632,6 +4632,105 @@ def test_live_scenario_result_accepts_entity_usage_ref_counts() -> None:
     assert "no_raw_or_segment_refs_detected" not in result.get("quality_flags", [])
 
 
+def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> None:
+    payload = {
+        "ok": True,
+        "result_count": 1,
+        "results": [
+            {
+                "raw_refs": ["raw:line:1"],
+                "segment_refs": ["001.md#event-1"],
+                "session_ids": ["session-1"],
+            }
+        ],
+        "totals": {"matched_group_count": 1, "omitted_group_count": 0},
+        "quality": {
+            "raw_or_segment_ref_present": True,
+            "freshness_status": "current",
+            "needs_refresh": False,
+        },
+        "cost_profile": {
+            "uses_materialized_route_rollup": True,
+            "resamples_shards": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+        },
+    }
+
+    result = module.live_scenario_result("route_rollup_query", payload, elapsed_ms=7)
+
+    assert result["status"] == "passed"
+    assert result["result_count"] == 1
+    assert result["evidence_ref_counts"]["raw_ref"] == 1
+    assert result["evidence_ref_counts"]["segment_ref"] == 1
+    assert result["evidence_ref_counts"]["session_ref"] == 1
+    assert result["first_ref"]["raw"] == "raw:line:1"
+    assert result["uses_materialized_route_rollup"] is True
+    assert result["resamples_shards"] is False
+
+    slow_payload = {
+        **payload,
+        "cost_profile": {
+            **payload["cost_profile"],
+            "opens_monolith": True,
+        },
+    }
+    slow_result = module.live_scenario_result("route_rollup_query", slow_payload, elapsed_ms=8)
+
+    assert slow_result["status"] == "warn"
+    assert "route_rollup_query_opens_monolith" in slow_result["quality_flags"]
+
+
+def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_route_rollup_query(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["query"] == "exec_command"
+        assert kwargs["layer"] == "tool"
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [
+                {
+                    "raw_refs": ["raw:line:7"],
+                    "segment_refs": ["001.md#event-7"],
+                    "session_ids": ["session-7"],
+                }
+            ],
+            "totals": {"matched_group_count": 1, "omitted_group_count": 0},
+            "quality": {
+                "raw_or_segment_ref_present": True,
+                "freshness_status": "current",
+                "needs_refresh": False,
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+            },
+        }
+
+    monkeypatch.setattr(module, "session_memory_search_operational_route_rollup_query", fake_route_rollup_query)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["route_rollup_query"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["scenario_count"] == 1
+    assert audit["quality"]["raw_or_segment_ref_scenario_count"] == 1
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "route_rollup_query"
+    assert scenario["status"] == "passed"
+    assert scenario["result_count"] == 1
+    assert scenario["uses_materialized_route_rollup"] is True
+    assert scenario["opens_monolith"] is False
+
+
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
     result = module.live_scenario_result(
         "entity_usage",
