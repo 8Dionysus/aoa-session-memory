@@ -1701,6 +1701,15 @@ Maintenance gates:
   reported `answer_rule_gate:stale`, `search_fts_query_timeout:8000ms`, and
   `sqlite_query_timeout:interrupted`, making GraphRAG/raw-text paths the next
   measurement target rather than a green gate for this search projection plan.
+  Follow-up route-family correction: `performance-baseline --kind agent_event`
+  now measures the structured `agent_event_route` through `agent-responses`
+  instead of treating `assistant_answer` as an operational entity and opening
+  entity usage plus GraphRAG. Live source proof returned `ok=true` in `722ms`
+  (`agent_event_route=535ms`), `result_count=5`, `uses_shards=true`,
+  `uses_fts=false`, `hydrates_body=false`, five raw refs, five segment refs,
+  and `freshness_counts={"fresh":5}`. The live-tail shard diagnostic
+  `search_shard_fanout_using_structured_nonmaterialized_shards:1` is preserved
+  as a warning rather than a blocking diagnostic.
   A post-install live-tail recheck kept the action visible with
   `search_shards_status=current_with_deferred_live_updates` and
   `search_projection_action_pending=true`; the same `agent-responses` route

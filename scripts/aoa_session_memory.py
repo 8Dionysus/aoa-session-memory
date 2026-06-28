@@ -50106,6 +50106,10 @@ def route_cache_freshness_markdown(payload: dict[str, Any]) -> str:
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
         lines.extend(f"- `{item}`" for item in diagnostics)
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if warnings:
+        lines.extend(["", "## Warnings", ""])
+        lines.extend(f"- `{item}`" for item in warnings)
     return "\n".join(lines) + "\n"
 
 
@@ -59325,6 +59329,19 @@ def performance_step_summary(payload: dict[str, Any]) -> dict[str, Any]:
         summary["graph_node_count"] = graph.get("node_count")
         summary["graph_edge_count"] = graph.get("edge_count")
         summary["evidence_ref_count"] = len(payload.get("evidence_refs", []) if isinstance(payload.get("evidence_refs"), list) else [])
+    if payload.get("artifact_type") == "agent_event_route_results":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        projection = payload.get("search_projection") if isinstance(payload.get("search_projection"), dict) else {}
+        cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+        summary["agent_events"] = payload.get("agent_events", []) if isinstance(payload.get("agent_events"), list) else []
+        summary["search_projection_mode"] = projection.get("mode")
+        summary["queried_shard_count"] = projection.get("queried_shard_count")
+        summary["uses_shards"] = cost_profile.get("uses_shards")
+        summary["uses_fts"] = cost_profile.get("uses_fts")
+        summary["hydrates_body"] = cost_profile.get("hydrates_body")
+        summary["raw_ref_present_count"] = quality.get("raw_ref_present_count")
+        summary["segment_ref_present_count"] = quality.get("segment_ref_present_count")
+        summary["freshness_counts"] = quality.get("freshness_counts")
     if payload.get("artifact_type") == "session_memory_entity_usage_neighborhood":
         quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
         summary["usage_neighborhood_present"] = quality.get("usage_neighborhood_present")
@@ -59381,6 +59398,15 @@ def skipped_performance_step(step_id: str, *, description: str, reason: str, mut
         "summary": {},
         "diagnostics": [reason],
     }
+
+
+PERFORMANCE_BASELINE_WARNING_DIAGNOSTIC_PREFIXES = (
+    "search_shard_fanout_using_structured_nonmaterialized_shards:",
+)
+
+
+def performance_baseline_diagnostic_is_warning(item: str) -> bool:
+    return any(str(item).startswith(prefix) for prefix in PERFORMANCE_BASELINE_WARNING_DIAGNOSTIC_PREFIXES)
 
 
 def performance_storage_summary(aoa_root: Path) -> dict[str, Any]:
@@ -59505,6 +59531,7 @@ def performance_baseline_diagnosis(steps: list[dict[str, Any]], storage: dict[st
         )
     for step_id, component in (
         ("registry_lookup", "entity_registry_lookup"),
+        ("agent_event_route", "agent_event_route_search"),
         ("usage_audit", "entity_usage_audit"),
         ("usage_neighborhood", "entity_usage_neighborhood"),
         ("graphrag_packet", "graph_rag_packet"),
@@ -59568,6 +59595,7 @@ def performance_baseline_markdown(payload: dict[str, Any]) -> str:
         f"- generated_at: `{payload.get('generated_at')}`",
         f"- ok: `{payload.get('ok')}`",
         f"- anchor: `{payload.get('anchor')}`",
+        f"- route_family: `{payload.get('route_family')}`",
         f"- kind: `{payload.get('kind')}`",
         f"- apply_refresh: `{payload.get('apply_refresh')}`",
         f"- search_target: `{payload.get('search_target')}`",
@@ -59623,6 +59651,10 @@ def performance_baseline_markdown(payload: dict[str, Any]) -> str:
     if diagnostics:
         lines.extend(["", "## Diagnostics", ""])
         lines.extend(f"- `{item}`" for item in diagnostics)
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if warnings:
+        lines.extend(["", "## Warnings", ""])
+        lines.extend(f"- `{item}`" for item in warnings)
     return "\n".join(lines) + "\n"
 
 
@@ -59646,6 +59678,7 @@ def performance_baseline(
     anchor_text = str(anchor or "").strip() or "aoa-session-memory-mcp"
     kind_text = str(kind or "auto").strip().lower() or "auto"
     trace_kind = normalize_trace_route_kind(kind_text)
+    route_family = "agent_event" if trace_kind == "agent_event" else "operational_entity"
     steps: list[dict[str, Any]] = [
         performance_baseline_step(
             "registry_lookup",
@@ -59653,49 +59686,90 @@ def performance_baseline(
             mutates=False,
             run=lambda: entity_registry_lookup(aoa_root=aoa_root, anchor=anchor_text, kind=kind_text),
         ),
-        performance_baseline_step(
-            "usage_audit",
-            description="Trace usage events, consequences, and document refs.",
-            mutates=False,
-            run=lambda: entity_usage_audit(
-                aoa_root=aoa_root,
-                anchor=anchor_text,
-                kind=trace_kind,
-                limit=limit,
-                per_route_limit=per_route_limit,
-                consequence_window=4,
-                document_limit=max(20, limit * 6),
-            ),
-        ),
-        performance_baseline_step(
-            "usage_neighborhood",
-            description="Open local before/after windows around usage events.",
-            mutates=False,
-            run=lambda: entity_usage_neighborhood(
-                aoa_root=aoa_root,
-                anchor=anchor_text,
-                kind=trace_kind,
-                limit=min(limit, 6),
-                per_route_limit=per_route_limit,
-                before=2,
-                after=4,
-                raw_preview_chars=400,
-                document_limit=max(24, limit * 8),
-            ),
-        ),
-        performance_baseline_step(
-            "graphrag_packet",
-            description="Build lexical plus graph expansion evidence packet.",
-            mutates=False,
-            run=lambda: graph_rag_packet(
-                aoa_root=aoa_root,
-                query=anchor_text,
-                anchor=anchor_text,
-                kind=trace_kind,
-                limit=min(limit, 8),
-            ),
-        ),
     ]
+    if route_family == "agent_event":
+        agent_event_classes = normalize_agent_event_route_classes([anchor_text], default=AGENT_RESPONSE_ROUTE_CLASSES)
+        steps.extend(
+            [
+                performance_baseline_step(
+                    "agent_event_route",
+                    description="Measure the compact structured agent-event route.",
+                    mutates=False,
+                    run=lambda: agent_event_route_search(
+                        aoa_root=aoa_root,
+                        agent_events=agent_event_classes,
+                        limit=limit,
+                        explain=True,
+                        use_shards=True,
+                    ),
+                ),
+                skipped_performance_step(
+                    "usage_audit",
+                    description="Trace usage events, consequences, and document refs.",
+                    reason="skipped_agent_event_route_family_uses_agent_event_route",
+                    mutates=False,
+                ),
+                skipped_performance_step(
+                    "usage_neighborhood",
+                    description="Open local before/after windows around usage events.",
+                    reason="skipped_agent_event_route_family_uses_agent_event_route",
+                    mutates=False,
+                ),
+                skipped_performance_step(
+                    "graphrag_packet",
+                    description="Build lexical plus graph expansion evidence packet.",
+                    reason="skipped_compact_agent_event_baseline_requires_explicit_graphrag_route",
+                    mutates=False,
+                ),
+            ]
+        )
+    else:
+        steps.extend(
+            [
+                performance_baseline_step(
+                    "usage_audit",
+                    description="Trace usage events, consequences, and document refs.",
+                    mutates=False,
+                    run=lambda: entity_usage_audit(
+                        aoa_root=aoa_root,
+                        anchor=anchor_text,
+                        kind=trace_kind,
+                        limit=limit,
+                        per_route_limit=per_route_limit,
+                        consequence_window=4,
+                        document_limit=max(20, limit * 6),
+                    ),
+                ),
+                performance_baseline_step(
+                    "usage_neighborhood",
+                    description="Open local before/after windows around usage events.",
+                    mutates=False,
+                    run=lambda: entity_usage_neighborhood(
+                        aoa_root=aoa_root,
+                        anchor=anchor_text,
+                        kind=trace_kind,
+                        limit=min(limit, 6),
+                        per_route_limit=per_route_limit,
+                        before=2,
+                        after=4,
+                        raw_preview_chars=400,
+                        document_limit=max(24, limit * 8),
+                    ),
+                ),
+                performance_baseline_step(
+                    "graphrag_packet",
+                    description="Build lexical plus graph expansion evidence packet.",
+                    mutates=False,
+                    run=lambda: graph_rag_packet(
+                        aoa_root=aoa_root,
+                        query=anchor_text,
+                        anchor=anchor_text,
+                        kind=trace_kind,
+                        limit=min(limit, 8),
+                    ),
+                ),
+            ]
+        )
     if apply_refresh:
         steps.append(
             performance_baseline_step(
@@ -59741,14 +59815,16 @@ def performance_baseline(
                 mutates=True,
             )
         )
-    diagnostics = sorted(
+    observed_diagnostics = sorted(
         {
             str(item)
             for step in steps
             for item in (step.get("diagnostics", []) if isinstance(step.get("diagnostics"), list) else [])
-            if item and item != "skipped_requires_apply_refresh"
+            if item and not str(item).startswith("skipped_")
         }
     )
+    warnings = [item for item in observed_diagnostics if performance_baseline_diagnostic_is_warning(item)]
+    diagnostics = [item for item in observed_diagnostics if not performance_baseline_diagnostic_is_warning(item)]
     storage = performance_storage_summary(aoa_root)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -59758,6 +59834,7 @@ def performance_baseline(
         "mutates": bool(apply_refresh),
         "truth_status": "performance_measurement_not_correctness_proof",
         "anchor": anchor_text,
+        "route_family": route_family,
         **trace_kind_payload_fields(kind_text, trace_kind),
         "limit": limit,
         "per_route_limit": per_route_limit,
@@ -59770,6 +59847,7 @@ def performance_baseline(
         "storage": storage,
         "diagnosis": performance_baseline_diagnosis(steps, storage=storage),
         "diagnostics": diagnostics,
+        "warnings": warnings,
         "next_route": "Use this baseline to choose the next optimization; repeat after changes and compare step elapsed_ms.",
     }
     if write_report:

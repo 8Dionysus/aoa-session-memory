@@ -2750,6 +2750,7 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
         aoa_root=aoa_root,
     )
     assert module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)["ok"] is True
+    assert module.materialize_search_shards(aoa_root=aoa_root, target="all")["ok"] is True
     assert module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)["ok"] is True
     assert module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)["ok"] is True
 
@@ -2764,6 +2765,7 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     planned_steps = {step["id"]: step for step in planned["steps"]}
     assert planned["ok"] is True
     assert planned["mutates"] is False
+    assert planned["route_family"] == "operational_entity"
     assert planned_steps["graphrag_packet"]["summary"]["kind"] == "mcp"
     assert planned_steps["narrow_entity_registry_refresh"]["status"] == "skipped"
     assert planned_steps["narrow_search_index_refresh"]["status"] == "skipped"
@@ -2773,6 +2775,26 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     assert planned["storage"]["graph"]["total_with_wal_bytes"] >= planned["storage"]["graph"]["size_bytes"]
     assert planned["storage"]["search_shards"]["status"] in {"current", "empty", "catalog_not_current", "incomplete"}
     assert "combined_search_projection_total_bytes" in planned["storage"]["search_shards"]
+
+    agent_event_planned = module.performance_baseline(
+        aoa_root=aoa_root,
+        anchor="assistant_answer",
+        kind="agent_event",
+        limit=2,
+        per_route_limit=3,
+        apply_refresh=False,
+    )
+    agent_event_steps = {step["id"]: step for step in agent_event_planned["steps"]}
+    assert agent_event_planned["ok"] is True
+    assert agent_event_planned["route_family"] == "agent_event"
+    assert agent_event_planned["diagnostics"] == []
+    assert agent_event_steps["agent_event_route"]["ok"] is True
+    assert agent_event_steps["agent_event_route"]["summary"]["agent_events"] == ["assistant_answer"]
+    assert agent_event_steps["agent_event_route"]["summary"]["uses_shards"] is True
+    assert agent_event_steps["agent_event_route"]["summary"]["uses_fts"] is False
+    assert agent_event_steps["usage_audit"]["status"] == "skipped"
+    assert agent_event_steps["usage_neighborhood"]["status"] == "skipped"
+    assert agent_event_steps["graphrag_packet"]["status"] == "skipped"
 
     applied = module.performance_baseline(
         aoa_root=aoa_root,
@@ -2819,6 +2841,58 @@ def test_performance_baseline_measures_core_routes_and_refresh_paths(tmp_path: P
     assert steps["narrow_search_index_refresh"]["summary"]["processed_count"] == 1
     assert applied["diagnosis"]["refresh_path"]["entity_registry_refresh_reindexes_session_docs"] is False
     assert applied["diagnosis"]["refresh_path"]["search_index_refresh_reindexes_session_docs"] is True
+
+
+def test_performance_baseline_agent_event_shard_projection_warning_nonblocking(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        module,
+        "entity_registry_lookup",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "entity_registry_lookup",
+            "match_count": 1,
+            "agent_route_packet": {"registered": True, "status": "observed"},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "agent_event_route_search",
+        lambda **_kwargs: {
+            "ok": True,
+            "artifact_type": "agent_event_route_results",
+            "result_count": 2,
+            "agent_events": ["assistant_answer"],
+            "search_projection": {
+                "mode": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+                "queried_shard_count": 3,
+            },
+            "cost_profile": {
+                "uses_shards": True,
+                "uses_fts": False,
+                "hydrates_body": False,
+            },
+            "quality": {
+                "raw_ref_present_count": 2,
+                "segment_ref_present_count": 2,
+                "freshness_counts": {"fresh": 2},
+            },
+            "diagnostics": ["search_shard_fanout_using_structured_nonmaterialized_shards:1"],
+        },
+    )
+    monkeypatch.setattr(module, "performance_storage_summary", lambda _aoa_root: {})
+
+    payload = module.performance_baseline(
+        aoa_root=aoa_root,
+        anchor="assistant_answer",
+        kind="agent_event",
+        limit=2,
+    )
+
+    assert payload["ok"] is True
+    assert payload["diagnostics"] == []
+    assert payload["warnings"] == ["search_shard_fanout_using_structured_nonmaterialized_shards:1"]
 
 
 def test_entity_usage_audit_fetches_beyond_presentation_limit_for_direct_usage(tmp_path: Path, monkeypatch: Any) -> None:

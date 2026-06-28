@@ -503,6 +503,11 @@ flags, timings, and expansion commands without turning graph output into
 reviewed truth. The default packet intentionally keeps dense anchors cheap;
 open the returned `graph-timeline` or `shortest_path` expansion only when the
 task really needs deeper ordering or a deeper graph path.
+`performance-baseline` is route-family aware: `--kind agent_event` measures the
+structured `agent-responses`/agent-event shard route and skips entity
+usage/neighborhood/GraphRAG steps by default. Use explicit graph or GraphRAG
+commands when the task needs deep synthesis; do not treat agent answers as
+operational entity usage just to produce a timing report.
 
 Audit whether the 22 operational route layers are currently covered by
 session route indexes, source atlas axes, generated atlas entries, and the
