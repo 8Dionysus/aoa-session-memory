@@ -1635,6 +1635,26 @@ Maintenance gates:
   full suite: `352 passed`. Report:
   `diagnostics/20260628T093929Z__live-scenario-corpus-check.json`; shard
   report: `diagnostics/20260628T094708Z__search-shards.json`.
+- 2026-06-28 graph queue-report route proof: the next bounded
+  `graph-maintenance --use-queue` drip processed `17` selected sources,
+  moved the generated queue `444 -> 427`, kept `budget_exhausted=false` and
+  `mutation_rolled_back=false`, but took `139.599s` because aggregate refresh
+  dominated (`aggregate_refresh_ms=103360`, `node_refresh_ms=36204`,
+  `edge_refresh_ms=49257`). That run also exposed a route-surface bug:
+  `maintenance-status` kept showing the older global report as the latest
+  graph evidence and did not surface the new queue-drip report, because real
+  queue reports may include selected `source_keys` while their
+  `source_state.selection_scope` remains `selected_sessions`. The queue-report
+  selector now recognizes queue drips by `use_queue` plus queue evidence
+  (`queue_update`, `queue_path`, or queue selection detail) instead of requiring
+  empty `source_keys`. Installed proof after copying the script to `.aoa`:
+  `maintenance-status --full` reports
+  `latest_queue_maintenance.path=diagnostics/20260628T095408Z__graph-maintenance.json`,
+  `selected_count=17`, `queue_removed_count=17`, `queue_queued_count=427`,
+  while keeping the global hot-gate `latest_maintenance` separate. Regression
+  proof: `test_latest_graph_queue_maintenance_report_prefers_latest_use_queue`.
+  The remaining route tails are still explicit:
+  `graph_actionable_sources` and `search_projection_combined_large`.
 
 ## Probe Notes
 

@@ -7576,9 +7576,22 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
         "use_queue": True,
         "generated_at": "2026-06-28T08:29:16Z",
     }
+    latest_real_queue_with_selected_source_keys = {
+        "target": "all",
+        "source_keys": ["segment:from-queue:001"],
+        "use_queue": True,
+        "queue_update": {
+            "path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json",
+            "queued_count": 427,
+            "removed_count": 17,
+        },
+        "source_state": {"selection_scope": "selected_sessions"},
+        "generated_at": "2026-06-28T08:20:16Z",
+    }
     latest_scoped_queue = {
         "target": "all",
         "use_queue": True,
+        "maintenance_detail": {"queue_path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json"},
         "source_state": {"selection_scope": "selected_sessions"},
         "generated_at": "2026-06-28T08:03:30Z",
     }
@@ -7589,9 +7602,16 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
         "generated_at": "2026-06-28T07:53:20Z",
     }
 
-    report = module.latest_graph_queue_maintenance_report([latest_source_key_queue, latest_scoped_queue, latest_global_non_queue])
+    report = module.latest_graph_queue_maintenance_report(
+        [
+            latest_source_key_queue,
+            latest_real_queue_with_selected_source_keys,
+            latest_scoped_queue,
+            latest_global_non_queue,
+        ]
+    )
 
-    assert report is latest_scoped_queue
+    assert report is latest_real_queue_with_selected_source_keys
 
 
 def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:

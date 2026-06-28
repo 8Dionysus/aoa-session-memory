@@ -54301,15 +54301,23 @@ def latest_graph_maintenance_report_for_hot_gate(reports: list[dict[str, Any]]) 
 
 
 def graph_maintenance_report_is_queue_drip(report: dict[str, Any]) -> bool:
-    source_keys = report.get("source_keys")
-    has_source_keys = bool(source_keys) if isinstance(source_keys, list) else bool(str(source_keys or "").strip())
+    detail = report.get("maintenance_detail") if isinstance(report.get("maintenance_detail"), dict) else {}
+    queue_update = report.get("queue_update") if isinstance(report.get("queue_update"), dict) else {}
+    has_queue_evidence = bool(
+        report.get("use_queue")
+        and (
+            queue_update.get("path")
+            or detail.get("queue_path")
+            or detail.get("use_queue")
+            or detail.get("queue_selected_source_count") is not None
+        )
+    )
     return bool(
         str(report.get("target") or "") == "all"
         and not report.get("since")
         and not report.get("until")
         and report.get("limit") in (None, 0, "0", "")
-        and not has_source_keys
-        and bool(report.get("use_queue"))
+        and has_queue_evidence
     )
 
 
