@@ -1,0 +1,61 @@
+{
+  "schema_version": "aoa-local-kag-record-v1",
+  "repo": "aoa-session-memory",
+  "local_id": "receipt:validation:session-memory-provider",
+  "record_class": "receipt",
+  "source_refs": [
+    {
+      "repo": "aoa-session-memory",
+      "path": "README.md",
+      "source_class": "memo_source",
+      "role": "owner_route",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "PIPELINE.md",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "schemas/session.manifest.schema.json",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    }
+  ],
+  "source_owner": "aoa-session-memory",
+  "provenance_mode": "strict_source_linked",
+  "derived_method": "source-linked local KAG receipt over session-memory provider records",
+  "generated_or_authored": "authored_control",
+  "status": "active",
+  "owner_return_route": {
+    "repo": "aoa-session-memory",
+    "surface": "README.md",
+    "route_kind": "memory"
+  },
+  "freshness": {
+    "mode": "validator_receipt",
+    "state": "current",
+    "checked_ref": "kag/manifest.json"
+  },
+  "builder": {
+    "route": "local KAG provider authoring",
+    "surface": "kag/manifest.json"
+  },
+  "validator": {
+    "route": "aoa-kag:scripts/validate_kag.py",
+    "lane": "local-kag"
+  },
+  "storage_posture": {
+    "git_surface": "receipt",
+    "payload_class": "receipt",
+    "runtime_route": "source-repo"
+  },
+  "consumer_route": "aoa-kag registry",
+  "receipt_kind": "validation",
+  "result": "current",
+  "fallback_route": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py"
+}

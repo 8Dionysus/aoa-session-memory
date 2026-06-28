@@ -1,0 +1,92 @@
+{
+  "schema_version": "aoa-local-kag-manifest-v1",
+  "repo": "aoa-session-memory",
+  "owner_surface": "kag/AGENTS.md",
+  "source_surfaces": [
+    {
+      "repo": "aoa-session-memory",
+      "path": "README.md",
+      "source_class": "memo_source",
+      "role": "owner_route",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "PIPELINE.md",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "READINESS.md",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "schemas/session.manifest.schema.json",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "maps/README.md",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "scripts/aoa_session_memory.py",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    }
+  ],
+  "record_classes": [
+    "node",
+    "edge",
+    "index",
+    "projection",
+    "receipt"
+  ],
+  "storage_posture": {
+    "git_surface": "portable_records",
+    "payload_class": "manifest",
+    "runtime_route": "source-repo"
+  },
+  "validation_routes": [
+    {
+      "route": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py",
+      "lane": "owner-local"
+    },
+    {
+      "route": "PYTHONDONTWRITEBYTECODE=1 python3 scripts/aoa_session_memory.py validate --workspace-root /tmp/aoa-session-memory-validate-workspace --aoa-root /tmp/aoa-session-memory-validate-workspace/.aoa",
+      "lane": "owner-local"
+    },
+    {
+      "route": "aoa-kag:scripts/validate_kag.py",
+      "lane": "local-kag"
+    }
+  ],
+  "consumer_routes": [
+    "aoa-kag registry",
+    "abyss-stack federation mirror",
+    "aoa-kag-mcp resource"
+  ],
+  "owner_return_routes": [
+    {
+      "repo": "aoa-session-memory",
+      "surface": "README.md",
+      "route_kind": "memory"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "surface": "PIPELINE.md",
+      "route_kind": "memory"
+    }
+  ]
+}
