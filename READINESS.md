@@ -1143,14 +1143,34 @@ Last observed result:
   Follow-up route adaptation: graph status now exposes a bounded
   `latest_maintenance` summary, chooses the latest global graph-maintenance
   report instead of letting scoped `selected_sessions` reports hide global
-  evidence, and switches queued graph repair to a `10`-source micro-drip with
-  `10000`/`30000` aggregate caps only after a recent global heavy-tail drip
-  made progress but ran near the interactive budget.
-  After targeted search catch-up and dirty-only `month/2026-06` shard refresh,
-  `maintenance-status --full` reports search and search shards `current`, no
-  recent problem jobs, graph queue `530`, graph actionable `2242`, and the only
-  warnings are `graph_actionable_sources` plus
-  `search_projection_combined_large`.
+  evidence, keeps scoped/source-key graph reports out of global queue-drip
+  sizing, and switches queued graph repair to a `10`-source micro-drip with
+  `10000`/`30000` aggregate caps only after a recent broad queue/heavy-tail
+  drip made progress but was slow or near the interactive budget.
+  Follow-up timing proof: `graph-maintenance` reports now include
+  `maintenance_detail.phase_timings_ms` plus nested
+  `replaced_phase_timings_ms` / `replaced_aggregate_refresh_timing`. A live
+  one-source apply before the aggregate-refresh fix
+  (`diagnostics/20260628T082319Z__graph-maintenance.json`) took `45.991s`;
+  `apply_replace_ms=42354`, `aggregate_refresh_ms=41515`, and
+  `replaced_node_refresh.elapsed_ms=36386` after scanning `229584`
+  `node_contribs` rows. The fix changes node/edge aggregate refresh from
+  Python JSON merge of every contributing row to SQL summary plus one
+  representative compact payload per aggregate id; evidence remains hydrated
+  from contribution rows. Live proof after the fix
+  (`diagnostics/20260628T082916Z__graph-maintenance.json`) processed a similar
+  source in `10.904s`, with `apply_replace_ms=6904`,
+  `aggregate_refresh_ms=5953`, `replaced_node_refresh.elapsed_ms=3085` over
+  `154846` node contrib rows, and queue `500 -> 499`. Regression proof:
+  `350 passed` for `tests/test_session_memory.py`; live `validate` returned
+  `ok=true`.
+  After targeted search catch-up, dirty-only `month/2026-06` shard refresh,
+  and the graph aggregate-refresh fix, `maintenance-status --full` reports
+  search/search shards `current_with_deferred_live_updates`, no recent problem
+  jobs, graph queue `499`, graph actionable `2177`, `latest_queue_maintenance`
+  absent for targeted source-key proof reports, and next action
+  `repair_graph_queue_drip` with `25` sources and `20000`/`60000` aggregate
+  caps.
 - 2026-06-27 graph rebuild cleanup proof: live maintenance found an orphaned
   `.graph.sqlite3.<pid>.rebuild.tmp-journal` after interrupted graph work while
   the base `.rebuild.tmp` file was already gone. `maintenance-cleanup` now

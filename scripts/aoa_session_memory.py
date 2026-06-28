@@ -260,6 +260,7 @@ GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
 GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT = 12
 GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS = 6 * 60 * 60
 GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS = 240_000
+GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS = 180_000
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
@@ -38128,6 +38129,18 @@ def graph_check_budget(budget_deadline: float | None) -> None:
         raise GraphMaintenanceBudgetExceeded("graph_maintenance_budget_exhausted")
 
 
+def graph_phase_timer_start() -> float:
+    return time.perf_counter()
+
+
+def graph_phase_elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def graph_add_phase_timing(timings: dict[str, int], key: str, started: float) -> None:
+    timings[key] = int_value(timings.get(key)) + graph_phase_elapsed_ms(started)
+
+
 def graph_aggregate_evidence_limit(table_or_kind: str) -> int:
     value = str(table_or_kind or "")
     return 20 if value in {"edge", "edges", "edge_contribs"} else 30
@@ -38142,7 +38155,7 @@ def graph_compact_aggregate_payload(payload: dict[str, Any], *, kind: str) -> di
         compact.pop("route_signals", None)
     refs = compact.pop("evidence_refs", None)
     if isinstance(refs, list):
-        compact["evidence_ref_count"] = len(refs)
+        compact["evidence_ref_count"] = max(int_value(compact.get("evidence_ref_count"), 0), len(refs))
     compact["evidence_refs_compacted"] = True
     compact["aggregate_payload_mode"] = GRAPH_STORE_AGGREGATE_PAYLOAD_MODE
     compact["evidence_hydration_source"] = "node_contribs" if kind == "node" else "edge_contribs"
@@ -39283,127 +39296,208 @@ class GraphSqliteStore:
             "type_counts_projection_ready": projection_ready,
         }
 
-    def _refresh_nodes(self, node_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, int]:
-        stats = {"requested_count": len({value for value in node_ids if value}), "chunk_count": 0, "row_count": 0, "missing_count": 0}
+    def _refresh_nodes(self, node_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        stats = {
+            "requested_count": len({value for value in node_ids if value}),
+            "chunk_count": 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "refresh_strategy": "sql_summary_representative_payload",
+        }
         for chunk in self._id_chunks(node_ids):
             graph_check_budget(budget_deadline)
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
-            cursor = self.conn.execute(
-                f"SELECT node_id, node_type, payload_json, count FROM node_contribs WHERE node_id IN ({placeholders}) ORDER BY node_id",
-                chunk,
-            )
-            remaining = set(chunk)
-            current_node_id = ""
-            merged: dict[str, dict[str, Any]] = {}
-
-            def flush_current() -> None:
-                nonlocal current_node_id, merged
-                if not current_node_id:
-                    return
-                remaining.discard(current_node_id)
-                if not merged:
-                    self.conn.execute("DELETE FROM nodes WHERE id = ?", (current_node_id,))
-                else:
-                    payload = next(iter(merged.values()))
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO nodes(id, node_type, payload_json, count) VALUES (?, ?, ?, ?)",
-                        (
-                            current_node_id,
-                            str(payload.get("type") or "unknown"),
-                            graph_json(graph_compact_aggregate_payload(payload, kind="node")),
-                            int_value(payload.get("count"), 1),
-                        ),
+            summary_rows = {
+                str(row["node_id"]): row
+                for row in self.conn.execute(
+                    f"""
+                    SELECT node_id,
+                           MIN(node_type) AS node_type,
+                           SUM(count) AS aggregate_count,
+                           COUNT(*) AS contrib_row_count
+                    FROM node_contribs
+                    WHERE node_id IN ({placeholders})
+                    GROUP BY node_id
+                    """,
+                    chunk,
+                ).fetchall()
+            }
+            representative_rows = {
+                str(row["node_id"]): row
+                for row in self.conn.execute(
+                    f"""
+                    WITH ranked AS (
+                        SELECT node_id,
+                               node_type,
+                               payload_json,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY node_id
+                                   ORDER BY LENGTH(payload_json) DESC, source_key
+                               ) AS rn
+                        FROM node_contribs
+                        WHERE node_id IN ({placeholders})
                     )
-                current_node_id = ""
-                merged = {}
-
-            for row in cursor:
-                stats["row_count"] += 1
-                if stats["row_count"] % 1000 == 0:
-                    graph_check_budget(budget_deadline)
-                row_node_id = str(row["node_id"])
-                if current_node_id and row_node_id != current_node_id:
-                    flush_current()
-                if row_node_id != current_node_id:
-                    current_node_id = row_node_id
-                    merged = {}
-                payload = json.loads(str(row["payload_json"]))
-                if isinstance(payload, dict):
-                    payload["id"] = row_node_id
-                    if not payload.get("type"):
-                        payload["type"] = str(row["node_type"] or "unknown")
-                    payload["count"] = int_value(row["count"], int_value(payload.get("count"), 1))
-                    graph_add_node(merged, payload)
-            flush_current()
-            for node_id in sorted(remaining):
-                stats["missing_count"] += 1
-                self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+                    SELECT node_id, node_type, payload_json
+                    FROM ranked
+                    WHERE rn = 1
+                    """,
+                    chunk,
+                ).fetchall()
+            }
+            for node_id in sorted(chunk):
+                row = summary_rows.get(node_id)
+                if row is None:
+                    stats["missing_count"] += 1
+                    self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+                    continue
+                stats["aggregate_row_count"] += 1
+                contrib_row_count = int_value(row["contrib_row_count"])
+                stats["row_count"] += contrib_row_count
+                representative = representative_rows.get(node_id)
+                payload: dict[str, Any] = {}
+                if representative is not None:
+                    stats["representative_payload_count"] += 1
+                    try:
+                        parsed = json.loads(str(representative["payload_json"]))
+                    except json.JSONDecodeError:
+                        parsed = {}
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                payload["id"] = node_id
+                payload["type"] = str(
+                    (representative["node_type"] if representative is not None else row["node_type"])
+                    or "unknown"
+                )
+                payload["count"] = int_value(row["aggregate_count"], 1)
+                payload["evidence_ref_count"] = max(
+                    int_value(payload.get("evidence_ref_count"), 0),
+                    min(contrib_row_count, graph_aggregate_evidence_limit("node")),
+                )
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO nodes(id, node_type, payload_json, count) VALUES (?, ?, ?, ?)",
+                    (
+                        node_id,
+                        str(payload.get("type") or "unknown"),
+                        graph_json(graph_compact_aggregate_payload(payload, kind="node")),
+                        int_value(payload.get("count"), 1),
+                    ),
+                )
+            if stats["row_count"] % 1000 == 0:
+                graph_check_budget(budget_deadline)
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return stats
 
-    def _refresh_edges(self, edge_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, int]:
-        stats = {"requested_count": len({value for value in edge_ids if value}), "chunk_count": 0, "row_count": 0, "missing_count": 0}
+    def _refresh_edges(self, edge_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        stats = {
+            "requested_count": len({value for value in edge_ids if value}),
+            "chunk_count": 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "refresh_strategy": "sql_summary_representative_payload",
+        }
         for chunk in self._id_chunks(edge_ids):
             graph_check_budget(budget_deadline)
             stats["chunk_count"] += 1
             placeholders = ",".join("?" for _ in chunk)
-            cursor = self.conn.execute(
-                f"SELECT edge_id, edge_type, source_node, target_node, payload_json, count FROM edge_contribs WHERE edge_id IN ({placeholders}) ORDER BY edge_id",
-                chunk,
-            )
-            remaining = set(chunk)
-            current_edge_id = ""
-            merged: dict[str, dict[str, Any]] = {}
-
-            def flush_current() -> None:
-                nonlocal current_edge_id, merged
-                if not current_edge_id:
-                    return
-                remaining.discard(current_edge_id)
-                if not merged:
-                    self.conn.execute("DELETE FROM edges WHERE id = ?", (current_edge_id,))
-                else:
-                    payload = next(iter(merged.values()))
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            current_edge_id,
-                            str(payload.get("type") or "unknown"),
-                            str(payload.get("source") or ""),
-                            str(payload.get("target") or ""),
-                            graph_json(graph_compact_aggregate_payload(payload, kind="edge")),
-                            int_value(payload.get("count"), 1),
-                        ),
+            summary_rows = {
+                str(row["edge_id"]): row
+                for row in self.conn.execute(
+                    f"""
+                    SELECT edge_id,
+                           MIN(edge_type) AS edge_type,
+                           MIN(source_node) AS source_node,
+                           MIN(target_node) AS target_node,
+                           SUM(count) AS aggregate_count,
+                           COUNT(*) AS contrib_row_count
+                    FROM edge_contribs
+                    WHERE edge_id IN ({placeholders})
+                    GROUP BY edge_id
+                    """,
+                    chunk,
+                ).fetchall()
+            }
+            representative_rows = {
+                str(row["edge_id"]): row
+                for row in self.conn.execute(
+                    f"""
+                    WITH ranked AS (
+                        SELECT edge_id,
+                               edge_type,
+                               source_node,
+                               target_node,
+                               payload_json,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY edge_id
+                                   ORDER BY LENGTH(payload_json) DESC, source_key
+                               ) AS rn
+                        FROM edge_contribs
+                        WHERE edge_id IN ({placeholders})
                     )
-                current_edge_id = ""
-                merged = {}
-
-            for row in cursor:
-                stats["row_count"] += 1
-                if stats["row_count"] % 1000 == 0:
-                    graph_check_budget(budget_deadline)
-                row_edge_id = str(row["edge_id"])
-                if current_edge_id and row_edge_id != current_edge_id:
-                    flush_current()
-                if row_edge_id != current_edge_id:
-                    current_edge_id = row_edge_id
-                    merged = {}
-                payload = json.loads(str(row["payload_json"]))
-                if isinstance(payload, dict):
-                    payload["id"] = row_edge_id
-                    if not payload.get("source"):
-                        payload["source"] = str(row["source_node"] or "")
-                    if not payload.get("target"):
-                        payload["target"] = str(row["target_node"] or "")
-                    row_edge_type = str(row["edge_type"] or "")
-                    if not payload.get("type") and row_edge_type != "unknown":
-                        payload["type"] = row_edge_type
-                    payload["count"] = int_value(row["count"], int_value(payload.get("count"), 1))
-                    graph_add_edge(merged, payload)
-            flush_current()
-            for edge_id in sorted(remaining):
-                stats["missing_count"] += 1
-                self.conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+                    SELECT edge_id, edge_type, source_node, target_node, payload_json
+                    FROM ranked
+                    WHERE rn = 1
+                    """,
+                    chunk,
+                ).fetchall()
+            }
+            for edge_id in sorted(chunk):
+                row = summary_rows.get(edge_id)
+                if row is None:
+                    stats["missing_count"] += 1
+                    self.conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+                    continue
+                stats["aggregate_row_count"] += 1
+                contrib_row_count = int_value(row["contrib_row_count"])
+                stats["row_count"] += contrib_row_count
+                representative = representative_rows.get(edge_id)
+                payload: dict[str, Any] = {}
+                if representative is not None:
+                    stats["representative_payload_count"] += 1
+                    try:
+                        parsed = json.loads(str(representative["payload_json"]))
+                    except json.JSONDecodeError:
+                        parsed = {}
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                payload["id"] = edge_id
+                payload["type"] = str(
+                    (representative["edge_type"] if representative is not None else row["edge_type"])
+                    or "unknown"
+                )
+                payload["source"] = str(
+                    (representative["source_node"] if representative is not None else row["source_node"])
+                    or ""
+                )
+                payload["target"] = str(
+                    (representative["target_node"] if representative is not None else row["target_node"])
+                    or ""
+                )
+                payload["count"] = int_value(row["aggregate_count"], 1)
+                payload["evidence_ref_count"] = max(
+                    int_value(payload.get("evidence_ref_count"), 0),
+                    min(contrib_row_count, graph_aggregate_evidence_limit("edge")),
+                )
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        edge_id,
+                        str(payload.get("type") or "unknown"),
+                        str(payload.get("source") or ""),
+                        str(payload.get("target") or ""),
+                        graph_json(graph_compact_aggregate_payload(payload, kind="edge")),
+                        int_value(payload.get("count"), 1),
+                    ),
+                )
+            if stats["row_count"] % 1000 == 0:
+                graph_check_budget(budget_deadline)
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return stats
 
     def _id_chunks(self, values: set[str]) -> Iterable[list[str]]:
@@ -39431,6 +39525,8 @@ class GraphSqliteStore:
         *,
         budget_deadline: float | None = None,
     ) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        phase_timings: dict[str, int] = {}
         touched_node_ids: set[str] = set()
         touched_edge_ids: set[str] = set()
         append_only_source_count = 0
@@ -39443,17 +39539,25 @@ class GraphSqliteStore:
         metadata_only_edge_count = 0
         results: list[dict[str, Any]] = []
         for contribution in contributions:
+            source_started = graph_phase_timer_start()
             graph_check_budget(budget_deadline)
             source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
             source_key = str(source.get("source_key") or "")
             if not source_key:
                 results.append({"source_key": "", "status": "skipped", "diagnostics": ["missing_source_key"]})
+                graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
+            phase_started = graph_phase_timer_start()
             old_node_ids, old_edge_ids = self.source_contribution_ids(source_key)
+            graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
             if source.get("status") != "blocked" and (old_node_ids or old_edge_ids):
+                phase_started = graph_phase_timer_start()
                 payload_match = self.source_contribution_payloads_match(contribution)
+                graph_add_phase_timing(phase_timings, "payload_match_ms", phase_started)
                 if payload_match.get("matches"):
+                    phase_started = graph_phase_timer_start()
                     self._insert_source_row(contribution, status="current")
+                    graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
                     metadata_only_source_count += 1
                     metadata_only_node_count += int_value(payload_match.get("node_count"))
                     metadata_only_edge_count += int_value(payload_match.get("edge_count"))
@@ -39467,20 +39571,32 @@ class GraphSqliteStore:
                             "aggregate_update": "metadata_only",
                         }
                     )
+                    graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                     continue
+            phase_started = graph_phase_timer_start()
             self.conn.execute("DELETE FROM node_contribs WHERE source_key = ?", (source_key,))
             self.conn.execute("DELETE FROM edge_contribs WHERE source_key = ?", (source_key,))
+            graph_add_phase_timing(phase_timings, "delete_old_contribs_ms", phase_started)
             if source.get("status") == "blocked":
                 touched_node_ids.update(old_node_ids)
                 touched_edge_ids.update(old_edge_ids)
+                phase_started = graph_phase_timer_start()
                 self._insert_source_row(contribution, status="blocked")
+                graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
                 results.append({"source_key": source_key, "status": "blocked", "diagnostics": source.get("diagnostics", [])})
+                graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
+            phase_started = graph_phase_timer_start()
             node_ids, edge_ids = self._insert_contrib_rows(contribution)
+            graph_add_phase_timing(phase_timings, "insert_contrib_rows_ms", phase_started)
+            phase_started = graph_phase_timer_start()
             self._insert_source_row(contribution, status="current")
+            graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
             append_only = not old_node_ids and not old_edge_ids
             if append_only:
+                phase_started = graph_phase_timer_start()
                 append_stats = self._append_aggregate_contribution(contribution, budget_deadline=budget_deadline)
+                graph_add_phase_timing(phase_timings, "append_aggregate_ms", phase_started)
                 append_only_source_count += 1
                 append_only_node_count += int_value(append_stats.get("node_count"))
                 append_only_edge_count += int_value(append_stats.get("edge_count"))
@@ -39496,6 +39612,7 @@ class GraphSqliteStore:
                         "aggregate_update": "append_only",
                     }
                 )
+                graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
             touched_node_ids.update(old_node_ids | node_ids)
             touched_edge_ids.update(old_edge_ids | edge_ids)
@@ -39509,12 +39626,16 @@ class GraphSqliteStore:
                     "aggregate_update": "refresh",
                 }
             )
+            graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
         graph_check_budget(budget_deadline)
-        node_refresh, edge_refresh = self._refresh_touched_aggregates_with_type_counts(
+        phase_started = graph_phase_timer_start()
+        node_refresh, edge_refresh, aggregate_refresh_timing = self._refresh_touched_aggregates_with_type_counts(
             touched_node_ids,
             touched_edge_ids,
             budget_deadline=budget_deadline,
         )
+        graph_add_phase_timing(phase_timings, "aggregate_refresh_ms", phase_started)
+        phase_started = graph_phase_timer_start()
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
         self._upsert_metadata("graph_store_schema_version", GRAPH_STORE_SCHEMA_VERSION)
@@ -39522,6 +39643,8 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
+        graph_add_phase_timing(phase_timings, "metadata_update_ms", phase_started)
+        phase_timings["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -39529,6 +39652,8 @@ class GraphSqliteStore:
             "refresh_chunk_size": self.refresh_chunk_size,
             "node_refresh": node_refresh,
             "edge_refresh": edge_refresh,
+            "aggregate_refresh_timing": aggregate_refresh_timing,
+            "phase_timings_ms": phase_timings,
             "append_only_source_count": append_only_source_count,
             "append_only_node_count": append_only_node_count,
             "append_only_edge_count": append_only_edge_count,
@@ -39545,33 +39670,47 @@ class GraphSqliteStore:
         *,
         budget_deadline: float | None = None,
     ) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        phase_timings: dict[str, int] = {}
         touched_node_ids: set[str] = set()
         touched_edge_ids: set[str] = set()
         results: list[dict[str, Any]] = []
         for source_key_value in source_keys:
+            source_started = graph_phase_timer_start()
             graph_check_budget(budget_deadline)
             source_key = str(source_key_value or "")
             if not source_key:
                 results.append({"source_key": "", "status": "skipped", "diagnostics": ["missing_source_key"]})
+                graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
+            phase_started = graph_phase_timer_start()
             old_node_ids, old_edge_ids = self.source_contribution_ids(source_key)
+            graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
+            phase_started = graph_phase_timer_start()
             self.conn.execute("DELETE FROM node_contribs WHERE source_key = ?", (source_key,))
             self.conn.execute("DELETE FROM edge_contribs WHERE source_key = ?", (source_key,))
             self.conn.execute("DELETE FROM graph_sources WHERE source_key = ?", (source_key,))
+            graph_add_phase_timing(phase_timings, "delete_source_rows_ms", phase_started)
             touched_node_ids.update(old_node_ids)
             touched_edge_ids.update(old_edge_ids)
             results.append({"source_key": source_key, "status": "removed", "node_count": len(old_node_ids), "edge_count": len(old_edge_ids)})
+            graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
         graph_check_budget(budget_deadline)
-        node_refresh, edge_refresh = self._refresh_touched_aggregates_with_type_counts(
+        phase_started = graph_phase_timer_start()
+        node_refresh, edge_refresh, aggregate_refresh_timing = self._refresh_touched_aggregates_with_type_counts(
             touched_node_ids,
             touched_edge_ids,
             budget_deadline=budget_deadline,
         )
+        graph_add_phase_timing(phase_timings, "aggregate_refresh_ms", phase_started)
+        phase_started = graph_phase_timer_start()
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_store_aggregate_payload_mode", f"{GRAPH_STORE_AGGREGATE_PAYLOAD_MODE}_mixed")
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
+        graph_add_phase_timing(phase_timings, "metadata_update_ms", phase_started)
+        phase_timings["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return {
             "results": results,
             "refreshed_node_count": len(touched_node_ids),
@@ -39579,6 +39718,8 @@ class GraphSqliteStore:
             "refresh_chunk_size": self.refresh_chunk_size,
             "node_refresh": node_refresh,
             "edge_refresh": edge_refresh,
+            "aggregate_refresh_timing": aggregate_refresh_timing,
+            "phase_timings_ms": phase_timings,
         }
 
     def replace_source(self, contribution: dict[str, Any], *, bulk: bool = False) -> dict[str, Any]:
@@ -39997,18 +40138,32 @@ class GraphSqliteStore:
         edge_ids: set[str],
         *,
         budget_deadline: float | None = None,
-    ) -> tuple[dict[str, int], dict[str, int]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        started = graph_phase_timer_start()
+        phase_timings: dict[str, int] = {}
         projection_ready = self.type_counts_projection_ready()
+        phase_started = graph_phase_timer_start()
         old_node_counts = self._aggregate_type_counts_for_ids("nodes", "node_type", node_ids) if projection_ready else Counter()
         old_edge_counts = self._aggregate_type_counts_for_ids("edges", "edge_type", edge_ids) if projection_ready else Counter()
+        graph_add_phase_timing(phase_timings, "type_count_before_ms", phase_started)
+        phase_started = graph_phase_timer_start()
         node_refresh = self._refresh_nodes(node_ids, budget_deadline=budget_deadline)
+        graph_add_phase_timing(phase_timings, "node_refresh_ms", phase_started)
+        phase_started = graph_phase_timer_start()
         edge_refresh = self._refresh_edges(edge_ids, budget_deadline=budget_deadline)
+        graph_add_phase_timing(phase_timings, "edge_refresh_ms", phase_started)
         if projection_ready:
+            phase_started = graph_phase_timer_start()
             new_node_counts = self._aggregate_type_counts_for_ids("nodes", "node_type", node_ids)
             new_edge_counts = self._aggregate_type_counts_for_ids("edges", "edge_type", edge_ids)
+            graph_add_phase_timing(phase_timings, "type_count_after_ms", phase_started)
+            phase_started = graph_phase_timer_start()
             self._apply_type_count_delta("node", old_node_counts, new_node_counts)
             self._apply_type_count_delta("edge", old_edge_counts, new_edge_counts)
-        return node_refresh, edge_refresh
+            graph_add_phase_timing(phase_timings, "type_count_delta_ms", phase_started)
+        phase_timings["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        phase_timings["type_counts_projection_ready"] = bool(projection_ready)
+        return node_refresh, edge_refresh, phase_timings
 
     def type_counts(self, table: str, column: str) -> dict[str, int]:
         projection_kind = "node" if table == "nodes" and column == "node_type" else "edge" if table == "edges" and column == "edge_type" else ""
@@ -42617,6 +42772,8 @@ def graph_maintenance(
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
+    phase_trace_started = graph_phase_timer_start()
+    phase_timings: dict[str, int] = {}
     if budget_seconds is not None:
         budget_seconds = float(budget_seconds)
         if budget_seconds <= 0:
@@ -42644,7 +42801,9 @@ def graph_maintenance(
             include_deferred_live=queue_seed_include_deferred_live,
         )
     if use_queue and not requested_source_keys and selected_records is None:
+        phase_started = graph_phase_timer_start()
         queue_payload = read_graph_maintenance_queue(aoa_root)
+        graph_add_phase_timing(phase_timings, "queue_read_ms", phase_started)
         queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
         queue_candidates = sorted(
             [item for item in queue_items.values() if isinstance(item, dict) and item.get("source_key")],
@@ -42657,7 +42816,9 @@ def graph_maintenance(
         ]
         if queue_selected_source_keys:
             requested_source_keys = queue_selected_source_keys
+            phase_started = graph_phase_timer_start()
             selected_records = graph_queue_source_records(aoa_root, queue_payload, queue_selected_source_keys)
+            graph_add_phase_timing(phase_timings, "queue_source_record_resolve_ms", phase_started)
             selected_records_global = False
         else:
             graph_hot_state = graph_store_hot_state(aoa_root)
@@ -42765,7 +42926,9 @@ def graph_maintenance(
                 write_report=write_report,
             )
     write_hash_cache = bool(write_hash_cache or apply or write_queue or write_ledger)
+    phase_started = graph_phase_timer_start()
     source_hash_cache_payload = read_graph_source_hash_cache(aoa_root) if hash_mode == "cached" or write_hash_cache else empty_graph_source_hash_cache()
+    graph_add_phase_timing(phase_timings, "source_hash_cache_read_ms", phase_started)
     source_hash_cache_entries = (
         source_hash_cache_payload.get("entries")
         if isinstance(source_hash_cache_payload.get("entries"), dict)
@@ -42779,6 +42942,7 @@ def graph_maintenance(
         "computed": 0,
         "missing": 0,
     }
+    phase_started = graph_phase_timer_start()
     states_payload = graph_source_states(
         aoa_root=aoa_root,
         target=target,
@@ -42793,6 +42957,8 @@ def graph_maintenance(
         source_hash_stats=source_hash_stats,
         source_hash_mode=hash_mode,
     )
+    graph_add_phase_timing(phase_timings, "source_state_scan_ms", phase_started)
+    phase_started = graph_phase_timer_start()
     states_all = states_payload.get("states") if isinstance(states_payload.get("states"), list) else []
     states = states_all
     missing_requested_source_keys: list[str] = []
@@ -42857,6 +43023,7 @@ def graph_maintenance(
     missing_add_only_batch_deferred = candidate_pool[batch_limit:] if missing_add_only_fast_plan else []
     diagnostics = list(states_payload.get("diagnostics", []) if isinstance(states_payload.get("diagnostics"), list) else [])
     diagnostics.extend(f"requested_graph_source_not_found:{source_key}" for source_key in missing_requested_source_keys)
+    graph_add_phase_timing(phase_timings, "candidate_selection_ms", phase_started)
     results: list[dict[str, Any]] = []
     maintenance_detail: dict[str, Any] = {
         "refresh_chunk_size": refresh_chunk_size,
@@ -42889,6 +43056,7 @@ def graph_maintenance(
         ),
         "matched_source_key_sample": bounded_graph_source_keys(states),
         "missing_source_keys": missing_requested_source_keys,
+        "phase_timings_ms": phase_timings,
     }
     if requested_source_keys:
         maintenance_detail["matched_source_keys"] = bounded_graph_source_keys(states, limit=len(states))
@@ -42937,7 +43105,9 @@ def graph_maintenance(
             defer_for_time_budget(candidate_pool)
             selected = []
         else:
+            phase_started = graph_phase_timer_start()
             store = GraphSqliteStore(aoa_root, refresh_chunk_size=refresh_chunk_size)
+            graph_add_phase_timing(phase_timings, "graph_store_open_ms", phase_started)
             try:
                 plan_entries: list[dict[str, Any]] = []
                 for state_index, state in enumerate(planning_candidate_pool):
@@ -42947,7 +43117,9 @@ def graph_maintenance(
                     if state.get("status") != "orphaned":
                         continue
                     source_key = str(state.get("source_key") or "")
+                    phase_started = graph_phase_timer_start()
                     old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
+                    graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
                     plan_entries.append(
                         graph_maintenance_plan_entry(
                             state=state,
@@ -42993,7 +43165,9 @@ def graph_maintenance(
                             for state in group:
                                 results.append({"source_key": state.get("source_key"), "status": "blocked", "diagnostics": group_diagnostics})
                             continue
+                    phase_started = graph_phase_timer_start()
                     record_contributions, record_diagnostics = graph_contributions_for_record(record, source_keys=group_source_keys)
+                    graph_add_phase_timing(phase_timings, "contribution_load_ms", phase_started)
                     diagnostics.extend(record_diagnostics)
                     by_source_key: dict[str, dict[str, Any]] = {}
                     for contribution in record_contributions:
@@ -43012,7 +43186,9 @@ def graph_maintenance(
                             diagnostics.append(missing_diagnostic)
                             results.append({"source_key": source_key, "status": "blocked", "diagnostics": [missing_diagnostic]})
                             continue
+                        phase_started = graph_phase_timer_start()
                         old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
+                        graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
                         plan_entries.append(
                             graph_maintenance_plan_entry(
                                 state=state,
@@ -43023,6 +43199,7 @@ def graph_maintenance(
                             )
                         )
 
+                phase_started = graph_phase_timer_start()
                 planned_node_ids: set[str] = set()
                 planned_edge_ids: set[str] = set()
                 sorted_plan_entries = sorted(plan_entries, key=graph_maintenance_plan_sort_key)
@@ -43079,6 +43256,7 @@ def graph_maintenance(
                     selected_plan.append(entry)
                     planned_node_ids = next_node_ids
                     planned_edge_ids = next_edge_ids
+                graph_add_phase_timing(phase_timings, "cost_selection_ms", phase_started)
 
                 if selected_plan and not has_time_budget():
                     defer_for_time_budget(selected_plan)
@@ -43127,19 +43305,27 @@ def graph_maintenance(
                 if apply:
                     try:
                         if orphaned_source_keys:
+                            phase_started = graph_phase_timer_start()
                             removed = store.remove_sources(orphaned_source_keys, budget_deadline=deadline)
+                            graph_add_phase_timing(phase_timings, "apply_remove_ms", phase_started)
                             results.extend(removed.get("results", []))
                             maintenance_detail["removed_refreshed_node_count"] = removed.get("refreshed_node_count", 0)
                             maintenance_detail["removed_refreshed_edge_count"] = removed.get("refreshed_edge_count", 0)
                             maintenance_detail["removed_node_refresh"] = removed.get("node_refresh", {})
                             maintenance_detail["removed_edge_refresh"] = removed.get("edge_refresh", {})
+                            maintenance_detail["removed_aggregate_refresh_timing"] = removed.get("aggregate_refresh_timing", {})
+                            maintenance_detail["removed_phase_timings_ms"] = removed.get("phase_timings_ms", {})
                         if replacements:
+                            phase_started = graph_phase_timer_start()
                             replaced = store.replace_sources(replacements, budget_deadline=deadline)
+                            graph_add_phase_timing(phase_timings, "apply_replace_ms", phase_started)
                             results.extend(replaced.get("results", []))
                             maintenance_detail["replaced_refreshed_node_count"] = replaced.get("refreshed_node_count", 0)
                             maintenance_detail["replaced_refreshed_edge_count"] = replaced.get("refreshed_edge_count", 0)
                             maintenance_detail["replaced_node_refresh"] = replaced.get("node_refresh", {})
                             maintenance_detail["replaced_edge_refresh"] = replaced.get("edge_refresh", {})
+                            maintenance_detail["replaced_aggregate_refresh_timing"] = replaced.get("aggregate_refresh_timing", {})
+                            maintenance_detail["replaced_phase_timings_ms"] = replaced.get("phase_timings_ms", {})
                             maintenance_detail["refresh_chunk_size"] = replaced.get("refresh_chunk_size", refresh_chunk_size)
                             maintenance_detail["replacement_group_count"] = replacement_group_count
                             maintenance_detail["append_only_source_count"] = replaced.get("append_only_source_count", 0)
@@ -43152,10 +43338,14 @@ def graph_maintenance(
                             maintenance_detail["metadata_only_edge_count"] = replaced.get("metadata_only_edge_count", 0)
                         if export_sidecar:
                             graph_check_budget(deadline)
+                            phase_started = graph_phase_timer_start()
                             sidecar = store.write_sidecar()
+                            graph_add_phase_timing(phase_timings, "apply_sidecar_ms", phase_started)
                         else:
                             sidecar = {}
+                        phase_started = graph_phase_timer_start()
                         store.conn.commit()
+                        graph_add_phase_timing(phase_timings, "apply_commit_ms", phase_started)
                     except GraphMaintenanceBudgetExceeded:
                         store.conn.rollback()
                         mutation_rolled_back = True
@@ -43213,6 +43403,7 @@ def graph_maintenance(
         and not mutation_rolled_back
         and any(item.get("status") in {"updated", "removed"} for item in results if isinstance(item, dict))
     )
+    phase_started = graph_phase_timer_start()
     if mutation_applied:
         result_statuses = graph_maintenance_successful_result_statuses(results)
         post_states_all = graph_maintenance_post_apply_state_rows(states_all, result_statuses)
@@ -43252,6 +43443,7 @@ def graph_maintenance(
         post_actionable_count = len(post_actionable)
         post_remaining_count = post_actionable_count
         state_window = "post_apply_selected_window"
+    graph_add_phase_timing(phase_timings, "post_state_window_ms", phase_started)
     maintenance_detail.update(
         {
             "state_window": state_window,
@@ -43276,23 +43468,31 @@ def graph_maintenance(
     effective_write_ledger = bool(write_ledger or mutation_applied or queue_consumer_applied)
     effective_write_queue = bool(write_queue or queue_consumer_applied)
     if effective_write_ledger:
+        phase_started = graph_phase_timer_start()
         ledger_update = update_graph_source_state_ledger_from_states(
             aoa_root,
             state_rows_for_persistence,
             reason=f"graph_maintenance:{reason}",
         )
+        graph_add_phase_timing(phase_timings, "ledger_update_ms", phase_started)
     if effective_write_queue:
+        phase_started = graph_phase_timer_start()
         queue_update = update_graph_maintenance_queue_from_states(
             aoa_root,
             state_rows_for_persistence,
             reason=f"graph_maintenance:{reason}",
         )
+        graph_add_phase_timing(phase_timings, "queue_update_ms", phase_started)
     if write_hash_cache:
+        phase_started = graph_phase_timer_start()
         source_hash_cache_update = write_graph_source_hash_cache(
             aoa_root,
             source_hash_cache_payload,
             source_hash_cache_updates,
         )
+        graph_add_phase_timing(phase_timings, "source_hash_cache_write_ms", phase_started)
+    phase_timings["total_tracked_ms"] = graph_phase_elapsed_ms(phase_trace_started)
+    maintenance_detail["phase_timings_ms"] = dict(phase_timings)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_maintenance",
@@ -43447,6 +43647,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- source_scan: `{detail.get('source_scan')}`",
                 f"- truth_status: `{detail.get('truth_status')}`",
                 f"- source_hash_cache: `{json.dumps(detail.get('source_hash_cache', {}), ensure_ascii=False)}`",
+                f"- phase_timings_ms: `{json.dumps(detail.get('phase_timings_ms', {}), ensure_ascii=False)}`",
                 f"- requested_source_keys: `{json.dumps(detail.get('requested_source_keys', []), ensure_ascii=False)}`",
                 f"- matched_source_key_count: `{detail.get('matched_source_key_count')}`",
                 f"- matched_source_key_sample: `{json.dumps(detail.get('matched_source_key_sample', []), ensure_ascii=False)}`",
@@ -43481,8 +43682,12 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- time_budget_deferred_sources: `{json.dumps(detail.get('time_budget_deferred_sources', []), ensure_ascii=False)}`",
                 f"- replaced_node_refresh: `{json.dumps(detail.get('replaced_node_refresh', {}), ensure_ascii=False)}`",
                 f"- replaced_edge_refresh: `{json.dumps(detail.get('replaced_edge_refresh', {}), ensure_ascii=False)}`",
+                f"- replaced_aggregate_refresh_timing: `{json.dumps(detail.get('replaced_aggregate_refresh_timing', {}), ensure_ascii=False)}`",
+                f"- replaced_phase_timings_ms: `{json.dumps(detail.get('replaced_phase_timings_ms', {}), ensure_ascii=False)}`",
                 f"- removed_node_refresh: `{json.dumps(detail.get('removed_node_refresh', {}), ensure_ascii=False)}`",
                 f"- removed_edge_refresh: `{json.dumps(detail.get('removed_edge_refresh', {}), ensure_ascii=False)}`",
+                f"- removed_aggregate_refresh_timing: `{json.dumps(detail.get('removed_aggregate_refresh_timing', {}), ensure_ascii=False)}`",
+                f"- removed_phase_timings_ms: `{json.dumps(detail.get('removed_phase_timings_ms', {}), ensure_ascii=False)}`",
             ]
         )
         if detail.get("matched_source_keys"):
@@ -50151,6 +50356,7 @@ def graph_maintenance_status_from_state(
     ledger = graph_state.get("ledger") if isinstance(graph_state.get("ledger"), dict) else {}
     queue = graph_state.get("queue") if isinstance(graph_state.get("queue"), dict) else {}
     latest_maintenance = graph_state.get("latest_maintenance") if isinstance(graph_state.get("latest_maintenance"), dict) else {}
+    latest_queue_maintenance = graph_state.get("latest_queue_maintenance") if isinstance(graph_state.get("latest_queue_maintenance"), dict) else {}
     source_version_state = graph_state.get("source_version_state") if isinstance(graph_state.get("source_version_state"), dict) else {}
     status_counts = (
         source_state.get("status_counts")
@@ -50238,6 +50444,34 @@ def graph_maintenance_status_from_state(
         ]
         if key in latest_maintenance
     }
+    latest_queue_maintenance_status = {
+        key: latest_queue_maintenance.get(key)
+        for key in [
+            "exists",
+            "path",
+            "mtime",
+            "ok",
+            "apply",
+            "target",
+            "selection_scope",
+            "scope_is_global",
+            "use_queue",
+            "remaining_count",
+            "selected_count",
+            "batch_limit",
+            "candidate_pool_limit",
+            "max_refresh_nodes",
+            "max_refresh_edges",
+            "budget_exhausted",
+            "elapsed_ms",
+            "mutation_rolled_back",
+            "queue_queued_count",
+            "queue_removed_count",
+            "budget_deferred_source_count",
+            "time_budget_deferred_source_count",
+        ]
+        if key in latest_queue_maintenance
+    }
     return {
         "status": graph_state.get("status"),
         "needs_maintenance": bool(graph_state.get("needs_maintenance")),
@@ -50257,6 +50491,7 @@ def graph_maintenance_status_from_state(
         "latest_maintenance_remaining_count": latest_remaining_count,
         "latest_maintenance_remaining_total_count": latest_remaining_total_count,
         "latest_maintenance": latest_maintenance_status,
+        "latest_queue_maintenance": latest_queue_maintenance_status,
         "deferred_live_source_count": deferred_live_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
@@ -52136,10 +52371,12 @@ def session_memory_maintenance_next_actions(
             graph_queued_count = int_value(graph.get("queued_count"))
             graph_route = str(graph_recommendation.get("route") or "")
             latest_graph_maintenance = graph.get("latest_maintenance") if isinstance(graph.get("latest_maintenance"), dict) else {}
-            latest_graph_maintenance_mtime = ops_float_value(latest_graph_maintenance.get("mtime"))
-            latest_graph_maintenance_recent = (
-                latest_graph_maintenance_mtime > 0
-                and latest_graph_maintenance_mtime >= time.time() - GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS
+            latest_queue_maintenance = graph.get("latest_queue_maintenance") if isinstance(graph.get("latest_queue_maintenance"), dict) else {}
+            queue_sizing_maintenance = latest_queue_maintenance if latest_queue_maintenance.get("exists") else latest_graph_maintenance
+            queue_sizing_maintenance_mtime = ops_float_value(queue_sizing_maintenance.get("mtime"))
+            queue_sizing_maintenance_recent = (
+                queue_sizing_maintenance_mtime > 0
+                and queue_sizing_maintenance_mtime >= time.time() - GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS
             )
             graph_queue_seed_needed = (
                 graph_queued_count <= 0
@@ -52155,15 +52392,17 @@ def session_memory_maintenance_next_actions(
             graph_queue_micro_drip = (
                 graph_queue_drip
                 and graph_queued_count > 0
-                and latest_graph_maintenance_recent
-                and bool(latest_graph_maintenance.get("scope_is_global"))
-                and bool(latest_graph_maintenance.get("apply"))
-                and int_value(latest_graph_maintenance.get("selected_count")) > 0
-                and not bool(latest_graph_maintenance.get("budget_exhausted"))
-                and not bool(latest_graph_maintenance.get("mutation_rolled_back"))
-                and int_value(latest_graph_maintenance.get("batch_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
-                and int_value(latest_graph_maintenance.get("candidate_pool_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
-                and int_value(latest_graph_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS
+                and queue_sizing_maintenance_recent
+                and bool(queue_sizing_maintenance.get("apply"))
+                and int_value(queue_sizing_maintenance.get("selected_count")) > 0
+                and not bool(queue_sizing_maintenance.get("budget_exhausted"))
+                and not bool(queue_sizing_maintenance.get("mutation_rolled_back"))
+                and int_value(queue_sizing_maintenance.get("batch_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+                and int_value(queue_sizing_maintenance.get("candidate_pool_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+                and (
+                    int_value(queue_sizing_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS
+                    or int_value(queue_sizing_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS
+                )
             )
             if graph_queue_drip:
                 if graph_queue_micro_drip:
@@ -52239,7 +52478,7 @@ def session_memory_maintenance_next_actions(
                     else "repair_graph_budgeted"
                 )
                 action_note = (
-                    "The latest bounded graph queue drip made progress but ran near the interactive budget; use a smaller aggregate-capped micro-drip so follow-up maintenance is predictable while the deeper graph-store refresh cost is investigated."
+                    "The latest bounded graph queue drip made progress but was slow or near the interactive budget; use a smaller aggregate-capped micro-drip so follow-up maintenance is predictable while the deeper graph-store refresh cost is investigated."
                     if graph_queue_micro_drip
                     else "Drain or seed the generated graph maintenance queue with a small candidate pool and aggregate refresh caps so interactive maintenance spends time applying bounded source updates, not planning or rewriting an oversized queue slice."
                     if graph_queue_drip
@@ -53917,6 +54156,26 @@ def latest_graph_maintenance_report_for_hot_gate(reports: list[dict[str, Any]]) 
     return reports[0] if reports and isinstance(reports[0], dict) else {}
 
 
+def graph_maintenance_report_is_queue_drip(report: dict[str, Any]) -> bool:
+    source_keys = report.get("source_keys")
+    has_source_keys = bool(source_keys) if isinstance(source_keys, list) else bool(str(source_keys or "").strip())
+    return bool(
+        str(report.get("target") or "") == "all"
+        and not report.get("since")
+        and not report.get("until")
+        and report.get("limit") in (None, 0, "0", "")
+        and not has_source_keys
+        and bool(report.get("use_queue"))
+    )
+
+
+def latest_graph_queue_maintenance_report(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    for report in reports:
+        if isinstance(report, dict) and graph_maintenance_report_is_queue_drip(report):
+            return report
+    return {}
+
+
 def graph_maintenance_report_mutation_rolled_back(report: dict[str, Any]) -> bool:
     detail = report.get("maintenance_detail") if isinstance(report.get("maintenance_detail"), dict) else {}
     return bool(detail.get("mutation_rolled_back"))
@@ -54025,6 +54284,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         "remaining_count": 0,
         "usable_for_hot_gate": False,
     }
+    latest_queue_maintenance: dict[str, Any] = {"exists": False}
     latest_graph_reports = diagnostic_json_payloads(
         aoa_root,
         "*__graph-maintenance.json",
@@ -54068,6 +54328,33 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "time_budget_deferred_source_count": latest_report.get("time_budget_deferred_source_count"),
             "usable_for_hot_gate": usable_for_hot_gate,
         }
+        latest_queue_report = latest_graph_queue_maintenance_report(latest_graph_reports)
+        if latest_queue_report:
+            latest_queue_update = latest_queue_report.get("queue_update") if isinstance(latest_queue_report.get("queue_update"), dict) else {}
+            latest_queue_maintenance = {
+                "exists": True,
+                "path": latest_queue_report.get("_diagnostic_path"),
+                "mtime": ops_float_value(latest_queue_report.get("_diagnostic_mtime")),
+                "ok": latest_queue_report.get("ok"),
+                "apply": latest_queue_report.get("apply"),
+                "target": latest_queue_report.get("target"),
+                "selection_scope": graph_maintenance_report_selection_scope(latest_queue_report),
+                "scope_is_global": graph_maintenance_report_scope_is_global(latest_queue_report),
+                "use_queue": bool(latest_queue_report.get("use_queue")),
+                "remaining_count": latest_queue_report.get("remaining_count"),
+                "selected_count": latest_queue_report.get("selected_count"),
+                "batch_limit": latest_queue_report.get("batch_limit"),
+                "candidate_pool_limit": latest_queue_report.get("candidate_pool_limit"),
+                "max_refresh_nodes": latest_queue_report.get("max_refresh_nodes"),
+                "max_refresh_edges": latest_queue_report.get("max_refresh_edges"),
+                "budget_exhausted": bool(latest_queue_report.get("budget_exhausted")),
+                "elapsed_ms": latest_queue_report.get("elapsed_ms"),
+                "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_queue_report),
+                "queue_queued_count": latest_queue_update.get("queued_count"),
+                "queue_removed_count": latest_queue_update.get("removed_count"),
+                "budget_deferred_source_count": latest_queue_report.get("budget_deferred_source_count"),
+                "time_budget_deferred_source_count": latest_queue_report.get("time_budget_deferred_source_count"),
+            }
     ledger_exists = paths["source_state_ledger"].exists()
     queue_exists = paths["maintenance_queue"].exists()
     ledger = read_graph_source_state_ledger(aoa_root)
@@ -54214,6 +54501,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "live_transcript_session_cache_count": ledger_live_summary.get("live_transcript_session_cache_count"),
         },
         "latest_maintenance": latest_maintenance_output,
+        "latest_queue_maintenance": latest_queue_maintenance,
         "queue": {
             "path": str(paths["maintenance_queue"]),
             "exists": queue_exists,

@@ -6897,6 +6897,10 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     assert metadata_only["results"][0]["aggregate_update"] == "metadata_only"
     assert changed_payload["metadata_only_source_count"] == 0
     assert changed_payload["refreshed_node_count"] >= 1
+    assert "elapsed_ms" in changed_payload["node_refresh"]
+    assert "elapsed_ms" in changed_payload["edge_refresh"]
+    assert "elapsed_ms" in changed_payload["aggregate_refresh_timing"]
+    assert "aggregate_refresh_ms" in changed_payload["phase_timings_ms"]
     assert changed_payload["results"][0]["aggregate_update"] == "refresh"
     assert source_row is not None
     assert source_row[0] == "sha-3"
@@ -7446,6 +7450,31 @@ def test_latest_graph_maintenance_report_for_hot_gate_prefers_global_scope() -> 
     assert report is global_report
 
 
+def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> None:
+    latest_source_key_queue = {
+        "target": "all",
+        "source_keys": ["segment:one:001"],
+        "use_queue": True,
+        "generated_at": "2026-06-28T08:29:16Z",
+    }
+    latest_scoped_queue = {
+        "target": "all",
+        "use_queue": True,
+        "source_state": {"selection_scope": "selected_sessions"},
+        "generated_at": "2026-06-28T08:03:30Z",
+    }
+    latest_global_non_queue = {
+        "target": "all",
+        "use_queue": False,
+        "source_state": {"selection_scope": "global"},
+        "generated_at": "2026-06-28T07:53:20Z",
+    }
+
+    report = module.latest_graph_queue_maintenance_report([latest_source_key_queue, latest_scoped_queue, latest_global_non_queue])
+
+    assert report is latest_scoped_queue
+
+
 def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -7565,7 +7594,68 @@ def test_maintenance_next_actions_micro_drips_after_near_budget_queue_progress(t
     assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES}" in command_text
     assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_CANDIDATE_POOL_LIMIT}" in command_text
-    assert "near the interactive budget" in actions[0]["note"]
+    assert "slow or near the interactive budget" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_micro_drips_after_slow_scoped_queue_progress(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2201,
+        "queued_count": 511,
+        "latest_maintenance": {
+            "exists": True,
+            "mtime": time.time(),
+            "scope_is_global": True,
+            "apply": True,
+            "selected_count": 25,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "elapsed_ms": 70_131,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+        },
+        "latest_queue_maintenance": {
+            "exists": True,
+            "mtime": time.time(),
+            "selection_scope": "selected_sessions",
+            "use_queue": True,
+            "apply": True,
+            "selected_count": 19,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "max_refresh_nodes": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            "max_refresh_edges": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
+            "elapsed_ms": module.GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+        },
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_micro_drip"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES}" in command_text
 
 
 def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:
@@ -8092,6 +8182,8 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
                 "refreshed_edge_count": 0,
                 "node_refresh": {"requested_count": len(contributions), "chunk_count": 1, "row_count": len(contributions), "missing_count": 0},
                 "edge_refresh": {"requested_count": 0, "chunk_count": 0, "row_count": 0, "missing_count": 0},
+                "aggregate_refresh_timing": {"elapsed_ms": 7},
+                "phase_timings_ms": {"elapsed_ms": 11, "aggregate_refresh_ms": 7},
                 "refresh_chunk_size": 64,
             }
 
@@ -8136,6 +8228,13 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
     assert payload["maintenance_detail"]["post_source_state_refreshed"] is False
     assert payload["maintenance_detail"]["post_source_state_partial"] is True
     assert payload["maintenance_detail"]["candidate_pool_count"] == 9
+    assert "source_state_scan_ms" in payload["maintenance_detail"]["phase_timings_ms"]
+    assert "contribution_load_ms" in payload["maintenance_detail"]["phase_timings_ms"]
+    assert "source_id_lookup_ms" in payload["maintenance_detail"]["phase_timings_ms"]
+    assert "apply_replace_ms" in payload["maintenance_detail"]["phase_timings_ms"]
+    assert "apply_commit_ms" in payload["maintenance_detail"]["phase_timings_ms"]
+    assert payload["maintenance_detail"]["replaced_aggregate_refresh_timing"]["elapsed_ms"] == 7
+    assert payload["maintenance_detail"]["replaced_phase_timings_ms"]["aggregate_refresh_ms"] == 7
     assert payload["maintenance_detail"]["matched_source_key_count"] == 20
     assert payload["maintenance_detail"]["matched_source_key_sample"] == [
         f"segment:session-1:{index:03d}" for index in range(20)
