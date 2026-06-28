@@ -139,6 +139,7 @@ SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS = 1200
 SEARCH_STRUCTURED_SHARD_ROUTE_LAYERS_PREVIEW_CHARS = 160
 SEARCH_STRUCTURED_SHARD_ROUTE_SIGNALS_PREVIEW_CHARS = 360
 SEARCH_STRUCTURED_SHARD_TAGS_PREVIEW_CHARS = 180
+SEARCH_SHARD_DIRTY_DRIP_LIMIT = 3
 SEARCH_TAGS_PREVIEW_CHARS = 512
 SEARCH_TAGS_STORAGE_POLICY_DROP_ROUTE_SIGNAL_TOKENS = "drop_route_signal_tokens_v1"
 SEARCH_TAGS_STORAGE_POLICY_FULL = SEARCH_TAGS_STORAGE_POLICY_DROP_ROUTE_SIGNAL_TOKENS
@@ -258,6 +259,7 @@ GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT = 25
 GRAPH_MAINTENANCE_APPLY_CANDIDATE_POOL_MULTIPLIER = 3
 GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT = 12
 GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS = 6 * 60 * 60
+GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS = 240_000
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
@@ -28285,6 +28287,9 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- pre_filter_selected_count: `{payload.get('pre_filter_selected_count')}`",
         f"- dirty_candidate_count: `{payload.get('dirty_candidate_count')}`",
         f"- dirty_selected_count: `{payload.get('dirty_selected_count')}`",
+        f"- dirty_pre_limit_selected_count: `{payload.get('dirty_pre_limit_selected_count')}`",
+        f"- dirty_limit: `{payload.get('dirty_limit')}`",
+        f"- dirty_limited_count: `{payload.get('dirty_limited_count')}`",
         f"- skipped_current_count: `{payload.get('skipped_current_count')}`",
         f"- deferred_live_skipped_count: `{payload.get('deferred_live_skipped_count')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
@@ -28405,7 +28410,8 @@ def materialize_search_shards(
     storage_profile = search_document_storage_profile(store_raw_text=not structured_only)
     if selected_records is None:
         try:
-            records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=limit)
+            record_limit = None if dirty_only and limit is not None and int_value(limit) > 0 and target == "all" else limit
+            records = search_records_for_target(aoa_root, target=target, since=since, until=until, limit=record_limit)
         except ValueError as exc:
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -28448,6 +28454,11 @@ def materialize_search_shards(
         )
         dirty_selection["dirty_only"] = True
         dirty_selection["pre_filter_selected_count"] = pre_dirty_group_count
+        if limit is not None and int_value(limit) > 0 and target == "all":
+            dirty_selection["dirty_pre_limit_selected_count"] = len(dirty_records)
+            dirty_selection["dirty_limit"] = int_value(limit)
+            dirty_records = dirty_records[: int_value(limit)]
+            dirty_selection["dirty_limited_count"] = len(dirty_records)
         for record in dirty_records:
             filtered_groups[search_shard_key_for_record(record)].append(record)
         groups = filtered_groups
@@ -28484,10 +28495,12 @@ def materialize_search_shards(
     slow_session_rows: list[dict[str, Any]] = []
     processed_count = 0
     document_count = 0
+    budget_exhausted = False
     document_type_counts: Counter[str] = Counter()
     for shard_key in sorted(groups):
         if deadline is not None and processed_count > 0 and time.monotonic() >= deadline:
             diagnostics.append("search_shard_materialization_budget_exhausted")
+            budget_exhausted = True
             break
         shard_records = groups[shard_key]
         shard_path = search_shard_db_path(aoa_root, shard_key)
@@ -28537,6 +28550,8 @@ def materialize_search_shards(
         )
         shard_elapsed_ms = int((time.monotonic() - shard_started) * 1000)
         shard_ok = bool(result.get("ok"))
+        shard_budget_exhausted = bool(result.get("budget_exhausted"))
+        budget_exhausted = budget_exhausted or shard_budget_exhausted
         shard_diagnostics = [str(item) for item in result.get("diagnostics", []) if item]
         shard_slow_sessions = [
             {"shard": shard_key, **item}
@@ -28565,6 +28580,8 @@ def materialize_search_shards(
                 "status": "current" if shard_ok else "failed",
                 "session_count": len(shard_records),
                 "processed_count": int_value(result.get("processed_count")),
+                "remaining_count": result.get("remaining_count"),
+                "budget_exhausted": shard_budget_exhausted,
                 "document_count": int_value(result.get("document_count")),
                 "document_counts": shard_document_counts,
                 "event_document_count": shard_document_counts["event"],
@@ -28608,6 +28625,8 @@ def materialize_search_shards(
         "selected_count": sum(len(items) for items in groups.values()),
         "pre_filter_selected_count": dirty_selection.get("pre_filter_selected_count", len(records)) if dirty_only else len(records),
         "processed_count": processed_count,
+        "budget_exhausted": budget_exhausted,
+        "partial": budget_exhausted,
         "elapsed_ms": elapsed_ms,
         "documents_per_second": round(document_count / (elapsed_ms / 1000.0), 2)
         if elapsed_ms > 0 and document_count > 0
@@ -28622,6 +28641,9 @@ def materialize_search_shards(
         "include_deferred_live": include_deferred_live,
         "dirty_candidate_count": dirty_selection.get("dirty_candidate_count", 0),
         "dirty_selected_count": dirty_selection.get("dirty_selected_count", 0),
+        "dirty_pre_limit_selected_count": dirty_selection.get("dirty_pre_limit_selected_count"),
+        "dirty_limit": dirty_selection.get("dirty_limit"),
+        "dirty_limited_count": dirty_selection.get("dirty_limited_count"),
         "skipped_current_count": dirty_selection.get("skipped_current_count", 0),
         "deferred_live_skipped_count": dirty_selection.get("deferred_live_skipped_count", 0),
         "shard_storage_mode": shard_storage_mode,
@@ -41601,6 +41623,15 @@ def graph_source_maintenance_recommendation(
         )
         and int_value(latest_maintenance.get("selected_count")) > 0
     )
+    latest_near_budget_success = (
+        latest_usable
+        and latest_remaining > 0
+        and latest_batch_limit > heavy_tail_batch_limit
+        and int_value(latest_maintenance.get("selected_count")) > 0
+        and not bool(latest_maintenance.get("mutation_rolled_back"))
+        and not bool(latest_maintenance.get("budget_exhausted"))
+        and int_value(latest_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS
+    )
 
     if actionable_count <= 0 and ledger_coverage_gap:
         route = "graph_ledger_catchup"
@@ -41665,6 +41696,13 @@ def graph_source_maintenance_recommendation(
             heavy_tail_batch_limit,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
+    elif latest_near_budget_success and actionable_count > heavy_tail_batch_limit:
+        route = "heavy_tail_graph_maintenance"
+        reason = "latest_budgeted_graph_maintenance_near_budget_after_progress"
+        command = graph_maintenance_command(
+            heavy_tail_batch_limit,
+            candidate_pool_limit=heavy_tail_candidate_pool_limit,
+        )
     elif latest_heavy_tail_success and actionable_count > heavy_tail_batch_limit:
         route = "heavy_tail_graph_maintenance"
         reason = "continue_heavy_tail_graph_maintenance"
@@ -41704,6 +41742,8 @@ def graph_source_maintenance_recommendation(
         notes.append("small_candidate_pool_preserves_progress_when_exact_planning_is_expensive")
         if reason == "recent_budgeted_graph_maintenance_exhausted_without_progress":
             notes.append("recent_no_progress_report_keeps_heavy_tail_route_sticky")
+        if reason == "latest_budgeted_graph_maintenance_near_budget_after_progress":
+            notes.append("near_budget_success_switches_to_smaller_interactive_queue_drip")
     if route == "budgeted_graph_maintenance" and actionable_count > 100:
         notes.append("full_store_only_rebuild_is_manual_heavy_route_after_resource_gate")
     return {
@@ -50286,6 +50326,17 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
         "requested_shard": report.get("requested_shard"),
         "selected_count": report.get("selected_count"),
         "processed_count": processed_count,
+        "budget_exhausted": bool(
+            report.get("budget_exhausted")
+            or any("budget_exhausted" in str(item) for item in report.get("diagnostics", []) if item)
+        ),
+        "partial": report.get("partial"),
+        "dirty_only": report.get("dirty_only"),
+        "dirty_candidate_count": report.get("dirty_candidate_count"),
+        "dirty_selected_count": report.get("dirty_selected_count"),
+        "dirty_pre_limit_selected_count": report.get("dirty_pre_limit_selected_count"),
+        "dirty_limit": report.get("dirty_limit"),
+        "dirty_limited_count": report.get("dirty_limited_count"),
         "shard_count": report.get("shard_count"),
         "document_count": document_count,
         "document_counts": report.get("document_counts") if isinstance(report.get("document_counts"), dict) else {},
@@ -50319,6 +50370,8 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
                     "ok",
                     "session_count",
                     "processed_count",
+                    "remaining_count",
+                    "budget_exhausted",
                     "document_count",
                     "document_counts",
                     "event_document_count",
@@ -52027,11 +52080,21 @@ def session_memory_maintenance_next_actions(
                 )
             graph_candidate_pool_limit = int_value(graph_recommendation.get("candidate_pool_limit"))
             graph_queued_count = int_value(graph.get("queued_count"))
+            graph_route = str(graph_recommendation.get("route") or "")
             graph_queue_seed_needed = (
                 graph_queued_count <= 0
                 and int_value(graph.get("actionable_count")) > 0
                 and "maintenance_queue_empty_but_ledger_actionable_sources_present" in graph_diagnostics
             )
+            graph_queue_drip = (
+                (graph_queued_count > 0 or graph_queue_seed_needed)
+                and graph_route == "budgeted_graph_maintenance"
+                and graph_candidate_pool_limit <= 0
+                and graph_batch_limit > GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+            )
+            if graph_queue_drip:
+                graph_batch_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+                graph_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
             graph_queue_seed_limit = max(
                 graph_batch_limit * 10,
                 graph_candidate_pool_limit,
@@ -52064,20 +52127,36 @@ def session_memory_maintenance_next_actions(
                 )
             if graph_candidate_pool_limit > 0:
                 command.extend(["--candidate-pool-limit", str(graph_candidate_pool_limit)])
-            graph_route = str(graph_recommendation.get("route") or "")
             if graph_route == "heavy_tail_graph_maintenance":
                 action_id = "repair_graph_queue_seeded_heavy_tail" if graph_queue_seed_needed else "repair_graph_heavy_tail"
                 action_note = "Run small-candidate graph repair after budgeted maintenance showed a heavy tail or rollback; this preserves progress without retrying an expensive full candidate pool."
             elif graph_route == "budgeted_graph_maintenance":
-                action_id = "repair_graph_queue_seeded_budgeted" if graph_queue_seed_needed else "repair_graph_budgeted"
-                action_note = "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
+                action_id = (
+                    "repair_graph_queue_seeded_drip"
+                    if graph_queue_seed_needed and graph_queue_drip
+                    else "repair_graph_queue_drip"
+                    if graph_queue_drip
+                    else "repair_graph_queue_seeded_budgeted"
+                    if graph_queue_seed_needed
+                    else "repair_graph_budgeted"
+                )
+                action_note = (
+                    "Drain or seed the generated graph maintenance queue with a small candidate pool so interactive maintenance spends time applying source updates, not planning an oversized queue slice."
+                    if graph_queue_drip
+                    else "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
+                )
             else:
                 action_id = "repair_graph_queue_seeded_bounded" if graph_queue_seed_needed else "repair_graph_bounded"
                 action_note = "Run bounded incremental graph repair for a small generated projection backlog."
             if graph_queue_seed_needed:
                 action_note = (
-                    "Seed the generated graph maintenance queue from the ledger, then drain it with --use-queue; "
+                    "Seed the generated graph maintenance queue from the ledger with a small candidate pool, then drain it with --use-queue; "
                     "this keeps the repair bounded without treating the generated queue as evidence authority."
+                    if graph_queue_drip
+                    else (
+                        "Seed the generated graph maintenance queue from the ledger, then drain it with --use-queue; "
+                        "this keeps the repair bounded without treating the generated queue as evidence authority."
+                    )
                 )
             actions.append(
                 {
@@ -52183,6 +52262,36 @@ def session_memory_search_shard_next_action(
     if materialized or shard_db_exists:
         command.extend(["--no-rebuild", "--dirty-only"])
         route_kind = "search_shard_structured_dirty_only"
+    latest_materialization = (
+        search_shards.get("latest_materialization")
+        if isinstance(search_shards.get("latest_materialization"), dict)
+        else {}
+    )
+    latest_requested_shard = str(latest_materialization.get("requested_shard") or "")
+    latest_budget_exhausted = bool(latest_materialization.get("budget_exhausted")) and latest_requested_shard == shard
+    latest_dirty_limit = int_value(latest_materialization.get("dirty_limit"))
+    latest_slow_warning_count = int_value(latest_materialization.get("slow_session_warning_count"))
+    latest_selected_count = int_value(latest_materialization.get("selected_count"))
+    latest_processed_count = int_value(latest_materialization.get("processed_count"))
+    remaining_from_shard = max(
+        1,
+        int_value(selected.get("stale_session_count")) + int_value(selected.get("missing_session_count")) - int_value(selected.get("deferred_live_session_count")),
+    )
+    latest_drip_sticky = (
+        latest_requested_shard == shard
+        and latest_dirty_limit > 0
+        and remaining_from_shard > 0
+        and (latest_slow_warning_count > 0 or latest_processed_count >= latest_dirty_limit)
+    )
+    dirty_drip_limit = 0
+    if route_kind == "search_shard_structured_dirty_only" and (
+        (latest_budget_exhausted and latest_processed_count > 0)
+        or latest_drip_sticky
+    ):
+        remaining_from_latest = max(1, latest_selected_count - latest_processed_count) if latest_budget_exhausted else remaining_from_shard
+        dirty_drip_limit = min(SEARCH_SHARD_DIRTY_DRIP_LIMIT, remaining_from_latest, remaining_from_shard)
+        command.extend(["--limit", str(dirty_drip_limit)])
+        route_kind = "search_shard_structured_dirty_only_drip"
 
     return {
         "id": "refresh_search_shard_structured",
@@ -52197,9 +52306,20 @@ def session_memory_search_shard_next_action(
         "raw_text_query_support": selected.get("raw_text_query_support"),
         "shard_db_exists": shard_db_exists,
         "budget_seconds": 300,
+        "dirty_drip_limit": dirty_drip_limit or None,
+        "latest_materialization_budget_exhausted": latest_budget_exhausted,
+        "latest_materialization_drip_sticky": latest_drip_sticky,
         "blocked_by_live_tail": False,
         "command": command,
-        "note": "Refresh this generated structured shard without --full-text; deferred_live rows stay on the live-tail route unless explicitly included.",
+        "note": (
+            (
+                "Refresh a small dirty-only slice of this generated structured shard after the previous shard materialization exhausted its budget; deferred_live rows stay on the live-tail route unless explicitly included."
+                if latest_budget_exhausted
+                else "Continue refreshing this generated structured shard as a small dirty-only slice because the previous bounded slice was slow and the shard still has stale sessions."
+            )
+            if dirty_drip_limit
+            else "Refresh this generated structured shard without --full-text; deferred_live rows stay on the live-tail route unless explicitly included."
+        ),
     }
 
 
@@ -52563,6 +52683,9 @@ def session_memory_maintenance_status(
                 "deferred_live_session_count",
                 "shard_db_exists",
                 "budget_seconds",
+                "dirty_drip_limit",
+                "latest_materialization_budget_exhausted",
+                "latest_materialization_drip_sticky",
             )
             if key in search_shard_next_action
         }
@@ -53161,7 +53284,16 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "status",
                     "target",
                     "requested_shard",
+                    "selected_count",
                     "processed_count",
+                    "budget_exhausted",
+                    "partial",
+                    "dirty_only",
+                    "dirty_candidate_count",
+                    "dirty_selected_count",
+                    "dirty_pre_limit_selected_count",
+                    "dirty_limit",
+                    "dirty_limited_count",
                     "shard_count",
                     "document_count",
                     "document_counts",
@@ -53287,6 +53419,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "raw_text_query_support",
                     "shard_db_exists",
                     "budget_seconds",
+                    "dirty_drip_limit",
+                    "latest_materialization_budget_exhausted",
+                    "latest_materialization_drip_sticky",
                     "blocked_by_live_tail",
                     "command",
                     "note",

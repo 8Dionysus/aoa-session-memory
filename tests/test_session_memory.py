@@ -7389,6 +7389,37 @@ def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() 
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
 
 
+def test_graph_source_recommendation_switches_near_budget_progress_to_heavy_tail() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=5625,
+        existing_source_count=5625,
+        dirty_count=593,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=0,
+        reason_group_counts={"source_sha_mismatch": 593},
+        workspace_root="/srv/AbyssOS",
+        aoa_root="/srv/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 450,
+            "actionable_remaining_count": 450,
+            "selected_count": 50,
+            "batch_limit": 50,
+            "candidate_pool_limit": 50,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+            "elapsed_ms": module.GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS,
+        },
+    )
+
+    assert recommendation["route"] == "heavy_tail_graph_maintenance"
+    assert recommendation["reason"] == "latest_budgeted_graph_maintenance_near_budget_after_progress"
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
+    assert "near_budget_success_switches_to_smaller_interactive_queue_drip" in recommendation["notes"]
+
+
 def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -7420,6 +7451,42 @@ def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path
     assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in command_text
     assert str(workspace) in command_text
     assert str(aoa_root) in command_text
+
+
+def test_maintenance_next_actions_drips_existing_budgeted_graph_queue(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2544,
+        "queued_count": 675,
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_drip"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "--use-queue" in command_text
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
+    assert "--seed-queue-from-ledger" not in command_text
+    assert "small candidate pool" in actions[0]["note"]
 
 
 def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:
@@ -7494,6 +7561,48 @@ def test_maintenance_next_actions_seeds_empty_graph_queue_from_ledger(tmp_path: 
     assert f"--queue-seed-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT * 10}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
     assert "generated queue as evidence authority" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_seeds_budgeted_graph_queue_as_drip(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2204,
+        "queued_count": 0,
+        "diagnostics": [
+            "latest_graph_maintenance_remaining_sources",
+            "maintenance_queue_empty_but_ledger_actionable_sources_present",
+        ],
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_seeded_drip"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "--use-queue" in command_text
+    assert "--seed-queue-from-ledger" in command_text
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
+    assert f"--queue-seed-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT * 10}" in command_text
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
+    assert "generated queue as evidence authority" in actions[0]["note"]
+    assert "small candidate pool" in actions[0]["note"]
 
 
 def test_maintenance_next_actions_uses_installed_script_path_when_available(tmp_path: Path) -> None:
@@ -14507,6 +14616,209 @@ def test_search_shard_next_action_ignores_stale_rows_covered_by_deferred_live_co
     )
     warning_codes = {item["code"] for item in ops["warnings"]}
     assert "search_shards_not_current" not in warning_codes
+
+
+def test_search_shard_next_action_drips_after_budget_exhausted_materialization(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard = "month/2026-05"
+    shard_db = module.search_shard_db_path(aoa_root, shard)
+    shard_db.parent.mkdir(parents=True)
+    shard_db.touch()
+
+    action = module.session_memory_search_shard_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_shards={
+            "status": "incomplete",
+            "materialized_shard_count": 1,
+            "actionable_noncurrent_shards": [
+                {
+                    "shard": shard,
+                    "shard_db_path": str(shard_db),
+                    "status": "stale",
+                    "materialized": True,
+                    "stale_session_count": 10,
+                    "missing_session_count": 0,
+                    "deferred_live_session_count": 0,
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                }
+            ],
+            "latest_materialization": {
+                "exists": True,
+                "requested_shard": shard,
+                "selected_count": 17,
+                "processed_count": 7,
+                "budget_exhausted": True,
+                "dirty_only": True,
+            },
+        },
+    )
+
+    assert action is not None
+    assert action["route_kind"] == "search_shard_structured_dirty_only_drip"
+    assert action["dirty_drip_limit"] == module.SEARCH_SHARD_DIRTY_DRIP_LIMIT
+    assert action["latest_materialization_budget_exhausted"] is True
+    command_text = module.shlex.join(action["command"])
+    assert "--no-rebuild --dirty-only" in command_text
+    assert f"--limit {module.SEARCH_SHARD_DIRTY_DRIP_LIMIT}" in command_text
+    assert "previous shard materialization exhausted its budget" in action["note"]
+    compact = module.compact_maintenance_status_payload(
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "next_actions": [action],
+            "operations": {
+                "search_shards": {
+                    "status": "incomplete",
+                    "latest_materialization": {
+                        "exists": True,
+                        "requested_shard": shard,
+                        "selected_count": 17,
+                        "processed_count": 7,
+                        "budget_exhausted": True,
+                        "dirty_only": True,
+                        "dirty_limit": module.SEARCH_SHARD_DIRTY_DRIP_LIMIT,
+                    },
+                },
+                "warnings": [],
+            },
+        }
+    )
+    assert compact["next_actions"][0]["dirty_drip_limit"] == module.SEARCH_SHARD_DIRTY_DRIP_LIMIT
+    assert compact["next_actions"][0]["latest_materialization_budget_exhausted"] is True
+    assert compact["operations"]["search_shards"]["latest_materialization"]["budget_exhausted"] is True
+    assert compact["operations"]["search_shards"]["latest_materialization"]["dirty_limit"] == module.SEARCH_SHARD_DIRTY_DRIP_LIMIT
+
+
+def test_search_shard_next_action_keeps_drip_sticky_after_slow_bounded_slice(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard = "month/2026-05"
+    shard_db = module.search_shard_db_path(aoa_root, shard)
+    shard_db.parent.mkdir(parents=True)
+    shard_db.touch()
+
+    action = module.session_memory_search_shard_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_shards={
+            "status": "incomplete",
+            "materialized_shard_count": 1,
+            "actionable_noncurrent_shards": [
+                {
+                    "shard": shard,
+                    "shard_db_path": str(shard_db),
+                    "status": "stale",
+                    "materialized": True,
+                    "stale_session_count": 7,
+                    "missing_session_count": 0,
+                    "deferred_live_session_count": 0,
+                    "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                    "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                }
+            ],
+            "latest_materialization": {
+                "exists": True,
+                "requested_shard": shard,
+                "selected_count": module.SEARCH_SHARD_DIRTY_DRIP_LIMIT,
+                "processed_count": module.SEARCH_SHARD_DIRTY_DRIP_LIMIT,
+                "budget_exhausted": False,
+                "dirty_only": True,
+                "dirty_limit": module.SEARCH_SHARD_DIRTY_DRIP_LIMIT,
+                "slow_session_warning_count": module.SEARCH_SHARD_DIRTY_DRIP_LIMIT,
+            },
+        },
+    )
+
+    assert action is not None
+    assert action["route_kind"] == "search_shard_structured_dirty_only_drip"
+    assert action["dirty_drip_limit"] == module.SEARCH_SHARD_DIRTY_DRIP_LIMIT
+    assert action["latest_materialization_budget_exhausted"] is False
+    assert action["latest_materialization_drip_sticky"] is True
+    command_text = module.shlex.join(action["command"])
+    assert f"--limit {module.SEARCH_SHARD_DIRTY_DRIP_LIMIT}" in command_text
+    assert "previous bounded slice was slow" in action["note"]
+
+
+def test_search_shards_dirty_only_limit_applies_after_dirty_filter(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shard = "month/2026-05"
+    module.search_shard_db_path(aoa_root, shard).parent.mkdir(parents=True)
+    module.search_shard_db_path(aoa_root, shard).touch()
+    records = [
+        {"session_id": f"may-{idx}", "session_label": f"2026-05-{idx + 1:02d}__001__dirty-{idx}"}
+        for idx in range(5)
+    ] + [
+        {"session_id": "june-1", "session_label": "2026-06-01__001__other-shard"}
+    ]
+    calls: dict[str, Any] = {}
+
+    def fake_records(_aoa_root: Path, *, target: str, since: str | None, until: str | None, limit: int | None) -> list[dict[str, Any]]:
+        calls["record_limit"] = limit
+        return list(records)
+
+    def fake_dirty_filter(
+        _aoa_root: Path,
+        selected_records: list[dict[str, Any]],
+        *,
+        shard: str | None = None,
+        include_deferred_live: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        dirty_records = [
+            item for item in selected_records
+            if module.search_shard_key_for_record(item) == "month/2026-05"
+        ]
+        return dirty_records, {
+            "dirty_candidate_count": len(dirty_records),
+            "deferred_live_skipped_count": 0,
+            "pre_filter_selected_count": len(selected_records),
+            "dirty_selected_count": len(dirty_records),
+            "skipped_current_count": len(selected_records) - len(dirty_records),
+        }
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        selected_records = kwargs["selected_records"]
+        calls["selected_labels"] = [item["session_label"] for item in selected_records]
+        return {
+            "ok": True,
+            "processed_count": len(selected_records),
+            "document_count": len(selected_records),
+            "session_document_count": len(selected_records),
+            "segment_document_count": 0,
+            "event_document_count": 0,
+            "incident_document_count": 0,
+            "goal_lifecycle_document_count": 0,
+            "task_episode_document_count": 0,
+            "slow_sessions": [],
+            "slow_session_warning_count": 0,
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_records_for_target", fake_records)
+    monkeypatch.setattr(module, "filter_search_records_to_dirty_shard_sessions", fake_dirty_filter)
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+    monkeypatch.setattr(module, "build_search_catalog", lambda *_args, **_kwargs: {"ok": True, "status": "current"})
+
+    result = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard=shard,
+        rebuild_shards=False,
+        dirty_only=True,
+        limit=3,
+    )
+
+    assert result["ok"] is True
+    assert calls["record_limit"] is None
+    assert len(calls["selected_labels"]) == 3
+    assert calls["selected_labels"] == [item["session_label"] for item in records[:3]]
+    assert result["selected_count"] == 3
+    assert result["dirty_selected_count"] == 5
+    assert result["dirty_pre_limit_selected_count"] == 5
+    assert result["dirty_limit"] == 3
+    assert result["dirty_limited_count"] == 3
 
 
 def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:
