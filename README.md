@@ -352,6 +352,15 @@ refresh budgets.
 `--budget-seconds` bounds live wall-clock work; if the deadline expires before
 or during a mutation pass, the command records `deferred_time_budget` sources
 and rolls back the in-flight mutation instead of leaving a half-refreshed graph.
+During aggregate refresh, low-cardinality node ids still get a fresh
+representative contribution payload so event labels and titles stay current.
+High-fanout node ids reuse the existing compact aggregate payload and update
+counts from the contribution summary. Edge aggregates do not run representative
+payload scans during incremental refresh; their `source`, `target`, `type`, and
+count come from the contribution summary, and evidence refs are still hydrated
+from `edge_contribs` when a packet is read. This keeps interactive queue drips
+from sorting large `edge_contribs` windows just to refresh non-authoritative
+edge labels.
 Deep graph source scans can reuse `graph/source-hash-cache.json` with
 `--hash-mode cached` when file size and `mtime_ns` still match. Mutating
 graph-maintenance source scans refresh that generated cache by default; use

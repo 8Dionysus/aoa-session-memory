@@ -1848,6 +1848,38 @@ Maintenance gates:
   `search-operational-route-rollup-query` / `aoa_session_operational_route_rollup_query`
   before broad search or raw expansion.
 
+- 2026-06-28 graph queue aggregate-refresh tail reduction: live graph queue
+  reports showed that the remaining interactive cost was dominated by
+  `replace_sources` aggregate refresh, especially edge representative payload
+  scans over large `edge_contribs` windows. Incremental refresh now keeps fresh
+  representative payloads for low-cardinality node ids, reuses existing compact
+  aggregate payloads for high-fanout nodes, and disables representative payload
+  scans for edge aggregates because edge `source`/`target`/`type`/count come
+  from the summary and evidence refs hydrate from `edge_contribs` at packet
+  read time. Live proof before the edge route fix:
+  `diagnostics/20260628T190807Z__graph-maintenance.json` took `128.919s`
+  with `aggregate_refresh_ms=97180`; after bounded node representative reuse,
+  `diagnostics/20260628T191905Z__graph-maintenance.json` took `114.187s`
+  with `aggregate_refresh_ms=83834`; after disabling edge representatives,
+  `diagnostics/20260628T192135Z__graph-maintenance.json` took `46.449s`
+  with `aggregate_refresh_ms=18176`, `node_refresh_ms=4247`,
+  `edge_refresh_ms=10866`, and `edge_refresh.representative_payload_count=0`.
+  `maintenance-status --no-timers` now surfaces the latest queue maintenance
+  as `elapsed_ms=46449`, `aggregate_refresh_ms=18176`, and moves the next
+  graph action back from micro-drip to ordinary queue drip while search,
+  entity registry, and operational route-rollup remain current. Route proof:
+  `graph-neighborhood aoa-session-memory-mcp --kind mcp --limit 4
+  --edge-limit 12` returned a compact stale-aware graph packet with raw/segment
+  refs, and `usage-chain aoa-session-memory-mcp --kind mcp --limit 2` returned
+  `ok=true`, `event_count=2`, `consequence_event_count=7`,
+  `evidence_ref_count=24`, and search freshness `current`. Regression proof:
+  source `py_compile` passed; targeted graph refresh tests passed; full source
+  pytest returned `374 passed`; source `validate` returned `ok=true`; source
+  `doctor` returned `ok=true`; standalone bundle `py_compile` passed, bundle
+  pytest returned `374 passed`, bundle `validate` returned `ok=true`, and
+  bundle `doctor` returned `ok=true` with the expected installed user-skill
+  symlink still pointing at the live `.aoa` source rather than the Git mirror.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

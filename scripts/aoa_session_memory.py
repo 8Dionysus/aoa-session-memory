@@ -293,6 +293,7 @@ GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 512
+GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT = 4
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES = 20000
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES = 60000
 GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT = 10
@@ -39440,7 +39441,11 @@ class GraphSqliteStore:
             "missing_count": 0,
             "aggregate_row_count": 0,
             "representative_payload_count": 0,
-            "refresh_strategy": "sql_summary_representative_payload",
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT,
+            "refresh_strategy": "sql_summary_existing_payload_with_bounded_fresh_representative",
         }
         for chunk in self._id_chunks(node_ids):
             graph_check_budget(budget_deadline)
@@ -39461,28 +39466,44 @@ class GraphSqliteStore:
                     chunk,
                 ).fetchall()
             }
-            representative_rows = {
-                str(row["node_id"]): row
+            existing_rows = {
+                str(row["id"]): row
                 for row in self.conn.execute(
-                    f"""
-                    WITH ranked AS (
-                        SELECT node_id,
-                               node_type,
-                               payload_json,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY node_id
-                                   ORDER BY LENGTH(payload_json) DESC, source_key
-                               ) AS rn
-                        FROM node_contribs
-                        WHERE node_id IN ({placeholders})
-                    )
-                    SELECT node_id, node_type, payload_json
-                    FROM ranked
-                    WHERE rn = 1
-                    """,
+                    f"SELECT id, node_type, payload_json FROM nodes WHERE id IN ({placeholders})",
                     chunk,
                 ).fetchall()
             }
+            representative_node_ids = [
+                node_id
+                for node_id, row in summary_rows.items()
+                if node_id not in existing_rows
+                or int_value(row["contrib_row_count"]) <= GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+            ]
+            representative_rows: dict[str, sqlite3.Row] = {}
+            if representative_node_ids:
+                representative_placeholders = ",".join("?" for _ in representative_node_ids)
+                representative_rows = {
+                    str(row["node_id"]): row
+                    for row in self.conn.execute(
+                        f"""
+                        WITH ranked AS (
+                            SELECT node_id,
+                                   node_type,
+                                   payload_json,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY node_id
+                                       ORDER BY LENGTH(payload_json) DESC, source_key
+                                   ) AS rn
+                            FROM node_contribs
+                            WHERE node_id IN ({representative_placeholders})
+                        )
+                        SELECT node_id, node_type, payload_json
+                        FROM ranked
+                        WHERE rn = 1
+                        """,
+                        representative_node_ids,
+                    ).fetchall()
+                }
             for node_id in sorted(chunk):
                 row = summary_rows.get(node_id)
                 if row is None:
@@ -39493,6 +39514,7 @@ class GraphSqliteStore:
                 contrib_row_count = int_value(row["contrib_row_count"])
                 stats["row_count"] += contrib_row_count
                 representative = representative_rows.get(node_id)
+                existing = existing_rows.get(node_id)
                 payload: dict[str, Any] = {}
                 if representative is not None:
                     stats["representative_payload_count"] += 1
@@ -39502,9 +39524,24 @@ class GraphSqliteStore:
                         parsed = {}
                     if isinstance(parsed, dict):
                         payload = parsed
+                elif existing is not None:
+                    try:
+                        parsed = json.loads(str(existing["payload_json"]))
+                    except json.JSONDecodeError:
+                        parsed = {}
+                        stats["invalid_existing_payload_count"] += 1
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                        stats["existing_payload_reused_count"] += 1
+                if not payload:
+                    stats["minimal_payload_count"] += 1
                 payload["id"] = node_id
                 payload["type"] = str(
-                    (representative["node_type"] if representative is not None else row["node_type"])
+                    (
+                        representative["node_type"]
+                        if representative is not None
+                        else row["node_type"]
+                    )
                     or "unknown"
                 )
                 payload["count"] = int_value(row["aggregate_count"], 1)
@@ -39535,7 +39572,11 @@ class GraphSqliteStore:
             "missing_count": 0,
             "aggregate_row_count": 0,
             "representative_payload_count": 0,
-            "refresh_strategy": "sql_summary_representative_payload",
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": 0,
+            "refresh_strategy": "sql_summary_existing_payload_without_edge_representative",
         }
         for chunk in self._id_chunks(edge_ids):
             graph_check_budget(budget_deadline)
@@ -39558,30 +39599,18 @@ class GraphSqliteStore:
                     chunk,
                 ).fetchall()
             }
-            representative_rows = {
-                str(row["edge_id"]): row
+            existing_rows = {
+                str(row["id"]): row
                 for row in self.conn.execute(
                     f"""
-                    WITH ranked AS (
-                        SELECT edge_id,
-                               edge_type,
-                               source_node,
-                               target_node,
-                               payload_json,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY edge_id
-                                   ORDER BY LENGTH(payload_json) DESC, source_key
-                               ) AS rn
-                        FROM edge_contribs
-                        WHERE edge_id IN ({placeholders})
-                    )
-                    SELECT edge_id, edge_type, source_node, target_node, payload_json
-                    FROM ranked
-                    WHERE rn = 1
+                    SELECT id, edge_type, source_node, target_node, payload_json
+                    FROM edges
+                    WHERE id IN ({placeholders})
                     """,
                     chunk,
                 ).fetchall()
             }
+            representative_rows: dict[str, sqlite3.Row] = {}
             for edge_id in sorted(chunk):
                 row = summary_rows.get(edge_id)
                 if row is None:
@@ -39592,6 +39621,7 @@ class GraphSqliteStore:
                 contrib_row_count = int_value(row["contrib_row_count"])
                 stats["row_count"] += contrib_row_count
                 representative = representative_rows.get(edge_id)
+                existing = existing_rows.get(edge_id)
                 payload: dict[str, Any] = {}
                 if representative is not None:
                     stats["representative_payload_count"] += 1
@@ -39601,17 +39631,40 @@ class GraphSqliteStore:
                         parsed = {}
                     if isinstance(parsed, dict):
                         payload = parsed
+                elif existing is not None:
+                    try:
+                        parsed = json.loads(str(existing["payload_json"]))
+                    except json.JSONDecodeError:
+                        parsed = {}
+                        stats["invalid_existing_payload_count"] += 1
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                        stats["existing_payload_reused_count"] += 1
+                if not payload:
+                    stats["minimal_payload_count"] += 1
                 payload["id"] = edge_id
                 payload["type"] = str(
-                    (representative["edge_type"] if representative is not None else row["edge_type"])
+                    (
+                        representative["edge_type"]
+                        if representative is not None
+                        else row["edge_type"]
+                    )
                     or "unknown"
                 )
                 payload["source"] = str(
-                    (representative["source_node"] if representative is not None else row["source_node"])
+                    (
+                        representative["source_node"]
+                        if representative is not None
+                        else row["source_node"]
+                    )
                     or ""
                 )
                 payload["target"] = str(
-                    (representative["target_node"] if representative is not None else row["target_node"])
+                    (
+                        representative["target_node"]
+                        if representative is not None
+                        else row["target_node"]
+                    )
                     or ""
                 )
                 payload["count"] = int_value(row["aggregate_count"], 1)

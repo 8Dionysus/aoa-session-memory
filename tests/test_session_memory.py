@@ -7671,6 +7671,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
         changed_payload = store.replace_sources([contribution(source_sha="sha-3", event_label="changed event")])
         store.conn.commit()
         source_row = store.conn.execute("SELECT source_sha FROM graph_sources WHERE source_key = ?", (source_key,)).fetchone()
+        event_payload_row = store.conn.execute("SELECT payload_json FROM nodes WHERE id = ?", (event_node_id,)).fetchone()
     finally:
         store.close()
 
@@ -7689,9 +7690,98 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     assert "elapsed_ms" in changed_payload["edge_refresh"]
     assert "elapsed_ms" in changed_payload["aggregate_refresh_timing"]
     assert "aggregate_refresh_ms" in changed_payload["phase_timings_ms"]
+    assert changed_payload["node_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_with_bounded_fresh_representative"
+    assert changed_payload["node_refresh"]["representative_payload_count"] >= 1
     assert changed_payload["results"][0]["aggregate_update"] == "refresh"
     assert source_row is not None
     assert source_row[0] == "sha-3"
+    assert event_payload_row is not None
+    assert json.loads(str(event_payload_row[0]))["label"] == "changed event"
+
+
+def test_graph_store_refresh_reuses_existing_payload_for_high_fanout_aggregates(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    shared_node_id = module.graph_route_node_id("entity", "high_fanout_refresh_probe")
+    shared_edge_id = module.graph_edge_id("session:high-fanout", shared_node_id, "session_has_registered_entity")
+    source_count = module.GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT + 3
+
+    def contribution(index: int, *, shared_label: str = "stable high fanout label") -> dict[str, Any]:
+        source_key = f"segment:high-fanout:{index:03}"
+        event_node_id = f"event:high-fanout:001:{index:06}"
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": "high-fanout",
+                "session_label": "2026-06-28__001__high-fanout",
+                "segment_id": f"{index:03}",
+                "source_path": str(aoa_root / f"{source_key}.json"),
+                "source_paths": [str(aoa_root / f"{source_key}.json")],
+                "source_sha": f"sha-{index}",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {
+                    "id": shared_node_id,
+                    "type": "route_signal",
+                    "label": shared_label,
+                    "route_layer": "entity",
+                    "route_key": "high_fanout_refresh_probe",
+                    "route_signal": "entity:high_fanout_refresh_probe",
+                    "count": 1,
+                },
+                {
+                    "id": event_node_id,
+                    "type": "event",
+                    "label": f"event {index}",
+                    "count": 1,
+                },
+            ],
+            "edges": [
+                {
+                    "id": shared_edge_id,
+                    "source": "session:high-fanout",
+                    "target": shared_node_id,
+                    "type": "session_has_registered_entity",
+                    "label": "shared edge",
+                    "count": 1,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution(index) for index in range(source_count)])
+        before_node = json.loads(str(store.conn.execute("SELECT payload_json FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()[0]))
+        before_edge = json.loads(str(store.conn.execute("SELECT payload_json FROM edges WHERE id = ?", (shared_edge_id,)).fetchone()[0]))
+        replaced = store.replace_sources([contribution(0, shared_label="changed high fanout label")])
+        store.conn.commit()
+        after_node_row = store.conn.execute("SELECT payload_json, count FROM nodes WHERE id = ?", (shared_node_id,)).fetchone()
+        after_edge_row = store.conn.execute("SELECT payload_json, count FROM edges WHERE id = ?", (shared_edge_id,)).fetchone()
+    finally:
+        store.close()
+
+    assert replaced["node_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_with_bounded_fresh_representative"
+    assert replaced["edge_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_without_edge_representative"
+    assert replaced["node_refresh"]["existing_payload_reused_count"] >= 1
+    assert replaced["edge_refresh"]["existing_payload_reused_count"] >= 1
+    assert replaced["node_refresh"]["representative_payload_count"] < replaced["node_refresh"]["aggregate_row_count"]
+    assert replaced["edge_refresh"]["representative_payload_count"] == 0
+    assert after_node_row is not None
+    assert after_edge_row is not None
+    after_node = json.loads(str(after_node_row[0]))
+    after_edge = json.loads(str(after_edge_row[0]))
+    assert int(after_node_row[1]) == source_count
+    assert int(after_edge_row[1]) == source_count
+    assert after_node["label"] == before_node["label"]
+    assert after_node["label"] != "changed high fanout label"
+    assert after_edge["label"] == before_edge["label"]
+    assert after_node["count"] == source_count
+    assert after_edge["count"] == source_count
 
 
 def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(tmp_path: Path) -> None:
