@@ -36460,7 +36460,7 @@ def literal_query_embedded_entity_anchor(
     search_kinds = literal_query_embedded_entity_search_kinds(kind)
     registry = load_entity_registry(aoa_root)
     entries = registry.get("entries") if isinstance(registry.get("entries"), list) else []
-    candidates: list[tuple[tuple[int, int, int, int, int], dict[str, Any]]] = []
+    candidates: list[tuple[tuple[int, int, int, int, int, int], dict[str, Any]]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -36476,11 +36476,19 @@ def literal_query_embedded_entity_anchor(
                 not match_key
                 or match_key in LITERAL_QUERY_EMBEDDED_ENTITY_STOP_KEYS
                 or len(match_key) < 4
-                or match_key == normalized_text
             ):
                 continue
             if not re.search(rf"(?:^|_){re.escape(match_key)}(?:_|$)", normalized_text):
                 continue
+            if match_key == normalized_text:
+                match_relation = "exact"
+                relation_score = 3
+            elif normalized_text.startswith(f"{match_key}_") or normalized_text.endswith(f"_{match_key}"):
+                match_relation = "boundary"
+                relation_score = 2
+            else:
+                match_relation = "embedded"
+                relation_score = 1
             status = str(entry.get("status") or "")
             status_score = {
                 "active": 5,
@@ -36492,7 +36500,7 @@ def literal_query_embedded_entity_anchor(
             kind_score = 100 - LITERAL_QUERY_EMBEDDED_ENTITY_KIND_PRIORITY.get(registry_kind, 90)
             source_score = 1 if raw_value == key else 0
             signal_score = min(int_value(entry.get("signal_count")), 1000)
-            score = (status_score, kind_score, len(match_key), source_score, signal_score)
+            score = (relation_score, status_score, len(match_key), source_score, kind_score, signal_score)
             candidates.append(
                 (
                     score,
@@ -36504,6 +36512,7 @@ def literal_query_embedded_entity_anchor(
                         "status": status,
                         "matched_text": raw_value,
                         "match_key": match_key,
+                        "match_relation": match_relation,
                         "source_surface": entry.get("source_surface"),
                     },
                 )

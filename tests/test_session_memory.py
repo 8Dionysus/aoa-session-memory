@@ -5524,6 +5524,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
+    skill_dir = aoa_root / "skills" / "aoa-session-memory-evidence-route"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: aoa-session-memory-evidence-route\n"
+        "description: Route prior session evidence for recurring operational entities.\n"
+        "---\n",
+        encoding="utf-8",
+    )
     archived_session_label = next(path.name for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
     graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True)
@@ -5701,6 +5710,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     concrete_mcp_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="как агент использовал aoa-session-memory-mcp и к чему это привело",
+        doc_type="event",
+    )
+    overlapping_exact_skill_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="aoa-session-memory-evidence-route",
         doc_type="event",
     )
     structured_literal_plan = module.literal_query_plan(
@@ -5946,6 +5960,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
     assert concrete_mcp_literal_plan["broad_entity_class"] == {}
     assert concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
+    assert overlapping_exact_skill_literal_plan["query_shape"]["primary"] == "entity_anchor"
+    assert overlapping_exact_skill_literal_plan["route_anchor"] == "aoa_session_memory_evidence_route"
+    assert overlapping_exact_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"
+    assert overlapping_exact_skill_literal_plan["route_anchor_kind"] == "skill"
+    assert overlapping_exact_skill_literal_plan["embedded_entity_anchor"]["registry_kind"] == "skill"
+    assert overlapping_exact_skill_literal_plan["embedded_entity_anchor"]["match_relation"] == "exact"
+    assert "usage-chain aoa_session_memory_evidence_route" in overlapping_exact_skill_literal_plan["next_command"]
+    assert "--kind skill" in overlapping_exact_skill_literal_plan["next_command"]
     assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
     assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
