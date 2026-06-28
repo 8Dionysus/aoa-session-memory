@@ -261,6 +261,8 @@ GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT = 12
 GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS = 6 * 60 * 60
 GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS = 240_000
 GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS = 180_000
+GRAPH_MAINTENANCE_SLOW_QUEUE_DRIP_ELAPSED_MS = 90_000
+GRAPH_MAINTENANCE_SLOW_AGGREGATE_REFRESH_MS = 60_000
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
@@ -50580,6 +50582,7 @@ def graph_maintenance_status_from_state(
             "max_refresh_edges",
             "budget_exhausted",
             "elapsed_ms",
+            "aggregate_refresh_ms",
             "mutation_rolled_back",
             "usable_for_hot_gate",
             "queue_queued_count",
@@ -50608,6 +50611,7 @@ def graph_maintenance_status_from_state(
             "max_refresh_edges",
             "budget_exhausted",
             "elapsed_ms",
+            "aggregate_refresh_ms",
             "mutation_rolled_back",
             "queue_queued_count",
             "queue_removed_count",
@@ -52527,6 +52531,8 @@ def session_memory_maintenance_next_actions(
                 and int_value(graph.get("actionable_count")) > 0
                 and "maintenance_queue_empty_but_ledger_actionable_sources_present" in graph_diagnostics
             )
+            queue_sizing_elapsed_ms = int_value(queue_sizing_maintenance.get("elapsed_ms"))
+            queue_sizing_aggregate_refresh_ms = int_value(queue_sizing_maintenance.get("aggregate_refresh_ms"))
             graph_queue_drip = (
                 (graph_queued_count > 0 or graph_queue_seed_needed)
                 and graph_route == "budgeted_graph_maintenance"
@@ -52544,8 +52550,8 @@ def session_memory_maintenance_next_actions(
                 and int_value(queue_sizing_maintenance.get("batch_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
                 and int_value(queue_sizing_maintenance.get("candidate_pool_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
                 and (
-                    int_value(queue_sizing_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS
-                    or int_value(queue_sizing_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS
+                    queue_sizing_elapsed_ms >= GRAPH_MAINTENANCE_SLOW_QUEUE_DRIP_ELAPSED_MS
+                    or queue_sizing_aggregate_refresh_ms >= GRAPH_MAINTENANCE_SLOW_AGGREGATE_REFRESH_MS
                 )
             )
             if graph_queue_drip:
@@ -54333,6 +54339,24 @@ def graph_maintenance_report_mutation_rolled_back(report: dict[str, Any]) -> boo
     return bool(detail.get("mutation_rolled_back"))
 
 
+def graph_maintenance_report_aggregate_refresh_ms(report: dict[str, Any]) -> int:
+    detail = report.get("maintenance_detail") if isinstance(report.get("maintenance_detail"), dict) else {}
+    replaced_phase_timings = (
+        detail.get("replaced_phase_timings_ms") if isinstance(detail.get("replaced_phase_timings_ms"), dict) else {}
+    )
+    replaced_aggregate_timing = (
+        detail.get("replaced_aggregate_refresh_timing")
+        if isinstance(detail.get("replaced_aggregate_refresh_timing"), dict)
+        else {}
+    )
+    phase_timings = detail.get("phase_timings_ms") if isinstance(detail.get("phase_timings_ms"), dict) else {}
+    return max(
+        int_value(replaced_phase_timings.get("aggregate_refresh_ms")),
+        int_value(replaced_aggregate_timing.get("elapsed_ms")),
+        int_value(phase_timings.get("aggregate_refresh_ms")),
+    )
+
+
 def recent_graph_maintenance_no_progress_evidence(
     reports: list[dict[str, Any]],
     *,
@@ -54474,6 +54498,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "max_refresh_edges": latest_report.get("max_refresh_edges"),
             "budget_exhausted": bool(latest_report.get("budget_exhausted")),
             "elapsed_ms": latest_report.get("elapsed_ms"),
+            "aggregate_refresh_ms": graph_maintenance_report_aggregate_refresh_ms(latest_report),
             "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_report),
             "queue_queued_count": latest_queue_update.get("queued_count"),
             "budget_deferred_source_count": latest_report.get("budget_deferred_source_count"),
@@ -54501,6 +54526,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
                 "max_refresh_edges": latest_queue_report.get("max_refresh_edges"),
                 "budget_exhausted": bool(latest_queue_report.get("budget_exhausted")),
                 "elapsed_ms": latest_queue_report.get("elapsed_ms"),
+                "aggregate_refresh_ms": graph_maintenance_report_aggregate_refresh_ms(latest_queue_report),
                 "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_queue_report),
                 "queue_queued_count": latest_queue_update.get("queued_count"),
                 "queue_removed_count": latest_queue_update.get("removed_count"),

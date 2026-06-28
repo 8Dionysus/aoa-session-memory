@@ -1655,6 +1655,24 @@ Maintenance gates:
   proof: `test_latest_graph_queue_maintenance_report_prefers_latest_use_queue`.
   The remaining route tails are still explicit:
   `graph_actionable_sources` and `search_projection_combined_large`.
+- 2026-06-28 graph queue micro-drip proof: the queue-report route now carries
+  `aggregate_refresh_ms` from full graph-maintenance diagnostics through the
+  compact `maintenance-status` packet. A live status read of
+  `diagnostics/20260628T095408Z__graph-maintenance.json` exposed
+  `elapsed_ms=139599` and `aggregate_refresh_ms=103360`; the next action
+  switched from ordinary queue drip to `repair_graph_queue_micro_drip` with
+  `--batch-limit 10`, `--max-refresh-nodes 10000`, and
+  `--max-refresh-edges 30000`. Running that exact live micro-drip wrote
+  `diagnostics/20260628T101255Z__graph-maintenance.json`, processed `8`
+  selected sources, moved the queue `427 -> 419`, kept rollback and budget
+  exhaustion false, and reduced aggregate refresh to `79012ms` for
+  `6524` planned nodes and `27730` planned edges. Because the run still took
+  `104712ms`, the practical slow queue-drip threshold now keeps the next
+  action on `repair_graph_queue_micro_drip` instead of bouncing back to a
+  larger drip too early. Regression proof:
+  `test_graph_status_preserves_latest_queue_aggregate_refresh_ms`,
+  `test_graph_maintenance_report_aggregate_refresh_ms_reads_real_queue_timing`,
+  and `test_maintenance_next_actions_micro_drips_after_slow_queue_aggregate_refresh`.
 
 ## Probe Notes
 

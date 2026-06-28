@@ -7797,6 +7797,68 @@ def test_maintenance_next_actions_micro_drips_after_slow_scoped_queue_progress(t
     assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES}" in command_text
 
 
+def test_maintenance_next_actions_micro_drips_after_slow_queue_aggregate_refresh(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2024,
+        "queued_count": 427,
+        "latest_queue_maintenance": {
+            "exists": True,
+            "mtime": time.time(),
+            "selection_scope": "selected_sessions",
+            "use_queue": True,
+            "apply": True,
+            "selected_count": 17,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "max_refresh_nodes": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            "max_refresh_edges": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
+            "elapsed_ms": module.GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS - 1,
+            "aggregate_refresh_ms": module.GRAPH_MAINTENANCE_SLOW_AGGREGATE_REFRESH_MS,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+        },
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_micro_drip"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES}" in command_text
+
+
+def test_graph_maintenance_report_aggregate_refresh_ms_reads_real_queue_timing() -> None:
+    report = {
+        "maintenance_detail": {
+            "phase_timings_ms": {"aggregate_refresh_ms": 40_000},
+            "replaced_phase_timings_ms": {"aggregate_refresh_ms": 103_360},
+            "replaced_aggregate_refresh_timing": {"elapsed_ms": 103_359},
+        }
+    }
+
+    assert module.graph_maintenance_report_aggregate_refresh_ms(report) == 103_360
+
+
 def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -8046,6 +8108,45 @@ def test_graph_status_preserves_existing_source_count_for_rebuild_recommendation
     assert summary["maintenance_recommendation"]["route"] == "store_only_rebuild"
     assert summary["maintenance_recommendation"]["existing_source_count"] == 118
     assert "graph-build all" in summary["maintenance_recommendation"]["command"]
+
+
+def test_graph_status_preserves_latest_queue_aggregate_refresh_ms(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph_state = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "needs_full_rebuild": False,
+        "source_count": 5705,
+        "source_state": {
+            "source_count": 5705,
+            "dirty_count": 2024,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "orphaned_count": 0,
+        },
+        "latest_queue_maintenance": {
+            "exists": True,
+            "path": str(aoa_root / "diagnostics" / "queue.json"),
+            "mtime": time.time(),
+            "use_queue": True,
+            "apply": True,
+            "selected_count": 17,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "elapsed_ms": 139_599,
+            "aggregate_refresh_ms": 103_360,
+            "queue_removed_count": 17,
+        },
+    }
+
+    summary = module.graph_maintenance_status_from_state(
+        graph_state,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert summary["latest_queue_maintenance"]["aggregate_refresh_ms"] == 103_360
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
