@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-28T14:25:00Z",
+  "generated_at": "2026-06-28T15:20:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 10,
+  "case_count": 11,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -116,6 +116,74 @@
             ],
             "required_match_relations": [
               "exact"
+            ],
+            "max_elapsed_ms": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "literal_mcp_transport_closed_reload_gate_contract",
+      "profiles": [
+        "literal_planner"
+      ],
+      "seed": "corpus-literal-mcp-transport-reload-gate",
+      "sample_size": 6,
+      "recent_days": 7,
+      "limit": 6,
+      "literal_probes": [
+        {
+          "name": "mcp_transport_closed_keeps_entity_anchor",
+          "query": "aoa-session-memory-mcp Transport closed",
+          "expected_shape": "entity_anchor",
+          "expected_primary_route": "entity_usage_chain",
+          "expected_route_anchor": "aoa_session_memory_mcp",
+          "expected_route_anchor_kind": "mcp",
+          "expected_route_anchor_source": "embedded_entity_registry",
+          "expected_match_relation": "boundary"
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "A direct MCP Transport closed symptom must stay routed as the aoa-session-memory MCP entity first, then to transport preflight or stdio validation, not to broad raw text fallback."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "literal_planner",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 6,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "required_primary_routes": [
+              "entity_usage_chain"
+            ],
+            "forbidden_primary_routes": [
+              "monolith_raw_text_fallback",
+              "scoped_shard_full_text"
+            ],
+            "required_shape_counts": [
+              "entity_anchor"
+            ],
+            "required_route_anchors": [
+              "aoa_session_memory_mcp"
+            ],
+            "required_route_anchor_kinds": [
+              "mcp"
+            ],
+            "required_route_anchor_sources": [
+              "embedded_entity_registry"
+            ],
+            "required_match_relations": [
+              "boundary"
             ],
             "max_elapsed_ms": 10000
           }

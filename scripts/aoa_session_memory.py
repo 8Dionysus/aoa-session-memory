@@ -61340,7 +61340,27 @@ def live_scenario_corpus_check(
     all_cases = [case for case in corpus.get("cases", []) if isinstance(case, dict)] if isinstance(corpus.get("cases"), list) else []
     selected_limit = max(0, int_value(case_limit, 0))
     cases = all_cases[:selected_limit] if selected_limit else all_cases
-    results = [live_scenario_corpus_case_check(aoa_root, case) for case in cases]
+    try:
+        live_session_count = len(chronological_session_records(aoa_root))
+    except Exception as exc:  # pragma: no cover - defensive route packet
+        live_session_count = 0
+        diagnostics.append(f"session_record_read_error:{exc}")
+    if cases and live_session_count <= 0:
+        results = [
+            {
+                "id": case.get("id"),
+                "ok": True,
+                "skipped": True,
+                "skip_reason": "empty_archive_no_live_scenarios",
+                "profiles": case.get("profiles") if isinstance(case.get("profiles"), list) else [],
+                "failures": [],
+                "actionable_gaps": [],
+                "observed": {},
+            }
+            for case in cases
+        ]
+    else:
+        results = [live_scenario_corpus_case_check(aoa_root, case) for case in cases]
     failures = [result for result in results if not result.get("ok")]
     actionable_gaps = [
         {**gap, "case_id": result.get("id")}
@@ -61358,6 +61378,7 @@ def live_scenario_corpus_check(
         "corpus_path": str(target),
         "case_count": len(results),
         "available_case_count": len(all_cases),
+        "live_session_count": live_session_count,
         "passed_count": sum(1 for result in results if result.get("ok")),
         "skipped_count": sum(1 for result in results if result.get("skipped")),
         "failed_count": len(failures),

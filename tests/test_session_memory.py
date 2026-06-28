@@ -4858,6 +4858,7 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
         }
 
     monkeypatch.setattr(module, "live_scenario_audit", fake_live_scenario_audit)
+    monkeypatch.setattr(module, "chronological_session_records", lambda _aoa_root: [{"session_id": "fixture-session"}])
 
     payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
 
@@ -4922,6 +4923,7 @@ def test_live_scenario_corpus_check_fails_missing_required_route(tmp_path: Path,
             "actionable_gaps": [],
         },
     )
+    monkeypatch.setattr(module, "chronological_session_records", lambda _aoa_root: [{"session_id": "fixture-session"}])
 
     payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
 
@@ -5003,6 +5005,7 @@ def test_live_scenario_corpus_check_fails_missing_entity_usage_spread(
             "actionable_gaps": [],
         },
     )
+    monkeypatch.setattr(module, "chronological_session_records", lambda _aoa_root: [{"session_id": "fixture-session"}])
 
     payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
 
@@ -5015,6 +5018,45 @@ def test_live_scenario_corpus_check_fails_missing_entity_usage_spread(
     assert "entity_usage:missing_evidence_mode:result_only" in failures
     assert "entity_usage:non_usage_evidence_sample_count:0<1" in failures
     assert "entity_usage:raw_or_segment_ref_sample_count:2<3" in failures
+
+
+def test_live_scenario_corpus_check_skips_empty_archive(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    corpus_path.parent.mkdir(parents=True)
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "needs_live_archive",
+                    "profiles": ["literal_planner"],
+                    "expect": {"max_failed_count": 0},
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(module, "chronological_session_records", lambda _aoa_root: [])
+
+    def fail_audit(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("empty archives should not run live scenarios")
+
+    monkeypatch.setattr(module, "live_scenario_audit", fail_audit)
+
+    payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
+
+    assert payload["ok"] is True
+    assert payload["case_count"] == 1
+    assert payload["live_session_count"] == 0
+    assert payload["skipped_count"] == 1
+    assert payload["failed_count"] == 0
+    assert payload["results"][0]["skip_reason"] == "empty_archive_no_live_scenarios"
 
 
 def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> None:
