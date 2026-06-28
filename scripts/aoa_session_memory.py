@@ -294,6 +294,10 @@ GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 512
 GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT = 4
+GRAPH_MAINTENANCE_EXISTING_NODE_FRESH_REPRESENTATIVE_SKIP_TYPES = {
+    "event",
+    "path",
+}
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES = 20000
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES = 60000
 GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT = 10
@@ -39321,26 +39325,7 @@ class GraphSqliteStore:
         if not source_key:
             return {"matches": False, "reason": "missing_source_key"}
         expected_nodes, expected_edges = self._expected_contrib_row_maps(contribution)
-        current_nodes = {
-            str(row["node_id"]): (str(row["node_type"] or "unknown"), str(row["payload_json"]), int_value(row["count"], 1))
-            for row in self.conn.execute(
-                "SELECT node_id, node_type, payload_json, count FROM node_contribs WHERE source_key = ?",
-                (source_key,),
-            ).fetchall()
-        }
-        current_edges = {
-            str(row["edge_id"]): (
-                str(row["edge_type"] or "unknown"),
-                str(row["source_node"] or ""),
-                str(row["target_node"] or ""),
-                str(row["payload_json"]),
-                int_value(row["count"], 1),
-            )
-            for row in self.conn.execute(
-                "SELECT edge_id, edge_type, source_node, target_node, payload_json, count FROM edge_contribs WHERE source_key = ?",
-                (source_key,),
-            ).fetchall()
-        }
+        current_nodes, current_edges = self._source_contrib_row_maps(source_key)
         node_match = current_nodes == expected_nodes
         edge_match = current_edges == expected_edges
         return {
@@ -39445,7 +39430,7 @@ class GraphSqliteStore:
             "minimal_payload_count": 0,
             "invalid_existing_payload_count": 0,
             "fresh_representative_row_limit": GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT,
-            "refresh_strategy": "sql_summary_existing_payload_with_bounded_fresh_representative",
+            "refresh_strategy": "sql_summary_existing_payload_with_selective_fresh_representative",
         }
         for chunk in self._id_chunks(node_ids):
             graph_check_budget(budget_deadline)
@@ -39456,7 +39441,6 @@ class GraphSqliteStore:
                 for row in self.conn.execute(
                     f"""
                     SELECT node_id,
-                           MIN(node_type) AS node_type,
                            SUM(count) AS aggregate_count,
                            COUNT(*) AS contrib_row_count
                     FROM node_contribs
@@ -39477,7 +39461,11 @@ class GraphSqliteStore:
                 node_id
                 for node_id, row in summary_rows.items()
                 if node_id not in existing_rows
-                or int_value(row["contrib_row_count"]) <= GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+                or (
+                    int_value(row["contrib_row_count"]) <= GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+                    and str(existing_rows[node_id]["node_type"] or "unknown")
+                    not in GRAPH_MAINTENANCE_EXISTING_NODE_FRESH_REPRESENTATIVE_SKIP_TYPES
+                )
             ]
             representative_rows: dict[str, sqlite3.Row] = {}
             if representative_node_ids:
@@ -39540,7 +39528,9 @@ class GraphSqliteStore:
                     (
                         representative["node_type"]
                         if representative is not None
-                        else row["node_type"]
+                        else existing["node_type"]
+                        if existing is not None
+                        else "unknown"
                     )
                     or "unknown"
                 )
@@ -39587,9 +39577,6 @@ class GraphSqliteStore:
                 for row in self.conn.execute(
                     f"""
                     SELECT edge_id,
-                           MIN(edge_type) AS edge_type,
-                           MIN(source_node) AS source_node,
-                           MIN(target_node) AS target_node,
                            SUM(count) AS aggregate_count,
                            COUNT(*) AS contrib_row_count
                     FROM edge_contribs
@@ -39610,6 +39597,25 @@ class GraphSqliteStore:
                     chunk,
                 ).fetchall()
             }
+            missing_identity_edge_ids = [edge_id for edge_id in summary_rows if edge_id not in existing_rows]
+            identity_rows: dict[str, sqlite3.Row] = {}
+            if missing_identity_edge_ids:
+                identity_placeholders = ",".join("?" for _ in missing_identity_edge_ids)
+                identity_rows = {
+                    str(row["edge_id"]): row
+                    for row in self.conn.execute(
+                        f"""
+                        SELECT edge_id,
+                               MIN(edge_type) AS edge_type,
+                               MIN(source_node) AS source_node,
+                               MIN(target_node) AS target_node
+                        FROM edge_contribs
+                        WHERE edge_id IN ({identity_placeholders})
+                        GROUP BY edge_id
+                        """,
+                        missing_identity_edge_ids,
+                    ).fetchall()
+                }
             representative_rows: dict[str, sqlite3.Row] = {}
             for edge_id in sorted(chunk):
                 row = summary_rows.get(edge_id)
@@ -39622,6 +39628,7 @@ class GraphSqliteStore:
                 stats["row_count"] += contrib_row_count
                 representative = representative_rows.get(edge_id)
                 existing = existing_rows.get(edge_id)
+                identity = identity_rows.get(edge_id)
                 payload: dict[str, Any] = {}
                 if representative is not None:
                     stats["representative_payload_count"] += 1
@@ -39647,7 +39654,11 @@ class GraphSqliteStore:
                     (
                         representative["edge_type"]
                         if representative is not None
-                        else row["edge_type"]
+                        else existing["edge_type"]
+                        if existing is not None
+                        else identity["edge_type"]
+                        if identity is not None
+                        else "unknown"
                     )
                     or "unknown"
                 )
@@ -39655,7 +39666,11 @@ class GraphSqliteStore:
                     (
                         representative["source_node"]
                         if representative is not None
-                        else row["source_node"]
+                        else existing["source_node"]
+                        if existing is not None
+                        else identity["source_node"]
+                        if identity is not None
+                        else ""
                     )
                     or ""
                 )
@@ -39663,7 +39678,11 @@ class GraphSqliteStore:
                     (
                         representative["target_node"]
                         if representative is not None
-                        else row["target_node"]
+                        else existing["target_node"]
+                        if existing is not None
+                        else identity["target_node"]
+                        if identity is not None
+                        else ""
                     )
                     or ""
                 )
@@ -39707,6 +39726,346 @@ class GraphSqliteStore:
         }
         return old_node_ids, old_edge_ids
 
+    def _source_contrib_row_maps(
+        self,
+        source_key: str,
+    ) -> tuple[dict[str, tuple[str, str, int]], dict[str, tuple[str, str, str, str, int]]]:
+        source_key = str(source_key or "")
+        if not source_key:
+            return {}, {}
+        node_rows = {
+            str(row["node_id"]): (str(row["node_type"] or "unknown"), str(row["payload_json"]), int_value(row["count"], 1))
+            for row in self.conn.execute(
+                "SELECT node_id, node_type, payload_json, count FROM node_contribs WHERE source_key = ?",
+                (source_key,),
+            ).fetchall()
+        }
+        edge_rows = {
+            str(row["edge_id"]): (
+                str(row["edge_type"] or "unknown"),
+                str(row["source_node"] or ""),
+                str(row["target_node"] or ""),
+                str(row["payload_json"]),
+                int_value(row["count"], 1),
+            )
+            for row in self.conn.execute(
+                """
+                SELECT edge_id, edge_type, source_node, target_node, payload_json, count
+                FROM edge_contribs
+                WHERE source_key = ?
+                """,
+                (source_key,),
+            ).fetchall()
+        }
+        return node_rows, edge_rows
+
+    @staticmethod
+    def _merge_numeric_stats(total: dict[str, Any], update: dict[str, Any]) -> None:
+        for key, value in update.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                total[key] = int_value(total.get(key)) + value
+
+    @staticmethod
+    def _parse_graph_payload(payload_json: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _aggregate_payload_from_node_row(
+        self,
+        node_id: str,
+        row: tuple[str, str, int],
+        *,
+        aggregate_count: int,
+    ) -> dict[str, Any]:
+        payload = self._parse_graph_payload(row[1])
+        payload["id"] = node_id
+        payload["type"] = str(row[0] or "unknown")
+        payload["count"] = max(0, int_value(aggregate_count))
+        payload["evidence_ref_count"] = max(
+            int_value(payload.get("evidence_ref_count"), 0),
+            min(max(0, int_value(aggregate_count)), graph_aggregate_evidence_limit("node")),
+        )
+        return graph_compact_aggregate_payload(payload, kind="node")
+
+    def _aggregate_payload_from_edge_row(
+        self,
+        edge_id: str,
+        row: tuple[str, str, str, str, int],
+        *,
+        aggregate_count: int,
+    ) -> dict[str, Any]:
+        payload = self._parse_graph_payload(row[3])
+        payload["id"] = edge_id
+        payload["type"] = str(row[0] or "unknown")
+        payload["source"] = str(row[1] or "")
+        payload["target"] = str(row[2] or "")
+        payload["count"] = max(0, int_value(aggregate_count))
+        payload["evidence_ref_count"] = max(
+            int_value(payload.get("evidence_ref_count"), 0),
+            min(max(0, int_value(aggregate_count)), graph_aggregate_evidence_limit("edge")),
+        )
+        return graph_compact_aggregate_payload(payload, kind="edge")
+
+    def _apply_node_aggregate_deltas(
+        self,
+        old_rows: dict[str, tuple[str, str, int]],
+        new_rows: dict[str, tuple[str, str, int]],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        node_ids = set(old_rows) | set(new_rows)
+        stats: dict[str, Any] = {
+            "refresh_strategy": "source_delta_existing_payload",
+            "requested_count": len(node_ids),
+            "chunk_count": 0,
+            "row_count": len(old_rows) + len(new_rows),
+            "old_row_count": len(old_rows),
+            "new_row_count": len(new_rows),
+            "aggregate_row_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "deleted_count": 0,
+            "payload_refreshed_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "missing_existing_count": 0,
+        }
+        projection_ready = self.type_counts_projection_ready()
+        inserted_type_counts: Counter[str] = Counter()
+        deleted_type_counts: Counter[str] = Counter()
+        changed_type_before: Counter[str] = Counter()
+        changed_type_after: Counter[str] = Counter()
+        for chunk in self._id_chunks(node_ids):
+            graph_check_budget(budget_deadline)
+            stats["chunk_count"] += 1
+            placeholders = ",".join("?" for _ in chunk)
+            existing_rows = {
+                str(row["id"]): row
+                for row in self.conn.execute(
+                    f"SELECT id, node_type, payload_json, count FROM nodes WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            }
+            for node_id in chunk:
+                old_row = old_rows.get(node_id)
+                new_row = new_rows.get(node_id)
+                old_count = int_value(old_row[2]) if old_row is not None else 0
+                new_count = int_value(new_row[2]) if new_row is not None else 0
+                delta = new_count - old_count
+                payload_changed = bool(old_row is not None and new_row is not None and old_row != new_row)
+                existing = existing_rows.get(node_id)
+                if existing is None:
+                    stats["missing_existing_count"] += 1
+                    if new_row is None or new_count <= 0:
+                        stats["minimal_payload_count"] += 1
+                        continue
+                    aggregate_count = new_count
+                    payload = self._aggregate_payload_from_node_row(node_id, new_row, aggregate_count=aggregate_count)
+                    node_type = str(payload.get("type") or new_row[0] or "unknown")
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO nodes(id, node_type, payload_json, count) VALUES (?, ?, ?, ?)",
+                        (node_id, node_type, graph_json(payload), aggregate_count),
+                    )
+                    inserted_type_counts[node_type] += 1
+                    stats["inserted_count"] += 1
+                    stats["payload_refreshed_count"] += 1
+                    stats["aggregate_row_count"] += 1
+                    continue
+
+                existing_count = int_value(existing["count"], 0)
+                aggregate_count = existing_count + delta
+                existing_type = str(existing["node_type"] or "unknown")
+                if aggregate_count <= 0:
+                    self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+                    deleted_type_counts[existing_type] += 1
+                    stats["deleted_count"] += 1
+                    continue
+
+                refresh_payload = (
+                    new_row is not None
+                    and payload_changed
+                    and aggregate_count <= GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+                    and str(new_row[0] or existing_type)
+                    not in GRAPH_MAINTENANCE_EXISTING_NODE_FRESH_REPRESENTATIVE_SKIP_TYPES
+                )
+                if refresh_payload:
+                    payload = self._aggregate_payload_from_node_row(node_id, new_row, aggregate_count=aggregate_count)
+                    node_type = str(payload.get("type") or new_row[0] or existing_type)
+                    stats["payload_refreshed_count"] += 1
+                else:
+                    payload = self._parse_graph_payload(str(existing["payload_json"]))
+                    if not payload:
+                        payload = {"id": node_id, "type": existing_type}
+                        stats["minimal_payload_count"] += 1
+                    else:
+                        stats["existing_payload_reused_count"] += 1
+                    payload["id"] = node_id
+                    payload["type"] = str(payload.get("type") or existing_type)
+                    payload["count"] = aggregate_count
+                    payload["evidence_ref_count"] = max(
+                        int_value(payload.get("evidence_ref_count"), 0),
+                        min(aggregate_count, graph_aggregate_evidence_limit("node")),
+                    )
+                    node_type = str(payload.get("type") or existing_type)
+                    payload = graph_compact_aggregate_payload(payload, kind="node")
+                if node_type != existing_type:
+                    changed_type_before[existing_type] += 1
+                    changed_type_after[node_type] += 1
+                self.conn.execute(
+                    "UPDATE nodes SET node_type = ?, payload_json = ?, count = ? WHERE id = ?",
+                    (node_type, graph_json(payload), aggregate_count, node_id),
+                )
+                stats["updated_count"] += 1
+                stats["aggregate_row_count"] += 1
+        if projection_ready:
+            before = deleted_type_counts + changed_type_before
+            after = inserted_type_counts + changed_type_after
+            self._apply_type_count_delta("node", before, after)
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        stats["type_counts_projection_ready"] = bool(projection_ready)
+        return stats
+
+    def _apply_edge_aggregate_deltas(
+        self,
+        old_rows: dict[str, tuple[str, str, str, str, int]],
+        new_rows: dict[str, tuple[str, str, str, str, int]],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        started = graph_phase_timer_start()
+        edge_ids = set(old_rows) | set(new_rows)
+        stats: dict[str, Any] = {
+            "refresh_strategy": "source_delta_existing_payload",
+            "requested_count": len(edge_ids),
+            "chunk_count": 0,
+            "row_count": len(old_rows) + len(new_rows),
+            "old_row_count": len(old_rows),
+            "new_row_count": len(new_rows),
+            "aggregate_row_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "deleted_count": 0,
+            "payload_refreshed_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "missing_existing_count": 0,
+        }
+        projection_ready = self.type_counts_projection_ready()
+        inserted_type_counts: Counter[str] = Counter()
+        deleted_type_counts: Counter[str] = Counter()
+        changed_type_before: Counter[str] = Counter()
+        changed_type_after: Counter[str] = Counter()
+        for chunk in self._id_chunks(edge_ids):
+            graph_check_budget(budget_deadline)
+            stats["chunk_count"] += 1
+            placeholders = ",".join("?" for _ in chunk)
+            existing_rows = {
+                str(row["id"]): row
+                for row in self.conn.execute(
+                    f"""
+                    SELECT id, edge_type, source_node, target_node, payload_json, count
+                    FROM edges
+                    WHERE id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+            }
+            for edge_id in chunk:
+                old_row = old_rows.get(edge_id)
+                new_row = new_rows.get(edge_id)
+                old_count = int_value(old_row[4]) if old_row is not None else 0
+                new_count = int_value(new_row[4]) if new_row is not None else 0
+                delta = new_count - old_count
+                payload_changed = bool(old_row is not None and new_row is not None and old_row != new_row)
+                existing = existing_rows.get(edge_id)
+                if existing is None:
+                    stats["missing_existing_count"] += 1
+                    if new_row is None or new_count <= 0:
+                        stats["minimal_payload_count"] += 1
+                        continue
+                    aggregate_count = new_count
+                    payload = self._aggregate_payload_from_edge_row(edge_id, new_row, aggregate_count=aggregate_count)
+                    edge_type = str(payload.get("type") or new_row[0] or "unknown")
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            edge_id,
+                            edge_type,
+                            str(payload.get("source") or new_row[1] or ""),
+                            str(payload.get("target") or new_row[2] or ""),
+                            graph_json(payload),
+                            aggregate_count,
+                        ),
+                    )
+                    inserted_type_counts[edge_type] += 1
+                    stats["inserted_count"] += 1
+                    stats["payload_refreshed_count"] += 1
+                    stats["aggregate_row_count"] += 1
+                    continue
+
+                existing_count = int_value(existing["count"], 0)
+                aggregate_count = existing_count + delta
+                existing_type = str(existing["edge_type"] or "unknown")
+                if aggregate_count <= 0:
+                    self.conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+                    deleted_type_counts[existing_type] += 1
+                    stats["deleted_count"] += 1
+                    continue
+
+                if payload_changed and new_row is not None:
+                    payload = self._aggregate_payload_from_edge_row(edge_id, new_row, aggregate_count=aggregate_count)
+                    edge_type = str(payload.get("type") or new_row[0] or existing_type)
+                    source_node = str(payload.get("source") or new_row[1] or existing["source_node"] or "")
+                    target_node = str(payload.get("target") or new_row[2] or existing["target_node"] or "")
+                    stats["payload_refreshed_count"] += 1
+                else:
+                    payload = self._parse_graph_payload(str(existing["payload_json"]))
+                    if not payload:
+                        payload = {
+                            "id": edge_id,
+                            "type": existing_type,
+                            "source": str(existing["source_node"] or ""),
+                            "target": str(existing["target_node"] or ""),
+                        }
+                        stats["minimal_payload_count"] += 1
+                    else:
+                        stats["existing_payload_reused_count"] += 1
+                    payload["id"] = edge_id
+                    payload["type"] = str(payload.get("type") or existing_type)
+                    payload["source"] = str(payload.get("source") or existing["source_node"] or "")
+                    payload["target"] = str(payload.get("target") or existing["target_node"] or "")
+                    payload["count"] = aggregate_count
+                    payload["evidence_ref_count"] = max(
+                        int_value(payload.get("evidence_ref_count"), 0),
+                        min(aggregate_count, graph_aggregate_evidence_limit("edge")),
+                    )
+                    edge_type = str(payload.get("type") or existing_type)
+                    source_node = str(payload.get("source") or "")
+                    target_node = str(payload.get("target") or "")
+                    payload = graph_compact_aggregate_payload(payload, kind="edge")
+                if edge_type != existing_type:
+                    changed_type_before[existing_type] += 1
+                    changed_type_after[edge_type] += 1
+                self.conn.execute(
+                    "UPDATE edges SET edge_type = ?, source_node = ?, target_node = ?, payload_json = ?, count = ? WHERE id = ?",
+                    (edge_type, source_node, target_node, graph_json(payload), aggregate_count, edge_id),
+                )
+                stats["updated_count"] += 1
+                stats["aggregate_row_count"] += 1
+        if projection_ready:
+            before = deleted_type_counts + changed_type_before
+            after = inserted_type_counts + changed_type_after
+            self._apply_type_count_delta("edge", before, after)
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        stats["type_counts_projection_ready"] = bool(projection_ready)
+        return stats
+
     def replace_sources(
         self,
         contributions: Iterable[dict[str, Any]],
@@ -39725,6 +40084,24 @@ class GraphSqliteStore:
         metadata_only_source_count = 0
         metadata_only_node_count = 0
         metadata_only_edge_count = 0
+        node_delta_stats: dict[str, Any] = {
+            "refresh_strategy": "source_delta_existing_payload",
+            "requested_count": 0,
+            "chunk_count": 0,
+            "row_count": 0,
+            "old_row_count": 0,
+            "new_row_count": 0,
+            "aggregate_row_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "deleted_count": 0,
+            "payload_refreshed_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "missing_existing_count": 0,
+            "elapsed_ms": 0,
+        }
+        edge_delta_stats: dict[str, Any] = dict(node_delta_stats)
         results: list[dict[str, Any]] = []
         for contribution in contributions:
             source_started = graph_phase_timer_start()
@@ -39736,7 +40113,9 @@ class GraphSqliteStore:
                 graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
             phase_started = graph_phase_timer_start()
-            old_node_ids, old_edge_ids = self.source_contribution_ids(source_key)
+            old_node_rows, old_edge_rows = self._source_contrib_row_maps(source_key)
+            old_node_ids = set(old_node_rows)
+            old_edge_ids = set(old_edge_rows)
             graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
             if source.get("status") != "blocked" and (old_node_ids or old_edge_ids):
                 phase_started = graph_phase_timer_start()
@@ -39766,8 +40145,12 @@ class GraphSqliteStore:
             self.conn.execute("DELETE FROM edge_contribs WHERE source_key = ?", (source_key,))
             graph_add_phase_timing(phase_timings, "delete_old_contribs_ms", phase_started)
             if source.get("status") == "blocked":
-                touched_node_ids.update(old_node_ids)
-                touched_edge_ids.update(old_edge_ids)
+                phase_started = graph_phase_timer_start()
+                node_delta = self._apply_node_aggregate_deltas(old_node_rows, {}, budget_deadline=budget_deadline)
+                edge_delta = self._apply_edge_aggregate_deltas(old_edge_rows, {}, budget_deadline=budget_deadline)
+                self._merge_numeric_stats(node_delta_stats, node_delta)
+                self._merge_numeric_stats(edge_delta_stats, edge_delta)
+                graph_add_phase_timing(phase_timings, "aggregate_delta_ms", phase_started)
                 phase_started = graph_phase_timer_start()
                 self._insert_source_row(contribution, status="blocked")
                 graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
@@ -39775,6 +40158,7 @@ class GraphSqliteStore:
                 graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
             phase_started = graph_phase_timer_start()
+            new_node_rows, new_edge_rows = self._expected_contrib_row_maps(contribution)
             node_ids, edge_ids = self._insert_contrib_rows(contribution)
             graph_add_phase_timing(phase_timings, "insert_contrib_rows_ms", phase_started)
             phase_started = graph_phase_timer_start()
@@ -39802,8 +40186,12 @@ class GraphSqliteStore:
                 )
                 graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
-            touched_node_ids.update(old_node_ids | node_ids)
-            touched_edge_ids.update(old_edge_ids | edge_ids)
+            phase_started = graph_phase_timer_start()
+            node_delta = self._apply_node_aggregate_deltas(old_node_rows, new_node_rows, budget_deadline=budget_deadline)
+            edge_delta = self._apply_edge_aggregate_deltas(old_edge_rows, new_edge_rows, budget_deadline=budget_deadline)
+            self._merge_numeric_stats(node_delta_stats, node_delta)
+            self._merge_numeric_stats(edge_delta_stats, edge_delta)
+            graph_add_phase_timing(phase_timings, "aggregate_delta_ms", phase_started)
             results.append(
                 {
                     "source_key": source_key,
@@ -39811,18 +40199,28 @@ class GraphSqliteStore:
                     "node_count": len(node_ids),
                     "edge_count": len(edge_ids),
                     "diagnostics": [],
-                    "aggregate_update": "refresh",
+                    "aggregate_update": "delta",
                 }
             )
             graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
         graph_check_budget(budget_deadline)
-        phase_started = graph_phase_timer_start()
-        node_refresh, edge_refresh, aggregate_refresh_timing = self._refresh_touched_aggregates_with_type_counts(
-            touched_node_ids,
-            touched_edge_ids,
-            budget_deadline=budget_deadline,
-        )
-        graph_add_phase_timing(phase_timings, "aggregate_refresh_ms", phase_started)
+        if touched_node_ids or touched_edge_ids:
+            phase_started = graph_phase_timer_start()
+            node_refresh, edge_refresh, aggregate_refresh_timing = self._refresh_touched_aggregates_with_type_counts(
+                touched_node_ids,
+                touched_edge_ids,
+                budget_deadline=budget_deadline,
+            )
+            graph_add_phase_timing(phase_timings, "aggregate_refresh_ms", phase_started)
+        else:
+            node_refresh = node_delta_stats
+            edge_refresh = edge_delta_stats
+            aggregate_refresh_timing = {
+                "refresh_strategy": "source_delta_no_full_refresh",
+                "elapsed_ms": 0,
+                "type_counts_projection_ready": self.type_counts_projection_ready(),
+            }
+            phase_timings.setdefault("aggregate_refresh_ms", 0)
         phase_started = graph_phase_timer_start()
         self._upsert_metadata("updated_at", utc_now())
         self._upsert_metadata("graph_schema_version", GRAPH_SCHEMA_VERSION)
@@ -39835,8 +40233,8 @@ class GraphSqliteStore:
         phase_timings["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return {
             "results": results,
-            "refreshed_node_count": len(touched_node_ids),
-            "refreshed_edge_count": len(touched_edge_ids),
+            "refreshed_node_count": len(touched_node_ids) + int_value(node_delta_stats.get("requested_count")),
+            "refreshed_edge_count": len(touched_edge_ids) + int_value(edge_delta_stats.get("requested_count")),
             "refresh_chunk_size": self.refresh_chunk_size,
             "node_refresh": node_refresh,
             "edge_refresh": edge_refresh,
@@ -39850,6 +40248,8 @@ class GraphSqliteStore:
             "metadata_only_source_count": metadata_only_source_count,
             "metadata_only_node_count": metadata_only_node_count,
             "metadata_only_edge_count": metadata_only_edge_count,
+            "node_delta_update": node_delta_stats,
+            "edge_delta_update": edge_delta_stats,
         }
 
     def remove_sources(

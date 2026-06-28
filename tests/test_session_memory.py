@@ -7618,7 +7618,12 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     entity_node_id = module.graph_route_node_id("entity", "metadata_only_probe")
     edge_id = module.graph_edge_id(event_node_id, entity_node_id, "event_mentions_registered_entity")
 
-    def contribution(*, source_sha: str, event_label: str = "original event") -> dict[str, Any]:
+    def contribution(
+        *,
+        source_sha: str,
+        event_label: str = "original event",
+        entity_label: str = "entity:metadata_only_probe",
+    ) -> dict[str, Any]:
         return {
             "source": {
                 "source_key": source_key,
@@ -7644,7 +7649,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
                 {
                     "id": entity_node_id,
                     "type": "route_signal",
-                    "label": "entity:metadata_only_probe",
+                    "label": entity_label,
                     "route_layer": "entity",
                     "route_key": "metadata_only_probe",
                     "route_signal": "entity:metadata_only_probe",
@@ -7668,10 +7673,19 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
         store.conn.commit()
         metadata_only = store.replace_sources([contribution(source_sha="sha-2")])
         store.conn.commit()
-        changed_payload = store.replace_sources([contribution(source_sha="sha-3", event_label="changed event")])
+        changed_payload = store.replace_sources(
+            [
+                contribution(
+                    source_sha="sha-3",
+                    event_label="changed event",
+                    entity_label="changed entity:metadata_only_probe",
+                )
+            ]
+        )
         store.conn.commit()
         source_row = store.conn.execute("SELECT source_sha FROM graph_sources WHERE source_key = ?", (source_key,)).fetchone()
         event_payload_row = store.conn.execute("SELECT payload_json FROM nodes WHERE id = ?", (event_node_id,)).fetchone()
+        entity_payload_row = store.conn.execute("SELECT payload_json FROM nodes WHERE id = ?", (entity_node_id,)).fetchone()
     finally:
         store.close()
 
@@ -7690,13 +7704,17 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     assert "elapsed_ms" in changed_payload["edge_refresh"]
     assert "elapsed_ms" in changed_payload["aggregate_refresh_timing"]
     assert "aggregate_refresh_ms" in changed_payload["phase_timings_ms"]
-    assert changed_payload["node_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_with_bounded_fresh_representative"
-    assert changed_payload["node_refresh"]["representative_payload_count"] >= 1
-    assert changed_payload["results"][0]["aggregate_update"] == "refresh"
+    assert changed_payload["node_refresh"]["refresh_strategy"] == "source_delta_existing_payload"
+    assert changed_payload["node_refresh"]["payload_refreshed_count"] >= 1
+    assert changed_payload["node_refresh"]["existing_payload_reused_count"] >= 1
+    assert changed_payload["aggregate_refresh_timing"]["refresh_strategy"] == "source_delta_no_full_refresh"
+    assert changed_payload["results"][0]["aggregate_update"] == "delta"
     assert source_row is not None
     assert source_row[0] == "sha-3"
     assert event_payload_row is not None
-    assert json.loads(str(event_payload_row[0]))["label"] == "changed event"
+    assert json.loads(str(event_payload_row[0]))["label"] == "original event"
+    assert entity_payload_row is not None
+    assert json.loads(str(entity_payload_row[0]))["label"] == "changed entity:metadata_only_probe"
 
 
 def test_graph_store_refresh_reuses_existing_payload_for_high_fanout_aggregates(tmp_path: Path) -> None:
@@ -7765,12 +7783,11 @@ def test_graph_store_refresh_reuses_existing_payload_for_high_fanout_aggregates(
     finally:
         store.close()
 
-    assert replaced["node_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_with_bounded_fresh_representative"
-    assert replaced["edge_refresh"]["refresh_strategy"] == "sql_summary_existing_payload_without_edge_representative"
+    assert replaced["node_refresh"]["refresh_strategy"] == "source_delta_existing_payload"
+    assert replaced["edge_refresh"]["refresh_strategy"] == "source_delta_existing_payload"
     assert replaced["node_refresh"]["existing_payload_reused_count"] >= 1
     assert replaced["edge_refresh"]["existing_payload_reused_count"] >= 1
-    assert replaced["node_refresh"]["representative_payload_count"] < replaced["node_refresh"]["aggregate_row_count"]
-    assert replaced["edge_refresh"]["representative_payload_count"] == 0
+    assert replaced["aggregate_refresh_timing"]["refresh_strategy"] == "source_delta_no_full_refresh"
     assert after_node_row is not None
     assert after_edge_row is not None
     after_node = json.loads(str(after_node_row[0]))
