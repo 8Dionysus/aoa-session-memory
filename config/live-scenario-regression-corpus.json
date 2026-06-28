@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-27T00:00:00Z",
+  "generated_at": "2026-06-28T13:25:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 4,
+  "case_count": 8,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -180,6 +180,150 @@
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
             "min_session_ref_count": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "hook_failure_receipt_contract",
+      "profiles": [
+        "hook_failure"
+      ],
+      "seed": "corpus-hook-failure",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Hook failure audit must prove the route can find recent failing UserPromptSubmit receipts and return receipt/session refs without opening raw transcript text."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "hook_failure",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_total_receipt_count": 1,
+            "min_returned_receipt_count": 1,
+            "min_receipt_ref_count": 1,
+            "min_session_ref_count": 1,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "goal_lifecycle_refs_contract",
+      "profiles": [
+        "goal_lifecycle"
+      ],
+      "seed": "corpus-goal-lifecycle",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Goal lifecycle route must return actual lifecycle results with raw/segment evidence, not just an observed state summary."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "goal_lifecycle",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_result_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "agent_closeout_refs_contract",
+      "profiles": [
+        "agent_closeout"
+      ],
+      "seed": "corpus-agent-closeout",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Agent closeout audit must find completion/closeout answers with raw or segment refs so final answers can be audited separately from interim reasoning."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "agent_closeout",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_result_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph_neighborhood_refs_contract",
+      "profiles": [
+        "graph_neighborhood"
+      ],
+      "seed": "corpus-graph-neighborhood",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Graph neighborhood must stay a compact topology route with nodes, edges, and evidence refs; empty graph packets are route failures."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "graph_neighborhood",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_node_count": 1,
+            "min_edge_count": 1,
+            "min_evidence_ref_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_session_ref_count": 1,
+            "max_elapsed_ms": 30000
           }
         ]
       }

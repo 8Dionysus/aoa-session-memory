@@ -4846,6 +4846,117 @@ def test_live_scenario_corpus_check_fails_missing_entity_usage_spread(
     assert "entity_usage:raw_or_segment_ref_sample_count:2<3" in failures
 
 
+def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> None:
+    failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "hook_failure",
+            "status": "passed",
+            "elapsed_ms": 2500,
+            "total_receipt_count": 0,
+            "returned_receipt_count": 0,
+            "evidence_ref_counts": {"receipt_ref": 0, "session_ref": 0},
+        },
+        {
+            "profile": "hook_failure",
+            "allowed_statuses": ["passed"],
+            "min_total_receipt_count": 1,
+            "min_returned_receipt_count": 1,
+            "min_receipt_ref_count": 1,
+            "min_session_ref_count": 1,
+            "max_elapsed_ms": 1000,
+        },
+    )
+
+    assert "hook_failure:total_receipt_count:0<1" in failures
+    assert "hook_failure:returned_receipt_count:0<1" in failures
+    assert "hook_failure:receipt_ref:0<1" in failures
+    assert "hook_failure:session_ref:0<1" in failures
+    assert "hook_failure:elapsed_ms:2500>1000" in failures
+
+    graph_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_neighborhood",
+            "status": "passed",
+            "node_count": 0,
+            "edge_count": 0,
+            "evidence_ref_count": 0,
+        },
+        {
+            "profile": "graph_neighborhood",
+            "min_node_count": 1,
+            "min_edge_count": 1,
+            "min_evidence_ref_count": 1,
+        },
+    )
+
+    assert "graph_neighborhood:node_count:0<1" in graph_failures
+    assert "graph_neighborhood:edge_count:0<1" in graph_failures
+    assert "graph_neighborhood:evidence_ref_count:0<1" in graph_failures
+
+
+def test_live_scenario_expectations_enforce_speed_and_gap_budget() -> None:
+    failures = module.live_scenario_expectation_failures(
+        {
+            "ok": True,
+            "quality": {
+                "failed_count": 0,
+                "warn_count": 0,
+                "actionable_gap_count": 2,
+                "first_useful_packet_ms": 1200,
+                "elapsed_ms": 5000,
+                "raw_or_segment_ref_scenario_count": 1,
+            },
+            "scenarios": [],
+        },
+        {
+            "max_actionable_gap_count": 1,
+            "max_first_useful_packet_ms": 1000,
+            "max_elapsed_ms": 4000,
+            "min_raw_or_segment_ref_scenario_count": 1,
+        },
+    )
+
+    assert "actionable_gap_count:2>1" in failures
+    assert "first_useful_packet_ms:1200>1000" in failures
+    assert "elapsed_ms:5000>4000" in failures
+
+
+def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None:
+    observed = module.live_scenario_compact_observed(
+        {
+            "ok": True,
+            "quality": {"scenario_count": 3},
+            "scenarios": [
+                {
+                    "profile": "hook_failure",
+                    "status": "passed",
+                    "total_receipt_count": 2,
+                    "returned_receipt_count": 1,
+                },
+                {
+                    "profile": "goal_lifecycle",
+                    "status": "passed",
+                    "result_count": 3,
+                },
+                {
+                    "profile": "graph_neighborhood",
+                    "status": "passed",
+                    "node_count": 4,
+                    "edge_count": 12,
+                    "evidence_ref_count": 7,
+                },
+            ],
+        }
+    )
+
+    profiles = {item["profile"]: item for item in observed["profiles"]}
+    assert profiles["hook_failure"]["total_receipt_count"] == 2
+    assert profiles["hook_failure"]["returned_receipt_count"] == 1
+    assert profiles["goal_lifecycle"]["result_count"] == 3
+    assert profiles["graph_neighborhood"]["node_count"] == 4
+    assert profiles["graph_neighborhood"]["edge_count"] == 12
+
+
 def test_trace_route_supports_agent_event_kind() -> None:
     candidates = module.trace_route_candidates("assistant_answer", kind="agent_event")
 

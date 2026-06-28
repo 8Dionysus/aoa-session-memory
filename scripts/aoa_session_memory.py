@@ -60621,6 +60621,11 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "direct_usage_sample_count": scenario.get("direct_usage_sample_count"),
             "non_usage_evidence_sample_count": scenario.get("non_usage_evidence_sample_count"),
             "raw_or_segment_ref_sample_count": scenario.get("raw_or_segment_ref_sample_count"),
+            "result_count": scenario.get("result_count"),
+            "total_receipt_count": scenario.get("total_receipt_count"),
+            "returned_receipt_count": scenario.get("returned_receipt_count"),
+            "node_count": scenario.get("node_count"),
+            "edge_count": scenario.get("edge_count"),
             "evidence_ref_count": scenario.get("evidence_ref_count"),
             "path_found": scenario.get("path_found"),
         }
@@ -60646,6 +60651,19 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
     min_sample_count = int_value(expectation.get("min_sample_count"))
     if min_sample_count and int_value(scenario.get("sample_count")) < min_sample_count:
         failures.append(f"{profile}:sample_count:{scenario.get('sample_count')}<{min_sample_count}")
+    for expectation_key, scenario_key in (
+        ("min_result_count", "result_count"),
+        ("min_total_receipt_count", "total_receipt_count"),
+        ("min_returned_receipt_count", "returned_receipt_count"),
+        ("min_node_count", "node_count"),
+        ("min_edge_count", "edge_count"),
+    ):
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(scenario.get(scenario_key)) < minimum:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    max_elapsed_ms = expectation.get("max_elapsed_ms")
+    if max_elapsed_ms is not None and int_value(scenario.get("elapsed_ms")) > int_value(max_elapsed_ms):
+        failures.append(f"{profile}:elapsed_ms:{scenario.get('elapsed_ms')}>{int_value(max_elapsed_ms)}")
     max_failed_count = expectation.get("max_failed_count")
     if max_failed_count is not None and int_value(scenario.get("failed_count")) > int_value(max_failed_count):
         failures.append(f"{profile}:failed_count:{scenario.get('failed_count')}>{int_value(max_failed_count)}")
@@ -60714,6 +60732,15 @@ def live_scenario_expectation_failures(audit: dict[str, Any], expect: dict[str, 
     max_warn_count = expect.get("max_warn_count")
     if max_warn_count is not None and int_value(quality.get("warn_count")) > int_value(max_warn_count):
         failures.append(f"warn_count:{quality.get('warn_count')}>{int_value(max_warn_count)}")
+    max_actionable_gap_count = expect.get("max_actionable_gap_count")
+    if max_actionable_gap_count is not None and int_value(quality.get("actionable_gap_count")) > int_value(max_actionable_gap_count):
+        failures.append(f"actionable_gap_count:{quality.get('actionable_gap_count')}>{int_value(max_actionable_gap_count)}")
+    max_first_useful_packet_ms = expect.get("max_first_useful_packet_ms")
+    if max_first_useful_packet_ms is not None and int_value(quality.get("first_useful_packet_ms")) > int_value(max_first_useful_packet_ms):
+        failures.append(f"first_useful_packet_ms:{quality.get('first_useful_packet_ms')}>{int_value(max_first_useful_packet_ms)}")
+    max_elapsed_ms = expect.get("max_elapsed_ms")
+    if max_elapsed_ms is not None and int_value(quality.get("elapsed_ms")) > int_value(max_elapsed_ms):
+        failures.append(f"elapsed_ms:{quality.get('elapsed_ms')}>{int_value(max_elapsed_ms)}")
     min_ref_scenarios = int_value(expect.get("min_raw_or_segment_ref_scenario_count"))
     if min_ref_scenarios and int_value(quality.get("raw_or_segment_ref_scenario_count")) < min_ref_scenarios:
         failures.append(
