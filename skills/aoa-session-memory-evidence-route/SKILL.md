@@ -77,6 +77,7 @@ tool is missing, run the equivalent archive command from `/srv/AbyssOS/.aoa`:
 For Codex tool discovery, search exact MCP tool names first when the general
 query is fuzzy:
 
+- transport/runtime preflight: `aoa_session_transport_preflight`
 - literal planner: `aoa_session_literal_query_plan`
 - entity usage dossier: `aoa_session_entity_dossier`
 - entity usage-to-consequence chain: `aoa_session_entity_usage_chain`
@@ -97,8 +98,17 @@ directly if a broad "graph route" tool search does not surface it.
 
 If an exact MCP tool is discovered but the call returns `Transport closed`,
 treat it as a Codex/MCP transport reload gate, not as evidence failure and not
-as permission to widen into broad raw search. Verify the configured stdio plane
-first:
+as permission to widen into broad raw search. If the preflight tool itself is
+callable, run `aoa_session_transport_preflight()` first. If direct MCP calls are
+already closed, use the CLI preflight from the `abyss-stack` checkout:
+
+```bash
+cd /home/dionysus/src/abyss-stack
+PYTHONPATH=mcp/services/aoa-session-memory-mcp/src \
+  python3 -m aoa_session_memory_mcp.cli transport-preflight
+```
+
+Then verify the configured stdio plane:
 
 ```bash
 python3 /home/dionysus/src/abyss-stack/mcp/services/aoa-session-memory-mcp/scripts/validate_session_memory_mcp.py
