@@ -1154,8 +1154,12 @@ python3 scripts/aoa_session_memory.py search-operational-projection-plan \
 operational event projection lane. It samples existing structured shard DBs,
 separates direct usage/result/outcome/entrypoint rows from protected context
 rows, and reports the generic context tail that could only be reduced after
-route refs and raw/segment refs have a replacement projection. It does not
-mutate search, raw, graph, or session archives.
+route refs and raw/segment refs have a replacement projection. The packet also
+includes a route-ref rollup plan with top candidate route layers/terms, so the
+next design step can preserve navigation fanout before any physical row
+reduction. The full rollup is bounded by `--per-shard-timeout` (default 12s);
+use `--route-rollup-limit 0` only for a core-count probe without route-term
+detail. It does not mutate search, raw, graph, or session archives.
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query

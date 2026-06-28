@@ -15178,7 +15178,13 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert plan["totals"]["candidate_context_tail_with_route_signals_count"] == 1
     assert plan["totals"]["candidate_context_tail_without_route_signals_count"] == 1
     assert plan["totals"]["replacement_route_refs_required"] is True
+    assert plan["totals"]["candidate_route_posting_count"] == 1
+    assert plan["route_ref_rollup_plan"]["status"] == "needs_route_ref_rollup"
+    assert plan["route_ref_rollup_plan"]["candidate_route_posting_count"] == 1
+    assert plan["route_ref_rollup_plan"]["top_route_layers"][0]["layer"] == "tool"
+    assert plan["route_ref_rollup_plan"]["top_route_terms"][0]["route_signal"] == "tool:exec_command"
     assert plan["projection_candidate"]["safe_to_apply_physical_compaction"] is False
+    assert plan["projection_candidate"]["candidate_route_posting_count"] == 1
     assert "do_not_drop_candidate_tail_without_route_ref_rehome" in plan["stop_lines"]
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()

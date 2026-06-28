@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 try:
     import tomllib
@@ -129,7 +129,8 @@ SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT = 1_000_000
 SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT = 500_000
 SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
 SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS = 3
-SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 3.0
+SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 12.0
+SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES = ("usage", "result", "outcome", "entrypoint")
 SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE = "context"
 SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES = (
@@ -52303,6 +52304,7 @@ def search_operational_event_projection_probe_shard(
     shard: str,
     per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
     top_context_session_act_limit: int = 8,
+    route_rollup_limit: int = SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + max(0.1, float(per_shard_timeout_seconds))
@@ -52336,49 +52338,86 @@ def search_operational_event_projection_probe_shard(
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
         direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
         protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
-        aggregate_sql = f"""
-            WITH event_docs AS (
-                SELECT
-                    event_type,
-                    usage_role,
-                    agent_event,
-                    task_episode_id,
-                    route_signals,
-                    session_act,
-                    CASE WHEN COALESCE(usage_role, '') = ? THEN 1 ELSE 0 END AS is_context,
-                    CASE
-                        WHEN COALESCE(usage_role, '') = ?
-                             AND COALESCE(agent_event, '') = ''
-                             AND COALESCE(task_episode_id, '') = ''
-                             AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
-                        THEN 1 ELSE 0
-                    END AS is_candidate_context_tail,
-                    CASE WHEN COALESCE(usage_role, '') IN ({direct_placeholders}) THEN 1 ELSE 0 END AS is_direct_actionable
-                FROM documents
-                WHERE doc_type = 'event'
-            )
-            SELECT
-                COUNT(*) AS event_total,
-                COALESCE(SUM(is_direct_actionable), 0) AS direct_actionable_event_count,
-                COALESCE(SUM(is_context), 0) AS context_event_count,
-                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END), 0) AS context_agent_event_count,
-                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(task_episode_id, '') <> '' THEN 1 ELSE 0 END), 0) AS context_task_episode_count,
-                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(event_type, '') IN ({protected_placeholders}) THEN 1 ELSE 0 END), 0) AS context_protected_event_type_count,
-                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END), 0) AS context_route_signal_preview_count,
-                COALESCE(SUM(CASE WHEN is_context = 1 AND COALESCE(session_act, '') = '' THEN 1 ELSE 0 END), 0) AS context_empty_session_act_count,
-                COALESCE(SUM(is_candidate_context_tail), 0) AS candidate_context_tail_v1_count,
-                COALESCE(SUM(CASE WHEN is_candidate_context_tail = 1 AND COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END), 0) AS candidate_context_tail_with_route_signals_count,
-                COALESCE(SUM(CASE WHEN is_candidate_context_tail = 1 AND COALESCE(route_signals, '') = '' THEN 1 ELSE 0 END), 0) AS candidate_context_tail_without_route_signals_count
-            FROM event_docs
+        index_names = {str(item[1]) for item in conn.execute("PRAGMA index_list(documents)").fetchall()}
+        doc_type_hint = " INDEXED BY idx_documents_doc_type_date" if "idx_documents_doc_type_date" in index_names else ""
+        usage_hint = (
+            " INDEXED BY idx_documents_doc_type_usage_role_date"
+            if "idx_documents_doc_type_usage_role_date" in index_names
+            else doc_type_hint
+        )
+
+        def count_documents(where_sql: str, params: Sequence[Any] = (), *, index_hint: str = "") -> int:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM documents{index_hint} WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()
+            return int_value(row["count"]) if row is not None else 0
+
+        context_where = "doc_type = 'event' AND usage_role = ?"
+        context_params = (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,)
+        candidate_where_unqualified = f"""
+            doc_type = 'event'
+            AND usage_role = ?
+            AND COALESCE(agent_event, '') = ''
+            AND COALESCE(task_episode_id, '') = ''
+            AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
         """
-        aggregate_params = [
+        candidate_params_unqualified: list[Any] = [
             SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
-            SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
-            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
-            *SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
         ]
-        row = conn.execute(aggregate_sql, aggregate_params).fetchone()
+        event_total = count_documents("doc_type = 'event'", index_hint=doc_type_hint)
+        direct_actionable_event_count = count_documents(
+            f"doc_type = 'event' AND usage_role IN ({direct_placeholders})",
+            SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
+            index_hint=usage_hint,
+        )
+        context_event_count = count_documents(context_where, context_params, index_hint=usage_hint)
+        result = {
+            "event_total": event_total,
+            "direct_actionable_event_count": direct_actionable_event_count,
+            "context_event_count": context_event_count,
+            "context_agent_event_count": count_documents(
+                f"{context_where} AND COALESCE(agent_event, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+            ),
+            "context_task_episode_count": count_documents(
+                f"{context_where} AND COALESCE(task_episode_id, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+            ),
+            "context_protected_event_type_count": count_documents(
+                f"{context_where} AND COALESCE(event_type, '') IN ({protected_placeholders})",
+                [*context_params, *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES],
+                index_hint=usage_hint,
+            ),
+            "context_route_signal_preview_count": count_documents(
+                f"{context_where} AND COALESCE(route_signals, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+            ),
+            "context_empty_session_act_count": count_documents(
+                f"{context_where} AND COALESCE(session_act, '') = ''",
+                context_params,
+                index_hint=usage_hint,
+            ),
+            "candidate_context_tail_v1_count": count_documents(
+                candidate_where_unqualified,
+                candidate_params_unqualified,
+                index_hint=usage_hint,
+            ),
+            "candidate_context_tail_with_route_signals_count": count_documents(
+                f"{candidate_where_unqualified} AND COALESCE(route_signals, '') <> ''",
+                candidate_params_unqualified,
+                index_hint=usage_hint,
+            ),
+            "candidate_context_tail_without_route_signals_count": count_documents(
+                f"{candidate_where_unqualified} AND COALESCE(route_signals, '') = ''",
+                candidate_params_unqualified,
+                index_hint=usage_hint,
+            ),
+        }
         role_rows = conn.execute(
             """
             SELECT COALESCE(NULLIF(usage_role, ''), 'unknown') AS role, COUNT(*) AS count
@@ -52399,10 +52438,10 @@ def search_operational_event_projection_probe_shard(
             """,
             (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, max(1, top_context_session_act_limit)),
         ).fetchall()
-        result = {key: int_value(row[key]) for key in row.keys()} if row is not None else {}
         event_total = int_value(result.get("event_total"))
         candidate_count = int_value(result.get("candidate_context_tail_v1_count"))
         context_count = int_value(result.get("context_event_count"))
+        core_elapsed_ms = int((time.monotonic() - started) * 1000)
         payload.update(
             {
                 "ok": True,
@@ -52421,9 +52460,120 @@ def search_operational_event_projection_probe_shard(
                     {"session_act": str(item["session_act"] or "empty"), "count": int_value(item["count"])}
                     for item in session_act_rows
                 ],
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "core_elapsed_ms": core_elapsed_ms,
+                "elapsed_ms": core_elapsed_ms,
             }
         )
+        route_rollup_started = time.monotonic()
+        if candidate_count <= 0:
+            payload["route_ref_rollup"] = {
+                "status": "no_candidate_tail",
+                "candidate_route_posting_count": 0,
+                "candidate_route_term_count": 0,
+                "top_route_layers": [],
+                "top_route_terms": [],
+                "elapsed_ms": int((time.monotonic() - route_rollup_started) * 1000),
+            }
+        elif route_rollup_limit <= 0:
+            payload["route_ref_rollup"] = {
+                "status": "skipped",
+                "reason": "route_rollup_limit_non_positive",
+                "candidate_route_posting_count": 0,
+                "candidate_route_term_count": 0,
+                "top_route_layers": [],
+                "top_route_terms": [],
+                "elapsed_ms": int((time.monotonic() - route_rollup_started) * 1000),
+            }
+        else:
+            candidate_where = f"""
+                documents.doc_type = 'event'
+                AND COALESCE(documents.usage_role, '') = ?
+                AND COALESCE(documents.agent_event, '') = ''
+                AND COALESCE(documents.task_episode_id, '') = ''
+                AND COALESCE(documents.event_type, '') NOT IN ({protected_placeholders})
+            """
+            candidate_params = [
+                SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+                *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+            ]
+            try:
+                layer_rows = conn.execute(
+                    f"""
+                    SELECT route_terms.layer AS layer,
+                           COUNT(*) AS posting_count,
+                           COUNT(DISTINCT route_terms.key) AS key_count
+                    FROM documents
+                    JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+                    JOIN route_terms ON route_terms.id = document_routes.route_id
+                    WHERE {candidate_where}
+                    GROUP BY route_terms.layer
+                    ORDER BY posting_count DESC, route_terms.layer ASC
+                    """,
+                    candidate_params,
+                ).fetchall()
+                term_rows = conn.execute(
+                    f"""
+                    SELECT route_terms.layer AS layer,
+                           route_terms.key AS key,
+                           route_terms.route_signal AS route_signal,
+                           COUNT(*) AS posting_count,
+                           COUNT(DISTINCT COALESCE(documents.session_id, '')) AS session_count,
+                           MIN(documents.session_date) AS first_session_date,
+                           MAX(documents.session_date) AS last_session_date
+                    FROM documents
+                    JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+                    JOIN route_terms ON route_terms.id = document_routes.route_id
+                    WHERE {candidate_where}
+                    GROUP BY route_terms.layer, route_terms.key, route_terms.route_signal
+                    ORDER BY posting_count DESC, route_terms.layer ASC, route_terms.key ASC
+                    LIMIT ?
+                    """,
+                    [*candidate_params, max(1, int(route_rollup_limit))],
+                ).fetchall()
+                candidate_route_posting_count = sum(int_value(item["posting_count"]) for item in layer_rows)
+                candidate_route_term_count = sum(int_value(item["key_count"]) for item in layer_rows)
+                payload["route_ref_rollup"] = {
+                    "status": "measured",
+                    "candidate_route_posting_count": candidate_route_posting_count,
+                    "candidate_route_term_count": candidate_route_term_count,
+                    "top_route_layers": [
+                        {
+                            "layer": str(item["layer"] or ""),
+                            "posting_count": int_value(item["posting_count"]),
+                            "key_count": int_value(item["key_count"]),
+                        }
+                        for item in layer_rows[: max(1, int(route_rollup_limit))]
+                    ],
+                    "top_route_terms": [
+                        {
+                            "layer": str(item["layer"] or ""),
+                            "key": str(item["key"] or ""),
+                            "route_signal": str(item["route_signal"] or ""),
+                            "posting_count": int_value(item["posting_count"]),
+                            "session_count": int_value(item["session_count"]),
+                            "first_session_date": str(item["first_session_date"] or ""),
+                            "last_session_date": str(item["last_session_date"] or ""),
+                        }
+                        for item in term_rows
+                    ],
+                    "rollup_grain": "route_term_plus_session_or_segment_ref_samples",
+                    "authority_boundary": "route rollups may preserve navigation fanout; raw and segment refs remain authority for exact evidence",
+                    "elapsed_ms": int((time.monotonic() - route_rollup_started) * 1000),
+                }
+            except sqlite3.Error as exc:
+                status = sqlite_error_status(exc)
+                payload.setdefault("diagnostics", []).append(
+                    f"search_operational_projection_route_rollup_probe_failed:{status}:{exc}"
+                )
+                payload["route_ref_rollup"] = {
+                    "status": status,
+                    "candidate_route_posting_count": 0,
+                    "candidate_route_term_count": 0,
+                    "top_route_layers": [],
+                    "top_route_terms": [],
+                    "elapsed_ms": int((time.monotonic() - route_rollup_started) * 1000),
+                }
+        payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     except sqlite3.Error as exc:
         status = sqlite_error_status(exc)
         payload.update(
@@ -52450,6 +52600,7 @@ def session_memory_search_operational_event_projection_plan(
     aoa_root: Path,
     max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
     per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+    route_rollup_limit: int = SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT,
     write_report: bool = False,
 ) -> dict[str, Any]:
     selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
@@ -52461,6 +52612,7 @@ def session_memory_search_operational_event_projection_plan(
             db_path=Path(str(item.get("db_path") or "")),
             shard=str(item.get("shard") or ""),
             per_shard_timeout_seconds=per_shard_timeout_seconds,
+            route_rollup_limit=route_rollup_limit,
         )
         for item in selected_shards
     ]
@@ -52495,6 +52647,55 @@ def session_memory_search_operational_event_projection_plan(
     for item in successful:
         for role, count in (item.get("role_counts") if isinstance(item.get("role_counts"), dict) else {}).items():
             role_counts[str(role)] += int_value(count)
+    route_layer_counts: Counter[str] = Counter()
+    route_layer_key_counts: Counter[str] = Counter()
+    route_term_counts: Counter[tuple[str, str, str]] = Counter()
+    route_posting_total = 0
+    route_term_total_sum = 0
+    route_rollup_elapsed_total_ms = 0
+    route_rollup_status_counts: Counter[str] = Counter()
+    for item in successful:
+        rollup = item.get("route_ref_rollup") if isinstance(item.get("route_ref_rollup"), dict) else {}
+        route_rollup_status_counts[str(rollup.get("status") or "missing")] += 1
+        route_posting_total += int_value(rollup.get("candidate_route_posting_count"))
+        route_term_total_sum += int_value(rollup.get("candidate_route_term_count"))
+        route_rollup_elapsed_total_ms += int_value(rollup.get("elapsed_ms"))
+        for layer_row in rollup.get("top_route_layers", []) if isinstance(rollup.get("top_route_layers"), list) else []:
+            if not isinstance(layer_row, dict):
+                continue
+            layer = str(layer_row.get("layer") or "")
+            if not layer:
+                continue
+            route_layer_counts[layer] += int_value(layer_row.get("posting_count"))
+            route_layer_key_counts[layer] += int_value(layer_row.get("key_count"))
+        for term_row in rollup.get("top_route_terms", []) if isinstance(rollup.get("top_route_terms"), list) else []:
+            if not isinstance(term_row, dict):
+                continue
+            token = (
+                str(term_row.get("layer") or ""),
+                str(term_row.get("key") or ""),
+                str(term_row.get("route_signal") or ""),
+            )
+            if not token[0] or not token[1]:
+                continue
+            route_term_counts[token] += int_value(term_row.get("posting_count"))
+    top_route_layers = [
+        {
+            "layer": layer,
+            "posting_count": count,
+            "sampled_key_count_sum": route_layer_key_counts[layer],
+        }
+        for layer, count in route_layer_counts.most_common(max(1, int(route_rollup_limit)))
+    ]
+    top_route_terms = [
+        {
+            "layer": layer,
+            "key": key,
+            "route_signal": signal,
+            "posting_count": count,
+        }
+        for (layer, key, signal), count in route_term_counts.most_common(max(1, int(route_rollup_limit)))
+    ]
     if not selected_shards:
         status = "blocked_by_missing_shard_projection"
     elif not successful:
@@ -52519,6 +52720,7 @@ def session_memory_search_operational_event_projection_plan(
             "selected_shard_count": len(selected_shards),
             "successful_shard_count": len(successful),
             "per_shard_timeout_seconds": per_shard_timeout_seconds,
+            "route_rollup_limit": route_rollup_limit,
             "selected_shards": selected_shards,
         },
         "direct_keep_roles": list(SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES),
@@ -52531,7 +52733,28 @@ def session_memory_search_operational_event_projection_plan(
             if candidate_count > 0
             else 0.0,
             "replacement_route_refs_required": candidate_with_routes > 0,
+            "candidate_route_posting_count": route_posting_total,
+            "candidate_route_term_count_sum": route_term_total_sum,
             "role_counts": dict(sorted(role_counts.items())),
+        },
+        "route_ref_rollup_plan": {
+            "status": "needs_route_ref_rollup" if candidate_with_routes > 0 else "not_needed",
+            "sampled_shard_status_counts": dict(sorted(route_rollup_status_counts.items())),
+            "candidate_route_posting_count": route_posting_total,
+            "candidate_route_term_count_sum": route_term_total_sum,
+            "sampled_route_rollup_elapsed_ms": route_rollup_elapsed_total_ms,
+            "top_route_layers": top_route_layers,
+            "top_route_terms": top_route_terms,
+            "recommended_rollup_grain": [
+                "shard",
+                "route_layer",
+                "route_key",
+                "session_id",
+                "segment_ref_sample",
+                "raw_ref_sample",
+            ],
+            "replacement_rule": "route filters should hit rollup rows first, then expand to raw/segment refs only when exact evidence is needed",
+            "authority_boundary": "rollup rows are navigation summaries; raw transcripts and segment indexes remain authority",
         },
         "projection_candidate": {
             "id": "compact_operational_event_projection_v1",
@@ -52545,6 +52768,7 @@ def session_memory_search_operational_event_projection_plan(
             "candidate_tail_count": candidate_count,
             "candidate_tail_with_route_signals_count": candidate_with_routes,
             "replacement_route_refs_required": candidate_with_routes > 0,
+            "candidate_route_posting_count": route_posting_total,
             "safe_to_apply_physical_compaction": False,
             "next_design_route": "design_route_ref_preserving_operational_event_rollup",
         },
@@ -52597,6 +52821,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
+    rollup = payload.get("route_ref_rollup_plan") if isinstance(payload.get("route_ref_rollup_plan"), dict) else {}
     lines = [
         "# Search Operational Event Projection Plan",
         "",
@@ -52611,6 +52836,8 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- candidate_context_tail_v1_count: `{totals.get('candidate_context_tail_v1_count')}`",
         f"- candidate_context_tail_v1_ratio: `{totals.get('candidate_context_tail_v1_ratio')}`",
         f"- candidate_context_tail_with_route_signals_count: `{totals.get('candidate_context_tail_with_route_signals_count')}`",
+        f"- candidate_route_posting_count: `{totals.get('candidate_route_posting_count')}`",
+        f"- route_ref_rollup_status: `{rollup.get('status')}`",
         f"- replacement_route_refs_required: `{totals.get('replacement_route_refs_required')}`",
         f"- next_design_route: `{candidate.get('next_design_route')}`",
         "",
@@ -52627,6 +52854,20 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
             f"`{item.get('event_total')}` | `{item.get('candidate_context_tail_v1_count')}` | "
             f"`{item.get('candidate_context_tail_with_route_signals_count')}` |"
         )
+    lines.extend(["", "## Route Ref Rollup", ""])
+    lines.append(f"- status: `{rollup.get('status')}`")
+    lines.append(f"- candidate_route_posting_count: `{rollup.get('candidate_route_posting_count')}`")
+    lines.append(f"- candidate_route_term_count_sum: `{rollup.get('candidate_route_term_count_sum')}`")
+    lines.append(f"- sampled_route_rollup_elapsed_ms: `{rollup.get('sampled_route_rollup_elapsed_ms')}`")
+    lines.append(f"- recommended_rollup_grain: `{rollup.get('recommended_rollup_grain')}`")
+    lines.extend(["", "### Top Route Layers", "", "| layer | postings | sampled_key_count_sum |", "| --- | ---: | ---: |"])
+    for item in rollup.get("top_route_layers", []) if isinstance(rollup.get("top_route_layers"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('layer')}` | `{item.get('posting_count')}` | `{item.get('sampled_key_count_sum')}` |")
+    lines.extend(["", "### Top Route Terms", "", "| layer | key | postings |", "| --- | --- | ---: |"])
+    for item in rollup.get("top_route_terms", []) if isinstance(rollup.get("top_route_terms"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('layer')}` | `{item.get('key')}` | `{item.get('posting_count')}` |")
     lines.extend(["", "## Stop Lines", ""])
     for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
         lines.append(f"- `{item}`")
@@ -61697,6 +61938,7 @@ def command_search_operational_projection_plan(args: argparse.Namespace) -> int:
         aoa_root=root,
         max_shards=args.max_shards,
         per_shard_timeout_seconds=args.per_shard_timeout,
+        route_rollup_limit=args.route_rollup_limit,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -67797,6 +68039,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_operational_projection_plan.add_argument("--aoa-root")
     search_operational_projection_plan.add_argument("--max-shards", type=int, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS)
     search_operational_projection_plan.add_argument("--per-shard-timeout", type=float, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS)
+    search_operational_projection_plan.add_argument("--route-rollup-limit", type=int, default=SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT)
     search_operational_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational event projection reports under .aoa/diagnostics.")
     search_operational_projection_plan.set_defaults(func=command_search_operational_projection_plan)
 

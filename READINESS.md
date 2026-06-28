@@ -1734,6 +1734,30 @@ Maintenance gates:
   `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`
   and `test_search_projection_plan_uses_cached_projection_summaries`.
 
+- 2026-06-28 route-ref rollup proof: the operational event projection planner
+  now includes a bounded route-ref rollup over candidate context-tail rows.
+  After replacing the broad aggregate CTE with smaller index-friendly counts and
+  deriving exact route posting totals from the full route-layer aggregate,
+  `search-operational-projection-plan --max-shards 2 --route-rollup-limit 8
+  --write-report` used the default `per_shard_timeout_seconds=12.0`, returned
+  `ok=true`, `status=candidate_tail_measured`, `successful_shard_count=2`, and
+  wrote `diagnostics/20260628T121146Z__search-operational-projection-plan.json`.
+  The live May/June sample found `1,573,103` event docs, `407,305` generic
+  context-tail candidates, `320,394` candidates with route signals, `858,883`
+  candidate route postings, and `43,630` sampled route terms. Top rollup layers
+  were `resource_profile`, `entity`, `path`, `confidence`, `tool`,
+  `mutation_surface`, `authority_surface`, and `mechanic`; the top terms include
+  `resource_profile:context_token_count`, `confidence:low_structural_confidence`,
+  `tool:namespace_codex_developer_tool`, and `tool:apply_patch`. The packet now
+  reports `core_elapsed_ms`, shard total `elapsed_ms`, and
+  `route_ref_rollup.elapsed_ms`; the sampled route-rollup elapsed total was
+  `3861ms` and the wall command completed in about `10s`. Full verification:
+  bundle pytest `359 passed`, active pytest `352 passed`, bundle `validate
+  ok=true`, and active `doctor ok=true status=current`. Active
+  `maintenance-status --full` remains `ok=false` only for existing graph backlog
+  and the large search projection warning; search shards are current and this
+  planner is the documented design route for that projection pressure.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,
