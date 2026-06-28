@@ -808,6 +808,20 @@ Last observed result:
   sources in `207.014s` with `candidate_pool_count=25`,
   `candidate_pool_limit=25`, `budget_exhausted=false`, moving archive graph
   queue from `625` to `600`.
+- 2026-06-28 auto-update live proof: a real
+  `auto-maintenance-resource backlog --apply` run was blocked at the medium
+  resource gate by `indexing_unattended_swap_used_pressure`, then successfully
+  used the profile graph-drip fallback as a probe-class job with `batch=25`,
+  `candidate_pool_limit=25`, and `elapsed_ms=31.943s`; this superseded the
+  earlier stale `recent_problem_jobs` lock-conflict report without deleting
+  diagnostics. The subsequent targeted live-tail catch-up for
+  `2026-06-12__001__на-машине-есть-раскиданный-abyss-machine` applied `4`
+  search/route actions in `122.455s`, and dirty-only `search-shards` refreshed
+  `month/2026-06` to `current` with `1` dirty session and `65,473` structured
+  documents in `75.150s`. A follow-up graph queue drip processed another `25`
+  sources in `249.255s`, moving graph queue from `600` to `575`; live scenario
+  corpus check passed `4/4` with `actionable_gap_count=0`. Remaining expected
+  tails: graph dirty/actionable backlog and `search_projection_combined_large`.
 - 2026-06-21 search raw-lexical policy proof: live `search-provider-status`,
   `maintenance-status --full`, and `storage-audit` showed the current search
   store has no recorded bounded raw-lexical metadata and is classified as
@@ -1035,6 +1049,15 @@ Last observed result:
   route is graph cardinality, sharding, or query projections, not a rebuild
   solely for aggregate payload compaction. Report:
   `diagnostics/20260621T091705Z__storage-audit.json`.
+- 2026-06-28 search/graph physical compaction proof: read-only
+  `storage-audit --write-report`, `search-sqlite-compact --write-report`, and
+  `graph-sqlite-compact --write-report` showed current physical SQLite reclaim
+  is tiny relative to store size: search monolith `10.5 GiB` with `28.2 MiB`
+  conservative reclaim, graph `28.7 GiB` with `46.2 MiB` conservative reclaim.
+  The `search_projection_combined_large` warning is therefore a projection
+  strategy issue (`monolith_fallback_required` plus structured shards), not a
+  safe `VACUUM` cleanup opportunity. Keep raw-text recall on the monolith until
+  a scoped full-text shard policy is intentionally chosen and benchmarked.
 - 2026-06-21 graph cardinality projection proof: before materialization,
   read-only `graph-cardinality --limit 12` returned
   `projection_missing` in `2 ms`. A resource-gated
