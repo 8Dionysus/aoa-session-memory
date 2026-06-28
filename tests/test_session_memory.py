@@ -22609,6 +22609,44 @@ def test_hook_worker_defers_sync_jobs_over_raw_budget(tmp_path: Path, monkeypatc
     assert len(list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))) == 1
 
 
+def test_hook_worker_default_raw_budget_matches_hot_mirror_budget(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AOA_SESSION_MEMORY_HOOK_WORKER_MAX_RAW_BYTES", raising=False)
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-worker-hot-budget.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-worker-hot-budget"}},
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hot worker budget"}]},
+            },
+        ],
+    )
+    with transcript.open("ab") as handle:
+        handle.truncate(module.DEFAULT_HOOK_MIRROR_MAX_BYTES + 1)
+
+    job_path = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="Stop",
+        event={"session_id": "session-worker-hot-budget", "transcript_path": str(transcript), "cwd": str(workspace)},
+        session_id="session-worker-hot-budget",
+        transcript_path=transcript,
+        reason="test_worker_default_budget",
+    )
+    assert job_path is not None
+
+    payload = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
+
+    assert payload["ok"] is True
+    assert payload["processed"] == 1
+    assert payload["results"][0]["status"] == "deferred_over_worker_budget"
+    assert payload["results"][0]["max_raw_bytes"] == module.DEFAULT_HOOK_MIRROR_MAX_BYTES
+    assert payload["results"][0]["transcript_bytes"] == module.DEFAULT_HOOK_MIRROR_MAX_BYTES + 1
+
+
 def test_hook_registry_lock_contention_defers_registry_update(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
