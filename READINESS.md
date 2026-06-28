@@ -1777,6 +1777,29 @@ Maintenance gates:
   focused pytest `3 passed`, active focused pytest `2 passed`, and active
   script equals the bundle script.
 
+- 2026-06-28 operational route-rollup status proof: `maintenance-status --full`
+  now surfaces `operations.search_pressure.operational_route_rollup` as a
+  read-only freshness packet derived from the materialized rollup DB and its
+  source shard size/mtime evidence. A live active-script check returned
+  `search_pressure.status=large_projection_stack`,
+  `operational_route_rollup.status=current`, `needs_refresh=false`, `43,630`
+  route rows, `858,883` candidate route postings, `24.5 MiB` size, and sampled
+  raw/segment terms for all rollup rows. The search projection next-action now
+  becomes `use_operational_route_rollup_projection` with route kind
+  `search_operational_route_rollup_ready` instead of repeating
+  `plan_search_projection_cardinality`. The command still exits non-zero while
+  graph maintenance is pending, but that is unrelated graph backlog, not a
+  route-rollup failure. Regression proof:
+  `test_operational_route_rollup_status_tracks_source_shard_freshness`,
+  `test_search_projection_next_action_requires_current_large_projection`, and
+  active `test_search_projection_next_action_prefers_route_rollup_over_repeated_plan`.
+  The route-aware plan proof is
+  `diagnostics/20260628T124004Z__search-projection-plan.json`, where
+  `search-projection-plan` returned `actionability=replacement_route_ready`,
+  `next_route=use_operational_route_rollup_before_physical_shrinkage`, and
+  candidate lane `compact_operational_event_projection` with
+  `status=route_rollup_ready`.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

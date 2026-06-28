@@ -51892,6 +51892,153 @@ def search_document_hotset_pressure(search_shards: dict[str, Any]) -> dict[str, 
     }
 
 
+def session_memory_operational_route_rollup_status(
+    *,
+    aoa_root: Path,
+    search_shards: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    search_shards = search_shards if isinstance(search_shards, dict) else {}
+    target_db = search_operational_route_rollup_db_path(aoa_root)
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-route-rollup",
+        "--workspace-root",
+        str(aoa_root.parent),
+        "--aoa-root",
+        str(aoa_root),
+        "--apply",
+        "--write-report",
+    ]
+    base: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_operational_route_rollup_status",
+        "mutates": False,
+        "path": str(target_db),
+        "exists": target_db.exists(),
+        "size_bytes": path_total_size(target_db),
+        "size_human": human_size(path_total_size(target_db)),
+        "source_search_shards_status": search_shards.get("status") or "unknown",
+        "refresh_command": command,
+        "exact_refresh_command": shlex.join(command),
+        "quality_boundary": "generated route-rollup is navigation only; raw transcripts and segment refs remain authority",
+        "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
+    }
+    if not target_db.exists():
+        return {
+            **base,
+            "status": "missing",
+            "needs_refresh": True,
+            "diagnostics": ["operational_route_rollup_missing"],
+        }
+
+    diagnostics: list[str] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        if not sqlite_table_exists(conn, "meta") or not sqlite_table_exists(conn, "shards") or not sqlite_table_exists(conn, "route_rollups"):
+            diagnostics.append("operational_route_rollup_schema_tables_missing")
+            return {
+                **base,
+                "status": "invalid",
+                "needs_refresh": True,
+                "diagnostics": diagnostics,
+            }
+        meta = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM meta")}
+        if int_value(meta.get("rollup_schema_version")) != SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION:
+            diagnostics.append("operational_route_rollup_schema_version_mismatch")
+        if meta.get("artifact_type") != "session_memory_search_operational_route_rollup":
+            diagnostics.append("operational_route_rollup_artifact_type_mismatch")
+        shard_rows = [dict(row) for row in conn.execute("SELECT * FROM shards ORDER BY shard")]
+        total_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COALESCE(SUM(posting_count), 0) AS posting_count,
+                   COUNT(CASE WHEN raw_refs_json != '[]' THEN 1 END) AS sampled_raw_term_count,
+                   COUNT(CASE WHEN segment_refs_json != '[]' THEN 1 END) AS sampled_segment_term_count
+            FROM route_rollups
+            """
+        ).fetchone()
+        route_row_count = int_value(total_row["row_count"] if total_row else 0)
+        posting_count = int_value(total_row["posting_count"] if total_row else 0)
+        sampled_raw_term_count = int_value(total_row["sampled_raw_term_count"] if total_row else 0)
+        sampled_segment_term_count = int_value(total_row["sampled_segment_term_count"] if total_row else 0)
+    except sqlite3.Error as exc:
+        diagnostics.append(f"operational_route_rollup_unreadable:{sqlite_error_diagnostic(exc)}")
+        return {
+            **base,
+            "status": "invalid",
+            "needs_refresh": True,
+            "diagnostics": diagnostics,
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    source_mismatches: list[dict[str, Any]] = []
+    selected_shards = [str(item.get("shard") or "") for item in shard_rows if isinstance(item, dict) and item.get("shard")]
+    for item in shard_rows:
+        db_path = Path(str(item.get("shard_db_path") or ""))
+        current_size = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+        current_mtime_ns = db_path.stat().st_mtime_ns if db_path.exists() else 0
+        if current_size != int_value(item.get("source_size_bytes")) or current_mtime_ns != int_value(item.get("source_mtime_ns")):
+            source_mismatches.append(
+                {
+                    "shard": item.get("shard"),
+                    "expected_size_bytes": item.get("source_size_bytes"),
+                    "current_size_bytes": current_size,
+                    "expected_mtime_ns": item.get("source_mtime_ns"),
+                    "current_mtime_ns": current_mtime_ns,
+                }
+            )
+    if source_mismatches:
+        diagnostics.append("operational_route_rollup_source_shards_changed")
+
+    largest_shards = search_shards.get("largest_shards") if isinstance(search_shards.get("largest_shards"), list) else []
+    expected_selected_shards = [
+        str(item.get("shard") or "")
+        for item in largest_shards[: len(selected_shards)]
+        if isinstance(item, dict) and item.get("shard")
+    ]
+    if expected_selected_shards and selected_shards != sorted(expected_selected_shards):
+        diagnostics.append("operational_route_rollup_selected_shards_changed")
+
+    source_status = str(search_shards.get("status") or "")
+    if source_status and source_status not in {"current", "current_with_deferred_live_updates", "empty"}:
+        diagnostics.append(f"operational_route_rollup_search_shards_not_current:{source_status}")
+
+    if route_row_count <= 0:
+        status = "empty"
+        needs_refresh = True
+    elif source_status and source_status not in {"current", "current_with_deferred_live_updates", "empty"} and not source_mismatches:
+        status = "blocked_by_search_freshness"
+        needs_refresh = False
+    elif diagnostics:
+        status = "stale"
+        needs_refresh = True
+    else:
+        status = "current"
+        needs_refresh = False
+
+    return {
+        **base,
+        "status": status,
+        "needs_refresh": needs_refresh,
+        "generated_at": meta.get("generated_at"),
+        "rollup_schema_version": meta.get("rollup_schema_version"),
+        "shard_count": len(shard_rows),
+        "selected_shards": selected_shards,
+        "expected_selected_shards": expected_selected_shards,
+        "route_rollup_row_count": route_row_count,
+        "candidate_route_posting_count": posting_count,
+        "sampled_raw_term_count": sampled_raw_term_count,
+        "sampled_segment_term_count": sampled_segment_term_count,
+        "source_mismatch_count": len(source_mismatches),
+        "source_mismatches": source_mismatches[:5],
+        "diagnostics": diagnostics,
+    }
+
+
 def session_memory_search_pressure_summary(
     *,
     aoa_root: Path,
@@ -51918,6 +52065,10 @@ def session_memory_search_pressure_summary(
     actionable_noncurrent_shard_count = int_value(search_shards.get("actionable_noncurrent_shard_count"))
     deferred_live_session_count = int_value(search_shards.get("deferred_live_session_count"))
     document_hotset = search_document_hotset_pressure(search_shards)
+    operational_route_rollup = session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards,
+    )
     near_warning_bytes = int(OPS_SEARCH_DB_WARNING_BYTES * OPS_SEARCH_DB_NEAR_WARNING_RATIO)
     if combined_total_bytes >= OPS_SEARCH_DB_CRITICAL_BYTES:
         status = "critical_projection_stack"
@@ -51939,10 +52090,16 @@ def session_memory_search_pressure_summary(
             "while only deferred_live sessions are pending"
         )
     elif status in {"critical_projection_stack", "large_projection_stack"} and document_hotset.get("status") != "normal":
-        next_route = (
-            "treat search weight as structured document hotset/cardinality pressure; design a compact operational-event "
-            "projection or schema normalization, then use storage-audit/search-sqlite-compact only as evidence"
-        )
+        if operational_route_rollup.get("status") == "current":
+            next_route = (
+                "use the current operational route-rollup as the replacement navigation proof before any physical "
+                "context-tail shrinkage; keep raw/segment refs as authority"
+            )
+        else:
+            next_route = (
+                "materialize or refresh the operational route-rollup before physical context-tail shrinkage; "
+                "then use storage-audit/search-sqlite-compact only as evidence"
+            )
     elif status in {"critical_projection_stack", "large_projection_stack"}:
         next_route = (
             "run storage-audit --deep-dbstat --write-report and a search-sqlite-compact dry-run; preserve the monolith raw-text "
@@ -52003,6 +52160,7 @@ def session_memory_search_pressure_summary(
         "raw_text_query_route": search_shards.get("raw_text_query_route"),
         "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
         "document_hotset": document_hotset,
+        "operational_route_rollup": operational_route_rollup,
         "quality_boundary": "structured routes and raw-text fallback are routing projections; raw transcripts and segment indexes remain authority",
         "speed_boundary": "agent-event/entity/goal routes should use structured shards; literal raw-text stays bounded and may use the monolith fallback",
         "weight_boundary": "do not remove the monolith solely for size while it is the verified raw-text fallback",
@@ -52042,11 +52200,17 @@ def session_memory_search_projection_plan(
         search_shards=search_shards,
     )
     document_hotset = pressure.get("document_hotset") if isinstance(pressure.get("document_hotset"), dict) else {}
+    operational_route_rollup = (
+        pressure.get("operational_route_rollup") if isinstance(pressure.get("operational_route_rollup"), dict) else {}
+    )
     freshness_status = str(pressure.get("freshness_status") or "unknown")
     pressure_status = str(pressure.get("status") or "unknown")
     if freshness_status not in {"current", "empty", "current_with_deferred_live_updates"}:
         next_route = "restore_search_projection_freshness_first"
         actionability = "blocked_by_projection_freshness"
+    elif pressure_status in {"critical_projection_stack", "large_projection_stack"} and operational_route_rollup.get("status") == "current":
+        next_route = "use_operational_route_rollup_before_physical_shrinkage"
+        actionability = "replacement_route_ready"
     elif pressure_status in {"critical_projection_stack", "large_projection_stack"}:
         next_route = "design_compact_operational_event_projection"
         actionability = "actionable_design_lane"
@@ -52100,6 +52264,26 @@ def session_memory_search_projection_plan(
             )
             if key in document_hotset
         },
+        "operational_route_rollup": {
+            key: operational_route_rollup.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "path",
+                "size_human",
+                "generated_at",
+                "shard_count",
+                "route_rollup_row_count",
+                "candidate_route_posting_count",
+                "sampled_raw_term_count",
+                "sampled_segment_term_count",
+                "source_mismatch_count",
+                "exact_refresh_command",
+                "quality_boundary",
+                "truth_status",
+            )
+            if key in operational_route_rollup
+        },
         "largest_shards": document_hotset.get("largest_shards", [])[:4]
         if isinstance(document_hotset.get("largest_shards"), list)
         else [],
@@ -52109,7 +52293,7 @@ def session_memory_search_projection_plan(
         "candidate_lanes": [
             {
                 "id": "compact_operational_event_projection",
-                "status": "recommended" if actionability == "actionable_design_lane" else "not_currently_needed",
+                "status": "route_rollup_ready" if actionability == "replacement_route_ready" else ("recommended" if actionability == "actionable_design_lane" else "not_currently_needed"),
                 "reason": "event/document cardinality is the visible search weight driver",
                 "quality_boundary": "preserve agent-event, usage, consequence, route-signal, raw_ref, segment_ref, and session refs before reducing generic event document rows",
             },
@@ -52204,6 +52388,7 @@ def session_memory_search_projection_plan(
 def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
     projection = payload.get("search_projection") if isinstance(payload.get("search_projection"), dict) else {}
     hotset = payload.get("document_hotset") if isinstance(payload.get("document_hotset"), dict) else {}
+    route_rollup = payload.get("operational_route_rollup") if isinstance(payload.get("operational_route_rollup"), dict) else {}
     lines = [
         "# Search Projection Plan",
         "",
@@ -52215,6 +52400,7 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
         f"- monolith: `{projection.get('monolith_db_total_human')}`",
         f"- shards: `{projection.get('shard_db_total_human')}`",
         f"- document_hotset: `{hotset.get('status')}` docs=`{hotset.get('document_count')}` latest_event_docs=`{hotset.get('latest_materialization_event_document_count')}`",
+        f"- operational_route_rollup: `{route_rollup.get('status')}` rows=`{route_rollup.get('route_rollup_row_count')}` postings=`{route_rollup.get('candidate_route_posting_count')}` size=`{route_rollup.get('size_human')}`",
         "",
         "## Candidate Lanes",
         "",
@@ -53433,6 +53619,54 @@ def session_memory_search_projection_next_action(
     if str(search_shards.get("status") or "") not in {"current", "current_with_deferred_live_updates"}:
         return None
     document_hotset = search_pressure.get("document_hotset") if isinstance(search_pressure.get("document_hotset"), dict) else {}
+    operational_route_rollup = (
+        search_pressure.get("operational_route_rollup")
+        if isinstance(search_pressure.get("operational_route_rollup"), dict)
+        else {}
+    )
+    route_rollup_status = str(operational_route_rollup.get("status") or "missing")
+    route_rollup_command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-route-rollup",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--max-shards",
+        str(max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_route_rollup.get("shard_count")))),
+        "--write-report",
+    ]
+    if route_rollup_status in {"missing", "stale", "invalid", "empty"}:
+        return {
+            "id": "materialize_search_operational_route_rollup",
+            "reason": f"search_projection_route_rollup_{route_rollup_status}",
+            "route_kind": "search_operational_route_rollup",
+            "command": [*route_rollup_command, "--apply"],
+            "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+            "document_hotset_status": document_hotset.get("status"),
+            "document_count": document_hotset.get("document_count"),
+            "latest_event_document_count": document_hotset.get("latest_materialization_event_document_count"),
+            "route_rollup_status": route_rollup_status,
+            "route_rollup_row_count": operational_route_rollup.get("route_rollup_row_count"),
+            "note": "Materialize the generated route-ref replacement projection before any context-tail shrinkage; raw/segment refs remain authority.",
+        }
+    if route_rollup_status == "current":
+        return {
+            "id": "use_operational_route_rollup_projection",
+            "reason": "search_projection_route_rollup_current",
+            "route_kind": "search_operational_route_rollup_ready",
+            "command": route_rollup_command,
+            "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+            "document_hotset_status": document_hotset.get("status"),
+            "document_count": document_hotset.get("document_count"),
+            "latest_event_document_count": document_hotset.get("latest_materialization_event_document_count"),
+            "route_rollup_status": route_rollup_status,
+            "route_rollup_row_count": operational_route_rollup.get("route_rollup_row_count"),
+            "candidate_route_posting_count": operational_route_rollup.get("candidate_route_posting_count"),
+            "sampled_raw_term_count": operational_route_rollup.get("sampled_raw_term_count"),
+            "sampled_segment_term_count": operational_route_rollup.get("sampled_segment_term_count"),
+            "note": "Use the current route-rollup as compact navigation proof before designing physical context-tail shrinkage; do not repeat the cardinality plan as the next step.",
+        }
     return {
         "id": "plan_search_projection_cardinality",
         "reason": "search_projection_combined_large_current_cardinality",
@@ -54663,6 +54897,11 @@ def session_memory_maintenance_status(
                 "document_hotset_status",
                 "document_count",
                 "latest_event_document_count",
+                "route_rollup_status",
+                "route_rollup_row_count",
+                "candidate_route_posting_count",
+                "sampled_raw_term_count",
+                "sampled_segment_term_count",
             )
             if key in search_projection_next_action
         }
@@ -55148,6 +55387,33 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             }
             if isinstance(search_pressure.get("physical_compaction"), dict)
             else {}
+        )
+        | (
+            {
+                "operational_route_rollup": {
+                    key: (search_pressure.get("operational_route_rollup") or {}).get(key)
+                    for key in (
+                        "status",
+                        "needs_refresh",
+                        "path",
+                        "size_human",
+                        "generated_at",
+                        "shard_count",
+                        "route_rollup_row_count",
+                        "candidate_route_posting_count",
+                        "sampled_raw_term_count",
+                        "sampled_segment_term_count",
+                        "source_mismatch_count",
+                        "exact_refresh_command",
+                        "quality_boundary",
+                        "truth_status",
+                    )
+                    if isinstance(search_pressure.get("operational_route_rollup"), dict)
+                    and key in (search_pressure.get("operational_route_rollup") or {})
+                }
+            }
+            if isinstance(search_pressure.get("operational_route_rollup"), dict)
+            else {}
         ),
         "graph_pressure": {
             key: graph_pressure.get(key)
@@ -55450,6 +55716,9 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     search_pressure_compaction = (
         search_pressure.get("physical_compaction") if isinstance(search_pressure.get("physical_compaction"), dict) else {}
     )
+    operational_route_rollup = (
+        search_pressure.get("operational_route_rollup") if isinstance(search_pressure.get("operational_route_rollup"), dict) else {}
+    )
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     graph_pressure_compaction = graph_pressure.get("physical_compaction") if isinstance(graph_pressure.get("physical_compaction"), dict) else {}
     lines = [
@@ -55470,6 +55739,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
         f"- search_shards: `{search_shards.get('status')}` materialized=`{search_shards.get('materialized_shard_count')}/{search_shards.get('shard_count')}` shard_total=`{search_shards.get('shard_db_total_human')}` combined=`{search_shards.get('combined_search_projection_total_human')}`",
         f"- search_pressure: `{search_pressure.get('status')}` freshness=`{search_pressure.get('freshness_status')}` combined=`{search_pressure.get('combined_search_projection_total_human')}` physical=`{search_pressure_compaction.get('status')}` next=`{search_pressure.get('next_route')}`",
+        f"- operational_route_rollup: `{operational_route_rollup.get('status')}` rows=`{operational_route_rollup.get('route_rollup_row_count')}` postings=`{operational_route_rollup.get('candidate_route_posting_count')}` size=`{operational_route_rollup.get('size_human')}`",
         f"- latest_search_shards: processed=`{latest_search_shards.get('processed_count')}` docs=`{latest_search_shards.get('document_count')}` elapsed_ms=`{latest_search_shards.get('elapsed_ms')}` docs_per_sec=`{latest_search_shards.get('documents_per_second')}`",
         f"- graph_db: `{graph_db.get('size_human')}` wal=`{(graph_db.get('wal') or {}).get('size_human') if isinstance(graph_db.get('wal'), dict) else ''}` total=`{graph_db.get('total_with_wal_human')}`",
         f"- graph_pressure: `{graph_pressure.get('status')}` nodes=`{graph_pressure.get('node_count')}` edges=`{graph_pressure.get('edge_count')}` physical=`{graph_pressure_compaction.get('status')}` reclaim=`{graph_pressure_compaction.get('conservative_reclaimable_human')}` next=`{graph_pressure.get('next_route')}`",

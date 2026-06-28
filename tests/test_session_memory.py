@@ -14970,12 +14970,37 @@ def test_search_projection_next_action_requires_current_large_projection(tmp_pat
     )
 
     assert action is not None
-    assert action["id"] == "plan_search_projection_cardinality"
-    assert action["route_kind"] == "search_projection_plan"
+    assert action["id"] == "materialize_search_operational_route_rollup"
+    assert action["route_kind"] == "search_operational_route_rollup"
     command_text = module.shlex.join(action["command"])
-    assert "search-projection-plan" in command_text
+    assert "search-operational-route-rollup" in command_text
+    assert "--apply" in command_text
     assert "--write-report" in command_text
     assert action["document_count"] == 1_888_501
+
+    ready_action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure={
+            **search_pressure,
+            "operational_route_rollup": {
+                "status": "current",
+                "route_rollup_row_count": 43_630,
+                "candidate_route_posting_count": 858_883,
+                "sampled_raw_term_count": 43_630,
+                "sampled_segment_term_count": 43_630,
+            },
+        },
+        search_shards={"status": "current"},
+    )
+    assert ready_action is not None
+    assert ready_action["id"] == "use_operational_route_rollup_projection"
+    assert ready_action["route_kind"] == "search_operational_route_rollup_ready"
+    assert ready_action["route_rollup_status"] == "current"
+    assert ready_action["route_rollup_row_count"] == 43_630
+    ready_command_text = module.shlex.join(ready_action["command"])
+    assert "search-operational-route-rollup" in ready_command_text
+    assert "--apply" not in ready_command_text
 
     assert (
         module.session_memory_search_projection_next_action(
@@ -15004,6 +15029,79 @@ def test_search_projection_next_action_requires_current_large_projection(tmp_pat
         )
         is None
     )
+
+
+def test_operational_route_rollup_status_tracks_source_shard_freshness(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    shard_db.parent.mkdir(parents=True)
+    shard_db.write_bytes(b"source-shard-v1")
+    target_db = module.search_operational_route_rollup_db_path(aoa_root)
+    module.write_search_operational_route_rollup_db(
+        target_db=target_db,
+        generated_at="2026-06-28T00:00:00Z",
+        shard_results=[
+            {
+                "shard": shard_key,
+                "db_path": str(shard_db),
+                "status": "sampled",
+                "summary": {
+                    "event_total": 3,
+                    "candidate_context_tail_v1_count": 1,
+                    "candidate_context_tail_with_route_signals_count": 1,
+                },
+                "elapsed_ms": 12,
+                "rows": [
+                    {
+                        "shard": shard_key,
+                        "layer": "tool",
+                        "key": "exec_command",
+                        "route_signal": module.route_signal_token("tool", "exec_command"),
+                        "posting_count": 2,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-28",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:line:1"],
+                        "segment_refs": ["segments/000__initial-to-latest.md"],
+                        "session_ids": ["rollup-session"],
+                    }
+                ],
+            }
+        ],
+    )
+    search_shards = {
+        "status": "current",
+        "largest_shards": [
+            {
+                "shard": shard_key,
+                "status": "current",
+                "materialized": True,
+                "total_with_wal_bytes": shard_db.stat().st_size,
+            }
+        ],
+    }
+
+    status = module.session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards,
+    )
+    assert status["status"] == "current"
+    assert status["needs_refresh"] is False
+    assert status["route_rollup_row_count"] == 1
+    assert status["candidate_route_posting_count"] == 2
+    assert status["sampled_raw_term_count"] == 1
+    assert status["sampled_segment_term_count"] == 1
+
+    shard_db.write_bytes(b"source-shard-v2-with-different-size")
+    stale = module.session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards,
+    )
+    assert stale["status"] == "stale"
+    assert stale["needs_refresh"] is True
+    assert stale["source_mismatch_count"] == 1
+    assert "operational_route_rollup_source_shards_changed" in stale["diagnostics"]
 
 
 def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path, monkeypatch: Any) -> None:
@@ -16109,7 +16207,8 @@ def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, 
     assert summary["document_hotset"]["latest_materialization_document_counts"]["event"] == 700
     assert summary["document_hotset"]["latest_slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
     assert "operational-event projection" in summary["document_hotset"]["next_route"]
-    assert "structured document hotset" in summary["next_route"]
+    assert summary["operational_route_rollup"]["status"] == "missing"
+    assert "operational route-rollup" in summary["next_route"]
     assert summary["physical_compaction"]["status"] == "requires_explicit_plan"
 
 

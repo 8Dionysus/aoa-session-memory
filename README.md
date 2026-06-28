@@ -1175,6 +1175,13 @@ candidate context-tail rows. It is still navigation, not authority, and it does
 not delete or compact event rows; physical search shrinkage must wait until this
 replacement route proves fresh and useful.
 
+`maintenance-status --full` surfaces this rollup under
+`operations.search_pressure.operational_route_rollup`. If the rollup is missing
+or stale, the search projection next-action routes to
+`search-operational-route-rollup --apply --write-report`; once it is current,
+the next-action becomes `use_operational_route_rollup_projection` instead of
+repeating the cardinality plan.
+
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query
 targets structured-only shards, `--use-shards` falls back to the monolith with an
