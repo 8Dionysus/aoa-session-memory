@@ -56735,6 +56735,11 @@ def entity_usage_scenario_audit(
     raw_preview_totals: Counter[str] = Counter()
     evidence_mode_counts: Counter[str] = Counter()
     quality_flag_counts: Counter[str] = Counter()
+    kind_counts: Counter[str] = Counter()
+    layer_counts: Counter[str] = Counter()
+    registry_status_counts: Counter[str] = Counter()
+    registry_source_surface_counts: Counter[str] = Counter()
+    source_backed_kind_counts: Counter[str] = Counter()
     sample_total_elapsed_ms = 0
     audit_total_elapsed_ms = 0
     raw_preview_total_elapsed_ms = 0
@@ -56745,6 +56750,24 @@ def entity_usage_scenario_audit(
             str(candidate.get("layer") or ""),
             str(candidate.get("kind") or "auto"),
         )
+        candidate_layer = str(candidate.get("layer") or "")
+        candidate_kind = str(candidate.get("kind") or "auto")
+        registry_status = str(candidate.get("registry_status") or "")
+        registry_source_surface = str(candidate.get("registry_source_surface") or "")
+        if candidate_layer:
+            layer_counts[candidate_layer] += 1
+        if candidate_kind:
+            kind_counts[candidate_kind] += 1
+        if registry_status:
+            registry_status_counts[registry_status] += 1
+        if registry_source_surface:
+            registry_source_surface_counts[registry_source_surface] += 1
+        if (
+            candidate_layer in ENTITY_USAGE_SCENARIO_SOURCE_PREFERRED_LAYERS
+            and registry_status in ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES
+            and registry_source_surface in ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES
+        ):
+            source_backed_kind_counts[candidate_kind] += 1
         audit = entity_usage_audit(
             aoa_root=aoa_root,
             anchor=str(candidate["anchor"]),
@@ -56864,6 +56887,14 @@ def entity_usage_scenario_audit(
         "passed_count": status_counts.get("passed", 0),
         "warn_count": status_counts.get("warn", 0),
         "failed_count": status_counts.get("failed", 0),
+        "kind_counts": dict(sorted(kind_counts.items())),
+        "layer_counts": dict(sorted(layer_counts.items())),
+        "distinct_kind_count": len(kind_counts),
+        "distinct_layer_count": len(layer_counts),
+        "registry_status_counts": dict(sorted(registry_status_counts.items())),
+        "registry_source_surface_counts": dict(sorted(registry_source_surface_counts.items())),
+        "source_backed_sample_count": sum(source_backed_kind_counts.values()),
+        "source_backed_kind_counts": dict(sorted(source_backed_kind_counts.items())),
         "slowest_sample_elapsed_ms": slowest_sample.get("elapsed_ms") if isinstance(slowest_sample, dict) else None,
         "slowest_sample_route": (slowest_sample.get("candidate") or {}).get("route_signal") if isinstance(slowest_sample.get("candidate"), dict) else None,
         "freshness_counts": dict(sorted(freshness_counts.items())),
@@ -56957,6 +56988,8 @@ def entity_usage_scenario_audit_markdown(payload: dict[str, Any]) -> str:
         f"- slowest_sample: `{quality.get('slowest_sample_route')}` `{quality.get('slowest_sample_elapsed_ms')}` ms",
         f"- route_terms: `{quality.get('search_route_term_count')}`",
         f"- route_postings: `{quality.get('search_route_index_count')}`",
+        f"- kinds: `{json.dumps(quality.get('kind_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
+        f"- layers: `{json.dumps(quality.get('layer_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
         f"- evidence_modes: `{json.dumps(quality.get('evidence_mode_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
         f"- quality_flags: `{json.dumps(quality.get('quality_flag_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
         "",
@@ -57557,6 +57590,16 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "passed_count": int_value(quality.get("passed_count")),
                 "warn_count": warned,
                 "failed_count": failed,
+                "kind_counts": quality.get("kind_counts"),
+                "layer_counts": quality.get("layer_counts"),
+                "distinct_kind_count": quality.get("distinct_kind_count"),
+                "distinct_layer_count": quality.get("distinct_layer_count"),
+                "evidence_mode_counts": quality.get("evidence_mode_counts"),
+                "raw_or_segment_ref_sample_count": quality.get("raw_or_segment_ref_sample_count"),
+                "direct_usage_sample_count": quality.get("direct_usage_sample_count"),
+                "non_usage_evidence_sample_count": quality.get("non_usage_evidence_sample_count"),
+                "source_backed_sample_count": quality.get("source_backed_sample_count"),
+                "source_backed_kind_counts": quality.get("source_backed_kind_counts"),
                 "raw_preview_counts": quality.get("raw_preview_counts"),
                 "provider_freshness_status": quality.get("provider_freshness_status"),
             }
@@ -58003,6 +58046,12 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "first_ref": scenario.get("first_ref"),
             "primary_route_counts": scenario.get("primary_route_counts"),
             "shape_counts": scenario.get("shape_counts"),
+            "kind_counts": scenario.get("kind_counts"),
+            "layer_counts": scenario.get("layer_counts"),
+            "evidence_mode_counts": scenario.get("evidence_mode_counts"),
+            "direct_usage_sample_count": scenario.get("direct_usage_sample_count"),
+            "non_usage_evidence_sample_count": scenario.get("non_usage_evidence_sample_count"),
+            "raw_or_segment_ref_sample_count": scenario.get("raw_or_segment_ref_sample_count"),
             "evidence_ref_count": scenario.get("evidence_ref_count"),
             "path_found": scenario.get("path_found"),
         }
@@ -58048,6 +58097,29 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
     min_evidence_ref_count = int_value(expectation.get("min_evidence_ref_count"))
     if min_evidence_ref_count and int_value(scenario.get("evidence_ref_count")) < min_evidence_ref_count:
         failures.append(f"{profile}:evidence_ref_count:{scenario.get('evidence_ref_count')}<{min_evidence_ref_count}")
+    for expectation_key, scenario_key in (
+        ("min_direct_usage_sample_count", "direct_usage_sample_count"),
+        ("min_non_usage_evidence_sample_count", "non_usage_evidence_sample_count"),
+        ("min_raw_or_segment_ref_sample_count", "raw_or_segment_ref_sample_count"),
+    ):
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(scenario.get(scenario_key)) < minimum:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    count_expectations = (
+        ("kind_counts", "required_kinds", "min_kind_count", "kind"),
+        ("layer_counts", "required_layers", "min_layer_count", "layer"),
+        ("evidence_mode_counts", "required_evidence_modes", "min_evidence_mode_count", "evidence_mode"),
+    )
+    for counts_key, required_key, minimum_key, label in count_expectations:
+        observed_counts = scenario.get(counts_key) if isinstance(scenario.get(counts_key), dict) else {}
+        observed_nonzero = {str(key) for key, value in observed_counts.items() if int_value(value) > 0}
+        minimum = int_value(expectation.get(minimum_key))
+        if minimum and len(observed_nonzero) < minimum:
+            failures.append(f"{profile}:{label}_count:{len(observed_nonzero)}<{minimum}")
+        for required in expectation.get(required_key, []) if isinstance(expectation.get(required_key), list) else []:
+            required_value = str(required)
+            if required_value not in observed_nonzero:
+                failures.append(f"{profile}:missing_{label}:{required_value}")
     primary_route_counts = scenario.get("primary_route_counts") if isinstance(scenario.get("primary_route_counts"), dict) else {}
     for route_id in expectation.get("required_primary_routes", []) if isinstance(expectation.get("required_primary_routes"), list) else []:
         if int_value(primary_route_counts.get(str(route_id))) <= 0:

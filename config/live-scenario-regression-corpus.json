@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 3,
+  "case_count": 4,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -87,6 +87,65 @@
             "max_failed_count": 0,
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "operational_entity_spread_contract",
+      "profiles": [
+        "entity_usage"
+      ],
+      "seed": "corpus-operational-entity-spread",
+      "sample_size": 8,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "The live consumer loop must prove it can sample several operational entity kinds, not only return evidence for one familiar anchor."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "entity_usage",
+            "allowed_statuses": [
+              "passed",
+              "warn"
+            ],
+            "min_sample_count": 8,
+            "max_failed_count": 0,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_raw_or_segment_ref_sample_count": 8,
+            "min_kind_count": 6,
+            "min_layer_count": 6,
+            "required_kinds": [
+              "api",
+              "mcp",
+              "skill",
+              "tool"
+            ],
+            "required_layers": [
+              "agent_event",
+              "api",
+              "goal",
+              "hook",
+              "hook_health",
+              "mcp",
+              "skill",
+              "tool"
+            ],
+            "required_evidence_modes": [
+              "outcome_only",
+              "result_only",
+              "usage_with_consequence"
+            ],
+            "min_direct_usage_sample_count": 4,
+            "min_non_usage_evidence_sample_count": 1
           }
         ]
       }

@@ -3863,6 +3863,10 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["quality"]["evidence_mode_counts"]["outcome_only"] == 1
     assert audit["quality"]["quality_flag_counts"]["result_only_evidence"] == 2
     assert audit["quality"]["quality_flag_counts"]["outcome_only_evidence"] == 1
+    assert audit["quality"]["kind_counts"] == {"agent_event": 1, "hook": 2}
+    assert audit["quality"]["layer_counts"] == {"agent_event": 1, "hook": 1, "hook_health": 1}
+    assert audit["quality"]["distinct_kind_count"] == 2
+    assert audit["quality"]["distinct_layer_count"] == 3
     assert {sample["candidate"]["route_signal"]: sample["evidence_mode"] for sample in audit["samples"]} == {
         "hook:stop": "result_only",
         "hook_health:postcompact": "result_only",
@@ -4341,6 +4345,48 @@ def test_live_scenario_result_accepts_entity_usage_ref_counts() -> None:
     assert "no_raw_or_segment_refs_detected" not in result.get("quality_flags", [])
 
 
+def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
+    result = module.live_scenario_result(
+        "entity_usage",
+        {
+            "ok": True,
+            "quality": {
+                "sample_count": 4,
+                "passed_count": 4,
+                "warn_count": 0,
+                "failed_count": 0,
+                "kind_counts": {"api": 1, "mcp": 1, "skill": 1, "tool": 1},
+                "layer_counts": {"api": 1, "mcp": 1, "skill": 1, "tool": 1},
+                "distinct_kind_count": 4,
+                "distinct_layer_count": 4,
+                "evidence_mode_counts": {"usage_with_consequence": 4},
+                "raw_or_segment_ref_sample_count": 4,
+                "direct_usage_sample_count": 4,
+                "non_usage_evidence_sample_count": 0,
+                "source_backed_sample_count": 3,
+                "source_backed_kind_counts": {"mcp": 1, "skill": 1, "tool": 1},
+            },
+            "samples": [
+                {
+                    "status": "passed",
+                    "evidence_ref_counts": {"raw_ref": 1, "segment_ref": 1},
+                    "first_ref": {"raw": "raw:line:1", "segment": "001.md#event-1"},
+                }
+            ],
+        },
+        elapsed_ms=5,
+    )
+
+    assert result["kind_counts"] == {"api": 1, "mcp": 1, "skill": 1, "tool": 1}
+    assert result["layer_counts"] == {"api": 1, "mcp": 1, "skill": 1, "tool": 1}
+    assert result["distinct_kind_count"] == 4
+    assert result["distinct_layer_count"] == 4
+    assert result["evidence_mode_counts"] == {"usage_with_consequence": 4}
+    assert result["raw_or_segment_ref_sample_count"] == 4
+    assert result["direct_usage_sample_count"] == 4
+    assert result["source_backed_sample_count"] == 3
+
+
 def test_live_scenario_audit_fails_empty_entity_dossier_profile(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(module, "entity_usage_scenario_candidates", lambda **_kwargs: ([], ["empty_fixture"]))
 
@@ -4637,6 +4683,93 @@ def test_live_scenario_corpus_check_fails_missing_required_route(tmp_path: Path,
     assert payload["ok"] is False
     assert payload["failed_count"] == 1
     assert payload["results"][0]["failures"] == ["literal_planner:missing_primary_route:session_rehydrate"]
+
+
+def test_live_scenario_corpus_check_fails_missing_entity_usage_spread(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    corpus_path.parent.mkdir(parents=True)
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "entity_spread_missing_kind",
+                    "profiles": ["entity_usage"],
+                    "expect": {
+                        "profile_expectations": [
+                            {
+                                "profile": "entity_usage",
+                                "allowed_statuses": ["passed"],
+                                "min_sample_count": 3,
+                                "min_kind_count": 3,
+                                "min_layer_count": 3,
+                                "required_kinds": ["mcp", "skill", "tool"],
+                                "required_layers": ["mcp", "skill", "tool"],
+                                "required_evidence_modes": ["usage_with_consequence", "result_only"],
+                                "min_direct_usage_sample_count": 2,
+                                "min_non_usage_evidence_sample_count": 1,
+                                "min_raw_or_segment_ref_sample_count": 3,
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        module,
+        "live_scenario_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "profiles": ["entity_usage"],
+            "quality": {
+                "scenario_count": 1,
+                "passed_count": 1,
+                "warn_count": 0,
+                "failed_count": 0,
+                "actionable_gap_count": 0,
+                "raw_or_segment_ref_scenario_count": 1,
+            },
+            "scenarios": [
+                {
+                    "profile": "entity_usage",
+                    "status": "passed",
+                    "sample_count": 3,
+                    "passed_count": 3,
+                    "warn_count": 0,
+                    "failed_count": 0,
+                    "kind_counts": {"mcp": 2, "skill": 1},
+                    "layer_counts": {"mcp": 2, "skill": 1},
+                    "evidence_mode_counts": {"usage_with_consequence": 3},
+                    "direct_usage_sample_count": 3,
+                    "non_usage_evidence_sample_count": 0,
+                    "raw_or_segment_ref_sample_count": 2,
+                    "evidence_ref_counts": {"raw_ref": 2, "segment_ref": 2},
+                    "first_ref": {"raw": "raw:line:7", "segment": "segment.md"},
+                }
+            ],
+            "actionable_gaps": [],
+        },
+    )
+
+    payload = module.live_scenario_corpus_check(aoa_root=aoa_root, corpus_path=corpus_path)
+
+    assert payload["ok"] is False
+    failures = payload["results"][0]["failures"]
+    assert "entity_usage:kind_count:2<3" in failures
+    assert "entity_usage:layer_count:2<3" in failures
+    assert "entity_usage:missing_kind:tool" in failures
+    assert "entity_usage:missing_layer:tool" in failures
+    assert "entity_usage:missing_evidence_mode:result_only" in failures
+    assert "entity_usage:non_usage_evidence_sample_count:0<1" in failures
+    assert "entity_usage:raw_or_segment_ref_sample_count:2<3" in failures
 
 
 def test_trace_route_supports_agent_event_kind() -> None:
