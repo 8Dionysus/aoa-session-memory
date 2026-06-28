@@ -1148,6 +1148,13 @@ python3 scripts/aoa_session_memory.py search-operational-projection-plan \
   --aoa-root /path/to/workspace/.aoa \
   --max-shards 3 \
   --write-report
+
+python3 scripts/aoa_session_memory.py search-operational-route-rollup \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --max-shards 3 \
+  --apply \
+  --write-report
 ```
 
 `search-operational-projection-plan` is the bounded follow-up for the compact
@@ -1160,6 +1167,13 @@ next design step can preserve navigation fanout before any physical row
 reduction. The full rollup is bounded by `--per-shard-timeout` (default 12s);
 use `--route-rollup-limit 0` only for a core-count probe without route-term
 detail. It does not mutate search, raw, graph, or session archives.
+
+`search-operational-route-rollup` is the generated replacement projection for
+that next step. It materializes `search/operational-route-rollup.sqlite3` with
+route term counts plus bounded raw, segment, and session ref samples for the
+candidate context-tail rows. It is still navigation, not authority, and it does
+not delete or compact event rows; physical search shrinkage must wait until this
+replacement route proves fresh and useful.
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query

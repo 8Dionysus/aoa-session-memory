@@ -1758,6 +1758,25 @@ Maintenance gates:
   and the large search projection warning; search shards are current and this
   planner is the documented design route for that projection pressure.
 
+- 2026-06-28 operational route-rollup materialization proof:
+  `search-operational-route-rollup --max-shards 2 --per-shard-timeout 30
+  --ref-sample-limit 2 --apply --write-report` materialized the generated
+  replacement read-model at `search/operational-route-rollup.sqlite3`. The
+  rerun proof wrote
+  `diagnostics/20260628T122847Z__search-operational-route-rollup.json`,
+  returned `ok=true`, `status=current`, `written=true`, empty diagnostics, and
+  completed in `11210ms`. The DB is `24.5 MiB`, has `43,630` route-rollup
+  rows across the May/June shards, `858,883` candidate route postings, and
+  sampled raw plus segment refs for every route term. Only the main SQLite file
+  remains after the repeat apply; stale target `-wal`/`-shm` sidecars are
+  removed around the atomic replace. This is still generated navigation rather
+  than authority: raw transcripts and segment refs remain the proof route, and
+  physical context-tail shrinkage remains blocked until this projection proves
+  fresh and useful as the replacement route. Regression proof:
+  `test_search_operational_route_rollup_materializes_ref_samples`, bundle
+  focused pytest `3 passed`, active focused pytest `2 passed`, and active
+  script equals the bundle script.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

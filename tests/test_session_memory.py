@@ -15190,6 +15190,126 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert Path(plan["report_markdown"]).exists()
 
 
+def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    conn = module.init_search_db(shard_db, rebuild=True)
+
+    def insert_event(
+        doc_id: str,
+        *,
+        usage_role: str,
+        route_signal: str = "",
+        event_type: str = "CONTEXT_STATE",
+    ) -> None:
+        module.insert_search_document(
+            conn,
+            {
+                "id": doc_id,
+                "doc_type": "event",
+                "session_id": "rollup-session",
+                "session_label": "2026-06-28__001__rollup-session",
+                "session_title": "Rollup session",
+                "session_date": "2026-06-28",
+                "event_id": doc_id,
+                "event_type": event_type,
+                "usage_role": usage_role,
+                "route_layers": module.packed_route_values(["tool"]) if route_signal else "",
+                "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
+                "title": doc_id,
+                "body": doc_id,
+                "raw_ref": f"raw:line:{doc_id}",
+                "segment_ref": "segments/000__initial-to-latest.md",
+                "payload_json": "{}",
+            },
+            store_raw_text=False,
+            storage_profile=module.search_document_storage_profile(store_raw_text=False),
+        )
+
+    insert_event(
+        "candidate-with-route",
+        usage_role="context",
+        route_signal=module.route_signal_token("tool", "exec_command"),
+    )
+    insert_event("candidate-without-route", usage_role="context")
+    insert_event("usage-doc", usage_role="usage", event_type="TOOL_CALL")
+    conn.commit()
+    conn.close()
+
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_count": 1,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": shard_key,
+                    "shard_db_path": str(shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 3,
+                    "total_with_wal_bytes": shard_db.stat().st_size,
+                    "total_with_wal_human": module.human_size(shard_db.stat().st_size),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    dry = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=False,
+        write_report=True,
+    )
+    assert dry["ok"] is True
+    assert dry["mutates"] is False
+    assert dry["written"] is False
+    target_db = module.search_operational_route_rollup_db_path(aoa_root)
+    assert not target_db.exists()
+    Path(str(target_db) + "-wal").write_text("stale\n", encoding="utf-8")
+    Path(str(target_db) + "-shm").write_text("stale\n", encoding="utf-8")
+
+    applied = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=True,
+        write_report=True,
+    )
+    assert applied["ok"] is True
+    assert applied["status"] == "current"
+    assert applied["written"] is True
+    assert applied["totals"]["route_rollup_row_count"] == 1
+    assert applied["totals"]["candidate_route_posting_count"] == 1
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+    assert not Path(str(target_db) + "-wal").exists()
+    assert not Path(str(target_db) + "-shm").exists()
+
+    rollup_conn = sqlite3.connect(module.search_operational_route_rollup_db_path(aoa_root))
+    rollup_conn.row_factory = sqlite3.Row
+    row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'tool' AND key = 'exec_command'").fetchone()
+    rollup_conn.close()
+
+    assert row is not None
+    assert row["posting_count"] == 1
+    assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
+    assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
+    assert "rollup-session" in json.loads(row["session_ids_json"])
+
+
 def test_live_sync_updates_search_catalog_deferred_shard_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
