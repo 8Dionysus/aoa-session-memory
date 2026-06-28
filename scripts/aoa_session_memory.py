@@ -51998,6 +51998,238 @@ def session_memory_search_pressure_summary(
     }
 
 
+def session_memory_search_projection_plan(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    storage = maintenance_storage_status(aoa_root)
+    search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    pressure = session_memory_search_pressure_summary(
+        aoa_root=aoa_root,
+        storage=storage,
+        search_shards=search_shards,
+    )
+    document_hotset = pressure.get("document_hotset") if isinstance(pressure.get("document_hotset"), dict) else {}
+    freshness_status = str(pressure.get("freshness_status") or "unknown")
+    pressure_status = str(pressure.get("status") or "unknown")
+    if freshness_status not in {"current", "empty", "current_with_deferred_live_updates"}:
+        next_route = "restore_search_projection_freshness_first"
+        actionability = "blocked_by_projection_freshness"
+    elif pressure_status in {"critical_projection_stack", "large_projection_stack"}:
+        next_route = "design_compact_operational_event_projection"
+        actionability = "actionable_design_lane"
+    elif pressure_status == "near_warning_projection_stack":
+        next_route = "monitor_and_keep_structured_fast_paths"
+        actionability = "monitor"
+    else:
+        next_route = "no_search_projection_weight_action_needed"
+        actionability = "none"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_projection_plan",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "ok": True,
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "status": pressure_status,
+        "freshness_status": freshness_status,
+        "actionability": actionability,
+        "next_route": next_route,
+        "search_projection": {
+            "monolith_db_total_human": pressure.get("monolith_db_total_human"),
+            "shard_db_total_human": pressure.get("shard_db_total_human"),
+            "combined_search_projection_total_human": pressure.get("combined_search_projection_total_human"),
+            "warning_human": pressure.get("warning_human"),
+            "critical_human": pressure.get("critical_human"),
+            "warning_ratio": pressure.get("warning_ratio"),
+            "critical_ratio": pressure.get("critical_ratio"),
+            "shard_strategy": pressure.get("shard_strategy"),
+            "active_projection": pressure.get("active_projection"),
+            "materialized_shard_count": pressure.get("materialized_shard_count"),
+            "shard_count": pressure.get("shard_count"),
+            "raw_text_fallback_status": pressure.get("raw_text_fallback_status"),
+            "raw_text_query_route": pressure.get("raw_text_query_route"),
+        },
+        "document_hotset": {
+            key: document_hotset.get(key)
+            for key in (
+                "status",
+                "cause",
+                "document_count",
+                "latest_materialization_document_count",
+                "latest_materialization_event_document_count",
+                "latest_materialization_event_document_ratio",
+                "structured_only_shard_count",
+                "full_text_shard_count",
+                "quality_boundary",
+                "speed_boundary",
+                "next_route",
+            )
+            if key in document_hotset
+        },
+        "largest_shards": document_hotset.get("largest_shards", [])[:4]
+        if isinstance(document_hotset.get("largest_shards"), list)
+        else [],
+        "latest_slow_sessions": document_hotset.get("latest_slow_sessions", [])[:4]
+        if isinstance(document_hotset.get("latest_slow_sessions"), list)
+        else [],
+        "candidate_lanes": [
+            {
+                "id": "compact_operational_event_projection",
+                "status": "recommended" if actionability == "actionable_design_lane" else "not_currently_needed",
+                "reason": "event/document cardinality is the visible search weight driver",
+                "quality_boundary": "preserve agent-event, usage, consequence, route-signal, raw_ref, segment_ref, and session refs before reducing generic event document rows",
+            },
+            {
+                "id": "schema_normalization_before_physical_compaction",
+                "status": "recommended" if actionability == "actionable_design_lane" else "evidence_only",
+                "reason": "search-sqlite-compact can reclaim freelist bytes but cannot fix large event-row cardinality",
+                "physical_compaction_status": (pressure.get("physical_compaction") or {}).get("status")
+                if isinstance(pressure.get("physical_compaction"), dict)
+                else "",
+            },
+            {
+                "id": "keep_monolith_raw_text_fallback",
+                "status": "required_while_raw_text_fallback_status_is_monolith_required"
+                if pressure.get("raw_text_fallback_status") == "monolith_required_for_raw_text_query"
+                else "review",
+                "reason": "structured shards are not raw-text FTS replacements; do not delete the monolith solely for size",
+            },
+        ],
+        "stop_lines": [
+            "do_not_drop_event_documents_without_replacement_route_refs",
+            "do_not_use_full_text_shards_as_weight_fix",
+            "do_not_run_broad_monolith_group_by_on_hot_agent_path",
+            "raw_transcripts_and_segment_indexes_remain_authority",
+        ],
+        "next_fast_proof_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "agent-responses",
+                "--agent-event",
+                "assistant_answer",
+                "--use-shards",
+                "--limit",
+                "5",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "live-scenario-corpus",
+                "check",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--write-report",
+            ],
+        ],
+        "next_measurement_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "performance-baseline",
+                "assistant_answer",
+                "--kind",
+                "agent_event",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--limit",
+                "5",
+                "--write-report",
+            ],
+        ],
+        "truth_status": "read_only_plan_from_cached_search_projection_summaries_not_archive_truth",
+    }
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-projection-plan",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_projection_plan_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
+    projection = payload.get("search_projection") if isinstance(payload.get("search_projection"), dict) else {}
+    hotset = payload.get("document_hotset") if isinstance(payload.get("document_hotset"), dict) else {}
+    lines = [
+        "# Search Projection Plan",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- freshness_status: `{payload.get('freshness_status')}`",
+        f"- actionability: `{payload.get('actionability')}`",
+        f"- next_route: `{payload.get('next_route')}`",
+        f"- combined: `{projection.get('combined_search_projection_total_human')}`",
+        f"- monolith: `{projection.get('monolith_db_total_human')}`",
+        f"- shards: `{projection.get('shard_db_total_human')}`",
+        f"- document_hotset: `{hotset.get('status')}` docs=`{hotset.get('document_count')}` latest_event_docs=`{hotset.get('latest_materialization_event_document_count')}`",
+        "",
+        "## Candidate Lanes",
+        "",
+    ]
+    for lane in payload.get("candidate_lanes", []) if isinstance(payload.get("candidate_lanes"), list) else []:
+        if not isinstance(lane, dict):
+            continue
+        lines.append(f"- `{lane.get('id')}`: `{lane.get('status')}` - {lane.get('reason')}")
+    lines.extend(["", "## Largest Shards", ""])
+    for shard in payload.get("largest_shards", []) if isinstance(payload.get("largest_shards"), list) else []:
+        if isinstance(shard, dict):
+            lines.append(f"- `{shard.get('shard')}` docs=`{shard.get('document_count')}` size=`{shard.get('total_with_wal_human')}` status=`{shard.get('status')}`")
+    lines.extend(["", "## Stop Lines", ""])
+    for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
+        lines.append(f"- `{item}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def session_memory_search_projection_next_action(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    search_pressure: dict[str, Any],
+    search_shards: dict[str, Any],
+) -> dict[str, Any] | None:
+    status = str(search_pressure.get("status") or "")
+    freshness_status = str(search_pressure.get("freshness_status") or "")
+    if status not in {"large_projection_stack", "critical_projection_stack"}:
+        return None
+    if freshness_status not in {"current", "current_with_deferred_live_updates"}:
+        return None
+    if str(search_shards.get("status") or "") not in {"current", "current_with_deferred_live_updates"}:
+        return None
+    document_hotset = search_pressure.get("document_hotset") if isinstance(search_pressure.get("document_hotset"), dict) else {}
+    return {
+        "id": "plan_search_projection_cardinality",
+        "reason": "search_projection_combined_large_current_cardinality",
+        "route_kind": "search_projection_plan",
+        "command": [
+            *session_memory_cli_command(aoa_root),
+            "search-projection-plan",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--write-report",
+        ],
+        "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+        "document_hotset_status": document_hotset.get("status"),
+        "document_count": document_hotset.get("document_count"),
+        "latest_event_document_count": document_hotset.get("latest_materialization_event_document_count"),
+        "note": "Plan the compact operational-event projection from cached search summaries; do not run broad monolith counts or physical compaction as the weight fix.",
+    }
+
+
 def session_memory_graph_pressure_summary(
     *,
     aoa_root: Path,
@@ -53139,7 +53371,7 @@ def session_memory_maintenance_status(
             search_shards=operations_search_shards,
         )
     if search_shard_next_action is not None:
-        if next_actions and next_actions[0].get("id") == "use_graph_search":
+        if next_actions and isinstance(next_actions[0], dict) and next_actions[0].get("id") == "use_graph_search":
             next_actions = [search_shard_next_action]
             recommendation = "run_maintenance"
             agent_route = session_memory_agent_route_status(
@@ -53154,11 +53386,29 @@ def session_memory_maintenance_status(
             agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, agent, script, validator, test, eval, git, graph, memory, goal, event class, decision thread, error, receipt, or route entity."
         elif not any(isinstance(action, dict) and action.get("id") == search_shard_next_action.get("id") for action in next_actions):
             next_actions.append(search_shard_next_action)
+    search_projection_next_action = None
+    operations_search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
+    if not portable_clean_runtime.get("ok") and search_shard_next_action is None:
+        search_projection_next_action = session_memory_search_projection_next_action(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            search_pressure=operations_search_pressure,
+            search_shards=operations_search_shards,
+        )
+    if search_projection_next_action is not None and not any(
+        isinstance(action, dict) and action.get("id") == search_projection_next_action.get("id")
+        for action in next_actions
+    ):
+        if next_actions and isinstance(next_actions[0], dict) and next_actions[0].get("id") == "use_graph_search":
+            next_actions = [search_projection_next_action]
+        else:
+            next_actions.append(search_projection_next_action)
     timers_status = session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": [], "diagnostics": []}
     if isinstance(operations_search_shards.get("fast_path_defaults"), dict):
         agent_route["fast_path_defaults"] = operations_search_shards["fast_path_defaults"]
     agent_route["search_shards_status"] = operations_search_shards.get("status")
     agent_route["search_shard_action_pending"] = bool(search_shard_next_action)
+    agent_route["search_projection_action_pending"] = bool(search_projection_next_action)
     if search_shard_next_action is not None:
         agent_route["search_shard_next_action"] = {
             key: search_shard_next_action.get(key)
@@ -53177,6 +53427,20 @@ def session_memory_maintenance_status(
                 "latest_materialization_drip_sticky",
             )
             if key in search_shard_next_action
+        }
+    if search_projection_next_action is not None:
+        agent_route["search_projection_next_action"] = {
+            key: search_projection_next_action.get(key)
+            for key in (
+                "id",
+                "reason",
+                "route_kind",
+                "combined_search_projection_total_human",
+                "document_hotset_status",
+                "document_count",
+                "latest_event_document_count",
+            )
+            if key in search_projection_next_action
         }
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -60889,6 +61153,19 @@ def command_search_shards(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_projection_plan(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_projection_plan(
+        workspace_root=workspace,
+        aoa_root=root,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -66963,6 +67240,16 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-shards reports under .aoa/diagnostics.")
     search_shards.add_argument("--full", action="store_true", help="Print complete shard materialization payload including all per-session rows.")
     search_shards.set_defaults(func=command_search_shards)
+
+    search_projection_plan = sub.add_parser(
+        "search-projection-plan",
+        aliases=["search-cardinality-plan"],
+        help="Plan the compact search projection/cardinality route from cached search summaries without broad DB scans.",
+    )
+    search_projection_plan.add_argument("--workspace-root")
+    search_projection_plan.add_argument("--aoa-root")
+    search_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search projection plan reports under .aoa/diagnostics.")
+    search_projection_plan.set_defaults(func=command_search_projection_plan)
 
     search = sub.add_parser(
         "search",

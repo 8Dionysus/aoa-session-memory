@@ -1674,6 +1674,40 @@ Maintenance gates:
   `test_graph_maintenance_report_aggregate_refresh_ms_reads_real_queue_timing`,
   and `test_maintenance_next_actions_micro_drips_after_slow_queue_aggregate_refresh`.
 
+- 2026-06-28 search projection cardinality plan proof: after targeted live
+  search catch-up, `index-maintenance
+  2026-06-12__001__на-машине-есть-раскиданный-abyss-machine --apply
+  --skip-graph-repair --skip-token-accounting --write-report` repaired the
+  single deferred search session in `66488ms`, then `search-shards all --shard
+  month/2026-06 --no-rebuild --dirty-only --write-report` repaired the stale
+  structured shard row in `70838ms` (`69071` documents, `68496` event
+  documents). With search and shards current, `search-projection-plan
+  --write-report` returned from cached summaries with
+  `status=large_projection_stack`, `freshness_status=current`,
+  `actionability=actionable_design_lane`, combined search projection
+  `15.8 GiB`, document hotset `1888501`, and next route
+  `design_compact_operational_event_projection`. `maintenance-status --full`
+  now exposes `agent_route.search_projection_action_pending=true` and appends
+  `plan_search_projection_cardinality` after the graph micro-drip action. This
+  is intentionally a planning route, not a weight fix: it prevents future
+  agents from treating SQLite vacuum, full-text shards, or broad monolith
+  `GROUP BY` scans as the solution to structured event cardinality. Fast route
+  proof after the plan:
+  `agent-responses --agent-event assistant_answer --use-shards --limit 5`
+  returned through `materialized_shard_fanout` with `uses_fts=false`,
+  `hydrates_body=false`, `uses_shards=true`, and empty diagnostics. Deep
+  measurement proof remains intentionally red:
+  `performance-baseline assistant_answer --kind agent_event --limit 5`
+  reported `answer_rule_gate:stale`, `search_fts_query_timeout:8000ms`, and
+  `sqlite_query_timeout:interrupted`, making GraphRAG/raw-text paths the next
+  measurement target rather than a green gate for this search projection plan.
+  A post-install live-tail recheck kept the action visible with
+  `search_shards_status=current_with_deferred_live_updates` and
+  `search_projection_action_pending=true`; the same `agent-responses` route
+  remained `ok=true` with a `search_shard_fanout_using_structured_nonmaterialized_shards:1`
+  diagnostic for the newest nonmaterialized shard instead of hiding the
+  cardinality plan.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

@@ -1111,6 +1111,16 @@ action deliberately omits `--full-text`, so
 raw-text recall stays on the monolith fallback unless an operator explicitly
 chooses a heavier shard-level lexical route.
 
+When shard freshness is current, or only has deferred live-tail updates, but
+`maintenance-status` still reports `search_projection_combined_large`, treat it
+as structured event/document cardinality pressure, not a SQLite vacuum or
+full-text shard problem. Use
+`search-projection-plan` to read the cached catalog, shard, storage, and latest
+materialization summaries without broad monolith `GROUP BY` scans. The plan
+keeps the stop-lines explicit: preserve agent-event, usage, consequence,
+route-signal, raw/segment/session refs before reducing generic event rows; keep
+the monolith raw-text fallback until a verified replacement exists.
+
 ```bash
 python3 scripts/aoa_session_memory.py search-shards all \
   --workspace-root /path/to/workspace \
@@ -1122,6 +1132,11 @@ python3 scripts/aoa_session_memory.py search "hook timed out" \
   --aoa-root /path/to/workspace/.aoa \
   --use-shards \
   --explain
+
+python3 scripts/aoa_session_memory.py search-projection-plan \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
 ```
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,

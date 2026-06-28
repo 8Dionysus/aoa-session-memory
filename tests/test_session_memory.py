@@ -14874,6 +14874,126 @@ def test_search_shards_deferred_live_tail_is_not_actionable_ops_warning(tmp_path
     assert "live_tail" in completeness["deferred_surface_ids"]
 
 
+def test_search_projection_next_action_requires_current_large_projection(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    search_pressure = {
+        "status": "large_projection_stack",
+        "freshness_status": "current",
+        "combined_search_projection_total_human": "15.8 GiB",
+        "document_hotset": {
+            "status": "large_structured_document_hotset",
+            "document_count": 1_888_501,
+            "latest_materialization_event_document_count": 68_496,
+        },
+    }
+
+    action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure=search_pressure,
+        search_shards={"status": "current"},
+    )
+
+    assert action is not None
+    assert action["id"] == "plan_search_projection_cardinality"
+    assert action["route_kind"] == "search_projection_plan"
+    command_text = module.shlex.join(action["command"])
+    assert "search-projection-plan" in command_text
+    assert "--write-report" in command_text
+    assert action["document_count"] == 1_888_501
+
+    assert (
+        module.session_memory_search_projection_next_action(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search_pressure={**search_pressure, "freshness_status": "incomplete"},
+            search_shards={"status": "current"},
+        )
+        is None
+    )
+    assert (
+        module.session_memory_search_projection_next_action(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search_pressure={**search_pressure, "freshness_status": "current_with_deferred_live_updates"},
+            search_shards={"status": "current_with_deferred_live_updates"},
+        )
+        is not None
+    )
+    assert (
+        module.session_memory_search_projection_next_action(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search_pressure=search_pressure,
+            search_shards={"status": "incomplete"},
+        )
+        is None
+    )
+
+
+def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    storage = {
+        "search_db": {"total_with_wal_bytes": 10 * 1024 * 1024 * 1024, "total_with_wal_human": "10.0 GiB"},
+        "search_root": {"size_bytes": 16 * 1024 * 1024 * 1024, "size_human": "16.0 GiB"},
+    }
+    search_shards = {
+        "status": "current",
+        "combined_search_projection_total_bytes": 16 * 1024 * 1024 * 1024,
+        "combined_search_projection_total_human": "16.0 GiB",
+        "monolith_db_total_bytes": 10 * 1024 * 1024 * 1024,
+        "monolith_db_total_human": "10.0 GiB",
+        "shard_db_total_bytes": 6 * 1024 * 1024 * 1024,
+        "shard_db_total_human": "6.0 GiB",
+        "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+        "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+        "materialized_shard_count": 3,
+        "shard_count": 3,
+        "raw_text_fallback_dependency": {"status": "monolith_required_for_raw_text_query"},
+        "document_count": 1_900_000,
+        "latest_materialization": {
+            "document_count": 70_000,
+            "document_counts": {"event": 69_000, "segment": 500, "session": 1},
+            "event_document_count": 69_000,
+            "slow_sessions": [{"session_label": "slow", "document_count": 69_000, "elapsed_ms": 70_000}],
+        },
+        "largest_shards": [
+            {
+                "shard": "month/2026-06",
+                "status": "current",
+                "document_count": 700_000,
+                "total_with_wal_human": "2.0 GiB",
+                "storage_profile": module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD,
+                "raw_text_query_support": module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+            }
+        ],
+        "raw_text_query_route": "structured shards use monolith fallback",
+    }
+    monkeypatch.setattr(module, "maintenance_storage_status", lambda _aoa_root: storage)
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", lambda _aoa_root: search_shards)
+
+    plan = module.session_memory_search_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        write_report=True,
+    )
+
+    assert plan["ok"] is True
+    assert plan["mutates"] is False
+    assert plan["status"] == "large_projection_stack"
+    assert plan["freshness_status"] == "current"
+    assert plan["actionability"] == "actionable_design_lane"
+    assert plan["next_route"] == "design_compact_operational_event_projection"
+    assert plan["candidate_lanes"][0]["id"] == "compact_operational_event_projection"
+    assert plan["candidate_lanes"][0]["status"] == "recommended"
+    assert "do_not_run_broad_monolith_group_by_on_hot_agent_path" in plan["stop_lines"]
+    assert Path(plan["report_json"]).exists()
+    assert Path(plan["report_markdown"]).exists()
+
+
 def test_live_sync_updates_search_catalog_deferred_shard_state(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
