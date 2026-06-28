@@ -13659,7 +13659,7 @@ def test_session_memory_timer_status_flags_stale_graph_drip_overrides(monkeypatc
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 25 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 75",
+                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 75 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 225",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -13677,7 +13677,7 @@ def test_session_memory_timer_status_flags_stale_graph_drip_overrides(monkeypatc
     assert contract["service"] == "aoa-session-memory-backlog-maintenance.service"
     assert contract["profile"] == "backlog"
     assert contract["status"] == "drift"
-    assert contract["explicit_graph_drip_overrides"]["graph_drip_batch_limit"] == "25"
+    assert contract["explicit_graph_drip_overrides"]["graph_drip_batch_limit"] == "75"
     assert contract["mismatched_graph_drip_overrides"][0]["expected"] == module.AUTO_MAINTENANCE_PROFILES["backlog"]["graph_drip_batch_limit"]
 
 

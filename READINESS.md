@@ -638,11 +638,12 @@ Last observed result:
   still run a capped probe-class graph-maintenance batch and expose it as
   `fallback_graph_drip` without marking the full backlog/deep profile as
   successful. The fallback now takes batch, budget, candidate-pool window, and
-  node/edge caps from profile graph-drip settings unless explicitly overridden,
-  so graph recovery can exact-plan more than the small old default while
-  staying within the same safety boundary. It mutates only when the outer
-  resource route is called with `--apply`; dry resource probes preserve the raw
-  blocked state.
+  node/edge caps from profile graph-drip settings unless explicitly overridden.
+  Those defaults are intentionally small (`25` sources, `300s`,
+  `25` candidate-pool window) so resource-blocked backlog/deep launches make
+  bounded progress without spending the fallback window on a wide exact-planning
+  pool. It mutates only when the outer resource route is called with `--apply`;
+  dry resource probes preserve the raw blocked state.
 - 2026-06-14 search read-availability proof: a live hot maintenance run opened
   a long rollback-journal write window on `search/aoa-search.sqlite3`; during
   that window both `agent-responses` and `search` returned
@@ -794,12 +795,19 @@ Last observed result:
   GraphRAG `answer_rule_gate:stale`; registry sync then refreshed the generated
   entity registry to `current`, and a bounded `graph-maintenance --apply`
   batch processed `25` graph sources without rollback. Backlog/deep
-  auto-maintenance resource fallbacks now use profile graph-drip defaults, and
+  auto-maintenance resource fallbacks use profile graph-drip defaults, and
   regression tests cover profile fallback, explicit disable, and the dry-run
   safety boundary that prevents graph mutation without outer `--apply`.
   `maintenance-status` also audits installed user timer `ExecStart` lines so a
   stale explicit graph-drip override is visible as unit drift instead of
-  silently slowing automatic graph catch-up.
+  silently slowing automatic graph catch-up. 2026-06-28 live proof: after
+  tightening both backlog/deep fallback defaults to `25` sources, `300s`, and
+  `25` candidate-pool window, installed user timers were `current` with no
+  explicit overrides, and
+  `diagnostics/20260628T065210Z__graph-maintenance.json` processed `25`
+  sources in `207.014s` with `candidate_pool_count=25`,
+  `candidate_pool_limit=25`, `budget_exhausted=false`, moving archive graph
+  queue from `625` to `600`.
 - 2026-06-21 search raw-lexical policy proof: live `search-provider-status`,
   `maintenance-status --full`, and `storage-audit` showed the current search
   store has no recorded bounded raw-lexical metadata and is classified as

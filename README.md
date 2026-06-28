@@ -672,9 +672,11 @@ tightly capped probe-class graph drip instead of leaving graph maintenance
 idle. Both profiles enable this by default because unattended medium/heavy
 indexing can be capped by the host resource policy. The report keeps the outer
 maintenance profile `ok=false`, records `fallback_graph_drip`, and does not
-claim the full backlog/deep profile succeeded. Profile graph-drip settings
-control the batch, budget, candidate-pool window, and node/edge refresh caps
-unless explicit CLI overrides are passed. Installed user timers are part of
+claim the full backlog/deep profile succeeded. The default fallback is a small
+progress drip, currently `25` graph sources with a `300s` budget and a `25`
+candidate-pool window; profile graph-drip settings control the batch, budget,
+candidate-pool window, and node/edge refresh caps unless explicit CLI overrides
+are passed. Installed user timers are part of
 that contract: `maintenance-status` reads their `ExecStart` lines and reports
 `available_with_unit_drift` when an explicit graph-drip override no longer
 matches the profile default. When a read-only MCP environment cannot query the
