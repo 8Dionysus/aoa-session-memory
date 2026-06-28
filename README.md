@@ -311,7 +311,7 @@ python3 scripts/aoa_session_memory.py graph-maintenance all \
   --apply \
   --batch-limit 3 \
   --budget-seconds 300 \
-  --refresh-chunk-size 64 \
+  --refresh-chunk-size 512 \
   --write-report \
   --write-hash-cache
 ```
@@ -328,7 +328,7 @@ abyss-machine resource launch --class medium --kind indexing --timeout 900 --jso
     --apply \
     --batch-limit 25 \
     --budget-seconds 300 \
-    --refresh-chunk-size 64 \
+    --refresh-chunk-size 512 \
     --write-report \
     --write-hash-cache
 ```

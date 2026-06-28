@@ -264,7 +264,7 @@ GRAPH_MAINTENANCE_SLOW_INTERACTIVE_ELAPSED_MS = 180_000
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
-GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
+GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 512
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES = 20000
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES = 60000
 GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT = 10
@@ -303,7 +303,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
-        "graph_refresh_chunk_size": 32,
+        "graph_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_max_refresh_nodes": GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
         "graph_max_refresh_edges": GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
         "ref_sample_limit": 200,
@@ -325,7 +325,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 100,
-        "graph_refresh_chunk_size": 64,
+        "graph_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_max_refresh_nodes": 80000,
         "graph_max_refresh_edges": 250000,
         "ref_sample_limit": 400,
@@ -341,7 +341,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "graph_drip_on_block": True,
         "graph_drip_batch_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
         "graph_drip_budget_seconds": 300,
-        "graph_drip_refresh_chunk_size": 64,
+        "graph_drip_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_drip_max_refresh_nodes": 60000,
         "graph_drip_max_refresh_edges": 180000,
         "graph_drip_candidate_pool_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
@@ -353,7 +353,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 0,
-        "graph_refresh_chunk_size": 64,
+        "graph_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_max_refresh_nodes": 0,
         "graph_max_refresh_edges": 0,
         "ref_sample_limit": 400,
@@ -375,7 +375,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "max_raw_mb": SEARCH_RAW_LEXICAL_DEFAULT_MAX_MB,
         "token_max_raw_mb": 512,
         "graph_batch_limit": 250,
-        "graph_refresh_chunk_size": 128,
+        "graph_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_max_refresh_nodes": 200000,
         "graph_max_refresh_edges": 750000,
         "ref_sample_limit": 1000,
@@ -391,7 +391,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "graph_drip_on_block": True,
         "graph_drip_batch_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
         "graph_drip_budget_seconds": 300,
-        "graph_drip_refresh_chunk_size": 64,
+        "graph_drip_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
         "graph_drip_max_refresh_nodes": 60000,
         "graph_drip_max_refresh_edges": 180000,
         "graph_drip_candidate_pool_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,

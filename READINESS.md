@@ -1545,6 +1545,33 @@ Maintenance gates:
   no mutation. The `abyss-machine` wrapper completed in `73.93s` with service
   runtime `1min 13.909s`, memory peak `4G`, and swap `0B`. Report:
   `diagnostics/20260621T185958Z__graph-maintenance.json`.
+- 2026-06-28 live queue-drip throughput proof: a real generated-queue
+  `graph-maintenance all --apply --batch-limit 25 --budget-seconds 300
+  --refresh-chunk-size 64 --max-refresh-nodes 20000 --max-refresh-edges 60000
+  --use-queue --candidate-pool-limit 25 --write-report --write-hash-cache`
+  completed without rollback or budget exhaustion, but still spent
+  `139.226s` for `19` selected sources. The bottleneck was aggregate refresh:
+  `102.879s` total, with `node_refresh_ms=31873`,
+  `edge_refresh_ms=51188`, `type_count_before_ms=19611`, `213` node chunks,
+  and `931` edge chunks. Report:
+  `diagnostics/20260628T084212Z__graph-maintenance.json`.
+- The bounded graph aggregate refresh chunk was then raised from `64` to `512`
+  across source defaults, auto-maintenance profiles, next-action commands, and
+  operator docs. A follow-up live queue drip on the same real backlog completed
+  in `56.547s` for `18` selected sources, again with no rollback, no
+  diagnostics, and no budget exhaustion. Aggregate refresh dropped to
+  `27.866s`: `node_refresh_ms=8117`, `edge_refresh_ms=14562`,
+  `type_count_before_ms=5013`, `27` node chunks, and `116` edge chunks.
+  Queue depth moved from `480` to `462`; the larger backlog remains a bounded
+  drain problem, not a reason to run a full rebuild by default. Report:
+  `diagnostics/20260628T084949Z__graph-maintenance.json`.
+- Post-change validation kept the consumer route green: `validate` and
+  `doctor` returned `ok=true`, and
+  `live-scenario-corpus check --write-report --full` passed `4/4` reviewed
+  scenarios with `actionable_gap_count=0`. The slowest remaining consumer
+  profile is `graph_bridge` at `42.082s`; it returned raw, segment, and session
+  refs, so the debt is latency rather than evidence loss. Report:
+  `diagnostics/20260628T085412Z__live-scenario-corpus-check.json`.
 
 ## Probe Notes
 

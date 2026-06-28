@@ -7291,7 +7291,7 @@ def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> 
     assert "--aoa-root /srv/AbyssOS/.aoa" in recommendation["command"]
     assert "--apply" in recommendation["command"]
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
-    assert "--refresh-chunk-size 64" in recommendation["command"]
+    assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in recommendation["command"]
     assert "--plan-refresh-costs" not in recommendation["command"]
     assert "/path/to/workspace" not in recommendation["command"]
 
@@ -10623,7 +10623,7 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
     assert "/path/to/workspace" not in nested_command
     assert "--apply" in nested_command
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT}" in nested_command
-    assert "--refresh-chunk-size 64" in nested_command
+    assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in nested_command
     assert recommendation == "run_maintenance"
     assert actions[0]["id"] == "repair_graph_bounded"
     command_text = module.shlex.join(actions[0]["command"])
