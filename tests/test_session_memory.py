@@ -16925,6 +16925,43 @@ def test_graph_mutation_commands_report_shared_maintenance_lock(tmp_path: Path, 
     assert calls["atlas_build"]["clean"] is True
 
 
+def test_hook_worker_command_reports_shared_maintenance_lock(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int = 5) -> dict[str, Any]:
+        calls["workspace_root"] = workspace_root
+        calls["aoa_root"] = aoa_root
+        calls["limit"] = limit
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "ok": True,
+            "status": "processed",
+            "processed": 0,
+            "results": [],
+        }
+
+    monkeypatch.setattr(module, "run_hook_worker", fake_run_hook_worker)
+
+    args = module.argparse.Namespace(
+        workspace_root=str(workspace),
+        aoa_root=str(aoa_root),
+        limit=5,
+    )
+
+    assert module.command_hook_worker(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["maintenance_lock_path"] == str(module.maintenance_lock_path(aoa_root))
+    assert payload["maintenance_coordinator"]["owner_job"] == "hook-worker"
+    assert payload["maintenance_coordinator"]["mode"] == "hook-worker"
+    assert "sessions" in payload["maintenance_coordinator"]["touched_surfaces"]
+    assert "graph" in payload["maintenance_coordinator"]["touched_surfaces"]
+    assert calls == {"workspace_root": workspace, "aoa_root": aoa_root, "limit": 5}
+
+
 def test_conversation_act_audit_empty_registry_is_structured(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()

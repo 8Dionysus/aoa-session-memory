@@ -60180,7 +60180,22 @@ def command_hook(args: argparse.Namespace) -> int:
 def command_hook_worker(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
-    payload = run_hook_worker(workspace_root=explicit_workspace, aoa_root=root, limit=args.limit)
+    touched_surfaces = sorted(
+        {
+            "hooks",
+            "sessions",
+            *maintenance_surfaces(repair_indexes=True, repair_token_accounting=True, repair_graph=True),
+        }
+    )
+    payload = run_with_maintenance_lock(
+        root,
+        lambda: run_hook_worker(workspace_root=explicit_workspace, aoa_root=root, limit=args.limit),
+        owner_job="hook-worker",
+        mode="hook-worker",
+        target="hook-jobs",
+        reason="background_hook_worker",
+        touched_surfaces=touched_surfaces,
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
 

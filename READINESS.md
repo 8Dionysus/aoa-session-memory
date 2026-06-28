@@ -1583,6 +1583,30 @@ Maintenance gates:
   warnings were `graph_actionable_sources` and
   `search_projection_combined_large`. Report:
   `diagnostics/20260628T085710Z__search-shards.json`.
+- 2026-06-28 hook-worker coordination proof: the next real graph queue drip
+  used the same bounded command shape and still completed safely, but regressed
+  to `134.322s` for `18` selected sources. Aggregate refresh again dominated:
+  `98.425s` total, with `type_count_before_ms=20989`,
+  `node_refresh_ms=30893`, and `edge_refresh_ms=46350`. A follow-up
+  rollback-only microbench over the same current node/edge set finished in
+  about `9-11s`, so the slow path was not explained by row count alone. Nearby
+  live evidence showed a large hidden hook worker had just synced a
+  `PreCompact` transcript job with `66888` events and `314` segments, while the
+  maintenance coordinator did not expose that worker as an active job. The
+  `hook-worker` command is now wrapped in the shared maintenance coordinator
+  with owner/mode `hook-worker`, target `hook-jobs`, and touched surfaces
+  covering `hooks`, `sessions`, `search`, `route_indexes`, `atlas`,
+  `entity_registry`, `token_accounting`, and `graph`. Regression proof:
+  `test_hook_worker_command_reports_shared_maintenance_lock`; full suite:
+  `351 passed`. Installed proof:
+  `hook-worker --limit 1` returned `ok=true`, `status=processed`,
+  `processed=0`, `coordinator_status=completed`, and
+  `maintenance_lock_path=/srv/AbyssOS/.aoa/diagnostics/auto-maintenance.lock`.
+  Post-install `validate` and `doctor` returned `ok=true`; `doctor` retained
+  only the known hook-only receipt-dir warning. The remaining live status is
+  now explicit, not hidden: `graph_actionable_sources` and
+  `search_projection_combined_large`, with the next action still
+  `repair_graph_queue_drip`.
 
 ## Probe Notes
 
