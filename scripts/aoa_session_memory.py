@@ -46236,9 +46236,25 @@ def graph_freshness(aoa_root: Path, graph: dict[str, Any]) -> dict[str, Any]:
                     "needs_maintenance": bool(hot_state.get("needs_maintenance")),
                     "needs_full_rebuild": bool(hot_state.get("needs_full_rebuild")),
                     "actionable_graph_source_count": hot_status.get("actionable_count"),
+                    "queued_graph_source_count": hot_status.get("queued_count"),
                     "deferred_live_source_count": hot_status.get("deferred_live_source_count"),
                     "ledger_store_missing_count": hot_status.get("ledger_store_missing_count"),
                     "latest_maintenance_remaining_count": hot_status.get("latest_maintenance_remaining_count"),
+                    "latest_queue_maintenance_remaining_count": (
+                        hot_status.get("latest_queue_maintenance", {}).get("remaining_count")
+                        if isinstance(hot_status.get("latest_queue_maintenance"), dict)
+                        else None
+                    ),
+                    "latest_queue_maintenance_selected_count": (
+                        hot_status.get("latest_queue_maintenance", {}).get("selected_count")
+                        if isinstance(hot_status.get("latest_queue_maintenance"), dict)
+                        else None
+                    ),
+                    "latest_queue_maintenance_elapsed_ms": (
+                        hot_status.get("latest_queue_maintenance", {}).get("elapsed_ms")
+                        if isinstance(hot_status.get("latest_queue_maintenance"), dict)
+                        else None
+                    ),
                     "hot_gate_diagnostics": hot_diagnostics,
                     "maintenance_recommendation": hot_status.get("maintenance_recommendation", {}),
                 }

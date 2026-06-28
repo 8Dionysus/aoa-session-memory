@@ -6544,6 +6544,15 @@ def test_graph_freshness_surfaces_hot_gate_backlog(tmp_path: Path, monkeypatch: 
             "needs_maintenance": True,
             "needs_full_rebuild": False,
             "ledger": {"actionable_count": 17, "deferred_live_source_count": 2, "status_counts": {"dirty": 17}},
+            "queue": {"queued_count": 5, "actionable_count": 5},
+            "latest_queue_maintenance": {
+                "exists": True,
+                "selection_scope": "selected_sessions",
+                "use_queue": True,
+                "remaining_count": 5,
+                "selected_count": 3,
+                "elapsed_ms": 1234,
+            },
             "diagnostics": ["latest_graph_maintenance_remaining_sources"],
         },
     )
@@ -6556,8 +6565,12 @@ def test_graph_freshness_surfaces_hot_gate_backlog(tmp_path: Path, monkeypatch: 
     assert freshness["status"] == "graph_store_stale"
     assert freshness["hot_gate_status"] == "stale"
     assert freshness["needs_maintenance"] is True
-    assert freshness["actionable_graph_source_count"] == 17
+    assert freshness["actionable_graph_source_count"] == 22
+    assert freshness["queued_graph_source_count"] == 5
     assert freshness["deferred_live_source_count"] == 2
+    assert freshness["latest_queue_maintenance_remaining_count"] == 5
+    assert freshness["latest_queue_maintenance_selected_count"] == 3
+    assert freshness["latest_queue_maintenance_elapsed_ms"] == 1234
     assert "latest_graph_maintenance_remaining_sources" in freshness["hot_gate_diagnostics"]
     assert freshness["maintenance_recommendation"]["route"] == "bounded_graph_maintenance"
 
