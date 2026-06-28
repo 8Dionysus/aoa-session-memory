@@ -1,0 +1,62 @@
+{
+  "schema_version": "aoa-local-kag-record-v1",
+  "repo": "aoa-session-memory",
+  "local_id": "edge:session-memory:kernel-routes-to-manifest-schema",
+  "record_class": "edge",
+  "source_refs": [
+    {
+      "repo": "aoa-session-memory",
+      "path": "README.md",
+      "source_class": "memo_source",
+      "role": "owner_route",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "PIPELINE.md",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "schemas/session.manifest.schema.json",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    }
+  ],
+  "source_owner": "aoa-session-memory",
+  "provenance_mode": "strict_source_linked",
+  "derived_method": "source-linked local KAG edge over archive route and manifest schema surfaces",
+  "generated_or_authored": "generated_from_source",
+  "status": "active",
+  "owner_return_route": {
+    "repo": "aoa-session-memory",
+    "surface": "PIPELINE.md",
+    "route_kind": "memory"
+  },
+  "freshness": {
+    "mode": "source_snapshot",
+    "state": "current",
+    "checked_ref": "PIPELINE.md"
+  },
+  "builder": {
+    "route": "local KAG provider authoring",
+    "surface": "kag/manifest.json"
+  },
+  "validator": {
+    "route": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py",
+    "lane": "owner-local"
+  },
+  "storage_posture": {
+    "git_surface": "portable_records",
+    "payload_class": "edge",
+    "runtime_route": "source-repo"
+  },
+  "consumer_route": "aoa-kag registry",
+  "from_id": "node:session-memory:portable-kernel",
+  "to_id": "node:session-memory:manifest-schema",
+  "edge_kind": "routes_to",
+  "edge_trace": "README.md and PIPELINE.md define the portable archive route; schemas/session.manifest.schema.json carries the session identity contract used by that route"
+}

@@ -1,0 +1,80 @@
+{
+  "schema_version": "aoa-local-kag-record-v1",
+  "repo": "aoa-session-memory",
+  "local_id": "projection:mcp:session-memory-source-return",
+  "record_class": "projection",
+  "source_refs": [
+    {
+      "repo": "aoa-session-memory",
+      "path": "README.md",
+      "source_class": "memo_source",
+      "role": "owner_route",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "PIPELINE.md",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "READINESS.md",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "maps/README.md",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "scripts/aoa_session_memory.py",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
+    }
+  ],
+  "source_owner": "aoa-session-memory",
+  "provenance_mode": "bounded_source_linked",
+  "derived_method": "source-return projection over the portable session-memory kernel, route atlas, and validator surfaces",
+  "generated_or_authored": "authored_control",
+  "status": "active",
+  "owner_return_route": {
+    "repo": "aoa-session-memory",
+    "surface": "README.md",
+    "route_kind": "memory"
+  },
+  "freshness": {
+    "mode": "source_snapshot",
+    "state": "current",
+    "checked_ref": "kag/manifest.json"
+  },
+  "builder": {
+    "route": "local KAG provider authoring",
+    "surface": "kag/manifest.json"
+  },
+  "validator": {
+    "route": "aoa-kag:scripts/validate_kag.py",
+    "lane": "local-kag"
+  },
+  "storage_posture": {
+    "git_surface": "compact_readmodel",
+    "payload_class": "projection",
+    "runtime_route": "source-repo"
+  },
+  "consumer_route": "aoa-kag-mcp resource",
+  "projection_kind": "source_return_view",
+  "source_record_ids": [
+    "node:session-memory:portable-kernel",
+    "node:session-memory:manifest-schema",
+    "edge:session-memory:kernel-routes-to-manifest-schema",
+    "index:session-memory:source-inventory"
+  ],
+  "consumer_shape": "resources expose session-memory source routes, manifest schema handles, route atlas handles, and validation handles while returning meaning changes to aoa-session-memory"
+}

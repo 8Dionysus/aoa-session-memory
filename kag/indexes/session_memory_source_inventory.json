@@ -1,0 +1,72 @@
+{
+  "schema_version": "aoa-local-kag-record-v1",
+  "repo": "aoa-session-memory",
+  "local_id": "index:session-memory:source-inventory",
+  "record_class": "index",
+  "source_refs": [
+    {
+      "repo": "aoa-session-memory",
+      "path": "README.md",
+      "source_class": "memo_source",
+      "role": "owner_route",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "PIPELINE.md",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "schemas/session.manifest.schema.json",
+      "source_class": "memo_source",
+      "role": "primary",
+      "authority": "authored_source"
+    }
+  ],
+  "source_owner": "aoa-session-memory",
+  "provenance_mode": "strict_source_linked",
+  "derived_method": "source-linked local KAG index over session-memory provider records",
+  "generated_or_authored": "generated_from_source",
+  "status": "active",
+  "owner_return_route": {
+    "repo": "aoa-session-memory",
+    "surface": "README.md",
+    "route_kind": "memory"
+  },
+  "freshness": {
+    "mode": "source_snapshot",
+    "state": "current",
+    "checked_ref": "kag/manifest.json"
+  },
+  "builder": {
+    "route": "local KAG provider authoring",
+    "surface": "kag/manifest.json"
+  },
+  "validator": {
+    "route": "aoa-kag:scripts/validate_kag.py",
+    "lane": "local-kag"
+  },
+  "storage_posture": {
+    "git_surface": "portable_records",
+    "payload_class": "index",
+    "runtime_route": "source-repo"
+  },
+  "consumer_route": "aoa-kag registry",
+  "index_kind": "inventory",
+  "indexed_record_classes": [
+    "node",
+    "edge",
+    "projection",
+    "receipt"
+  ],
+  "source_record_ids": [
+    "node:session-memory:portable-kernel",
+    "node:session-memory:manifest-schema",
+    "edge:session-memory:kernel-routes-to-manifest-schema",
+    "projection:mcp:session-memory-source-return",
+    "receipt:validation:session-memory-provider"
+  ]
+}
