@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-28T13:25:00Z",
+  "generated_at": "2026-06-28T13:45:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 8,
+  "case_count": 9,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -286,6 +286,50 @@
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
             "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "entity_registry_lookup_status_contract",
+      "profiles": [
+        "entity_registry_lookup"
+      ],
+      "seed": "corpus-entity-registry-lookup",
+      "sample_size": 5,
+      "recent_days": 7,
+      "limit": 5,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Entity registry lookup must prove active, observed, unknown, stale, and removed status routing. Stale/removed are checked through a temporary previous-snapshot transition so the live archive is not mutated."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "entity_registry_lookup",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 5,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "min_active_lookup_count": 1,
+            "min_observed_lookup_count": 1,
+            "min_unknown_lookup_count": 1,
+            "min_stale_lookup_count": 1,
+            "min_removed_lookup_count": 1,
+            "min_retired_lookup_count": 2,
+            "min_registered_lookup_count": 4,
+            "min_unregistered_lookup_count": 1,
+            "min_transition_probe_count": 2,
+            "min_source_ref_count": 4,
+            "max_elapsed_ms": 10000
           }
         ]
       }

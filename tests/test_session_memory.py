@@ -2358,6 +2358,20 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert unknown_lookup["agent_route_packet"]["status"] == "unknown"
     assert unknown_lookup["entries"][0]["kind"] == "mcp_service"
 
+    lookup_scenario = module.live_scenario_entity_registry_lookup_audit(
+        aoa_root=aoa_root,
+        seed="entity-registry-lookup-fixture",
+        limit=5,
+    )
+    assert lookup_scenario["ok"] is True
+    assert lookup_scenario["quality"]["active_lookup_count"] >= 1
+    assert lookup_scenario["quality"]["observed_lookup_count"] >= 1
+    assert lookup_scenario["quality"]["unknown_lookup_count"] >= 1
+    assert lookup_scenario["quality"]["stale_lookup_count"] >= 1
+    assert lookup_scenario["quality"]["removed_lookup_count"] >= 1
+    assert lookup_scenario["quality"]["transition_probe_count"] >= 2
+    assert lookup_scenario["quality"]["source_ref_count"] >= 4
+
     filtered = module.build_entity_registry(
         aoa_root=aoa_root,
         write=True,
@@ -4355,6 +4369,31 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     def fake_graph(**_kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "node_count": 2, "edge_count": 1, "evidence_refs": [{"refs": {"raw": "raw:line:3"}}]}
 
+    def fake_registry(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "quality": {
+                "sample_count": 5,
+                "passed_count": 5,
+                "warn_count": 0,
+                "failed_count": 0,
+                "status_counts": {"active": 1, "observed": 1, "unknown": 1, "stale": 1, "removed": 1},
+                "active_lookup_count": 1,
+                "observed_lookup_count": 1,
+                "unknown_lookup_count": 1,
+                "stale_lookup_count": 1,
+                "removed_lookup_count": 1,
+                "retired_lookup_count": 2,
+                "source_ref_count": 4,
+                "registered_lookup_count": 4,
+                "unregistered_lookup_count": 1,
+                "transition_probe_count": 2,
+            },
+            "samples": [
+                {"status": "passed", "anchor": "aoa-live-skill", "kind": "skill", "source_ref_count": 1}
+            ],
+        }
+
     monkeypatch.setattr(
         module,
         "entity_usage_scenario_candidates",
@@ -4370,10 +4409,20 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     monkeypatch.setattr(module, "agent_event_route_search", fake_closeouts)
     monkeypatch.setattr(module, "literal_query_plan", fake_literal)
     monkeypatch.setattr(module, "graph_neighborhood", fake_graph)
+    monkeypatch.setattr(module, "live_scenario_entity_registry_lookup_audit", fake_registry)
 
     audit = module.live_scenario_audit(
         aoa_root=tmp_path / ".aoa",
-        profiles=["entity_dossier", "entity_usage", "hook_failure", "goal_lifecycle", "agent_closeout", "literal_planner", "graph_neighborhood"],
+        profiles=[
+            "entity_registry_lookup",
+            "entity_dossier",
+            "entity_usage",
+            "hook_failure",
+            "goal_lifecycle",
+            "agent_closeout",
+            "literal_planner",
+            "graph_neighborhood",
+        ],
         sample_size=1,
         recent_days=7,
         limit=1,
@@ -4381,11 +4430,13 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
 
     assert audit["ok"] is True
     assert audit["artifact_type"] == "session_memory_live_scenario_audit"
-    assert audit["quality"]["scenario_count"] == 7
+    assert audit["quality"]["scenario_count"] == 8
     assert audit["quality"]["failed_count"] == 0
     assert audit["quality"]["actionable_gap_count"] == 0
     assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 6
     scenarios = {item["profile"]: item for item in audit["scenarios"]}
+    assert scenarios["entity_registry_lookup"]["active_lookup_count"] == 1
+    assert scenarios["entity_registry_lookup"]["removed_lookup_count"] == 1
     assert scenarios["entity_dossier"]["sample_count"] == 1
     assert scenarios["entity_dossier"]["one_short_route_sample_count"] == 1
     assert scenarios["literal_planner"]["sample_count"] == 4
@@ -4893,6 +4944,44 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_neighborhood:edge_count:0<1" in graph_failures
     assert "graph_neighborhood:evidence_ref_count:0<1" in graph_failures
 
+    registry_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "entity_registry_lookup",
+            "status": "passed",
+            "sample_count": 5,
+            "active_lookup_count": 1,
+            "observed_lookup_count": 0,
+            "unknown_lookup_count": 1,
+            "stale_lookup_count": 0,
+            "removed_lookup_count": 1,
+            "retired_lookup_count": 1,
+            "source_ref_count": 2,
+            "registered_lookup_count": 3,
+            "unregistered_lookup_count": 1,
+            "transition_probe_count": 1,
+        },
+        {
+            "profile": "entity_registry_lookup",
+            "min_active_lookup_count": 1,
+            "min_observed_lookup_count": 1,
+            "min_unknown_lookup_count": 1,
+            "min_stale_lookup_count": 1,
+            "min_removed_lookup_count": 1,
+            "min_retired_lookup_count": 2,
+            "min_source_ref_count": 3,
+            "min_registered_lookup_count": 4,
+            "min_unregistered_lookup_count": 1,
+            "min_transition_probe_count": 2,
+        },
+    )
+
+    assert "entity_registry_lookup:observed_lookup_count:0<1" in registry_failures
+    assert "entity_registry_lookup:stale_lookup_count:0<1" in registry_failures
+    assert "entity_registry_lookup:retired_lookup_count:1<2" in registry_failures
+    assert "entity_registry_lookup:source_ref_count:2<3" in registry_failures
+    assert "entity_registry_lookup:registered_lookup_count:3<4" in registry_failures
+    assert "entity_registry_lookup:transition_probe_count:1<2" in registry_failures
+
 
 def test_live_scenario_expectations_enforce_speed_and_gap_budget() -> None:
     failures = module.live_scenario_expectation_failures(
@@ -4925,8 +5014,17 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     observed = module.live_scenario_compact_observed(
         {
             "ok": True,
-            "quality": {"scenario_count": 3},
+            "quality": {"scenario_count": 4},
             "scenarios": [
+                {
+                    "profile": "entity_registry_lookup",
+                    "status": "passed",
+                    "status_counts": {"active": 1, "observed": 1, "unknown": 1, "stale": 1, "removed": 1},
+                    "active_lookup_count": 1,
+                    "removed_lookup_count": 1,
+                    "transition_probe_count": 2,
+                    "source_ref_count": 4,
+                },
                 {
                     "profile": "hook_failure",
                     "status": "passed",
@@ -4950,6 +5048,9 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     )
 
     profiles = {item["profile"]: item for item in observed["profiles"]}
+    assert profiles["entity_registry_lookup"]["active_lookup_count"] == 1
+    assert profiles["entity_registry_lookup"]["removed_lookup_count"] == 1
+    assert profiles["entity_registry_lookup"]["transition_probe_count"] == 2
     assert profiles["hook_failure"]["total_receipt_count"] == 2
     assert profiles["hook_failure"]["returned_receipt_count"] == 1
     assert profiles["goal_lifecycle"]["result_count"] == 3

@@ -59734,6 +59734,8 @@ def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
                 counts["segment_ref"] += 1
             elif kind == "session_manifest" and item.get("value"):
                 counts["session_ref"] += 1
+            if item.get("source_type") and item.get("path"):
+                counts["source_ref"] += 1
             evidence_counts = item.get("evidence_ref_counts")
             if isinstance(evidence_counts, dict):
                 for count_key, target_key in (
@@ -60063,6 +60065,324 @@ def live_scenario_literal_planner_audit(
     }
 
 
+def live_scenario_entity_registry_lookup_audit(
+    *,
+    aoa_root: Path,
+    seed: str,
+    limit: int,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    snapshot = load_entity_registry(aoa_root)
+    entries = [entry for entry in snapshot.get("entries", []) if isinstance(entry, dict)]
+    diagnostics: list[str] = []
+    samples: list[dict[str, Any]] = []
+    selected_limit = max(5, min(int_value(limit, 5), 10))
+
+    def entry_anchor(entry: dict[str, Any]) -> str:
+        return str(entry.get("canonical_key") or next((alias for alias in entry.get("aliases", []) if alias), ""))
+
+    def entry_source_ref_count(entry: dict[str, Any]) -> int:
+        refs = entry.get("source_refs") if isinstance(entry.get("source_refs"), list) else []
+        return sum(1 for ref in refs if isinstance(ref, dict) and str(ref.get("path") or ""))
+
+    def source_ref_status_counts(lookup_entries: list[dict[str, Any]]) -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        for entry in lookup_entries:
+            for ref in entry.get("source_refs", []) if isinstance(entry.get("source_refs"), list) else []:
+                if not isinstance(ref, dict):
+                    continue
+                status = str(ref.get("status") or "unknown")
+                counts[status] += 1
+        return dict(sorted(counts.items()))
+
+    def run_lookup_sample(
+        *,
+        name: str,
+        root: Path,
+        anchor: str,
+        kind: str,
+        expected_statuses: set[str],
+        expected_registered: bool | None,
+        require_refs: bool,
+        probe_mode: str = "live_registry",
+    ) -> None:
+        sample_started = time.monotonic()
+        lookup = entity_registry_lookup(
+            aoa_root=root,
+            anchor=anchor,
+            kind=kind,
+            include_unknown=True,
+        )
+        lookup_entries = [entry for entry in lookup.get("entries", []) if isinstance(entry, dict)]
+        statuses = [str(entry.get("status") or "unknown") for entry in lookup_entries]
+        first_status = statuses[0] if statuses else "missing"
+        packet = lookup.get("agent_route_packet") if isinstance(lookup.get("agent_route_packet"), dict) else {}
+        registered = bool(packet.get("registered"))
+        refs = [
+            ref
+            for entry in lookup_entries
+            for ref in (entry.get("source_refs", []) if isinstance(entry.get("source_refs"), list) else [])
+            if isinstance(ref, dict)
+        ]
+        ref_count = sum(1 for ref in refs if str(ref.get("path") or ""))
+        quality_flags: list[str] = []
+        if not lookup.get("ok"):
+            quality_flags.append("entity_registry_lookup_payload_not_ok")
+        if not lookup_entries:
+            quality_flags.append("entity_registry_lookup_no_entries")
+        if expected_statuses and not any(status in expected_statuses for status in statuses):
+            quality_flags.append(f"entity_registry_lookup_unexpected_status:{first_status}")
+        if expected_registered is not None and registered is not expected_registered:
+            quality_flags.append(f"entity_registry_lookup_registered_mismatch:{registered}")
+        if require_refs and ref_count <= 0:
+            quality_flags.append("entity_registry_lookup_missing_source_refs")
+        status = "failed" if any(flag.startswith("entity_registry_lookup_") for flag in quality_flags) else "passed"
+        samples.append(
+            {
+                "name": name,
+                "status": status,
+                "anchor": anchor,
+                "kind": kind,
+                "probe_mode": probe_mode,
+                "expected_statuses": sorted(expected_statuses),
+                "actual_statuses": statuses,
+                "registered": registered,
+                "match_count": int_value(lookup.get("match_count"), len(lookup_entries)),
+                "source_ref_count": ref_count,
+                "source_ref_status_counts": source_ref_status_counts(lookup_entries),
+                "source_surfaces": sorted(
+                    {
+                        str(entry.get("source_surface") or "")
+                        for entry in lookup_entries
+                        if str(entry.get("source_surface") or "")
+                    }
+                ),
+                "quality_flags": quality_flags,
+                "elapsed_ms": int((time.monotonic() - sample_started) * 1000),
+            }
+        )
+
+    active_entry = next(
+        (
+            entry
+            for entry in entries
+            if str(entry.get("status") or "") == "active"
+            and entry_anchor(entry)
+            and entry_source_ref_count(entry) > 0
+        ),
+        None,
+    )
+    observed_entry = next(
+        (
+            entry
+            for entry in entries
+            if str(entry.get("status") or "") == "observed"
+            and entry_anchor(entry)
+            and str(entry.get("source_surface") or "") == "archived_route_terms"
+            and entry_source_ref_count(entry) > 0
+        ),
+        None,
+    )
+    if active_entry:
+        run_lookup_sample(
+            name="active_source_registered_entity",
+            root=aoa_root,
+            anchor=entry_anchor(active_entry),
+            kind=str(active_entry.get("kind") or "auto"),
+            expected_statuses={"active"},
+            expected_registered=True,
+            require_refs=True,
+        )
+    else:
+        diagnostics.append("no_active_source_backed_entity_for_lookup_probe")
+    if observed_entry and len(samples) < selected_limit:
+        run_lookup_sample(
+            name="observed_archived_entity",
+            root=aoa_root,
+            anchor=entry_anchor(observed_entry),
+            kind=str(observed_entry.get("kind") or "auto"),
+            expected_statuses={"observed"},
+            expected_registered=True,
+            require_refs=True,
+        )
+    else:
+        diagnostics.append("no_observed_archived_entity_for_lookup_probe")
+
+    unknown_anchor = ""
+    for attempt in range(20):
+        digest = hashlib.sha256(f"{seed}:entity-registry-unknown:{attempt}".encode("utf-8")).hexdigest()[:12]
+        candidate = f"aoa_session_memory_unknown_probe_{digest}"
+        probe = entity_registry_lookup(aoa_root=aoa_root, anchor=candidate, kind="skill", include_unknown=False)
+        if int_value(probe.get("match_count")) == 0:
+            unknown_anchor = candidate
+            break
+    if unknown_anchor and len(samples) < selected_limit:
+        run_lookup_sample(
+            name="unknown_unregistered_entity",
+            root=aoa_root,
+            anchor=unknown_anchor,
+            kind="skill",
+            expected_statuses={"unknown"},
+            expected_registered=False,
+            require_refs=False,
+        )
+    elif not unknown_anchor:
+        diagnostics.append("unable_to_find_unknown_entity_probe_anchor")
+
+    existing_ref = next(
+        (
+            ref
+            for entry in entries
+            if str(entry.get("status") or "") == "active"
+            for ref in (entry.get("source_refs", []) if isinstance(entry.get("source_refs"), list) else [])
+            if isinstance(ref, dict)
+            and str(ref.get("source_type") or "") != "search_route_terms"
+            and str(ref.get("path") or "")
+            and Path(str(ref.get("path"))).exists()
+        ),
+        None,
+    )
+    if existing_ref and len(samples) < selected_limit:
+        with tempfile.TemporaryDirectory(prefix="aoa-entity-registry-retired-probe-") as tmp:
+            tmp_root = Path(tmp) / ".aoa"
+            empty_codex = Path(tmp) / "empty-codex"
+            empty_services = Path(tmp) / "empty-mcp-services"
+            empty_codex.mkdir(parents=True)
+            empty_services.mkdir(parents=True)
+            digest = hashlib.sha256(f"{seed}:entity-registry-retired".encode("utf-8")).hexdigest()[:10]
+            stale_key = f"aoa_session_memory_stale_probe_{digest}"
+            removed_key = f"aoa_session_memory_removed_probe_{digest}"
+            stale_ref = dict(existing_ref)
+            stale_ref["source_type"] = "live_scenario_existing_source_probe"
+            stale_ref["status"] = "active"
+            missing_path = Path(tmp) / "missing" / "SKILL.md"
+            removed_ref = {
+                "source_type": "live_scenario_missing_source_probe",
+                "path": str(missing_path),
+                "status": "active",
+            }
+            previous_entries = [
+                entity_registry_make_entry(
+                    kind="skill",
+                    key=stale_key,
+                    aliases=[stale_key.replace("_", "-")],
+                    source_refs=[stale_ref],
+                    source_surface="live_scenario_previous_snapshot_probe",
+                    owner="aoa-session-memory-live-scenario",
+                    status="active",
+                ),
+                entity_registry_make_entry(
+                    kind="skill",
+                    key=removed_key,
+                    aliases=[removed_key.replace("_", "-")],
+                    source_refs=[removed_ref],
+                    source_surface="live_scenario_previous_snapshot_probe",
+                    owner="aoa-session-memory-live-scenario",
+                    status="active",
+                ),
+            ]
+            write_json(
+                tmp_root / ENTITY_REGISTRY_PATH,
+                {
+                    "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+                    "artifact_type": "entity_registry_snapshot",
+                    "generated_at": utc_now(),
+                    "generated_at_epoch": time.time(),
+                    "ok": True,
+                    "mutates": False,
+                    "aoa_root": str(tmp_root),
+                    "truth_status": "generated_entity_registry_navigation_not_source_truth",
+                    "registry_path": str(tmp_root / ENTITY_REGISTRY_PATH),
+                    "source_surfaces": ["live_scenario_previous_snapshot_probe"],
+                    "entity_count": len(previous_entries),
+                    "counts_by_kind": {"skill": len(previous_entries)},
+                    "counts_by_status": {"active": len(previous_entries)},
+                    "entries": previous_entries,
+                },
+            )
+            old_codex_home = os.environ.get("CODEX_HOME")
+            old_mcp_roots = os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS")
+            try:
+                os.environ["CODEX_HOME"] = str(empty_codex)
+                os.environ["AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS"] = str(empty_services)
+                build_entity_registry(aoa_root=tmp_root, write=True, include_runtime=True)
+                run_lookup_sample(
+                    name="stale_previous_snapshot_entity",
+                    root=tmp_root,
+                    anchor=stale_key,
+                    kind="skill",
+                    expected_statuses={"stale"},
+                    expected_registered=True,
+                    require_refs=True,
+                    probe_mode="temporary_previous_snapshot_transition",
+                )
+                run_lookup_sample(
+                    name="removed_previous_snapshot_entity",
+                    root=tmp_root,
+                    anchor=removed_key,
+                    kind="skill",
+                    expected_statuses={"removed"},
+                    expected_registered=True,
+                    require_refs=True,
+                    probe_mode="temporary_previous_snapshot_transition",
+                )
+            finally:
+                if old_codex_home is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = old_codex_home
+                if old_mcp_roots is None:
+                    os.environ.pop("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", None)
+                else:
+                    os.environ["AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS"] = old_mcp_roots
+    else:
+        diagnostics.append("no_existing_source_ref_for_retired_entity_transition_probe")
+
+    status_counts = Counter(str(sample.get("status") or "unknown") for sample in samples)
+    lookup_status_counts: Counter[str] = Counter()
+    for sample in samples:
+        for status in sample.get("actual_statuses", []) if isinstance(sample.get("actual_statuses"), list) else []:
+            lookup_status_counts[str(status)] += 1
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_entity_registry_lookup_scenario_audit",
+        "generated_at": utc_now(),
+        "ok": bool(samples) and status_counts.get("failed", 0) == 0,
+        "mutates": False,
+        "truth_status": "entity_registry_lookup_live_route_contract_not_source_truth",
+        "seed": seed,
+        "sample_count": len(samples),
+        "quality": {
+            "elapsed_ms": elapsed_ms,
+            "sample_count": len(samples),
+            "passed_count": status_counts.get("passed", 0),
+            "warn_count": status_counts.get("warn", 0),
+            "failed_count": status_counts.get("failed", 0),
+            "status_counts": dict(sorted(lookup_status_counts.items())),
+            "active_lookup_count": lookup_status_counts.get("active", 0),
+            "observed_lookup_count": lookup_status_counts.get("observed", 0),
+            "unknown_lookup_count": lookup_status_counts.get("unknown", 0),
+            "stale_lookup_count": lookup_status_counts.get("stale", 0),
+            "removed_lookup_count": lookup_status_counts.get("removed", 0),
+            "retired_lookup_count": lookup_status_counts.get("stale", 0) + lookup_status_counts.get("removed", 0),
+            "source_ref_count": sum(int_value(sample.get("source_ref_count")) for sample in samples),
+            "registered_lookup_count": sum(1 for sample in samples if sample.get("registered") is True),
+            "unregistered_lookup_count": sum(1 for sample in samples if sample.get("registered") is False),
+            "transition_probe_count": sum(
+                1
+                for sample in samples
+                if str(sample.get("probe_mode") or "") == "temporary_previous_snapshot_transition"
+            ),
+        },
+        "samples": samples,
+        "snapshot_counts_by_status": snapshot.get("counts_by_status", {}),
+        "diagnostics": diagnostics,
+        "next_route": "For source identity use entity-registry --lookup first; for observed use expand to usage-chain/graph/raw refs only after the lookup packet.",
+        "authority_boundary": "entity registry lookup scenarios test navigation status only; source files, route refs, and owner layers remain authoritative.",
+    }
+
+
 def live_scenario_compact_sample(sample: dict[str, Any], *, profile: str) -> dict[str, Any]:
     anchor = str(sample.get("anchor") or "")
     kind = str(sample.get("kind") or sample.get("requested_kind") or "")
@@ -60082,7 +60402,19 @@ def live_scenario_compact_sample(sample: dict[str, Any], *, profile: str) -> dic
             "python3 scripts/aoa_session_memory.py entity-dossier "
             f"{shlex.quote(anchor)} --kind {shlex.quote(kind or 'auto')} --aoa-root <aoa-root> --full --write-report"
         )
+    elif profile == "entity_registry_lookup" and anchor:
+        compact["next_command"] = (
+            "python3 scripts/aoa_session_memory.py entity-registry "
+            f"--lookup {shlex.quote(anchor)} --kind {shlex.quote(kind or 'auto')} --aoa-root <aoa-root>"
+        )
     for key in (
+        "actual_statuses",
+        "registered",
+        "match_count",
+        "source_ref_count",
+        "source_ref_status_counts",
+        "source_surfaces",
+        "probe_mode",
         "strong_ref_count",
         "event_count",
         "usage_event_count",
@@ -60177,6 +60509,36 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             result["status"] = "failed"
         elif warned or not sample_count:
             result["status"] = "warn"
+    elif profile == "entity_registry_lookup":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        failed = int_value(quality.get("failed_count"))
+        warned = int_value(quality.get("warn_count"))
+        sample_count = int_value(quality.get("sample_count"))
+        result.update(
+            {
+                "sample_count": sample_count,
+                "passed_count": int_value(quality.get("passed_count")),
+                "warn_count": warned,
+                "failed_count": failed,
+                "status_counts": quality.get("status_counts"),
+                "active_lookup_count": quality.get("active_lookup_count"),
+                "observed_lookup_count": quality.get("observed_lookup_count"),
+                "unknown_lookup_count": quality.get("unknown_lookup_count"),
+                "stale_lookup_count": quality.get("stale_lookup_count"),
+                "removed_lookup_count": quality.get("removed_lookup_count"),
+                "retired_lookup_count": quality.get("retired_lookup_count"),
+                "source_ref_count": quality.get("source_ref_count"),
+                "registered_lookup_count": quality.get("registered_lookup_count"),
+                "unregistered_lookup_count": quality.get("unregistered_lookup_count"),
+                "transition_probe_count": quality.get("transition_probe_count"),
+                "warning_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"warn"}),
+                "failed_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"failed"}),
+            }
+        )
+        if failed:
+            result["status"] = "failed"
+        elif warned or sample_count < 5:
+            result["status"] = "warn"
     elif profile == "hook_failure":
         total = int_value(payload.get("total_receipt_count"))
         result.update(
@@ -60251,7 +60613,7 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             result["status"] = "warn"
     if not ok:
         result["status"] = "failed"
-    if not counts and profile != "literal_planner":
+    if not counts and profile not in {"literal_planner", "entity_registry_lookup"}:
         result.setdefault("quality_flags", []).append("no_raw_or_segment_refs_detected")
         if result["status"] == "passed":
             result["status"] = "warn"
@@ -60304,6 +60666,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run entity-usage-scenario-audit with the same seed and --full --write-report, then open the first raw/segment refs."
     if profile == "entity_dossier":
         return "Run entity-dossier for the sampled anchor and open read_first raw/segment refs before changing the route."
+    if profile == "entity_registry_lookup":
+        return "Run live-scenario-audit --profile entity_registry_lookup with --write-report, then inspect failed_samples before changing registry discovery or retired-entry logic."
     if profile == "literal_planner":
         return "Run live-scenario-audit --profile literal_planner with the same seed and inspect failed route samples before changing planner rules."
     if profile == "hook_failure":
@@ -60348,7 +60712,7 @@ def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[
         if warn_count:
             reasons.append(f"warn_subsample_count:{warn_count}")
         counts = scenario.get("evidence_ref_counts") if isinstance(scenario.get("evidence_ref_counts"), dict) else {}
-        if profile != "literal_planner" and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
+        if profile not in {"literal_planner", "entity_registry_lookup"} and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
             reasons.append("no_direct_raw_segment_or_receipt_ref")
         if profile == "literal_planner" and scenario.get("monolith_fallback_first") is True:
             reasons.append("literal_planner_used_monolith_fallback_first")
@@ -60388,6 +60752,7 @@ def live_scenario_audit(
     write_report: bool = False,
 ) -> dict[str, Any]:
     allowed_profiles = {
+        "entity_registry_lookup",
         "entity_dossier",
         "entity_usage",
         "hook_failure",
@@ -60398,6 +60763,7 @@ def live_scenario_audit(
         "graph_bridge",
     }
     default_profiles = [
+        "entity_registry_lookup",
         "entity_dossier",
         "entity_usage",
         "hook_failure",
@@ -60439,7 +60805,18 @@ def live_scenario_audit(
 
     scenarios: list[dict[str, Any]] = []
     for profile in selected_profiles:
-        if profile == "entity_dossier":
+        if profile == "entity_registry_lookup":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: live_scenario_entity_registry_lookup_audit(
+                        aoa_root=aoa_root,
+                        seed=seed,
+                        limit=max(selected_limit, 5),
+                    ),
+                )
+            )
+        elif profile == "entity_dossier":
             scenarios.append(
                 run(
                     profile,
@@ -60615,6 +60992,17 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "first_ref": scenario.get("first_ref"),
             "primary_route_counts": scenario.get("primary_route_counts"),
             "shape_counts": scenario.get("shape_counts"),
+            "status_counts": scenario.get("status_counts"),
+            "active_lookup_count": scenario.get("active_lookup_count"),
+            "observed_lookup_count": scenario.get("observed_lookup_count"),
+            "unknown_lookup_count": scenario.get("unknown_lookup_count"),
+            "stale_lookup_count": scenario.get("stale_lookup_count"),
+            "removed_lookup_count": scenario.get("removed_lookup_count"),
+            "retired_lookup_count": scenario.get("retired_lookup_count"),
+            "source_ref_count": scenario.get("source_ref_count"),
+            "registered_lookup_count": scenario.get("registered_lookup_count"),
+            "unregistered_lookup_count": scenario.get("unregistered_lookup_count"),
+            "transition_probe_count": scenario.get("transition_probe_count"),
             "kind_counts": scenario.get("kind_counts"),
             "layer_counts": scenario.get("layer_counts"),
             "evidence_mode_counts": scenario.get("evidence_mode_counts"),
@@ -60681,9 +61069,26 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(counts.get(count_key)) < minimum:
             failures.append(f"{profile}:{count_key}:{counts.get(count_key)}<{minimum}")
+    min_source_ref_count = int_value(expectation.get("min_source_ref_count"))
+    if min_source_ref_count and int_value(scenario.get("source_ref_count")) < min_source_ref_count:
+        failures.append(f"{profile}:source_ref_count:{scenario.get('source_ref_count')}<{min_source_ref_count}")
     min_evidence_ref_count = int_value(expectation.get("min_evidence_ref_count"))
     if min_evidence_ref_count and int_value(scenario.get("evidence_ref_count")) < min_evidence_ref_count:
         failures.append(f"{profile}:evidence_ref_count:{scenario.get('evidence_ref_count')}<{min_evidence_ref_count}")
+    for expectation_key, scenario_key in (
+        ("min_active_lookup_count", "active_lookup_count"),
+        ("min_observed_lookup_count", "observed_lookup_count"),
+        ("min_unknown_lookup_count", "unknown_lookup_count"),
+        ("min_stale_lookup_count", "stale_lookup_count"),
+        ("min_removed_lookup_count", "removed_lookup_count"),
+        ("min_retired_lookup_count", "retired_lookup_count"),
+        ("min_registered_lookup_count", "registered_lookup_count"),
+        ("min_unregistered_lookup_count", "unregistered_lookup_count"),
+        ("min_transition_probe_count", "transition_probe_count"),
+    ):
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(scenario.get(scenario_key)) < minimum:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
     for expectation_key, scenario_key in (
         ("min_direct_usage_sample_count", "direct_usage_sample_count"),
         ("min_non_usage_evidence_sample_count", "non_usage_evidence_sample_count"),
@@ -69751,7 +70156,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)
