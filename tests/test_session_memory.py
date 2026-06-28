@@ -4344,15 +4344,26 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
 
     def fake_literal(**kwargs: Any) -> dict[str, Any]:
         query = str(kwargs.get("query") or "")
+        route_anchor = query
+        route_anchor_kind = "auto"
+        route_anchor_source = "query"
+        embedded_entity_anchor: dict[str, Any] = {}
         if "raw_unavailable" in query:
             route_id = "route_signal_structured_search"
             shape = "error_text"
         elif "найди все MCP" in query:
             route_id = "entity_inventory"
             shape = "entity_class"
+            route_anchor = "mcp"
+            route_anchor_kind = "mcp"
+            route_anchor_source = "broad_entity_class_query"
         elif "aoa-session-memory-mcp" in query:
             route_id = "entity_usage_chain"
             shape = "entity_anchor"
+            route_anchor = "aoa_session_memory_mcp"
+            route_anchor_kind = "mcp"
+            route_anchor_source = "embedded_entity_registry"
+            embedded_entity_anchor = {"match_relation": "exact"}
         elif query.startswith("python3 "):
             route_id = "command_structured_search"
             shape = "command"
@@ -4363,6 +4374,10 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
             "ok": True,
             "query_shape": {"primary": shape},
             "primary_route": {"route_id": route_id},
+            "route_anchor": route_anchor,
+            "route_anchor_kind": route_anchor_kind,
+            "route_anchor_source": route_anchor_source,
+            "embedded_entity_anchor": embedded_entity_anchor,
             "cost_profile": {"structured_first": True, "uses_fts_first": False, "monolith_fallback_first": False},
         }
 
@@ -4444,7 +4459,90 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     assert scenarios["literal_planner"]["primary_route_counts"]["entity_inventory"] == 1
     assert scenarios["literal_planner"]["primary_route_counts"]["route_signal_structured_search"] == 1
     assert scenarios["literal_planner"]["shape_counts"]["entity_class"] == 1
+    assert scenarios["literal_planner"]["route_anchor_kind_counts"]["mcp"] == 2
+    assert scenarios["literal_planner"]["route_anchor_source_counts"]["embedded_entity_registry"] == 1
     assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
+
+
+def test_live_scenario_literal_planner_accepts_case_specific_exact_probe(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    def fake_literal(**kwargs: Any) -> dict[str, Any]:
+        query = str(kwargs.get("query") or "")
+        if "raw_unavailable" in query:
+            route_id = "route_signal_structured_search"
+            shape = "error_text"
+            route_anchor = query
+            route_anchor_kind = "auto"
+            route_anchor_source = "query"
+            embedded_entity_anchor = {}
+        elif "найди все MCP" in query:
+            route_id = "entity_inventory"
+            shape = "entity_class"
+            route_anchor = "mcp"
+            route_anchor_kind = "mcp"
+            route_anchor_source = "broad_entity_class_query"
+            embedded_entity_anchor = {}
+        elif query == "aoa-session-memory-evidence-route":
+            route_id = "entity_usage_chain"
+            shape = "entity_anchor"
+            route_anchor = "aoa_session_memory_evidence_route"
+            route_anchor_kind = "skill"
+            route_anchor_source = "embedded_entity_registry"
+            embedded_entity_anchor = {"match_relation": "exact"}
+        elif "aoa-session-memory-mcp" in query:
+            route_id = "entity_usage_chain"
+            shape = "entity_anchor"
+            route_anchor = "aoa_session_memory_mcp"
+            route_anchor_kind = "mcp"
+            route_anchor_source = "embedded_entity_registry"
+            embedded_entity_anchor = {"match_relation": "exact"}
+        else:
+            route_id = "command_structured_search"
+            shape = "command"
+            route_anchor = query
+            route_anchor_kind = "auto"
+            route_anchor_source = "command_anchor"
+            embedded_entity_anchor = {}
+        return {
+            "ok": True,
+            "query_shape": {"primary": shape},
+            "primary_route": {"route_id": route_id},
+            "route_anchor": route_anchor,
+            "route_anchor_kind": route_anchor_kind,
+            "route_anchor_source": route_anchor_source,
+            "embedded_entity_anchor": embedded_entity_anchor,
+            "cost_profile": {"structured_first": True, "uses_fts_first": False, "monolith_fallback_first": False},
+        }
+
+    monkeypatch.setattr(module, "literal_query_plan", fake_literal)
+
+    payload = module.live_scenario_literal_planner_audit(
+        aoa_root=tmp_path / ".aoa",
+        limit=5,
+        literal_probes=[
+            {
+                "name": "exact_skill_anchor_with_mcp_prefix",
+                "query": "aoa-session-memory-evidence-route",
+                "expected_shape": "entity_anchor",
+                "expected_primary_route": "entity_usage_chain",
+                "expected_route_anchor": "aoa_session_memory_evidence_route",
+                "expected_route_anchor_kind": "skill",
+                "expected_route_anchor_source": "embedded_entity_registry",
+                "expected_match_relation": "exact",
+            }
+        ],
+    )
+
+    assert payload["ok"] is True
+    assert payload["quality"]["failed_count"] == 0
+    assert payload["quality"]["route_anchor_counts"]["aoa_session_memory_evidence_route"] == 1
+    assert payload["quality"]["route_anchor_kind_counts"]["skill"] == 1
+    assert payload["quality"]["route_anchor_source_counts"]["embedded_entity_registry"] == 2
+    assert payload["quality"]["match_relation_counts"]["exact"] == 2
+    assert payload["samples"][-1]["name"] == "exact_skill_anchor_with_mcp_prefix"
+    assert payload["samples"][-1]["match_relation"] == "exact"
 
 
 def test_live_scenario_result_accepts_entity_usage_ref_counts() -> None:
@@ -4633,6 +4731,18 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                     "seed": "literal-test",
                     "sample_size": 5,
                     "limit": 5,
+                    "literal_probes": [
+                        {
+                            "name": "exact_skill_anchor_with_mcp_prefix",
+                            "query": "aoa-session-memory-evidence-route",
+                            "expected_shape": "entity_anchor",
+                            "expected_primary_route": "entity_usage_chain",
+                            "expected_route_anchor": "aoa_session_memory_evidence_route",
+                            "expected_route_anchor_kind": "skill",
+                            "expected_route_anchor_source": "embedded_entity_registry",
+                            "expected_match_relation": "exact",
+                        }
+                    ],
                     "expect": {
                         "max_failed_count": 0,
                         "max_warn_count": 0,
@@ -4645,6 +4755,10 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                                 "max_warn_count": 0,
                                 "required_primary_routes": ["entity_inventory", "session_rehydrate"],
                                 "required_shape_counts": ["entity_class", "session_id"],
+                                "required_route_anchors": ["aoa_session_memory_evidence_route"],
+                                "required_route_anchor_kinds": ["skill"],
+                                "required_route_anchor_sources": ["embedded_entity_registry"],
+                                "required_match_relations": ["exact"],
                             }
                         ],
                     },
@@ -4677,6 +4791,8 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
     def fake_live_scenario_audit(**kwargs: Any) -> dict[str, Any]:
         profiles = kwargs.get("profiles") or []
         if profiles == ["literal_planner"]:
+            literal_probes = kwargs.get("literal_probes") or []
+            assert literal_probes[0]["query"] == "aoa-session-memory-evidence-route"
             return {
                 "ok": True,
                 "profiles": profiles,
@@ -4698,6 +4814,10 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                         "failed_count": 0,
                         "primary_route_counts": {"entity_inventory": 1, "session_rehydrate": 1},
                         "shape_counts": {"entity_class": 1, "session_id": 1},
+                        "route_anchor_counts": {"aoa_session_memory_evidence_route": 1},
+                        "route_anchor_kind_counts": {"skill": 1},
+                        "route_anchor_source_counts": {"embedded_entity_registry": 1},
+                        "match_relation_counts": {"exact": 1},
                     }
                 ],
                 "actionable_gaps": [],
@@ -4943,6 +5063,29 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_neighborhood:node_count:0<1" in graph_failures
     assert "graph_neighborhood:edge_count:0<1" in graph_failures
     assert "graph_neighborhood:evidence_ref_count:0<1" in graph_failures
+
+    literal_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "literal_planner",
+            "status": "passed",
+            "route_anchor_counts": {"aoa_session_memory_mcp": 1},
+            "route_anchor_kind_counts": {"mcp": 1},
+            "route_anchor_source_counts": {"embedded_entity_registry": 1},
+            "match_relation_counts": {"embedded": 1},
+        },
+        {
+            "profile": "literal_planner",
+            "required_route_anchors": ["aoa_session_memory_evidence_route"],
+            "required_route_anchor_kinds": ["skill"],
+            "required_route_anchor_sources": ["embedded_entity_registry"],
+            "required_match_relations": ["exact"],
+        },
+    )
+
+    assert "literal_planner:missing_route_anchor:aoa_session_memory_evidence_route" in literal_failures
+    assert "literal_planner:missing_route_anchor_kind:skill" in literal_failures
+    assert "literal_planner:missing_match_relation:exact" in literal_failures
+    assert "literal_planner:missing_route_anchor_source:embedded_entity_registry" not in literal_failures
 
     registry_failures = module.live_scenario_profile_expectation_failures(
         {

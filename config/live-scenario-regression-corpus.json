@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-28T13:45:00Z",
+  "generated_at": "2026-06-28T14:25:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 9,
+  "case_count": 10,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -54,6 +54,70 @@
               "command",
               "session_id"
             ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "literal_exact_skill_anchor_precedence_contract",
+      "profiles": [
+        "literal_planner"
+      ],
+      "seed": "corpus-literal-exact-skill-anchor",
+      "sample_size": 6,
+      "recent_days": 7,
+      "limit": 6,
+      "literal_probes": [
+        {
+          "name": "exact_skill_anchor_with_mcp_prefix",
+          "query": "aoa-session-memory-evidence-route",
+          "expected_shape": "entity_anchor",
+          "expected_primary_route": "entity_usage_chain",
+          "expected_route_anchor": "aoa_session_memory_evidence_route",
+          "expected_route_anchor_kind": "skill",
+          "expected_route_anchor_source": "embedded_entity_registry",
+          "expected_match_relation": "exact"
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-28",
+        "note": "Exact skill entity names must outrank shorter embedded MCP substrings when literal planner resolves a typed operational anchor."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "literal_planner",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 6,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "required_primary_routes": [
+              "entity_usage_chain"
+            ],
+            "required_shape_counts": [
+              "entity_anchor"
+            ],
+            "required_route_anchors": [
+              "aoa_session_memory_evidence_route"
+            ],
+            "required_route_anchor_kinds": [
+              "skill"
+            ],
+            "required_route_anchor_sources": [
+              "embedded_entity_registry"
+            ],
+            "required_match_relations": [
+              "exact"
+            ],
+            "max_elapsed_ms": 10000
           }
         ]
       }

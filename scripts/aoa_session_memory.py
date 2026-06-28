@@ -59939,8 +59939,10 @@ def live_scenario_literal_planner_audit(
     *,
     aoa_root: Path,
     limit: int,
+    literal_probes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    diagnostics: list[str] = []
     probes = [
         {
             "name": "noisy_route_signal",
@@ -59990,11 +59992,41 @@ def live_scenario_literal_planner_audit(
                 "expected_primary_route": "session_rehydrate",
             }
         )
+    for index, probe in enumerate(literal_probes or [], start=1):
+        if not isinstance(probe, dict):
+            diagnostics.append(f"ignored literal probe {index}: not an object")
+            continue
+        query = str(probe.get("query") or "").strip()
+        expected_shape = str(probe.get("expected_shape") or "").strip()
+        expected_primary_route = str(probe.get("expected_primary_route") or "").strip()
+        if not query or not expected_shape or not expected_primary_route:
+            diagnostics.append(f"ignored literal probe {index}: missing query/expected_shape/expected_primary_route")
+            continue
+        normalized_probe = {
+            "name": str(probe.get("name") or f"case_literal_probe_{index}"),
+            "query": query,
+            "expected_shape": expected_shape,
+            "expected_primary_route": expected_primary_route,
+        }
+        for optional_key in (
+            "expected_route_anchor",
+            "expected_route_anchor_kind",
+            "expected_route_anchor_source",
+            "expected_match_relation",
+        ):
+            optional_value = str(probe.get(optional_key) or "").strip()
+            if optional_value:
+                normalized_probe[optional_key] = optional_value
+        probes.append(normalized_probe)
     selected_limit = max(1, min(int_value(limit, len(probes)), len(probes)))
     samples: list[dict[str, Any]] = []
     status_counts: Counter[str] = Counter()
     primary_route_counts: Counter[str] = Counter()
     shape_counts: Counter[str] = Counter()
+    route_anchor_counts: Counter[str] = Counter()
+    route_anchor_kind_counts: Counter[str] = Counter()
+    route_anchor_source_counts: Counter[str] = Counter()
+    match_relation_counts: Counter[str] = Counter()
     for probe in probes[:selected_limit]:
         sample_started = time.monotonic()
         plan = literal_query_plan(
@@ -60008,6 +60040,11 @@ def live_scenario_literal_planner_audit(
         query_shape = plan.get("query_shape") if isinstance(plan.get("query_shape"), dict) else {}
         route_id = str(primary_route.get("route_id") or "")
         shape = str(query_shape.get("primary") or "")
+        route_anchor = str(plan.get("route_anchor") or "")
+        route_anchor_kind = str(plan.get("route_anchor_kind") or "")
+        route_anchor_source = str(plan.get("route_anchor_source") or "")
+        embedded_entity_anchor = plan.get("embedded_entity_anchor") if isinstance(plan.get("embedded_entity_anchor"), dict) else {}
+        match_relation = str(embedded_entity_anchor.get("match_relation") or "")
         quality_flags: list[str] = []
         if not plan.get("ok"):
             quality_flags.append("literal_planner_payload_not_ok")
@@ -60021,6 +60058,14 @@ def live_scenario_literal_planner_audit(
             quality_flags.append(f"literal_planner_unexpected_primary_route:{route_id or '<missing>'}")
         if shape != probe["expected_shape"]:
             quality_flags.append(f"literal_planner_unexpected_shape:{shape or '<missing>'}")
+        if probe.get("expected_route_anchor") and route_anchor != probe["expected_route_anchor"]:
+            quality_flags.append(f"literal_planner_unexpected_route_anchor:{route_anchor or '<missing>'}")
+        if probe.get("expected_route_anchor_kind") and route_anchor_kind != probe["expected_route_anchor_kind"]:
+            quality_flags.append(f"literal_planner_unexpected_route_anchor_kind:{route_anchor_kind or '<missing>'}")
+        if probe.get("expected_route_anchor_source") and route_anchor_source != probe["expected_route_anchor_source"]:
+            quality_flags.append(f"literal_planner_unexpected_route_anchor_source:{route_anchor_source or '<missing>'}")
+        if probe.get("expected_match_relation") and match_relation != probe["expected_match_relation"]:
+            quality_flags.append(f"literal_planner_unexpected_match_relation:{match_relation or '<missing>'}")
         status = "failed" if not plan.get("ok") or any(flag.startswith("literal_planner_unexpected_") for flag in quality_flags) else "passed"
         if status == "passed" and quality_flags:
             status = "warn"
@@ -60029,6 +60074,14 @@ def live_scenario_literal_planner_audit(
             primary_route_counts[route_id] += 1
         if shape:
             shape_counts[shape] += 1
+        if route_anchor:
+            route_anchor_counts[route_anchor] += 1
+        if route_anchor_kind:
+            route_anchor_kind_counts[route_anchor_kind] += 1
+        if route_anchor_source:
+            route_anchor_source_counts[route_anchor_source] += 1
+        if match_relation:
+            match_relation_counts[match_relation] += 1
         samples.append(
             {
                 "name": probe["name"],
@@ -60038,11 +60091,17 @@ def live_scenario_literal_planner_audit(
                 "actual_shape": shape,
                 "expected_primary_route": probe["expected_primary_route"],
                 "primary_route_id": route_id,
+                "expected_route_anchor": probe.get("expected_route_anchor"),
+                "route_anchor": route_anchor,
+                "expected_route_anchor_kind": probe.get("expected_route_anchor_kind"),
+                "route_anchor_kind": route_anchor_kind,
+                "expected_route_anchor_source": probe.get("expected_route_anchor_source"),
+                "route_anchor_source": route_anchor_source,
+                "expected_match_relation": probe.get("expected_match_relation"),
+                "match_relation": match_relation,
                 "structured_first": cost_profile.get("structured_first"),
                 "uses_fts_first": cost_profile.get("uses_fts_first"),
                 "monolith_fallback_first": cost_profile.get("monolith_fallback_first"),
-                "route_anchor": plan.get("route_anchor"),
-                "route_anchor_source": plan.get("route_anchor_source"),
                 "quality_flags": quality_flags,
                 "elapsed_ms": int((time.monotonic() - sample_started) * 1000),
             }
@@ -60064,11 +60123,15 @@ def live_scenario_literal_planner_audit(
             "failed_count": status_counts.get("failed", 0),
             "primary_route_counts": dict(sorted(primary_route_counts.items())),
             "shape_counts": dict(sorted(shape_counts.items())),
+            "route_anchor_counts": dict(sorted(route_anchor_counts.items())),
+            "route_anchor_kind_counts": dict(sorted(route_anchor_kind_counts.items())),
+            "route_anchor_source_counts": dict(sorted(route_anchor_source_counts.items())),
+            "match_relation_counts": dict(sorted(match_relation_counts.items())),
             "monolith_fallback_first_sample_count": sum(1 for sample in samples if sample.get("monolith_fallback_first") is True),
             "fts_first_sample_count": sum(1 for sample in samples if sample.get("uses_fts_first") is True),
         },
         "samples": samples,
-        "diagnostics": [],
+        "diagnostics": diagnostics,
         "next_route": "Open a failed sample route plan before changing literal search, route-signal, or entity-registry behavior.",
         "authority_boundary": "literal planner scenarios test route choice only; returned plans are not evidence truth.",
     }
@@ -60417,6 +60480,20 @@ def live_scenario_compact_sample(sample: dict[str, Any], *, profile: str) -> dic
             f"--lookup {shlex.quote(anchor)} --kind {shlex.quote(kind or 'auto')} --aoa-root <aoa-root>"
         )
     for key in (
+        "name",
+        "query",
+        "expected_shape",
+        "actual_shape",
+        "expected_primary_route",
+        "primary_route_id",
+        "expected_route_anchor",
+        "route_anchor",
+        "expected_route_anchor_kind",
+        "route_anchor_kind",
+        "expected_route_anchor_source",
+        "route_anchor_source",
+        "expected_match_relation",
+        "match_relation",
         "actual_statuses",
         "registered",
         "match_count",
@@ -60581,6 +60658,12 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "failed_count": int_value(quality.get("failed_count")),
                 "primary_route_counts": quality.get("primary_route_counts"),
                 "shape_counts": quality.get("shape_counts"),
+                "route_anchor_counts": quality.get("route_anchor_counts"),
+                "route_anchor_kind_counts": quality.get("route_anchor_kind_counts"),
+                "route_anchor_source_counts": quality.get("route_anchor_source_counts"),
+                "match_relation_counts": quality.get("match_relation_counts"),
+                "warning_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"warn"}),
+                "failed_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"failed"}),
             }
         )
         if isinstance(payload.get("samples"), list):
@@ -60758,6 +60841,7 @@ def live_scenario_audit(
     sample_size: int = 4,
     recent_days: int = 7,
     limit: int = 3,
+    literal_probes: list[dict[str, Any]] | None = None,
     write_report: bool = False,
 ) -> dict[str, Any]:
     allowed_profiles = {
@@ -60887,6 +60971,7 @@ def live_scenario_audit(
                     lambda: live_scenario_literal_planner_audit(
                         aoa_root=aoa_root,
                         limit=max(selected_limit, 4),
+                        literal_probes=literal_probes,
                     ),
                 )
             )
@@ -60953,6 +61038,7 @@ def live_scenario_audit(
             "recent_days": selected_recent_days,
             "date_from": date_from,
             "limit": selected_limit,
+            "literal_probe_count": len(literal_probes or []),
         },
         "quality": quality,
         "scenarios": scenarios,
@@ -61001,6 +61087,10 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "first_ref": scenario.get("first_ref"),
             "primary_route_counts": scenario.get("primary_route_counts"),
             "shape_counts": scenario.get("shape_counts"),
+            "route_anchor_counts": scenario.get("route_anchor_counts"),
+            "route_anchor_kind_counts": scenario.get("route_anchor_kind_counts"),
+            "route_anchor_source_counts": scenario.get("route_anchor_source_counts"),
+            "match_relation_counts": scenario.get("match_relation_counts"),
             "status_counts": scenario.get("status_counts"),
             "active_lookup_count": scenario.get("active_lookup_count"),
             "observed_lookup_count": scenario.get("observed_lookup_count"),
@@ -61132,6 +61222,17 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
     for shape in expectation.get("required_shape_counts", []) if isinstance(expectation.get("required_shape_counts"), list) else []:
         if int_value(shape_counts.get(str(shape))) <= 0:
             failures.append(f"{profile}:missing_shape:{shape}")
+    for counts_key, required_key, label in (
+        ("route_anchor_counts", "required_route_anchors", "route_anchor"),
+        ("route_anchor_kind_counts", "required_route_anchor_kinds", "route_anchor_kind"),
+        ("route_anchor_source_counts", "required_route_anchor_sources", "route_anchor_source"),
+        ("match_relation_counts", "required_match_relations", "match_relation"),
+    ):
+        observed_counts = scenario.get(counts_key) if isinstance(scenario.get(counts_key), dict) else {}
+        for required in expectation.get(required_key, []) if isinstance(expectation.get(required_key), list) else []:
+            required_value = str(required)
+            if int_value(observed_counts.get(required_value)) <= 0:
+                failures.append(f"{profile}:missing_{label}:{required_value}")
     return failures
 
 
@@ -61211,6 +61312,7 @@ def live_scenario_corpus_case_check(
         sample_size=max(1, min(int_value(case.get("sample_size"), 4), 12)),
         recent_days=max(1, min(int_value(case.get("recent_days"), 7), 90)),
         limit=max(1, min(int_value(case.get("limit"), 3), 10)),
+        literal_probes=case.get("literal_probes") if isinstance(case.get("literal_probes"), list) else None,
         write_report=False,
     )
     failures = live_scenario_expectation_failures(audit, expect)
