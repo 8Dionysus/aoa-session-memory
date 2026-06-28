@@ -1123,6 +1123,28 @@ Last observed result:
 	  `abyss-machine resource launch --class medium --kind indexing` in `102.559s`,
 	  selected `25` sources, left `4679` global missing sources, consumed `4G`
 	  peak memory, and used `0B` swap.
+- 2026-06-28 interactive graph-drip cap proof: near-budget live graph drips
+  showed that limiting only `batch-limit` and `candidate-pool-limit` is not
+  enough for predictable interactive maintenance. `maintenance-status` now emits
+  graph queue/heavy-tail commands with aggregate caps
+  `--max-refresh-nodes 20000 --max-refresh-edges 60000`; heavy-tail source
+  recommendations carry the same caps and an
+  `interactive_drip_uses_aggregate_refresh_caps` note. Regression proof:
+  `test_graph_source_recommendation_*heavy_tail*`,
+  `test_maintenance_next_actions_drips_existing_budgeted_graph_queue`,
+  `test_maintenance_next_actions_preserves_heavy_tail_candidate_pool`, and
+  `test_maintenance_next_actions_seeds_empty_graph_queue_from_ledger`.
+  Live proof: uncapped `25`-source drip refreshed `18,478` nodes and `70,142`
+  edges in `241.855s`; capped exact planning chose `20` sources, `14,584`
+  nodes, and `58,808` edges; capped apply refreshed those same aggregate counts
+  in `239.897s`, moved the generated graph queue `550 -> 530`, and deferred
+  `5` sources by refresh budget. The cap prevents oversized rewrite slices but
+  does not yet solve the deeper `replace_sources` / aggregate-refresh cost.
+  After targeted search catch-up and dirty-only `month/2026-06` shard refresh,
+  `maintenance-status --full` reports search and search shards `current`, no
+  recent problem jobs, graph queue `530`, graph actionable `2242`, and the only
+  warnings are `graph_actionable_sources` plus
+  `search_projection_combined_large`.
 - 2026-06-27 graph rebuild cleanup proof: live maintenance found an orphaned
   `.graph.sqlite3.<pid>.rebuild.tmp-journal` after interrupted graph work while
   the base `.rebuild.tmp` file was already gone. `maintenance-cleanup` now

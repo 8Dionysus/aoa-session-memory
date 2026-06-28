@@ -7319,10 +7319,13 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
     assert recommendation["route"] == "heavy_tail_graph_maintenance"
     assert recommendation["reason"] == "latest_budgeted_graph_maintenance_exhausted_without_progress"
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in recommendation["command"]
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in recommendation["command"]
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
     assert recommendation["batch_limit"] == module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
     assert recommendation["candidate_pool_limit"] == module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
     assert "small_candidate_pool_preserves_progress_when_exact_planning_is_expensive" in recommendation["notes"]
+    assert "interactive_drip_uses_aggregate_refresh_caps" in recommendation["notes"]
 
 
 def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
@@ -7356,6 +7359,8 @@ def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
     assert recommendation["route"] == "heavy_tail_graph_maintenance"
     assert recommendation["reason"] == "recent_budgeted_graph_maintenance_exhausted_without_progress"
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in recommendation["command"]
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in recommendation["command"]
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
     assert "recent_no_progress_report_keeps_heavy_tail_route_sticky" in recommendation["notes"]
 
@@ -7386,6 +7391,8 @@ def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() 
     assert recommendation["route"] == "heavy_tail_graph_maintenance"
     assert recommendation["reason"] == "continue_heavy_tail_graph_maintenance"
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in recommendation["command"]
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in recommendation["command"]
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
 
 
@@ -7416,6 +7423,8 @@ def test_graph_source_recommendation_switches_near_budget_progress_to_heavy_tail
     assert recommendation["route"] == "heavy_tail_graph_maintenance"
     assert recommendation["reason"] == "latest_budgeted_graph_maintenance_near_budget_after_progress"
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in recommendation["command"]
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in recommendation["command"]
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in recommendation["command"]
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in recommendation["command"]
     assert "near_budget_success_switches_to_smaller_interactive_queue_drip" in recommendation["notes"]
 
@@ -7484,9 +7493,11 @@ def test_maintenance_next_actions_drips_existing_budgeted_graph_queue(tmp_path: 
     command_text = module.shlex.join(actions[0]["command"])
     assert "--use-queue" in command_text
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
     assert "--seed-queue-from-ledger" not in command_text
-    assert "small candidate pool" in actions[0]["note"]
+    assert "small candidate pool and aggregate refresh caps" in actions[0]["note"]
 
 
 def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:
@@ -7519,6 +7530,8 @@ def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: 
     assert actions[0]["id"] == "repair_graph_heavy_tail"
     command_text = module.shlex.join(actions[0]["command"])
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
 
 
@@ -7559,6 +7572,8 @@ def test_maintenance_next_actions_seeds_empty_graph_queue_from_ledger(tmp_path: 
     assert "--use-queue" in command_text
     assert "--seed-queue-from-ledger" in command_text
     assert f"--queue-seed-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT * 10}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES}" in command_text
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
     assert "generated queue as evidence authority" in actions[0]["note"]
 

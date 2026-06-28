@@ -264,6 +264,8 @@ GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_FLOOR = 50
 GRAPH_MAINTENANCE_PLAN_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
+GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES = 20000
+GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES = 60000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
 OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
@@ -297,8 +299,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "token_max_raw_mb": 512,
         "graph_batch_limit": GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
         "graph_refresh_chunk_size": 32,
-        "graph_max_refresh_nodes": 20000,
-        "graph_max_refresh_edges": 60000,
+        "graph_max_refresh_nodes": GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+        "graph_max_refresh_edges": GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
         "ref_sample_limit": 200,
         "sample_audit": False,
         "repair_indexes": True,
@@ -41556,12 +41558,22 @@ def graph_source_maintenance_recommendation(
     heavy_tail_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
     latest_maintenance = latest_maintenance if isinstance(latest_maintenance, dict) else {}
 
-    def graph_maintenance_command(batch_limit: int, *, candidate_pool_limit: int | None = None) -> str:
+    def graph_maintenance_command(
+        batch_limit: int,
+        *,
+        candidate_pool_limit: int | None = None,
+        max_refresh_nodes: int | None = None,
+        max_refresh_edges: int | None = None,
+    ) -> str:
         command = (
             "python3 scripts/aoa_session_memory.py graph-maintenance all "
             f"{root_args} --apply --batch-limit {batch_limit} --budget-seconds 300 "
             f"--refresh-chunk-size {GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE} --write-report --write-hash-cache"
         )
+        if max_refresh_nodes is not None and int_value(max_refresh_nodes) > 0:
+            command += f" --max-refresh-nodes {max(1, int_value(max_refresh_nodes))}"
+        if max_refresh_edges is not None and int_value(max_refresh_edges) > 0:
+            command += f" --max-refresh-edges {max(1, int_value(max_refresh_edges))}"
         if candidate_pool_limit is not None and int_value(candidate_pool_limit) > 0:
             command += f" --candidate-pool-limit {max(1, int_value(candidate_pool_limit))}"
         return command
@@ -41687,6 +41699,8 @@ def graph_source_maintenance_recommendation(
         reason = "latest_budgeted_graph_maintenance_exhausted_without_progress"
         command = graph_maintenance_command(
             heavy_tail_batch_limit,
+            max_refresh_nodes=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            max_refresh_edges=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
     elif recent_budget_no_progress_near_current:
@@ -41694,6 +41708,8 @@ def graph_source_maintenance_recommendation(
         reason = "recent_budgeted_graph_maintenance_exhausted_without_progress"
         command = graph_maintenance_command(
             heavy_tail_batch_limit,
+            max_refresh_nodes=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            max_refresh_edges=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
     elif latest_near_budget_success and actionable_count > heavy_tail_batch_limit:
@@ -41701,6 +41717,8 @@ def graph_source_maintenance_recommendation(
         reason = "latest_budgeted_graph_maintenance_near_budget_after_progress"
         command = graph_maintenance_command(
             heavy_tail_batch_limit,
+            max_refresh_nodes=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            max_refresh_edges=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
     elif latest_heavy_tail_success and actionable_count > heavy_tail_batch_limit:
@@ -41708,6 +41726,8 @@ def graph_source_maintenance_recommendation(
         reason = "continue_heavy_tail_graph_maintenance"
         command = graph_maintenance_command(
             heavy_tail_batch_limit,
+            max_refresh_nodes=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            max_refresh_edges=GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
             candidate_pool_limit=heavy_tail_candidate_pool_limit,
         )
     elif actionable_count <= 100:
@@ -41740,6 +41760,7 @@ def graph_source_maintenance_recommendation(
     if route == "heavy_tail_graph_maintenance":
         notes.append("latest_budgeted_graph_maintenance_showed_heavy_tail_or_budget_rollback")
         notes.append("small_candidate_pool_preserves_progress_when_exact_planning_is_expensive")
+        notes.append("interactive_drip_uses_aggregate_refresh_caps")
         if reason == "recent_budgeted_graph_maintenance_exhausted_without_progress":
             notes.append("recent_no_progress_report_keeps_heavy_tail_route_sticky")
         if reason == "latest_budgeted_graph_maintenance_near_budget_after_progress":
@@ -52095,6 +52116,13 @@ def session_memory_maintenance_next_actions(
             if graph_queue_drip:
                 graph_batch_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
                 graph_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+            graph_interactive_drip = graph_queue_drip or graph_route == "heavy_tail_graph_maintenance"
+            graph_max_refresh_nodes = (
+                GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES if graph_interactive_drip else None
+            )
+            graph_max_refresh_edges = (
+                GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES if graph_interactive_drip else None
+            )
             graph_queue_seed_limit = max(
                 graph_batch_limit * 10,
                 graph_candidate_pool_limit,
@@ -52115,6 +52143,10 @@ def session_memory_maintenance_next_actions(
                 "--write-report",
                 "--write-hash-cache",
             ]
+            if graph_max_refresh_nodes is not None and graph_max_refresh_nodes > 0:
+                command.extend(["--max-refresh-nodes", str(graph_max_refresh_nodes)])
+            if graph_max_refresh_edges is not None and graph_max_refresh_edges > 0:
+                command.extend(["--max-refresh-edges", str(graph_max_refresh_edges)])
             if graph_queued_count > 0 or graph_queue_seed_needed:
                 command.append("--use-queue")
             if graph_queue_seed_needed:
@@ -52141,7 +52173,7 @@ def session_memory_maintenance_next_actions(
                     else "repair_graph_budgeted"
                 )
                 action_note = (
-                    "Drain or seed the generated graph maintenance queue with a small candidate pool so interactive maintenance spends time applying source updates, not planning an oversized queue slice."
+                    "Drain or seed the generated graph maintenance queue with a small candidate pool and aggregate refresh caps so interactive maintenance spends time applying bounded source updates, not planning or rewriting an oversized queue slice."
                     if graph_queue_drip
                     else "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
                 )
