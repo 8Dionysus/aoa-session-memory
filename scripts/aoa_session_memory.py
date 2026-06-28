@@ -626,6 +626,7 @@ PORTABLE_BUNDLE_ITEMS = [
     "tests",
 ]
 PORTABLE_COPY_IGNORE = {".git", ".pytest_cache", "__pycache__"}
+PORTABLE_EXPORT_FORCE_PRESERVE_ITEMS = {".git", "kag"}
 
 ROUTE_SIGNAL_LAYER_TO_AXIS = {
     "scope_contract": "by-scope-contract",
@@ -1762,7 +1763,7 @@ def clear_export_target_for_force(target: Path) -> None:
     if not target.exists():
         return
     for child in target.iterdir():
-        if child.name == ".git":
+        if child.name in PORTABLE_EXPORT_FORCE_PRESERVE_ITEMS:
             continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
@@ -52031,6 +52032,17 @@ def session_memory_operational_route_rollup_status(
         "--apply",
         "--write-report",
     ]
+    query_command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-route-rollup-query",
+        "--workspace-root",
+        str(aoa_root.parent),
+        "--aoa-root",
+        str(aoa_root),
+        "--limit",
+        "12",
+        "--write-report",
+    ]
     base: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_operational_route_rollup_status",
@@ -52042,6 +52054,8 @@ def session_memory_operational_route_rollup_status(
         "source_search_shards_status": search_shards.get("status") or "unknown",
         "refresh_command": command,
         "exact_refresh_command": shlex.join(command),
+        "query_command": query_command,
+        "exact_query_command": shlex.join(query_command),
         "quality_boundary": "generated route-rollup is navigation only; raw transcripts and segment refs remain authority",
         "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
     }
@@ -53725,6 +53739,389 @@ def search_operational_route_rollup_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def search_operational_route_rollup_string_list(value: Any) -> tuple[list[str], bool]:
+    try:
+        loaded = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return [], False
+    if not isinstance(loaded, list):
+        return [], False
+    return [str(item) for item in loaded if str(item)], True
+
+
+def search_operational_route_rollup_query_command(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    query: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+    limit: int = 12,
+    ref_limit: int = SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+    write_report: bool = False,
+) -> list[str]:
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-route-rollup-query",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+    if query:
+        command.append(str(query))
+    for flag, value in (("--layer", layer), ("--key", key), ("--route-signal", route_signal)):
+        if value:
+            command.extend([flag, str(value)])
+    command.extend(["--limit", str(max(1, int(limit))), "--ref-limit", str(max(0, int(ref_limit)))])
+    if write_report:
+        command.append("--write-report")
+    return command
+
+
+def session_memory_search_operational_route_rollup_query(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    query: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+    limit: int = 12,
+    ref_limit: int = SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    generated_at = utc_now()
+    target_db = search_operational_route_rollup_db_path(aoa_root)
+    limit_value = max(1, min(100, int(limit)))
+    ref_limit_value = max(0, min(25, int(ref_limit)))
+    filters = {
+        "query": str(query or ""),
+        "layer": str(layer or ""),
+        "key": str(key or ""),
+        "route_signal": str(route_signal or ""),
+        "limit": limit_value,
+        "ref_limit": ref_limit_value,
+    }
+    diagnostics: list[str] = []
+    rollup_status = session_memory_operational_route_rollup_status(aoa_root=aoa_root)
+    rollup_state = str(rollup_status.get("status") or "missing")
+    base: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_route_rollup_query",
+        "rollup_schema_version": SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "mutates": False,
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "target_db": str(target_db),
+        "filters": filters,
+        "rollup_status": {
+            key: rollup_status.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "generated_at",
+                "size_human",
+                "shard_count",
+                "route_rollup_row_count",
+                "candidate_route_posting_count",
+                "sampled_raw_term_count",
+                "sampled_segment_term_count",
+                "source_mismatch_count",
+                "diagnostics",
+                "refresh_command",
+                "query_command",
+            )
+            if key in rollup_status
+        },
+        "stop_lines": [
+            "generated_rollup_is_navigation_not_authority",
+            "raw_and_segment_refs_remain_required_for_evidence",
+            "query_route_must_not_resample_search_shards",
+        ],
+        "quality_boundary": "route-rollup query is compact navigation over a generated projection; open raw/segment refs before proof claims.",
+        "truth_status": "generated_search_route_rollup_query_not_archive_truth",
+    }
+    if rollup_state in {"missing", "invalid", "empty"} or not target_db.exists():
+        diagnostics.append(f"operational_route_rollup_query_unavailable:{rollup_state}")
+        payload = {
+            **base,
+            "ok": False,
+            "status": "unavailable",
+            "results": [],
+            "result_count": 0,
+            "totals": {
+                "matched_shard_row_count": 0,
+                "matched_group_count": 0,
+                "omitted_group_count": 0,
+            },
+            "quality": {
+                "uses_materialized_rollup": True,
+                "raw_or_segment_ref_present": False,
+                "freshness_status": rollup_state,
+                "needs_refresh": rollup_status.get("needs_refresh"),
+                "truncated": False,
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            },
+            "next_routes": [rollup_status.get("refresh_command")] if rollup_status.get("refresh_command") else [],
+            "diagnostics": diagnostics,
+        }
+        return payload
+
+    where: list[str] = []
+    params: list[Any] = []
+    if filters["layer"]:
+        where.append("layer = ?")
+        params.append(filters["layer"])
+    if filters["key"]:
+        where.append("key = ?")
+        params.append(filters["key"])
+    if filters["route_signal"]:
+        where.append("route_signal = ?")
+        params.append(filters["route_signal"])
+    if filters["query"]:
+        needle = f"%{filters['query'].lower()}%"
+        where.append("(lower(layer) LIKE ? OR lower(key) LIKE ? OR lower(route_signal) LIKE ?)")
+        params.extend([needle, needle, needle])
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    conn: sqlite3.Connection | None = None
+    bad_json_field_count = 0
+    try:
+        conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT shard, layer, key, route_signal, posting_count, session_count,
+                   first_session_date, last_session_date, raw_refs_json,
+                   segment_refs_json, session_ids_json
+            FROM route_rollups
+            {where_sql}
+            ORDER BY posting_count DESC, layer ASC, key ASC
+            """,
+            params,
+        ).fetchall()
+        shard_summary_rows = conn.execute(
+            """
+            SELECT COUNT(*) AS shard_count,
+                   COALESCE(SUM(event_total), 0) AS event_total,
+                   COALESCE(SUM(candidate_tail_count), 0) AS candidate_tail_count,
+                   COALESCE(SUM(candidate_tail_with_route_signals_count), 0) AS candidate_tail_with_route_signals_count,
+                   COALESCE(SUM(candidate_route_posting_count), 0) AS candidate_route_posting_count,
+                   COALESCE(SUM(candidate_route_term_count), 0) AS candidate_route_term_count
+            FROM shards
+            """
+        ).fetchone()
+    except sqlite3.Error as exc:
+        diagnostics.append(f"operational_route_rollup_query_unreadable:{sqlite_error_diagnostic(exc)}")
+        return {
+            **base,
+            "ok": False,
+            "status": "unreadable",
+            "results": [],
+            "result_count": 0,
+            "totals": {
+                "matched_shard_row_count": 0,
+                "matched_group_count": 0,
+                "omitted_group_count": 0,
+            },
+            "quality": {
+                "uses_materialized_rollup": True,
+                "raw_or_segment_ref_present": False,
+                "freshness_status": rollup_state,
+                "needs_refresh": rollup_status.get("needs_refresh"),
+                "truncated": False,
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            },
+            "diagnostics": diagnostics,
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    layer_counts: Counter[str] = Counter()
+    for row in rows:
+        token = (str(row["layer"] or ""), str(row["key"] or ""), str(row["route_signal"] or ""))
+        bucket = grouped.setdefault(
+            token,
+            {
+                "layer": token[0],
+                "key": token[1],
+                "route_signal": token[2],
+                "posting_count": 0,
+                "session_count": 0,
+                "first_session_date": "",
+                "last_session_date": "",
+                "source_shards": [],
+                "raw_refs": [],
+                "segment_refs": [],
+                "session_ids": [],
+            },
+        )
+        posting_count = int_value(row["posting_count"])
+        bucket["posting_count"] += posting_count
+        bucket["session_count"] += int_value(row["session_count"])
+        layer_counts[token[0]] += posting_count
+        shard = str(row["shard"] or "")
+        if shard and shard not in bucket["source_shards"]:
+            bucket["source_shards"].append(shard)
+        first_date = str(row["first_session_date"] or "")
+        last_date = str(row["last_session_date"] or "")
+        if first_date and (not bucket["first_session_date"] or first_date < bucket["first_session_date"]):
+            bucket["first_session_date"] = first_date
+        if last_date and (not bucket["last_session_date"] or last_date > bucket["last_session_date"]):
+            bucket["last_session_date"] = last_date
+        for json_key, target_key in (
+            ("raw_refs_json", "raw_refs"),
+            ("segment_refs_json", "segment_refs"),
+            ("session_ids_json", "session_ids"),
+        ):
+            values, valid_json = search_operational_route_rollup_string_list(row[json_key])
+            if not valid_json:
+                bad_json_field_count += 1
+                continue
+            for value in values:
+                if value and value not in bucket[target_key] and len(bucket[target_key]) < ref_limit_value:
+                    bucket[target_key].append(value)
+    if bad_json_field_count:
+        diagnostics.append(f"operational_route_rollup_query_bad_json_fields:{bad_json_field_count}")
+
+    grouped_rows = sorted(
+        grouped.values(),
+        key=lambda item: (-int_value(item.get("posting_count")), str(item.get("layer") or ""), str(item.get("key") or "")),
+    )
+    results = grouped_rows[:limit_value]
+    raw_or_segment_ref_present = any((item.get("raw_refs") or item.get("segment_refs")) for item in results)
+    query_more_command = search_operational_route_rollup_query_command(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        query=filters["query"],
+        layer=filters["layer"],
+        key=filters["key"],
+        route_signal=filters["route_signal"],
+        limit=min(100, max(limit_value + 1, limit_value * 2)),
+        ref_limit=ref_limit_value,
+    )
+    payload = {
+        **base,
+        "ok": rollup_state not in {"missing", "invalid", "empty"},
+        "status": "matched" if results else "no_matches",
+        "results": results,
+        "result_count": len(results),
+        "top_route_layers": [
+            {"layer": layer_name, "posting_count": posting_count}
+            for layer_name, posting_count in layer_counts.most_common(12)
+            if layer_name
+        ],
+        "totals": {
+            "matched_shard_row_count": len(rows),
+            "matched_group_count": len(grouped_rows),
+            "omitted_group_count": max(0, len(grouped_rows) - len(results)),
+            "source_shard_count": int_value(shard_summary_rows["shard_count"] if shard_summary_rows else 0),
+            "source_event_total": int_value(shard_summary_rows["event_total"] if shard_summary_rows else 0),
+            "source_candidate_tail_count": int_value(shard_summary_rows["candidate_tail_count"] if shard_summary_rows else 0),
+            "source_candidate_tail_with_route_signals_count": int_value(
+                shard_summary_rows["candidate_tail_with_route_signals_count"] if shard_summary_rows else 0
+            ),
+            "source_candidate_route_posting_count": int_value(shard_summary_rows["candidate_route_posting_count"] if shard_summary_rows else 0),
+            "source_candidate_route_term_count": int_value(shard_summary_rows["candidate_route_term_count"] if shard_summary_rows else 0),
+        },
+        "quality": {
+            "uses_materialized_rollup": True,
+            "raw_or_segment_ref_present": raw_or_segment_ref_present,
+            "freshness_status": rollup_state,
+            "needs_refresh": rollup_status.get("needs_refresh"),
+            "truncated": len(grouped_rows) > len(results),
+            "omitted_group_count": max(0, len(grouped_rows) - len(results)),
+            "ref_limit": ref_limit_value,
+        },
+        "cost_profile": {
+            "uses_materialized_route_rollup": True,
+            "resamples_shards": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+        "next_routes": [
+            query_more_command,
+            rollup_status.get("refresh_command") if rollup_status.get("needs_refresh") else None,
+        ],
+        "next_expansion_command": query_more_command,
+        "diagnostics": diagnostics,
+    }
+    payload["next_routes"] = [item for item in payload["next_routes"] if item]
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-operational-route-rollup-query",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_operational_route_rollup_query_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> str:
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    cost = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+    lines = [
+        "# Search Operational Route Rollup Query",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- target_db: `{payload.get('target_db')}`",
+        f"- matched_groups: `{totals.get('matched_group_count')}`",
+        f"- omitted_groups: `{totals.get('omitted_group_count')}`",
+        f"- freshness_status: `{quality.get('freshness_status')}`",
+        f"- raw_or_segment_ref_present: `{quality.get('raw_or_segment_ref_present')}`",
+        f"- elapsed_ms: `{cost.get('elapsed_ms')}`",
+        "",
+        "## Results",
+        "",
+        "| layer | key | postings | sessions | refs |",
+        "| --- | --- | ---: | ---: | ---: |",
+    ]
+    for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if isinstance(item, dict):
+            ref_count = len(item.get("raw_refs") if isinstance(item.get("raw_refs"), list) else []) + len(
+                item.get("segment_refs") if isinstance(item.get("segment_refs"), list) else []
+            )
+            lines.append(
+                f"| `{item.get('layer')}` | `{item.get('key')}` | `{item.get('posting_count')}` | `{item.get('session_count')}` | `{ref_count}` |"
+            )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend(["", "## Diagnostics", ""])
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def session_memory_search_projection_next_action(
     *,
     workspace_root: Path,
@@ -53747,7 +54144,7 @@ def session_memory_search_projection_next_action(
         else {}
     )
     route_rollup_status = str(operational_route_rollup.get("status") or "missing")
-    route_rollup_command = [
+    materialize_route_rollup_command = [
         *session_memory_cli_command(aoa_root),
         "search-operational-route-rollup",
         "--workspace-root",
@@ -53758,12 +54155,19 @@ def session_memory_search_projection_next_action(
         str(max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_route_rollup.get("shard_count")))),
         "--write-report",
     ]
+    query_route_rollup_command = search_operational_route_rollup_query_command(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        limit=12,
+        ref_limit=SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+        write_report=True,
+    )
     if route_rollup_status in {"missing", "stale", "invalid", "empty"}:
         return {
             "id": "materialize_search_operational_route_rollup",
             "reason": f"search_projection_route_rollup_{route_rollup_status}",
             "route_kind": "search_operational_route_rollup",
-            "command": [*route_rollup_command, "--apply"],
+            "command": [*materialize_route_rollup_command, "--apply"],
             "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
             "document_hotset_status": document_hotset.get("status"),
             "document_count": document_hotset.get("document_count"),
@@ -53777,7 +54181,7 @@ def session_memory_search_projection_next_action(
             "id": "use_operational_route_rollup_projection",
             "reason": "search_projection_route_rollup_current",
             "route_kind": "search_operational_route_rollup_ready",
-            "command": route_rollup_command,
+            "command": query_route_rollup_command,
             "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
             "document_hotset_status": document_hotset.get("status"),
             "document_count": document_hotset.get("document_count"),
@@ -63445,6 +63849,25 @@ def command_search_operational_route_rollup(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_operational_route_rollup_query(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=root,
+        query=args.query or "",
+        layer=args.layer or "",
+        key=args.key or "",
+        route_signal=args.route_signal or "",
+        limit=args.limit,
+        ref_limit=args.ref_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -69556,6 +69979,22 @@ def build_parser() -> argparse.ArgumentParser:
     search_operational_route_rollup.add_argument("--apply", action="store_true", help="Write search/operational-route-rollup.sqlite3. Without this flag the command is read-only.")
     search_operational_route_rollup.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational route-rollup reports under .aoa/diagnostics.")
     search_operational_route_rollup.set_defaults(func=command_search_operational_route_rollup)
+
+    search_operational_route_rollup_query = sub.add_parser(
+        "search-operational-route-rollup-query",
+        aliases=["search-route-rollup-query", "search-operational-rollup-query"],
+        help="Read the generated operational route-ref rollup projection without resampling search shards.",
+    )
+    search_operational_route_rollup_query.add_argument("query", nargs="?", default="", help="Optional case-insensitive filter over layer, key, or route_signal.")
+    search_operational_route_rollup_query.add_argument("--workspace-root")
+    search_operational_route_rollup_query.add_argument("--aoa-root")
+    search_operational_route_rollup_query.add_argument("--layer", default="", help="Exact route layer filter.")
+    search_operational_route_rollup_query.add_argument("--key", default="", help="Exact route key filter.")
+    search_operational_route_rollup_query.add_argument("--route-signal", default="", help="Exact route_signal filter.")
+    search_operational_route_rollup_query.add_argument("--limit", type=int, default=12, help="Maximum aggregated route rows to return.")
+    search_operational_route_rollup_query.add_argument("--ref-limit", type=int, default=SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT, help="Maximum sampled raw/segment/session refs per returned route row.")
+    search_operational_route_rollup_query.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational route-rollup query reports under .aoa/diagnostics.")
+    search_operational_route_rollup_query.set_defaults(func=command_search_operational_route_rollup_query)
 
     search = sub.add_parser(
         "search",

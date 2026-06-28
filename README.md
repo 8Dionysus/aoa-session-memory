@@ -1158,6 +1158,13 @@ python3 scripts/aoa_session_memory.py search-operational-route-rollup \
   --max-shards 3 \
   --apply \
   --write-report
+
+python3 scripts/aoa_session_memory.py search-operational-route-rollup-query \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --layer tool \
+  --key exec_command \
+  --limit 12
 ```
 
 `search-operational-projection-plan` is the bounded follow-up for the compact
@@ -1167,7 +1174,7 @@ rows, and reports the generic context tail that could only be reduced after
 route refs and raw/segment refs have a replacement projection. The packet also
 includes a route-ref rollup plan with top candidate route layers/terms, so the
 next design step can preserve navigation fanout before any physical row
-reduction. The full rollup is bounded by `--per-shard-timeout` (default 12s);
+reduction. The full rollup is bounded by `--per-shard-timeout` (default 180s);
 use `--route-rollup-limit 0` only for a core-count probe without route-term
 detail. It does not mutate search, raw, graph, or session archives.
 
@@ -1178,12 +1185,21 @@ candidate context-tail rows. It is still navigation, not authority, and it does
 not delete or compact event rows; physical search shrinkage must wait until this
 replacement route proves fresh and useful.
 
+`search-operational-route-rollup-query` is the consumer route for the current
+materialized rollup. It opens only `search/operational-route-rollup.sqlite3`,
+aggregates route rows by `layer/key/route_signal`, returns bounded raw,
+segment, and session refs, and reports a cost profile showing that it does not
+resample shards, open the monolith, use FTS, or hydrate raw body text. Use the
+materialize command only for missing or stale rollups; use the query command
+when the rollup is current and an agent needs compact navigation proof.
+
 `maintenance-status --full` surfaces this rollup under
 `operations.search_pressure.operational_route_rollup`. If the rollup is missing
 or stale, the search projection next-action routes to
 `search-operational-route-rollup --apply --write-report`; once it is current,
-the next-action becomes `use_operational_route_rollup_projection` instead of
-repeating the cardinality plan.
+the next-action becomes `use_operational_route_rollup_projection` and points to
+`search-operational-route-rollup-query` instead of repeating sampling or the
+cardinality plan.
 
 `index-maintenance` also treats a missing or stale operational route-rollup as
 a generated read-model repair when search shards are current. This lets

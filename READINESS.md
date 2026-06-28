@@ -1812,6 +1812,28 @@ Maintenance gates:
   proves the action moves `final_operational_route_rollup.status` to `current`
   through the normal maintenance pipeline.
 
+- 2026-06-28 operational route-rollup query proof:
+  `search-operational-route-rollup-query` is now the fast consumer route over
+  the materialized `search/operational-route-rollup.sqlite3` read-model. It
+  reads the existing DB instead of resampling structured shards, aggregates
+  route rows by `layer/key/route_signal`, and returns raw, segment, and session
+  refs plus a cost profile. Live query without filters over the current
+  `31.4 MiB` rollup returned `ok=true`, `status=matched`, `result_count=5`,
+  `matched_group_count=39328`, and `elapsed_ms=532`; filtered live query for
+  `tool/exec_command` returned one route row with `posting_count=781`, raw and
+  segment refs, and `elapsed_ms=12`. In both packets
+  `resamples_shards=false`, `opens_monolith=false`, `uses_fts=false`, and
+  `hydrates_body=false`. `maintenance-status` now points
+  `use_operational_route_rollup_projection` at
+  `search-operational-route-rollup-query --limit 12 --ref-limit 3
+  --write-report`; materialization remains the repair route for missing or
+  stale rollups. Regression proof:
+  `test_search_operational_route_rollup_query_reads_materialized_projection`,
+  updated `test_search_projection_next_action_requires_current_large_projection`,
+  source pytest `371 passed`, standalone bundle pytest `371 passed`, source
+  `validate ok=true`, standalone `validate ok=true`, and portable-bundle audit
+  `ok=true`.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

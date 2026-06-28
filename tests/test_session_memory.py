@@ -15568,9 +15568,12 @@ def test_search_projection_next_action_requires_current_large_projection(tmp_pat
     assert ready_action["route_kind"] == "search_operational_route_rollup_ready"
     assert ready_action["route_rollup_status"] == "current"
     assert ready_action["route_rollup_row_count"] == 43_630
+    assert "search-operational-route-rollup-query" in ready_action["command"]
+    assert "search-operational-route-rollup" not in ready_action["command"]
     ready_command_text = module.shlex.join(ready_action["command"])
-    assert "search-operational-route-rollup" in ready_command_text
+    assert "search-operational-route-rollup-query" in ready_command_text
     assert "--apply" not in ready_command_text
+    assert "--max-shards" not in ready_command_text
 
     assert (
         module.session_memory_search_projection_next_action(
@@ -15672,6 +15675,116 @@ def test_operational_route_rollup_status_tracks_source_shard_freshness(tmp_path:
     assert stale["needs_refresh"] is True
     assert stale["source_mismatch_count"] == 1
     assert "operational_route_rollup_source_shards_changed" in stale["diagnostics"]
+
+
+def test_search_operational_route_rollup_query_reads_materialized_projection(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_a = module.search_shard_db_path(aoa_root, "month/2026-05")
+    shard_b = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_a.parent.mkdir(parents=True)
+    shard_a.write_bytes(b"source-a")
+    shard_b.parent.mkdir(parents=True)
+    shard_b.write_bytes(b"source-b")
+    target_db = module.search_operational_route_rollup_db_path(aoa_root)
+    module.write_search_operational_route_rollup_db(
+        target_db=target_db,
+        generated_at="2026-06-28T00:00:00Z",
+        shard_results=[
+            {
+                "shard": "month/2026-05",
+                "db_path": str(shard_a),
+                "status": "sampled",
+                "summary": {
+                    "event_total": 10,
+                    "candidate_context_tail_v1_count": 6,
+                    "candidate_context_tail_with_route_signals_count": 4,
+                },
+                "elapsed_ms": 11,
+                "rows": [
+                    {
+                        "shard": "month/2026-05",
+                        "layer": "tool",
+                        "key": "exec_command",
+                        "route_signal": module.route_signal_token("tool", "exec_command"),
+                        "posting_count": 5,
+                        "session_count": 2,
+                        "first_session_date": "2026-05-01",
+                        "last_session_date": "2026-05-30",
+                        "raw_refs": ["raw:a:1"],
+                        "segment_refs": ["segments/a.md"],
+                        "session_ids": ["session-a"],
+                    }
+                ],
+            },
+            {
+                "shard": "month/2026-06",
+                "db_path": str(shard_b),
+                "status": "sampled",
+                "summary": {
+                    "event_total": 8,
+                    "candidate_context_tail_v1_count": 5,
+                    "candidate_context_tail_with_route_signals_count": 3,
+                },
+                "elapsed_ms": 9,
+                "rows": [
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "tool",
+                        "key": "exec_command",
+                        "route_signal": module.route_signal_token("tool", "exec_command"),
+                        "posting_count": 3,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:b:1"],
+                        "segment_refs": ["segments/b.md"],
+                        "session_ids": ["session-b"],
+                    }
+                ],
+            },
+        ],
+    )
+
+    payload = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        layer="tool",
+        key="exec_command",
+        limit=5,
+        ref_limit=4,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "matched"
+    assert payload["mutates"] is False
+    assert payload["result_count"] == 1
+    assert payload["cost_profile"]["uses_materialized_route_rollup"] is True
+    assert payload["cost_profile"]["resamples_shards"] is False
+    assert payload["cost_profile"]["opens_monolith"] is False
+    assert payload["cost_profile"]["uses_fts"] is False
+    result = payload["results"][0]
+    assert result["posting_count"] == 8
+    assert result["session_count"] == 3
+    assert set(result["source_shards"]) == {"month/2026-05", "month/2026-06"}
+    assert result["raw_refs"] == ["raw:a:1", "raw:b:1"]
+    assert result["segment_refs"] == ["segments/a.md", "segments/b.md"]
+    assert result["session_ids"] == ["session-a", "session-b"]
+    assert payload["quality"]["raw_or_segment_ref_present"] is True
+    assert payload["totals"]["matched_group_count"] == 1
+    assert payload["totals"]["source_candidate_route_posting_count"] == 8
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+    no_match = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="definitely-not-there",
+    )
+    assert no_match["ok"] is True
+    assert no_match["status"] == "no_matches"
+    assert no_match["cost_profile"]["resamples_shards"] is False
 
 
 def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path, monkeypatch: Any) -> None:
@@ -23324,10 +23437,13 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     git_dir = target / ".git"
+    kag_dir = target / "kag"
     stale_dir = target / "stale"
     stale_file = target / "stale.txt"
     git_dir.mkdir(parents=True)
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    kag_dir.mkdir()
+    (kag_dir / "manifest.json").write_text('{"repo":"aoa-session-memory"}\n', encoding="utf-8")
     stale_dir.mkdir()
     (stale_dir / "old.txt").write_text("old\n", encoding="utf-8")
     stale_file.write_text("old\n", encoding="utf-8")
@@ -23336,6 +23452,8 @@ def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
 
     assert git_dir.exists()
     assert (git_dir / "HEAD").exists()
+    assert kag_dir.exists()
+    assert (kag_dir / "manifest.json").exists()
     assert not stale_dir.exists()
     assert not stale_file.exists()
 
