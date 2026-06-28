@@ -7322,6 +7322,80 @@ def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: 
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
 
 
+def test_maintenance_next_actions_seeds_empty_graph_queue_from_ledger(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2204,
+        "queued_count": 0,
+        "diagnostics": [
+            "latest_graph_maintenance_remaining_sources",
+            "maintenance_queue_empty_but_ledger_actionable_sources_present",
+        ],
+        "maintenance_recommendation": {
+            "route": "heavy_tail_graph_maintenance",
+            "reason": "continue_heavy_tail_graph_maintenance",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_seeded_heavy_tail"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "--use-queue" in command_text
+    assert "--seed-queue-from-ledger" in command_text
+    assert f"--queue-seed-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT * 10}" in command_text
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
+    assert "generated queue as evidence authority" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_uses_installed_script_path_when_available(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    script_path = aoa_root / "scripts" / "aoa_session_memory.py"
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={
+            "status": "stale",
+            "needs_maintenance": True,
+            "actionable_count": 7,
+            "queued_count": 7,
+            "maintenance_recommendation": {
+                "route": "bounded_graph_maintenance",
+                "reason": "small_incremental_backlog",
+                "command": "graph-maintenance all",
+            },
+        },
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_bounded"
+    assert actions[0]["command"][:3] == ["python3", str(script_path), "graph-maintenance"]
+    assert "scripts/aoa_session_memory.py" not in actions[0]["command"][:2]
+
+
 def test_maintenance_next_actions_routes_mostly_missing_graph_store_to_rebuild(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -9180,6 +9254,148 @@ def test_graph_maintenance_use_queue_empty_is_noop_without_source_scan(tmp_path:
     assert payload["source_state"]["retired_count"] == 1
     assert payload["source_state"]["partial_evidence_count"] == 1
     assert payload["maintenance_detail"]["selection_strategy"] == "queue_empty_no_source_scan"
+
+
+def test_graph_maintenance_queue_seed_from_ledger_skips_recent_live_and_orders(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / "graph").mkdir(parents=True)
+    stable_dir = aoa_root / "sessions" / "2026-06-22__001__queue-seed-stable"
+    live_dir = aoa_root / "sessions" / "2026-06-22__002__queue-seed-live"
+    (stable_dir / "segments").mkdir(parents=True)
+    (live_dir / "segments").mkdir(parents=True)
+    (live_dir / "raw").mkdir(parents=True)
+    live_transcript = tmp_path / ".codex" / "sessions" / "2026" / "06" / "22" / "rollout-2026-06-22T00-00-00-queue-seed-live.jsonl"
+    live_transcript.parent.mkdir(parents=True)
+    live_transcript.write_text("{}\n", encoding="utf-8")
+    now_ts = time.time()
+    os.utime(live_transcript, (now_ts, now_ts))
+    module.write_json(live_dir / "raw" / module.RAW_SOURCE_JSON, {"source_path": str(live_transcript)})
+    module.write_json(live_dir / "session.manifest.json", {"raw": {"source_path": str(live_transcript)}})
+
+    light_path = stable_dir / "segments" / "000.index.json"
+    heavy_path = stable_dir / "segments" / "001.index.json"
+    live_path = live_dir / "segments" / "000.index.json"
+    for path in (light_path, heavy_path, live_path):
+        path.write_text("{}", encoding="utf-8")
+
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                "segment:queue-seed:heavy": {
+                    "source_key": "segment:queue-seed:heavy",
+                    "source_type": "segment",
+                    "session_id": "queue-seed-stable",
+                    "session_label": stable_dir.name,
+                    "segment_id": "001",
+                    "session_dir": str(stable_dir),
+                    "source_path": str(heavy_path),
+                    "status": "dirty",
+                    "stored_node_count": 8,
+                    "stored_edge_count": 8,
+                },
+                "segment:queue-seed:live": {
+                    "source_key": "segment:queue-seed:live",
+                    "source_type": "segment",
+                    "session_id": "queue-seed-live",
+                    "session_label": live_dir.name,
+                    "segment_id": "000",
+                    "session_dir": str(live_dir),
+                    "source_path": str(live_path),
+                    "status": "dirty",
+                    "stored_node_count": 0,
+                    "stored_edge_count": 0,
+                },
+                "segment:queue-seed:light": {
+                    "source_key": "segment:queue-seed:light",
+                    "source_type": "segment",
+                    "session_id": "queue-seed-stable",
+                    "session_label": stable_dir.name,
+                    "segment_id": "000",
+                    "session_dir": str(stable_dir),
+                    "source_path": str(light_path),
+                    "status": "dirty",
+                    "stored_node_count": 0,
+                    "stored_edge_count": 0,
+                },
+            }
+        },
+    )
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+
+    seeded = module.graph_maintenance_queue_seed_from_ledger(aoa_root, limit=2, now_ts=now_ts)
+    queue = module.read_graph_maintenance_queue(aoa_root)
+
+    assert seeded["seeded_from"] == "graph_source_state_ledger"
+    assert seeded["selected_count"] == 2
+    assert seeded["deferred_live_source_count"] == 1
+    assert seeded["selected_sources"] == ["segment:queue-seed:light", "segment:queue-seed:heavy"]
+    assert sorted(queue["items"]) == ["segment:queue-seed:heavy", "segment:queue-seed:light"]
+    assert "segment:queue-seed:live" not in queue["items"]
+
+
+def test_graph_maintenance_seed_queue_then_uses_queue_source_filters(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-22__003__seeded-queue-drain"
+    (session_dir / "segments").mkdir(parents=True)
+    source_items = {
+        "segment:seeded-drain:light": {
+            "source_key": "segment:seeded-drain:light",
+            "source_type": "segment",
+            "session_id": "seeded-drain",
+            "session_label": session_dir.name,
+            "segment_id": "000",
+            "session_dir": str(session_dir),
+            "source_path": str(session_dir / "segments" / "000.index.json"),
+            "status": "dirty",
+            "stored_node_count": 0,
+            "stored_edge_count": 0,
+        },
+        "segment:seeded-drain:heavy": {
+            "source_key": "segment:seeded-drain:heavy",
+            "source_type": "segment",
+            "session_id": "seeded-drain",
+            "session_label": session_dir.name,
+            "segment_id": "001",
+            "session_dir": str(session_dir),
+            "source_path": str(session_dir / "segments" / "001.index.json"),
+            "status": "dirty",
+            "stored_node_count": 5,
+            "stored_edge_count": 5,
+        },
+    }
+    for item in source_items.values():
+        Path(str(item["source_path"])).write_text("{}", encoding="utf-8")
+    module.write_graph_source_state_ledger(aoa_root, {"sources": source_items})
+    module.write_graph_maintenance_queue(aoa_root, {"items": {}})
+    observed: dict[str, Any] = {}
+
+    def fake_graph_source_states(**kwargs: Any) -> dict[str, Any]:
+        source_key_filters = list(kwargs.get("source_key_filters") or [])
+        observed["source_key_filters"] = source_key_filters
+        return {
+            "states": [dict(source_items[source_key]) for source_key in source_key_filters],
+            "diagnostics": [],
+            "existing_source_count": len(source_key_filters),
+        }
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        seed_queue_from_ledger=True,
+        queue_seed_limit=2,
+        use_queue=True,
+        apply=False,
+        batch_limit=1,
+    )
+
+    assert payload["use_queue"] is True
+    assert payload["queue_seed_update"]["selected_count"] == 2
+    assert payload["maintenance_detail"]["seed_queue_from_ledger"] is True
+    assert payload["maintenance_detail"]["queue_selected_source_count"] == 2
+    assert observed["source_key_filters"] == ["segment:seeded-drain:light", "segment:seeded-drain:heavy"]
+    assert payload["maintenance_detail"]["matched_source_keys"] == observed["source_key_filters"]
 
 
 def test_graph_maintenance_hot_noop_all_is_cached_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:

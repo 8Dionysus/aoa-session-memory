@@ -1061,6 +1061,13 @@ def build_hook_command(event_name: str, workspace_root: Path, aoa_root: Path, *,
     )
 
 
+def session_memory_cli_command(aoa_root: Path, *, python_bin: str = "python3") -> list[str]:
+    script = aoa_root / "scripts" / "aoa_session_memory.py"
+    if script.exists():
+        return [python_bin, str(script)]
+    return [python_bin, "scripts/aoa_session_memory.py"]
+
+
 def build_user_hooks_config(workspace_root: Path, aoa_root: Path, *, python_bin: str = "python3") -> dict[str, Any]:
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event_name in REQUIRED_HOOK_EVENTS:
@@ -37441,6 +37448,9 @@ def update_graph_maintenance_queue_from_states(
                 "source_path": state.get("source_path"),
                 "source_sha": state.get("source_sha"),
                 "source_mtime": state.get("source_mtime"),
+                "source_size_bytes": state.get("source_size_bytes"),
+                "stored_node_count": state.get("stored_node_count"),
+                "stored_edge_count": state.get("stored_edge_count"),
                 "status": status,
                 "reasons": state.get("reasons", []) if isinstance(state.get("reasons"), list) else [],
                 "reason": reason,
@@ -37457,6 +37467,78 @@ def update_graph_maintenance_queue_from_states(
         "queued_count": len(items),
         "enqueued_or_refreshed_count": enqueued,
         "removed_count": removed,
+    }
+
+
+def graph_maintenance_queue_seed_from_ledger(
+    aoa_root: Path,
+    *,
+    limit: int,
+    reason: str = "graph_ledger_queue_seed",
+    include_deferred_live: bool = False,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    ledger = read_graph_source_state_ledger(aoa_root)
+    queue_payload = read_graph_maintenance_queue(aoa_root)
+    queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
+    existing_queue_keys = {str(key) for key in queue_items if key}
+    sources = ledger.get("sources") if isinstance(ledger.get("sources"), dict) else {}
+    actionable_items = [
+        item
+        for item in sources.values()
+        if isinstance(item, dict)
+        and str(item.get("source_key") or "")
+        and str(item.get("status") or "") in GRAPH_ACTIONABLE_SOURCE_STATUSES
+    ]
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - max(0.0, float(quiet_seconds))
+    eligible: list[dict[str, Any]] = []
+    deferred_live: list[dict[str, Any]] = []
+    deferred_live_count = 0
+    skipped_existing = 0
+    for item in sorted(actionable_items, key=graph_maintenance_actionable_sort_key):
+        source_key = str(item.get("source_key") or "")
+        if source_key in existing_queue_keys:
+            skipped_existing += 1
+            continue
+        live_transcript_mtime, live_transcript_path = graph_state_item_live_transcript_mtime(item)
+        if not include_deferred_live and live_transcript_mtime > threshold:
+            deferred_live_count += 1
+            if len(deferred_live) < 20:
+                deferred_live.append(
+                    {
+                        "source_key": source_key,
+                        "session_id": item.get("session_id"),
+                        "session_label": item.get("session_label"),
+                        "live_transcript_path": live_transcript_path,
+                        "live_transcript_mtime": live_transcript_mtime,
+                        "age_seconds": max(0.0, now_value - live_transcript_mtime),
+                    }
+                )
+            continue
+        eligible.append(item)
+        if len(eligible) >= max(1, int_value(limit, 1)):
+            break
+    queue_update = update_graph_maintenance_queue_from_states(
+        aoa_root,
+        eligible,
+        reason=reason,
+    )
+    return {
+        **queue_update,
+        "seeded_from": "graph_source_state_ledger",
+        "limit": max(1, int_value(limit, 1)),
+        "candidate_count": len(actionable_items),
+        "selected_count": len(eligible),
+        "skipped_existing_count": skipped_existing,
+        "deferred_live_source_count": deferred_live_count,
+        "not_selected_count": max(0, len(actionable_items) - len(eligible) - skipped_existing - deferred_live_count),
+        "deferred_live_sources_sample": deferred_live,
+        "include_deferred_live": bool(include_deferred_live),
+        "quiet_seconds": quiet_seconds,
+        "selected_sources": [str(item.get("source_key") or "") for item in eligible[:40]],
+        "reason": reason,
     }
 
 
@@ -42329,6 +42411,10 @@ def graph_maintenance_no_source_scan_payload(
         + int_value(source_state.get("missing_count"))
         + int_value(source_state.get("orphaned_count"))
     )
+    queue_mutates = bool(
+        int_value(queue_update.get("enqueued_or_refreshed_count"))
+        or int_value(queue_update.get("removed_count"))
+    )
     maintenance_detail = {
         "refresh_chunk_size": refresh_chunk_size,
         "max_refresh_nodes": max_refresh_nodes,
@@ -42337,6 +42423,7 @@ def graph_maintenance_no_source_scan_payload(
         "requested_source_keys": source_keys,
         "use_queue": bool(use_queue),
         "queue_selected_source_count": queue_selected_source_count,
+        "queue_seed_update": queue_update if queue_update.get("seeded_from") else {},
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "matched_source_key_count": matched_source_key_count,
         "matched_source_key_sample": matched_source_key_sample or [],
@@ -42370,10 +42457,10 @@ def graph_maintenance_no_source_scan_payload(
             and not graph_hot_state.get("needs_maintenance")
             and not graph_hot_state.get("needs_full_rebuild")
         ),
-        "mutates": False,
+        "mutates": queue_mutates,
         "apply": apply,
         "use_queue": bool(use_queue),
-        "write_queue": write_queue,
+        "write_queue": bool(write_queue or queue_mutates),
         "write_ledger": write_ledger,
         "target": target,
         "since": since,
@@ -42413,6 +42500,7 @@ def graph_maintenance_no_source_scan_payload(
         "results": [],
         "maintenance_detail": maintenance_detail,
         "ledger_update": {},
+        "queue_seed_update": queue_update if queue_update.get("seeded_from") else {},
         "queue_update": queue_update,
         "sidecar": {},
         "diagnostics": diagnostics,
@@ -42453,6 +42541,9 @@ def graph_maintenance(
     export_sidecar: bool = False,
     write_report: bool = False,
     use_queue: bool = False,
+    seed_queue_from_ledger: bool = False,
+    queue_seed_limit: int | None = None,
+    queue_seed_include_deferred_live: bool = False,
     write_queue: bool = False,
     write_ledger: bool = False,
     reason: str = "operator_requested",
@@ -42473,11 +42564,32 @@ def graph_maintenance(
     hash_mode = normalize_graph_source_hash_mode(hash_mode)
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
     queue_payload: dict[str, Any] | None = None
+    queue_seed_update: dict[str, Any] = {}
     queue_selected_source_keys: list[str] = []
+    if seed_queue_from_ledger and not requested_source_keys and selected_records is None:
+        effective_queue_seed_limit = (
+            max(batch_limit * 10, batch_limit)
+            if queue_seed_limit is None or int_value(queue_seed_limit) <= 0
+            else max(1, int_value(queue_seed_limit))
+        )
+        queue_seed_update = graph_maintenance_queue_seed_from_ledger(
+            aoa_root,
+            limit=effective_queue_seed_limit,
+            reason=f"graph_maintenance:{reason}:seed_queue_from_ledger",
+            include_deferred_live=queue_seed_include_deferred_live,
+        )
     if use_queue and not requested_source_keys and selected_records is None:
         queue_payload = read_graph_maintenance_queue(aoa_root)
         queue_items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
-        queue_selected_source_keys = sorted(str(key) for key in queue_items if key)[: max(batch_limit * 10, batch_limit)]
+        queue_candidates = sorted(
+            [item for item in queue_items.values() if isinstance(item, dict) and item.get("source_key")],
+            key=graph_maintenance_actionable_sort_key,
+        )
+        queue_selected_source_keys = [
+            str(item.get("source_key") or "")
+            for item in queue_candidates[: max(batch_limit * 10, batch_limit)]
+            if item.get("source_key")
+        ]
         if queue_selected_source_keys:
             requested_source_keys = queue_selected_source_keys
             selected_records = graph_queue_source_records(aoa_root, queue_payload, queue_selected_source_keys)
@@ -42513,7 +42625,7 @@ def graph_maintenance(
                 matched_source_key_count=0,
                 matched_source_key_sample=[],
                 queue_selected_source_count=0,
-                queue_update={
+                queue_update=queue_seed_update or {
                     "path": str(graph_paths(aoa_root)["maintenance_queue"]),
                     "queued_count": 0,
                     "enqueued_or_refreshed_count": 0,
@@ -42532,6 +42644,7 @@ def graph_maintenance(
         and not requested_source_keys
         and selected_records is None
         and not use_queue
+        and not seed_queue_from_ledger
         and not plan_refresh_costs
         and not export_sidecar
         and not write_queue
@@ -42694,6 +42807,8 @@ def graph_maintenance(
         ),
         "requested_source_keys": requested_source_keys,
         "use_queue": bool(use_queue),
+        "seed_queue_from_ledger": bool(seed_queue_from_ledger),
+        "queue_seed_update": queue_seed_update,
         "queue_selected_source_count": len(queue_selected_source_keys),
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "candidate_pool_policy": candidate_pool_policy,
@@ -43166,6 +43281,7 @@ def graph_maintenance(
         "results": results,
         "maintenance_detail": maintenance_detail,
         "ledger_update": ledger_update,
+        "queue_seed_update": queue_seed_update,
         "queue_update": queue_update,
         "source_hash_cache": source_hash_stats,
         "source_hash_cache_update": source_hash_cache_update,
@@ -51640,6 +51756,7 @@ def session_memory_live_tail_catchup_route(
     live_tail: dict[str, Any],
 ) -> dict[str, Any]:
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    cli = session_memory_cli_command(aoa_root)
     raw_samples = live_tail.get("samples") if isinstance(live_tail.get("samples"), list) else []
     samples = [item for item in raw_samples if isinstance(item, dict)]
     ready_samples = [item for item in samples if item.get("ready_for_catchup")]
@@ -51649,8 +51766,7 @@ def session_memory_live_tail_catchup_route(
     selected_target = str(selected_sample.get("session_label") or selected_sample.get("session_id") or "") if selected_sample else ""
     if search_deferred_count > 0 and selected_target:
         command = [
-            "python3",
-            "scripts/aoa_session_memory.py",
+            *cli,
             "index-maintenance",
             selected_target,
             *root_args,
@@ -51672,8 +51788,7 @@ def session_memory_live_tail_catchup_route(
         }
     if search_deferred_count > 0:
         command = [
-            "python3",
-            "scripts/aoa_session_memory.py",
+            *cli,
             "index-maintenance",
             "all",
             *root_args,
@@ -51695,8 +51810,7 @@ def session_memory_live_tail_catchup_route(
         }
     if graph_deferred_count > 0:
         command = [
-            "python3",
-            "scripts/aoa_session_memory.py",
+            *cli,
             "graph-maintenance",
             "all",
             *root_args,
@@ -51721,8 +51835,7 @@ def session_memory_live_tail_catchup_route(
             "note": "Run graph queue maintenance after the live quiet window.",
         }
     command = [
-        "python3",
-        "scripts/aoa_session_memory.py",
+        *cli,
         "auto-maintenance",
         "hot",
         "all",
@@ -51752,6 +51865,7 @@ def session_memory_maintenance_next_actions(
     coordinator: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    cli = session_memory_cli_command(aoa_root)
     actions: list[dict[str, Any]] = []
     coordinator = coordinator if isinstance(coordinator, dict) else {}
     cleanup_status = maintenance_cleanup(aoa_root=aoa_root, apply=False, write_report=False)
@@ -51763,8 +51877,7 @@ def session_memory_maintenance_next_actions(
                 "id": "repair_maintenance_cleanup",
                 "reason": ",".join(str(item) for item in cleanup_diagnostics if item) or "stale_generated_runtime_cleanup_needed",
                 "command": [
-                    "python3",
-                    "scripts/aoa_session_memory.py",
+                    *cli,
                     "maintenance-cleanup",
                     *root_args,
                     "--apply",
@@ -51784,7 +51897,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "wait_active_writer" if active_writer else "retry_graph_status",
                 "reason": "graph_store_locked_by_active_writer" if active_writer else "graph_store_sqlite_locked",
-                "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", *root_args, "--no-timers"],
+                "command": [*cli, "maintenance-status", *root_args, "--no-timers"],
                 "note": "A graph SQLite busy lock is a transient writer/read contention state, not schema drift or corruption; wait for the active writer and retry status before planning rebuilds.",
             }
         )
@@ -51815,7 +51928,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_search_storage_policy",
                 "reason": search.get("storage_policy_status") or "search_raw_lexical_policy_not_bounded",
-                "command": ["python3", "scripts/aoa_session_memory.py", "search-index", "all", *root_args, "--write-report"],
+                "command": [*cli, "search-index", "all", *root_args, "--write-report"],
                 "note": "Rebuilds generated search projection with the bounded default raw lexical policy; raw transcript remains the proof authority.",
             }
         )
@@ -51823,12 +51936,12 @@ def session_memory_maintenance_next_actions(
         first = actionable_sessions[0] if actionable_sessions else {}
         target = str(first.get("session_label") or first.get("session_id") or "all") if isinstance(first, dict) else "all"
         command = (
-            ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-graph-repair", "--skip-token-accounting", "--write-report"]
+            [*cli, "index-maintenance", "all", *root_args, "--apply", "--skip-graph-repair", "--skip-token-accounting", "--write-report"]
             if search_contract_state_drift
             else (
-                ["python3", "scripts/aoa_session_memory.py", "search-index", target, *root_args, "--no-rebuild", "--write-report"]
+                [*cli, "search-index", target, *root_args, "--no-rebuild", "--write-report"]
                 if target != "all"
-                else ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"]
+                else [*cli, "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"]
             )
         )
         actions.append({"id": "repair_search_actionable", "reason": "search_actionable_dirty_sessions", "command": command})
@@ -51838,8 +51951,7 @@ def session_memory_maintenance_next_actions(
                 "id": "entity_registry_refresh",
                 "reason": ",".join(str(item) for item in route_entity_registry.get("diagnostics", []) if item) or "entity_registry_needs_refresh",
                 "command": [
-                    "python3",
-                    "scripts/aoa_session_memory.py",
+                    *cli,
                     "entity-registry-search-sync",
                     *root_args,
                     "--write-report",
@@ -51852,7 +51964,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_index_read_models",
                 "reason": "route_or_search_or_atlas_index_maintenance_needed",
-                "command": ["python3", "scripts/aoa_session_memory.py", "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"],
+                "command": [*cli, "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"],
             }
         )
     if graph.get("needs_full_rebuild"):
@@ -51866,8 +51978,7 @@ def session_memory_maintenance_next_actions(
                     "id": "repair_graph_store_incremental_recovery",
                     "reason": "graph_store_empty_generated_projection",
                     "command": [
-                        "python3",
-                        "scripts/aoa_session_memory.py",
+                        *cli,
                         "graph-maintenance",
                         "all",
                         *root_args,
@@ -51889,7 +52000,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_graph_store_rebuild",
                 "reason": "graph_store_schema_or_structural_rebuild_needed",
-                "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--write-report"],
+                "command": [*cli, "graph-build", "all", *root_args, "--write", "--store-only", "--write-report"],
             }
         )
     elif graph.get("needs_maintenance") or int_value(graph.get("actionable_count")) > 0:
@@ -51899,7 +52010,7 @@ def session_memory_maintenance_next_actions(
                 {
                     "id": "repair_graph_store_rebuild",
                     "reason": graph_recommendation.get("reason") or "graph_source_version_drift",
-                    "command": ["python3", "scripts/aoa_session_memory.py", "graph-build", "all", *root_args, "--write", "--store-only", "--progress-every", "10"],
+                    "command": [*cli, "graph-build", "all", *root_args, "--write", "--store-only", "--progress-every", "10"],
                     "note": "A mostly missing generated graph store is cheaper and cleaner as a resource-gated store-only rebuild than as many small queue batches; add --in-place only when storage headroom is low.",
                 }
             )
@@ -51915,9 +52026,19 @@ def session_memory_maintenance_next_actions(
                     else GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
                 )
             graph_candidate_pool_limit = int_value(graph_recommendation.get("candidate_pool_limit"))
+            graph_queued_count = int_value(graph.get("queued_count"))
+            graph_queue_seed_needed = (
+                graph_queued_count <= 0
+                and int_value(graph.get("actionable_count")) > 0
+                and "maintenance_queue_empty_but_ledger_actionable_sources_present" in graph_diagnostics
+            )
+            graph_queue_seed_limit = max(
+                graph_batch_limit * 10,
+                graph_candidate_pool_limit,
+                graph_batch_limit,
+            )
             command = [
-                "python3",
-                "scripts/aoa_session_memory.py",
+                *cli,
                 "graph-maintenance",
                 "all",
                 *root_args,
@@ -51931,18 +52052,33 @@ def session_memory_maintenance_next_actions(
                 "--write-report",
                 "--write-hash-cache",
             ]
+            if graph_queued_count > 0 or graph_queue_seed_needed:
+                command.append("--use-queue")
+            if graph_queue_seed_needed:
+                command.extend(
+                    [
+                        "--seed-queue-from-ledger",
+                        "--queue-seed-limit",
+                        str(graph_queue_seed_limit),
+                    ]
+                )
             if graph_candidate_pool_limit > 0:
                 command.extend(["--candidate-pool-limit", str(graph_candidate_pool_limit)])
             graph_route = str(graph_recommendation.get("route") or "")
             if graph_route == "heavy_tail_graph_maintenance":
-                action_id = "repair_graph_heavy_tail"
+                action_id = "repair_graph_queue_seeded_heavy_tail" if graph_queue_seed_needed else "repair_graph_heavy_tail"
                 action_note = "Run small-candidate graph repair after budgeted maintenance showed a heavy tail or rollback; this preserves progress without retrying an expensive full candidate pool."
             elif graph_route == "budgeted_graph_maintenance":
-                action_id = "repair_graph_budgeted"
+                action_id = "repair_graph_queue_seeded_budgeted" if graph_queue_seed_needed else "repair_graph_budgeted"
                 action_note = "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
             else:
-                action_id = "repair_graph_bounded"
+                action_id = "repair_graph_queue_seeded_bounded" if graph_queue_seed_needed else "repair_graph_bounded"
                 action_note = "Run bounded incremental graph repair for a small generated projection backlog."
+            if graph_queue_seed_needed:
+                action_note = (
+                    "Seed the generated graph maintenance queue from the ledger, then drain it with --use-queue; "
+                    "this keeps the repair bounded without treating the generated queue as evidence authority."
+                )
             actions.append(
                 {
                     "id": action_id,
@@ -51956,7 +52092,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_graph_queue",
                 "reason": "graph_dirty_or_missing_sources",
-                "command": ["python3", "scripts/aoa_session_memory.py", "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report", "--write-hash-cache"],
+                "command": [*cli, "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report", "--write-hash-cache"],
             }
         )
     if not actions and (int_value(search.get("deferred_live_session_count")) > 0 or int_value(graph.get("deferred_live_source_count")) > 0):
@@ -51964,7 +52100,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "wait_live_catchup",
                 "reason": "recent_live_sources_deferred_until_quiet_window",
-                "command": ["python3", "scripts/aoa_session_memory.py", "auto-maintenance", "hot", "all", *root_args, "--apply", "--write-report"],
+                "command": [*cli, "auto-maintenance", "hot", "all", *root_args, "--apply", "--write-report"],
                 "note": "Run after the live quiet window, or let the timer catch up.",
             }
         )
@@ -51976,7 +52112,7 @@ def session_memory_maintenance_next_actions(
         {
             "id": "use_graph_search",
             "reason": "graph_and_search_hot_status_current",
-            "command": ["python3", "scripts/aoa_session_memory.py", "search", "", *root_args, "--limit", "20"],
+            "command": [*cli, "search", "", *root_args, "--limit", "20"],
         }
     ]
 
@@ -51992,6 +52128,7 @@ def session_memory_search_shard_next_action(
         return None
 
     root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    cli = session_memory_cli_command(aoa_root)
     materialized_shard_count = int_value(search_shards.get("materialized_shard_count"))
     if status == "catalog_not_current":
         if not search_catalog_path(aoa_root).exists() or materialized_shard_count <= 0:
@@ -52000,7 +52137,7 @@ def session_memory_search_shard_next_action(
             "id": "refresh_search_catalog",
             "reason": "search_catalog_not_current",
             "route_kind": "search_catalog_refresh",
-            "command": ["python3", "scripts/aoa_session_memory.py", "search-catalog", *root_args, "--refresh"],
+            "command": [*cli, "search-catalog", *root_args, "--refresh"],
             "note": "Refresh the generated search catalog before shard materialization; this does not change raw evidence.",
         }
 
@@ -52032,8 +52169,7 @@ def session_memory_search_shard_next_action(
     if not shard_db_exists and materialized_shard_count <= 0:
         return None
     command = [
-        "python3",
-        "scripts/aoa_session_memory.py",
+        *cli,
         "search-shards",
         "all",
         *root_args,
@@ -52254,12 +52390,13 @@ def session_memory_maintenance_status(
     coordinator = maintenance_lock_snapshot(aoa_root)
     if portable_clean_runtime.get("ok"):
         root_args = ["--workspace-root", str(workspace_root), "--source-aoa-root", str(aoa_root), "--force"]
+        cli = session_memory_cli_command(aoa_root)
         recommendation = "install_or_bootstrap_runtime"
         next_actions = [
             {
                 "id": "install_or_bootstrap_runtime",
                 "reason": "clean_portable_bundle_without_live_runtime_indexes",
-                "command": ["python3", "scripts/aoa_session_memory.py", "install", *root_args],
+                "command": [*cli, "install", *root_args],
                 "note": "Install into a workspace or populate sessions before using graph/search.",
             }
         ]
@@ -52304,6 +52441,9 @@ def session_memory_maintenance_status(
             "repair_graph_bounded",
             "repair_graph_budgeted",
             "repair_graph_heavy_tail",
+            "repair_graph_queue_seeded_bounded",
+            "repair_graph_queue_seeded_budgeted",
+            "repair_graph_queue_seeded_heavy_tail",
             "repair_graph_queue",
             "wait_live_catchup",
         }
@@ -60442,6 +60582,9 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             export_sidecar=args.export_sidecar,
             write_report=args.write_report,
             use_queue=getattr(args, "use_queue", False),
+            seed_queue_from_ledger=getattr(args, "seed_queue_from_ledger", False),
+            queue_seed_limit=getattr(args, "queue_seed_limit", None),
+            queue_seed_include_deferred_live=getattr(args, "queue_seed_include_deferred_live", False),
             write_queue=getattr(args, "write_queue", False),
             write_ledger=getattr(args, "write_ledger", False),
             reason="operator_requested",
@@ -60458,7 +60601,7 @@ def command_graph_maintenance(args: argparse.Namespace) -> int:
             touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
             budget_seconds=getattr(args, "budget_seconds", None),
         )
-        if args.apply or args.export_sidecar or args.write_queue or args.write_ledger or getattr(args, "write_hash_cache", False)
+        if args.apply or args.export_sidecar or args.write_queue or args.write_ledger or getattr(args, "write_hash_cache", False) or getattr(args, "seed_queue_from_ledger", False)
         else run_maintenance()
     )
     stdout_payload = payload if getattr(args, "full", False) else compact_graph_maintenance_stdout_payload(payload)
@@ -60505,6 +60648,7 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
         "time_budget_deferred_source_count",
         "mutation_rolled_back",
         "maintenance_lock_path",
+        "queue_seed_update",
         "queue_update",
         "ledger_update",
         "report_json",
@@ -60545,6 +60689,8 @@ def compact_graph_maintenance_stdout_payload(payload: dict[str, Any]) -> dict[st
                 "source_hash_cache",
                 "truth_status",
                 "use_queue",
+                "seed_queue_from_ledger",
+                "queue_seed_update",
                 "queue_selected_source_count",
                 "matched_source_key_count",
                 "matched_source_key_sample",
@@ -66395,6 +66541,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph_maintenance_parser.add_argument("--apply", action="store_true", help="Apply dirty source replacements. Default only reports state.")
     graph_maintenance_parser.add_argument("--export-sidecar", action="store_true", help="Regenerate nodes.jsonl/edges.jsonl from the graph store after applying.")
     graph_maintenance_parser.add_argument("--use-queue", action="store_true", help="Use graph/maintenance-queue.json as a bounded source-key selector before scanning the full source graph.")
+    graph_maintenance_parser.add_argument("--seed-queue-from-ledger", action="store_true", help="Seed graph/maintenance-queue.json from actionable source-state-ledger entries before queue selection. Generated navigation only.")
+    graph_maintenance_parser.add_argument("--queue-seed-limit", type=int, help="Maximum ledger entries to enqueue when --seed-queue-from-ledger is used.")
+    graph_maintenance_parser.add_argument("--queue-seed-include-deferred-live", action="store_true", help="Allow recent live transcript sources into a ledger queue seed. Default keeps the live quiet-window guard.")
     graph_maintenance_parser.add_argument("--write-queue", action="store_true", help="Refresh graph/maintenance-queue.json from the current source-state window.")
     graph_maintenance_parser.add_argument("--write-ledger", action="store_true", help="Refresh graph/source-state-ledger.json checked/clean/dirty timestamps from the current source-state window.")
     graph_maintenance_parser.add_argument("--write-report", action="store_true", help="Write graph maintenance reports under .aoa/diagnostics.")
