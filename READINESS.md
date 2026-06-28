@@ -1140,6 +1140,12 @@ Last observed result:
   in `239.897s`, moved the generated graph queue `550 -> 530`, and deferred
   `5` sources by refresh budget. The cap prevents oversized rewrite slices but
   does not yet solve the deeper `replace_sources` / aggregate-refresh cost.
+  Follow-up route adaptation: graph status now exposes a bounded
+  `latest_maintenance` summary, chooses the latest global graph-maintenance
+  report instead of letting scoped `selected_sessions` reports hide global
+  evidence, and switches queued graph repair to a `10`-source micro-drip with
+  `10000`/`30000` aggregate caps only after a recent global heavy-tail drip
+  made progress but ran near the interactive budget.
   After targeted search catch-up and dirty-only `month/2026-06` shard refresh,
   `maintenance-status --full` reports search and search shards `current`, no
   recent problem jobs, graph queue `530`, graph actionable `2242`, and the only

@@ -7429,6 +7429,23 @@ def test_graph_source_recommendation_switches_near_budget_progress_to_heavy_tail
     assert "near_budget_success_switches_to_smaller_interactive_queue_drip" in recommendation["notes"]
 
 
+def test_latest_graph_maintenance_report_for_hot_gate_prefers_global_scope() -> None:
+    scoped = {
+        "target": "all",
+        "source_state": {"selection_scope": "selected_sessions"},
+        "generated_at": "2026-06-28T07:48:56Z",
+    }
+    global_report = {
+        "target": "all",
+        "source_state": {"selection_scope": "global"},
+        "generated_at": "2026-06-28T07:38:51Z",
+    }
+
+    report = module.latest_graph_maintenance_report_for_hot_gate([scoped, global_report])
+
+    assert report is global_report
+
+
 def test_maintenance_next_actions_uses_budgeted_graph_batch_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -7498,6 +7515,57 @@ def test_maintenance_next_actions_drips_existing_budgeted_graph_queue(tmp_path: 
     assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT}" in command_text
     assert "--seed-queue-from-ledger" not in command_text
     assert "small candidate pool and aggregate refresh caps" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_micro_drips_after_near_budget_queue_progress(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    graph = {
+        "status": "stale",
+        "needs_maintenance": True,
+        "actionable_count": 2242,
+        "queued_count": 530,
+        "latest_maintenance": {
+            "exists": True,
+            "mtime": time.time(),
+            "scope_is_global": True,
+            "apply": True,
+            "selected_count": 20,
+            "batch_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+            "candidate_pool_limit": module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
+            "max_refresh_nodes": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES,
+            "max_refresh_edges": module.GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES,
+            "elapsed_ms": module.GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+        },
+        "maintenance_recommendation": {
+            "route": "budgeted_graph_maintenance",
+            "reason": "mixed_or_medium_backlog",
+            "command": "graph-maintenance all",
+            "batch_limit": module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT,
+        },
+    }
+
+    recommendation, actions = module.session_memory_maintenance_next_actions(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph=graph,
+        route_status={"needs_index_maintenance": False, "needs_graph_maintenance": True},
+        entity_registry={"status": "current", "needs_maintenance": False},
+        coordinator={},
+    )
+
+    assert recommendation == "run_maintenance"
+    assert actions[0]["id"] == "repair_graph_queue_micro_drip"
+    command_text = module.shlex.join(actions[0]["command"])
+    assert "--use-queue" in command_text
+    assert f"--batch-limit {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT}" in command_text
+    assert f"--max-refresh-nodes {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES}" in command_text
+    assert f"--max-refresh-edges {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES}" in command_text
+    assert f"--candidate-pool-limit {module.GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_CANDIDATE_POOL_LIMIT}" in command_text
+    assert "near the interactive budget" in actions[0]["note"]
 
 
 def test_maintenance_next_actions_preserves_heavy_tail_candidate_pool(tmp_path: Path) -> None:

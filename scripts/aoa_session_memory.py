@@ -266,6 +266,10 @@ GRAPH_MAINTENANCE_GRAPH_DRIP_CANDIDATE_POOL_LIMIT = 75
 GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE = 64
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES = 20000
 GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES = 60000
+GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT = 10
+GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_CANDIDATE_POOL_LIMIT = 25
+GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES = 10000
+GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES = 30000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
 OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
@@ -50206,6 +50210,34 @@ def graph_maintenance_status_from_state(
         aoa_root=str(aoa_root),
         latest_maintenance=latest_maintenance,
     )
+    latest_maintenance_status = {
+        key: latest_maintenance.get(key)
+        for key in [
+            "exists",
+            "path",
+            "mtime",
+            "ok",
+            "apply",
+            "target",
+            "scope_is_global",
+            "selection_scope",
+            "remaining_count",
+            "actionable_remaining_count",
+            "selected_count",
+            "batch_limit",
+            "candidate_pool_limit",
+            "max_refresh_nodes",
+            "max_refresh_edges",
+            "budget_exhausted",
+            "elapsed_ms",
+            "mutation_rolled_back",
+            "usable_for_hot_gate",
+            "queue_queued_count",
+            "budget_deferred_source_count",
+            "time_budget_deferred_source_count",
+        ]
+        if key in latest_maintenance
+    }
     return {
         "status": graph_state.get("status"),
         "needs_maintenance": bool(graph_state.get("needs_maintenance")),
@@ -50224,6 +50256,7 @@ def graph_maintenance_status_from_state(
         "deferred_ledger_store_missing_count": ledger_store_missing_deferred_count,
         "latest_maintenance_remaining_count": latest_remaining_count,
         "latest_maintenance_remaining_total_count": latest_remaining_total_count,
+        "latest_maintenance": latest_maintenance_status,
         "deferred_live_source_count": deferred_live_count,
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
@@ -52102,6 +52135,12 @@ def session_memory_maintenance_next_actions(
             graph_candidate_pool_limit = int_value(graph_recommendation.get("candidate_pool_limit"))
             graph_queued_count = int_value(graph.get("queued_count"))
             graph_route = str(graph_recommendation.get("route") or "")
+            latest_graph_maintenance = graph.get("latest_maintenance") if isinstance(graph.get("latest_maintenance"), dict) else {}
+            latest_graph_maintenance_mtime = ops_float_value(latest_graph_maintenance.get("mtime"))
+            latest_graph_maintenance_recent = (
+                latest_graph_maintenance_mtime > 0
+                and latest_graph_maintenance_mtime >= time.time() - GRAPH_MAINTENANCE_RECENT_NO_PROGRESS_SECONDS
+            )
             graph_queue_seed_needed = (
                 graph_queued_count <= 0
                 and int_value(graph.get("actionable_count")) > 0
@@ -52113,15 +52152,40 @@ def session_memory_maintenance_next_actions(
                 and graph_candidate_pool_limit <= 0
                 and graph_batch_limit > GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
             )
+            graph_queue_micro_drip = (
+                graph_queue_drip
+                and graph_queued_count > 0
+                and latest_graph_maintenance_recent
+                and bool(latest_graph_maintenance.get("scope_is_global"))
+                and bool(latest_graph_maintenance.get("apply"))
+                and int_value(latest_graph_maintenance.get("selected_count")) > 0
+                and not bool(latest_graph_maintenance.get("budget_exhausted"))
+                and not bool(latest_graph_maintenance.get("mutation_rolled_back"))
+                and int_value(latest_graph_maintenance.get("batch_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+                and int_value(latest_graph_maintenance.get("candidate_pool_limit")) <= GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+                and int_value(latest_graph_maintenance.get("elapsed_ms")) >= GRAPH_MAINTENANCE_NEAR_BUDGET_ELAPSED_MS
+            )
             if graph_queue_drip:
-                graph_batch_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
-                graph_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
+                if graph_queue_micro_drip:
+                    graph_batch_limit = GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_BATCH_LIMIT
+                    graph_candidate_pool_limit = GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_CANDIDATE_POOL_LIMIT
+                else:
+                    graph_batch_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT
+                    graph_candidate_pool_limit = GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
             graph_interactive_drip = graph_queue_drip or graph_route == "heavy_tail_graph_maintenance"
             graph_max_refresh_nodes = (
-                GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES if graph_interactive_drip else None
+                GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES
+                if graph_queue_micro_drip
+                else GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_NODES
+                if graph_interactive_drip
+                else None
             )
             graph_max_refresh_edges = (
-                GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES if graph_interactive_drip else None
+                GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES
+                if graph_queue_micro_drip
+                else GRAPH_MAINTENANCE_INTERACTIVE_DRIP_MAX_REFRESH_EDGES
+                if graph_interactive_drip
+                else None
             )
             graph_queue_seed_limit = max(
                 graph_batch_limit * 10,
@@ -52166,6 +52230,8 @@ def session_memory_maintenance_next_actions(
                 action_id = (
                     "repair_graph_queue_seeded_drip"
                     if graph_queue_seed_needed and graph_queue_drip
+                    else "repair_graph_queue_micro_drip"
+                    if graph_queue_micro_drip
                     else "repair_graph_queue_drip"
                     if graph_queue_drip
                     else "repair_graph_queue_seeded_budgeted"
@@ -52173,7 +52239,9 @@ def session_memory_maintenance_next_actions(
                     else "repair_graph_budgeted"
                 )
                 action_note = (
-                    "Drain or seed the generated graph maintenance queue with a small candidate pool and aggregate refresh caps so interactive maintenance spends time applying bounded source updates, not planning or rewriting an oversized queue slice."
+                    "The latest bounded graph queue drip made progress but ran near the interactive budget; use a smaller aggregate-capped micro-drip so follow-up maintenance is predictable while the deeper graph-store refresh cost is investigated."
+                    if graph_queue_micro_drip
+                    else "Drain or seed the generated graph maintenance queue with a small candidate pool and aggregate refresh caps so interactive maintenance spends time applying bounded source updates, not planning or rewriting an oversized queue slice."
                     if graph_queue_drip
                     else "Run bounded incremental graph repair so a large generated projection does not require a single full SQLite rebuild; budgeted manual routes may use a larger source batch than hot timers."
                 )
@@ -53842,6 +53910,13 @@ def graph_maintenance_report_scope_is_global(report: dict[str, Any]) -> bool:
     )
 
 
+def latest_graph_maintenance_report_for_hot_gate(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    for report in reports:
+        if isinstance(report, dict) and graph_maintenance_report_scope_is_global(report):
+            return report
+    return reports[0] if reports and isinstance(reports[0], dict) else {}
+
+
 def graph_maintenance_report_mutation_rolled_back(report: dict[str, Any]) -> bool:
     detail = report.get("maintenance_detail") if isinstance(report.get("maintenance_detail"), dict) else {}
     return bool(detail.get("mutation_rolled_back"))
@@ -53956,7 +54031,8 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
         limit=GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT,
     )
     if latest_graph_reports:
-        latest_report = latest_graph_reports[0]
+        latest_report = latest_graph_maintenance_report_for_hot_gate(latest_graph_reports)
+        latest_queue_update = latest_report.get("queue_update") if isinstance(latest_report.get("queue_update"), dict) else {}
         report_mtime = ops_float_value(latest_report.get("_diagnostic_mtime"))
         store_metadata_updated_at = parse_utc_timestamp(str(metadata.get("updated_at") or ""))
         store_updated_epoch = store_metadata_updated_at.timestamp() if store_metadata_updated_at is not None else path_mtime(paths["store"])
@@ -53982,9 +54058,14 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "selected_count": latest_report.get("selected_count"),
             "batch_limit": latest_report.get("batch_limit"),
             "candidate_pool_limit": latest_report.get("candidate_pool_limit"),
+            "max_refresh_nodes": latest_report.get("max_refresh_nodes"),
+            "max_refresh_edges": latest_report.get("max_refresh_edges"),
             "budget_exhausted": bool(latest_report.get("budget_exhausted")),
             "elapsed_ms": latest_report.get("elapsed_ms"),
             "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_report),
+            "queue_queued_count": latest_queue_update.get("queued_count"),
+            "budget_deferred_source_count": latest_report.get("budget_deferred_source_count"),
+            "time_budget_deferred_source_count": latest_report.get("time_budget_deferred_source_count"),
             "usable_for_hot_gate": usable_for_hot_gate,
         }
     ledger_exists = paths["source_state_ledger"].exists()
