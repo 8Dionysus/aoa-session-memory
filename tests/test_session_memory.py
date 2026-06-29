@@ -17150,7 +17150,7 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert plan["projection_candidate"]["physical_shrink_plan_status"] == "blocked_missing_materialized_rollup"
     assert plan["physical_shrink_plan"]["status"] == "blocked_missing_materialized_rollup"
     assert plan["physical_shrink_plan"]["safe_to_apply"] is False
-    assert plan["physical_shrink_plan"]["apply_status"] == "not_implemented"
+    assert plan["physical_shrink_plan"]["apply_status"] == "blocked"
     assert plan["physical_shrink_plan"]["context_tail_candidate_count"] == 2
     assert plan["physical_shrink_plan"]["route_ref_backed_omission_candidate_count"] == 1
     assert plan["physical_shrink_plan"]["unrouted_keep_candidate_count"] == 1
@@ -17189,7 +17189,9 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert ready_plan["projection_candidate"]["next_design_route"] == "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
     assert ready_plan["physical_shrink_plan"]["status"] == "guarded_plan_ready"
     assert ready_plan["physical_shrink_plan"]["safe_to_apply_physical_compaction"] is False
-    assert ready_plan["physical_shrink_plan"]["apply_status"] == "not_implemented"
+    assert ready_plan["physical_shrink_plan"]["apply_status"] == "operator_rebuild_route_available"
+    assert ready_plan["physical_shrink_plan"]["operator_rebuild_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+    assert "--context-tail-omission-policy" in ready_plan["physical_shrink_plan"]["operator_rebuild_command"]
     assert ready_plan["physical_shrink_plan"]["materialized_rollup_ready"] is True
     assert ready_plan["physical_shrink_plan"]["materialized_rollup_status"] == "current"
     assert ready_plan["physical_shrink_plan"]["materialized_route_rollup_row_count"] == 1
@@ -17200,7 +17202,7 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     ]["required_invariants"]
 
 
-def test_search_operational_shrink_gates_block_apply_until_explicit_route(
+def test_search_operational_shrink_gates_block_apply_until_before_after_comparison(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -17222,7 +17224,19 @@ def test_search_operational_shrink_gates_block_apply_until_explicit_route(
                 "route_ref_backed_omission_candidate_count": 16,
                 "unrouted_keep_candidate_count": 4,
                 "materialized_rollup_status": "current",
-                "next_implementation_route": "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates",
+                "apply_status": "operator_rebuild_route_available",
+                "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
+                "operator_rebuild_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "operator_rebuild_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-shards",
+                    "all",
+                    "--context-tail-omission-policy",
+                    "route-ref-backed",
+                    "--write-report",
+                ],
+                "next_implementation_route": "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates",
             },
         },
     )
@@ -17338,9 +17352,10 @@ def test_search_operational_shrink_gates_block_apply_until_explicit_route(
         "literal_exact_recall",
         "live_scenario_corpus",
         "storage_baseline",
+        "explicit_apply_route",
     }
     assert payload["failed_gate_ids"] == []
-    assert payload["blocked_gate_ids"] == ["storage_before_after_comparison", "explicit_apply_route"]
+    assert payload["blocked_gate_ids"] == ["storage_before_after_comparison"]
     literal_gate = next(gate for gate in payload["gates"] if gate["id"] == "literal_exact_recall")
     assert literal_gate["summary"]["probe_count"] == len(module.SEARCH_OPERATIONAL_SHRINK_LITERAL_PROBES)
     route_gate = next(gate for gate in payload["gates"] if gate["id"] == "route_rollup_refs")
@@ -17349,6 +17364,107 @@ def test_search_operational_shrink_gates_block_apply_until_explicit_route(
     parsed = parser.parse_args(["search-operational-shrink-gates", "--live-scenario-case-limit", "2"])
     assert parsed.func == module.command_search_operational_shrink_gates
     assert parsed.live_scenario_case_limit == 2
+
+
+def test_search_index_sessions_applies_explicit_context_tail_omission_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    db_path = tmp_path / "search" / "aoa-search.sqlite3"
+    session_label = "2026-06-29__001__omission-policy"
+
+    def event_doc(doc_id: str, **overrides: Any) -> dict[str, Any]:
+        route_signal = str(overrides.pop("route_signal", "") or "")
+        return {
+            "id": doc_id,
+            "doc_type": "event",
+            "session_id": "session-omission",
+            "session_label": session_label,
+            "session_title": "Omission policy",
+            "session_date": "2026-06-29",
+            "event_id": doc_id,
+            "event_type": overrides.pop("event_type", "CONTEXT_STATE"),
+            "usage_role": overrides.pop("usage_role", "context"),
+            "agent_event": overrides.pop("agent_event", ""),
+            "task_episode_id": overrides.pop("task_episode_id", ""),
+            "session_act": "tool_context" if route_signal else "",
+            "route_layers": module.packed_route_values(["tool"]) if route_signal else "",
+            "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
+            "title": doc_id,
+            "body": f"body {doc_id}",
+            "raw_ref": f"raw:line:{doc_id}",
+            "segment_ref": "segments/000__initial-to-latest.md",
+            "segment_index_path": "",
+            "payload_json": "{}",
+            **overrides,
+        }
+
+    documents = [
+        event_doc("usage-doc", event_type="TOOL_CALL", usage_role="usage"),
+        event_doc("agent-answer-context", agent_event="assistant_answer"),
+        event_doc("task-context", task_episode_id="task-1"),
+        event_doc("protected-context", event_type="ASSISTANT_MESSAGE"),
+        event_doc("candidate-with-route", route_signal=module.route_signal_token("tool", "exec_command")),
+        event_doc("candidate-without-route"),
+    ]
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_fingerprint",
+        lambda _record, include_rendered_markdown=False: {
+            "session_id": "session-omission",
+            "session_label": session_label,
+            "fingerprint": "fingerprint-1",
+            "latest_source_mtime": 1.0,
+            "source_path_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "search_documents_for_record",
+        lambda *_args, **_kwargs: (
+            list(documents),
+            {
+                "status": "indexed",
+                "session_id": "session-omission",
+                "session_label": session_label,
+                "raw_text_status": "skipped_structured_projection",
+                "diagnostics": [],
+            },
+        ),
+    )
+
+    payload = module.search_index_sessions(
+        aoa_root=aoa_root,
+        selected_records=[{"session_id": "session-omission", "session_label": session_label}],
+        rebuild=True,
+        db_path_override=db_path,
+        refresh_catalog=False,
+        include_entity_registry=False,
+        include_raw_event_text=False,
+        store_raw_text=False,
+        context_tail_omission_policy=module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+    )
+
+    assert payload["ok"] is True
+    assert payload["document_count"] == 5
+    assert payload["event_document_count"] == 5
+    assert payload["context_tail_omission"]["omitted_document_count"] == 1
+    assert payload["context_tail_omission"]["counts"]["candidate_context_tail_count"] == 2
+    assert payload["context_tail_omission"]["counts"]["route_ref_backed_omission_candidate_count"] == 1
+    assert payload["context_tail_omission"]["counts"]["unrouted_keep_candidate_count"] == 1
+
+    conn = module.connect_existing_search_db(db_path)
+    try:
+        ids = {str(row[0]) for row in conn.execute("SELECT id FROM documents").fetchall()}
+        metadata = module.search_index_metadata(conn)
+    finally:
+        conn.close()
+    assert "candidate-with-route" not in ids
+    assert "candidate-without-route" in ids
+    assert metadata["search_context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
 
 
 def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:

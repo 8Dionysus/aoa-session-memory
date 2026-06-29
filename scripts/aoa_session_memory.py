@@ -125,6 +125,12 @@ SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_slim_preview_v3"
 SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v2"
 SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
+SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL = "keep_all_context_tail_v1"
+SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED = "route_ref_backed_context_tail_v1"
+SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES = {
+    "keep-all": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+    "route-ref-backed": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+}
 SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT = 1_000_000
 SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT = 500_000
 SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
@@ -28969,6 +28975,7 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- shard_storage_mode: `{payload.get('shard_storage_mode')}`",
         f"- search_fts_storage_mode: `{payload.get('search_fts_storage_mode')}`",
         f"- raw_text_query_support: `{payload.get('raw_text_query_support')}`",
+        f"- context_tail_omission_policy: `{payload.get('context_tail_omission_policy')}`",
         f"- search_document_storage_profile: `{payload.get('search_document_storage_profile')}`",
         f"- search_index_profile: `{payload.get('search_index_profile')}`",
         f"- search_ref_path_storage_policy: `{payload.get('search_ref_path_storage_policy')}`",
@@ -28995,11 +29002,27 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- slow_session_warning_count: `{payload.get('slow_session_warning_count')}`",
         f"- slow_session_threshold_ms: `{payload.get('slow_session_threshold_ms')}`",
         "",
-        "## Materialized Shards",
-        "",
-        "| shard | sessions | documents | ok | db |",
-        "| --- | ---: | ---: | --- | --- |",
     ]
+    omission = payload.get("context_tail_omission") if isinstance(payload.get("context_tail_omission"), dict) else {}
+    if omission:
+        lines.extend(
+            [
+                "## Context Tail Omission",
+                "",
+                f"- policy: `{omission.get('policy')}`",
+                f"- omitted_document_count: `{omission.get('omitted_document_count')}`",
+                f"- counts: `{omission.get('counts')}`",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Materialized Shards",
+            "",
+            "| shard | sessions | documents | ok | db |",
+            "| --- | ---: | ---: | --- | --- |",
+        ]
+    )
     for shard in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
         if isinstance(shard, dict):
             lines.append(
@@ -29076,6 +29099,7 @@ def materialize_search_shards(
     dirty_only: bool = False,
     include_deferred_live: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
+    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -29089,6 +29113,31 @@ def materialize_search_shards(
         "skipped_current_count": 0,
         "deferred_live_skipped_count": 0,
     }
+    effective_context_tail_omission_policy = normalize_search_context_tail_omission_policy(context_tail_omission_policy)
+    if not structured_only and effective_context_tail_omission_policy != SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "context_tail_omission_requires_structured_shard",
+            "target": target,
+            "requested_shard": shard or "",
+            "selected_count": 0,
+            "processed_count": 0,
+            "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "structured_only": structured_only,
+            "rebuild_shards": rebuild_shards,
+            "dirty_only": dirty_only,
+            "include_deferred_live": include_deferred_live,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "shard_count": 0,
+            "document_count": 0,
+            "shards": [],
+            "diagnostics": ["context_tail_omission_policy_is_structured_shard_only"],
+            "exact_next_command": "remove --full-text or use --context-tail-omission-policy keep-all",
+        }
     if dirty_only and rebuild_shards:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -29109,6 +29158,7 @@ def materialize_search_shards(
             "rebuild_shards": rebuild_shards,
             "dirty_only": True,
             "include_deferred_live": include_deferred_live,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -29152,6 +29202,7 @@ def materialize_search_shards(
                 "shard_storage_mode": shard_storage_mode,
                 "search_fts_storage_mode": shard_fts_storage_mode,
                 "raw_text_query_support": raw_text_query_support,
+                "context_tail_omission_policy": effective_context_tail_omission_policy,
                 "shard_count": 0,
                 "document_count": 0,
                 "shards": [],
@@ -29218,6 +29269,7 @@ def materialize_search_shards(
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -29231,6 +29283,8 @@ def materialize_search_shards(
     document_count = 0
     budget_exhausted = False
     document_type_counts: Counter[str] = Counter()
+    context_tail_omission_counts: Counter[str] = Counter()
+    context_tail_omission_session_samples: list[dict[str, Any]] = []
     shard_materialization_started = time.monotonic()
     for shard_key in sorted(groups):
         if deadline is not None and processed_count > 0 and time.monotonic() >= deadline:
@@ -29280,6 +29334,7 @@ def materialize_search_shards(
             include_raw_event_text=not structured_only,
             store_raw_text=not structured_only,
             projection_storage_mode=shard_storage_mode,
+            context_tail_omission_policy=effective_context_tail_omission_policy,
             budget_seconds=remaining_budget,
             progress_every=progress_every,
         )
@@ -29308,6 +29363,12 @@ def materialize_search_shards(
         diagnostics.extend(f"{shard_key}:{item}" for item in shard_diagnostics)
         processed_count += int_value(result.get("processed_count"))
         document_count += int_value(result.get("document_count"))
+        result_omission = result.get("context_tail_omission") if isinstance(result.get("context_tail_omission"), dict) else {}
+        result_omission_counts = result_omission.get("counts") if isinstance(result_omission.get("counts"), dict) else {}
+        context_tail_omission_counts.update({str(key): int_value(value) for key, value in result_omission_counts.items()})
+        for sample in result_omission.get("session_samples", []) if isinstance(result_omission.get("session_samples"), list) else []:
+            if isinstance(sample, dict):
+                context_tail_omission_session_samples.append({"shard": shard_key, **sample})
         shard_document_counts = {
             "session": int_value(result.get("session_document_count")),
             "segment": int_value(result.get("segment_document_count")),
@@ -29346,6 +29407,9 @@ def materialize_search_shards(
                 "shard_storage_mode": result.get("search_body_storage_mode") or shard_storage_mode,
                 "search_fts_storage_mode": result.get("search_fts_storage_mode") or shard_fts_storage_mode,
                 "raw_text_query_support": result.get("raw_text_query_support") or raw_text_query_support,
+                "context_tail_omission_policy": result.get("context_tail_omission_policy")
+                or effective_context_tail_omission_policy,
+                "context_tail_omission": result_omission,
                 "search_document_storage_profile": result.get("search_document_storage_profile") or storage_profile.get("name"),
                 "search_index_profile": result.get("search_index_profile") or SEARCH_INDEX_PROFILE,
                 "search_ref_path_storage_policy": result.get("search_ref_path_storage_policy") or storage_profile.get("ref_path_storage_policy"),
@@ -29424,6 +29488,16 @@ def materialize_search_shards(
         "shard_storage_mode": shard_storage_mode,
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
+        "context_tail_omission_policy": effective_context_tail_omission_policy,
+        "context_tail_omission": {
+            "policy": effective_context_tail_omission_policy,
+            "counts": dict(sorted(context_tail_omission_counts.items())),
+            "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+            "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
+            "protected_boundary": "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept",
+            "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
+            "truth_status": "generated_search_projection_policy_not_archive_truth",
+        },
         "search_document_storage_profile": storage_profile.get("name"),
         "search_index_profile": SEARCH_INDEX_PROFILE,
         "search_ref_path_storage_policy": storage_profile.get("ref_path_storage_policy"),
@@ -31877,6 +31951,107 @@ def document_route_entries(route_layers: Any, route_signals: Any, *, doc_type: s
     return entries
 
 
+def normalize_search_context_tail_omission_policy(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+    return SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES.get(text, text)
+
+
+def search_context_tail_omission_policy_cli_value(policy: str) -> str:
+    normalized = normalize_search_context_tail_omission_policy(policy)
+    for cli_value, internal_value in SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES.items():
+        if internal_value == normalized:
+            return cli_value
+    return "keep-all"
+
+
+def search_document_is_context_tail_candidate(doc: dict[str, Any]) -> bool:
+    return (
+        str(doc.get("doc_type") or "") == "event"
+        and str(doc.get("usage_role") or "") == SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE
+        and not str(doc.get("agent_event") or "").strip()
+        and not str(doc.get("task_episode_id") or "").strip()
+        and str(doc.get("event_type") or "") not in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES
+    )
+
+
+def search_document_has_route_ref_backing(doc: dict[str, Any]) -> bool:
+    return any(
+        item.get("key")
+        for item in document_route_entries(
+            doc.get("route_layers"),
+            doc.get("route_signals"),
+            doc_type=str(doc.get("doc_type") or ""),
+        )
+    )
+
+
+def apply_search_context_tail_omission_policy(
+    documents: list[dict[str, Any]],
+    *,
+    policy: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    normalized_policy = normalize_search_context_tail_omission_policy(policy)
+    counts: Counter[str] = Counter()
+    kept: list[dict[str, Any]] = []
+    omitted_examples: list[dict[str, Any]] = []
+    for doc in documents:
+        counts["input_document_count"] += 1
+        if not search_document_is_context_tail_candidate(doc):
+            counts["non_candidate_keep_count"] += 1
+            kept.append(doc)
+            continue
+        counts["candidate_context_tail_count"] += 1
+        if not search_document_has_route_ref_backing(doc):
+            counts["unrouted_keep_candidate_count"] += 1
+            kept.append(doc)
+            continue
+        counts["route_ref_backed_omission_candidate_count"] += 1
+        if normalized_policy != SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED:
+            counts["route_ref_backed_keep_candidate_count"] += 1
+            kept.append(doc)
+            continue
+        counts["omitted_document_count"] += 1
+        if len(omitted_examples) < 5:
+            omitted_examples.append(
+                {
+                    "id": str(doc.get("id") or ""),
+                    "event_id": str(doc.get("event_id") or ""),
+                    "session_label": str(doc.get("session_label") or ""),
+                    "event_type": str(doc.get("event_type") or ""),
+                    "raw_ref": str(doc.get("raw_ref") or ""),
+                    "segment_ref": str(doc.get("segment_ref") or ""),
+                    "route_signals": unpacked_route_values(doc.get("route_signals"))[:8],
+                }
+            )
+    counts["output_document_count"] = len(kept)
+    return kept, {
+        "schema_version": 1,
+        "policy": normalized_policy,
+        "policy_cli_value": search_context_tail_omission_policy_cli_value(normalized_policy),
+        "applied": normalized_policy == SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+        "counts": dict(sorted(counts.items())),
+        "input_document_count": int_value(counts.get("input_document_count")),
+        "output_document_count": int_value(counts.get("output_document_count")),
+        "candidate_context_tail_count": int_value(counts.get("candidate_context_tail_count")),
+        "route_ref_backed_omission_candidate_count": int_value(
+            counts.get("route_ref_backed_omission_candidate_count")
+        ),
+        "unrouted_keep_candidate_count": int_value(counts.get("unrouted_keep_candidate_count")),
+        "omitted_document_count": int_value(counts.get("omitted_document_count")),
+        "omitted_examples": omitted_examples,
+        "protected_boundary": (
+            "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept"
+        ),
+        "authority_boundary": (
+            "this omits only generated structured-shard rows; raw transcripts, segment indexes, and monolith "
+            "raw-text fallback remain authority"
+        ),
+        "truth_status": "generated_search_projection_policy_not_archive_truth",
+    }
+
+
 def bounded_packed_route_values(value: Any, *, max_chars: int) -> str:
     text = str(value or "")
     if len(text) <= max_chars:
@@ -33043,6 +33218,7 @@ def search_index_sessions(
     include_raw_event_text: bool = True,
     store_raw_text: bool = True,
     projection_storage_mode: str | None = None,
+    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -33061,6 +33237,10 @@ def search_index_sessions(
         SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL if store_raw_text else SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
     )
     storage_profile = search_document_storage_profile(store_raw_text=store_raw_text)
+    requested_context_tail_omission_policy = normalize_search_context_tail_omission_policy(context_tail_omission_policy)
+    effective_context_tail_omission_policy = (
+        SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL if store_raw_text else requested_context_tail_omission_policy
+    )
     write_db_path = db_path
     temp_db_path: Path | None = None
     if rebuild:
@@ -33090,6 +33270,8 @@ def search_index_sessions(
             "search_body_storage_mode": effective_body_storage_mode,
             "search_fts_storage_mode": effective_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
             "db_path": str(db_path),
             "diagnostics": [str(exc)],
             "sessions": [],
@@ -33110,6 +33292,8 @@ def search_index_sessions(
             "search_body_storage_mode": effective_body_storage_mode,
             "search_fts_storage_mode": effective_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
             "db_path": str(db_path),
             "diagnostics": ["no sessions selected"],
             "sessions": [],
@@ -33133,6 +33317,8 @@ def search_index_sessions(
     inserted_entity_registry_document_count = 0
     updated_entity_registry_document_count = 0
     unchanged_entity_registry_document_count = 0
+    context_tail_omission_counts: Counter[str] = Counter()
+    context_tail_omission_session_samples: list[dict[str, Any]] = []
     budget_exhausted = False
     active_session: dict[str, Any] | None = None
     active_session_started = 0.0
@@ -33256,6 +33442,10 @@ def search_index_sessions(
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_context_tail_omission_policy", effective_context_tail_omission_policy),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_aggregate_route_posting_doc_types", ",".join(sorted(SEARCH_AGGREGATE_ROUTE_POSTING_DOC_TYPES))),
         )
         conn.execute(
@@ -33320,6 +33510,26 @@ def search_index_sessions(
                 max_raw_bytes=effective_max_raw_bytes,
                 include_raw_event_text=include_raw_event_text,
             )
+            documents, omission_summary = apply_search_context_tail_omission_policy(
+                documents,
+                policy=effective_context_tail_omission_policy if not store_raw_text else SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+            )
+            omission_counts = omission_summary.get("counts") if isinstance(omission_summary.get("counts"), dict) else {}
+            context_tail_omission_counts.update({str(key): int_value(value) for key, value in omission_counts.items()})
+            if int_value(omission_summary.get("omitted_document_count")) > 0:
+                context_tail_omission_session_samples.append(
+                    {
+                        "session_id": str(result.get("session_id") or record.get("session_id") or ""),
+                        "session_label": str(result.get("session_label") or record.get("session_label") or ""),
+                        "omitted_document_count": omission_summary.get("omitted_document_count"),
+                        "candidate_context_tail_count": omission_summary.get("candidate_context_tail_count"),
+                        "route_ref_backed_omission_candidate_count": omission_summary.get(
+                            "route_ref_backed_omission_candidate_count"
+                        ),
+                        "unrouted_keep_candidate_count": omission_summary.get("unrouted_keep_candidate_count"),
+                        "omitted_examples": omission_summary.get("omitted_examples", []),
+                    }
+                )
             if active_session is not None:
                 active_session.update(
                     {
@@ -33327,7 +33537,10 @@ def search_index_sessions(
                         "session_label": str(result.get("session_label") or active_session.get("session_label") or ""),
                         "status": result.get("status"),
                         "raw_text_status": result.get("raw_text_status"),
-                        "candidate_document_count": len(documents),
+                        "candidate_document_count": int_value(omission_summary.get("input_document_count"), len(documents)),
+                        "context_tail_omission_policy": effective_context_tail_omission_policy,
+                        "context_tail_omitted_document_count": omission_summary.get("omitted_document_count"),
+                        "indexed_document_count_after_omission": len(documents),
                     }
                 )
             session_results.append(result)
@@ -33491,6 +33704,15 @@ def search_index_sessions(
                 "raw_text_query_support": raw_text_query_support,
                 "store_raw_text": store_raw_text,
                 "include_raw_event_text": include_raw_event_text,
+                "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
+                "context_tail_omission_policy": effective_context_tail_omission_policy,
+                "context_tail_omission": {
+                    "policy": effective_context_tail_omission_policy,
+                    "counts": dict(sorted(context_tail_omission_counts.items())),
+                    "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+                    "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
+                    "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
+                },
                 "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
                 "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
                 "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
@@ -33539,6 +33761,15 @@ def search_index_sessions(
             "raw_text_query_support": raw_text_query_support,
             "store_raw_text": store_raw_text,
             "include_raw_event_text": include_raw_event_text,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
+            "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission": {
+                "policy": effective_context_tail_omission_policy,
+                "counts": dict(sorted(context_tail_omission_counts.items())),
+                "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+                "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
+                "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
+            },
             "raw_text_status_counts": dict(sorted(raw_text_status_counts.items())),
             "raw_text_skipped_session_count": raw_text_status_counts.get("skipped_raw_too_large", 0),
             "search_route_posting_policy_mode": SEARCH_ROUTE_POSTING_POLICY_MODE,
@@ -33578,6 +33809,17 @@ def search_index_sessions(
         "raw_text_query_support": raw_text_query_support,
         "store_raw_text": store_raw_text,
         "include_raw_event_text": include_raw_event_text,
+        "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
+        "context_tail_omission_policy": effective_context_tail_omission_policy,
+        "context_tail_omission": {
+            "policy": effective_context_tail_omission_policy,
+            "counts": dict(sorted(context_tail_omission_counts.items())),
+            "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+            "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
+            "protected_boundary": "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept",
+            "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
+            "truth_status": "generated_search_projection_policy_not_archive_truth",
+        },
         "search_payload_storage_mode": SEARCH_PAYLOAD_STORAGE_MODE if rebuild else f"{SEARCH_PAYLOAD_STORAGE_MODE}_mixed",
         "search_document_storage_profile": storage_profile.get("name"),
         "search_index_profile": SEARCH_INDEX_PROFILE,
@@ -55392,6 +55634,8 @@ def search_operational_event_projection_probe_shard(
 
 def search_operational_context_tail_physical_shrink_plan(
     *,
+    workspace_root: Path | str,
+    aoa_root: Path,
     candidate_count: int,
     candidate_with_routes: int,
     candidate_without_routes: int,
@@ -55413,8 +55657,21 @@ def search_operational_context_tail_physical_shrink_plan(
         blocked_reason = "materialized operational route-rollup is missing, stale, or source-mismatched"
     else:
         status = "guarded_plan_ready"
-        blocked_reason = "apply route and regression gates are not implemented yet"
+        blocked_reason = "operator rebuild route exists; run it only after shrink gates and capture before/after storage"
     route_ref_coverage_ratio = round(candidate_with_routes / candidate_count, 6) if candidate_count > 0 else 0.0
+    operator_rebuild_command = [
+        *session_memory_cli_command(aoa_root),
+        "search-shards",
+        "all",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--context-tail-omission-policy",
+        "route-ref-backed",
+        "--write-report",
+    ]
+    apply_status = "operator_rebuild_route_available" if status == "guarded_plan_ready" else "blocked"
     return {
         "schema_version": 1,
         "id": "guarded_context_tail_physical_shrink_v1",
@@ -55422,8 +55679,12 @@ def search_operational_context_tail_physical_shrink_plan(
         "mutates": False,
         "safe_to_apply": False,
         "safe_to_apply_physical_compaction": False,
-        "apply_status": "not_implemented",
+        "apply_status": apply_status,
         "blocked_reason": blocked_reason,
+        "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
+        "operator_rebuild_command": operator_rebuild_command if status == "guarded_plan_ready" else [],
+        "operator_rebuild_policy": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+        "operator_rebuild_policy_cli_value": "route-ref-backed",
         "candidate_selector": (
             "doc_type=event AND usage_role=context AND agent_event='' AND task_episode_id='' "
             "AND event_type NOT IN protected_context_event_types"
@@ -55465,7 +55726,9 @@ def search_operational_context_tail_physical_shrink_plan(
             "bundle_parity_validation",
         ],
         "next_implementation_route": (
-            "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
+            "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates"
+            if status == "guarded_plan_ready"
+            else "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
         ),
         "rollback_route": "rebuild structured search shards from raw/session indexes; do not repair by deleting raw evidence",
         "mutation_boundary": "read-only plan packet; no search/raw/graph/session mutation is performed here",
@@ -55737,14 +56000,23 @@ def session_memory_search_operational_shrink_gates(
             "after_search_store_size_human": "",
         },
     )
+    explicit_operator_route_ready = (
+        str(physical.get("apply_status") or "") == "operator_rebuild_route_available"
+        and bool(physical.get("operator_rebuild_command"))
+    )
     apply_route_gate = search_operational_shrink_gate_packet(
         gate_id="explicit_apply_route",
-        status="blocked",
-        passed=False,
+        status=search_operational_shrink_gate_status(passed=explicit_operator_route_ready, blocked=not explicit_operator_route_ready),
+        passed=explicit_operator_route_ready,
         summary={
-            "reason": "context-tail physical omission policy and rebuild/apply route are not implemented",
+            "reason": "explicit structured-shard omission rebuild route is available"
+            if explicit_operator_route_ready
+            else "context-tail physical omission policy and rebuild/apply route are not implemented",
             "next_implementation_route": physical.get("next_implementation_route")
             or "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates",
+            "operator_rebuild_route_kind": physical.get("operator_rebuild_route_kind"),
+            "operator_rebuild_policy": physical.get("operator_rebuild_policy"),
+            "operator_rebuild_command": physical.get("operator_rebuild_command", []),
         },
     )
 
@@ -56051,6 +56323,8 @@ def session_memory_search_operational_event_projection_plan(
     else:
         status = "no_context_tail_seen"
     physical_shrink_plan = search_operational_context_tail_physical_shrink_plan(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
         candidate_count=candidate_count,
         candidate_with_routes=candidate_with_routes,
         candidate_without_routes=int_value(totals.get("candidate_context_tail_without_route_signals_count")),
@@ -56258,6 +56532,10 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     lines.append(f"- safe_to_apply: `{physical.get('safe_to_apply')}`")
     lines.append(f"- apply_status: `{physical.get('apply_status')}`")
     lines.append(f"- blocked_reason: `{physical.get('blocked_reason')}`")
+    lines.append(f"- operator_rebuild_route_kind: `{physical.get('operator_rebuild_route_kind')}`")
+    lines.append(f"- operator_rebuild_policy: `{physical.get('operator_rebuild_policy')}`")
+    if physical.get("operator_rebuild_command"):
+        lines.append(f"- operator_rebuild_command: `{shlex.join([str(part) for part in physical.get('operator_rebuild_command', [])])}`")
     lines.append(f"- context_tail_candidate_count: `{physical.get('context_tail_candidate_count')}`")
     lines.append(
         f"- route_ref_backed_omission_candidate_count: `{physical.get('route_ref_backed_omission_candidate_count')}`"
@@ -67561,6 +67839,7 @@ def command_search_shards(args: argparse.Namespace) -> int:
             rebuild_shards=not args.no_rebuild,
             dirty_only=bool(getattr(args, "dirty_only", False)),
             include_deferred_live=bool(getattr(args, "include_deferred_live", False)),
+            context_tail_omission_policy=getattr(args, "context_tail_omission_policy", SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL),
         )
 
     payload = run_with_maintenance_lock(
@@ -73749,6 +74028,12 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument("--max-raw-mb", type=float, help="Skip raw-text extraction for sessions whose raw JSONL is larger than this many MiB.")
     search_shards.add_argument("--unbounded-raw-text", action="store_true", help="Disable the default bounded raw lexical budget for an explicit full-text shard rebuild.")
     search_shards.add_argument("--full-text", action="store_true", help="Store FTS and compressed bodies in shard DBs; default shards are structured route projections and use the monolith for raw-text queries.")
+    search_shards.add_argument(
+        "--context-tail-omission-policy",
+        choices=sorted(SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES),
+        default="keep-all",
+        help="Explicit generated structured-shard omission policy. route-ref-backed omits only route-ref-backed context-tail rows and keeps raw/segment plus monolith fallback authority.",
+    )
     search_shards.add_argument("--no-rebuild", action="store_true", help="Incrementally update selected sessions in existing shard DBs instead of rebuilding each shard.")
     search_shards.add_argument("--dirty-only", action="store_true", help="With --no-rebuild, update only catalog-stale sessions in the selected shard(s).")
     search_shards.add_argument("--include-deferred-live", action="store_true", help="Allow --dirty-only to process catalog rows still marked deferred_live; default leaves them to live-tail catch-up.")

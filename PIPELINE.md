@@ -399,6 +399,32 @@ rows and can see which heavy session or indexing phase consumed the budget.
 Dirty-only selection is cheap-first by catalog `document_count`, so small stale
 rows can be repaired before a known heavy-tail session without hiding the heavy
 session from the remaining packet.
+
+Context-tail omission is an explicit generated-search projection route, not a
+cleanup shortcut. After `search-operational-shrink-gates` passes projection,
+route-rollup, literal, live-corpus, and storage gates, an operator may rebuild
+structured shards with:
+
+```bash
+python3 scripts/aoa_session_memory.py search-shards all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --context-tail-omission-policy route-ref-backed \
+  --write-report
+```
+
+This policy omits only generated structured-shard event rows that are
+route-ref-backed context tail: `doc_type=event`, `usage_role=context`, no
+`agent_event`, no `task_episode_id`, not a protected context event type, and
+with route refs available through the operational route-rollup path. It keeps
+agent-event rows, task-episode rows, protected event-type context, and unrouted
+context-tail rows. It is invalid with `--full-text`; literal/raw recall remains
+behind the monolith fallback or explicitly materialized scoped full-text shards.
+The report records `context_tail_omission_policy`,
+`context_tail_omission.omitted_document_count`, examples, and authority
+boundaries. Capture before/after storage and recall gates after any live
+rebuild; do not treat the policy flag itself as proof of safe shrinkage.
+
 Scoped shard maintenance refreshes `search/catalog.json` from the selected
 records plus existing catalog fallback, rather than forcing a full live
 session-index scan after every dirty-only tick.

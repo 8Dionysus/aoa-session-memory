@@ -134,6 +134,24 @@ catchup all` must wrap the targeted live-tail `index-maintenance <session>
 --skip-graph-repair --skip-token-accounting` command when it is ready, instead
 of broadening one deferred live session into full catch-up.
 
+When `search-operational-shrink-gates` reports `explicit_apply_route=pass` but
+still blocks on `storage_before_after_comparison`, the explicit generated
+structured-shard route is:
+
+```bash
+python3 scripts/aoa_session_memory.py search-shards all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --context-tail-omission-policy route-ref-backed \
+  --write-report
+```
+
+Use it only as an operator rebuild route after the shrink gates. It omits only
+route-ref-backed context-tail event rows from structured shards; it keeps
+agent-event, task-episode, protected context, and unrouted context-tail rows.
+It is not valid with `--full-text`, does not touch raw/segment evidence, and
+does not remove the monolith raw-text fallback.
+
 When only the generated entity inventory is stale, refresh it without touching
 session documents:
 

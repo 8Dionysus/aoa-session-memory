@@ -1961,6 +1961,19 @@ Maintenance gates:
   next weight-reduction step is an explicit generated-search omission policy
   with before/after storage and recall gates, not physical SQLite compaction or
   raw fallback removal.
+  Follow-up code slice added that explicit structured-shard policy:
+  `search-shards --context-tail-omission-policy route-ref-backed` omits only
+  route-ref-backed generated context-tail event rows from structured shards,
+  keeps agent-event, task-episode, protected context, and unrouted context-tail
+  rows, refuses `--full-text`, and records `context_tail_omission` counts in
+  shard reports and search DB metadata. Live gate
+  `diagnostics/20260629T202328Z__search-operational-shrink-gates.json`
+  returned `ok=true`, `status=blocked_before_apply`, `apply_ready=false`,
+  passed `explicit_apply_route`, and now blocks only
+  `storage_before_after_comparison`. The next live step is an operator rebuild
+  through the explicit policy followed by before/after storage and recall
+  comparison; raw/segment evidence and monolith raw-text fallback remain
+  authority.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over
