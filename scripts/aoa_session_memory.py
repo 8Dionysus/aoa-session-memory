@@ -306,6 +306,10 @@ GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_NODES = 10000
 GRAPH_MAINTENANCE_INTERACTIVE_MICRO_DRIP_MAX_REFRESH_EDGES = 30000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_NODES = 50000
 GRAPH_MAINTENANCE_AUTO_MAX_REFRESH_EDGES = 150000
+GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT = 50
+GRAPH_MAINTENANCE_LIVE_CATCHUP_QUEUE_SEED_LIMIT = 250
+GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES = 80000
+GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES = 240000
 OPS_SEARCH_DB_WARNING_BYTES = 12 * 1024 * 1024 * 1024
 OPS_SEARCH_DB_CRITICAL_BYTES = 20 * 1024 * 1024 * 1024
 OPS_SEARCH_DB_NEAR_WARNING_RATIO = 0.80
@@ -54974,11 +54978,19 @@ def session_memory_live_tail_catchup_route(
             "all",
             *root_args,
             "--use-queue",
+            "--seed-queue-from-ledger",
+            "--queue-seed-include-deferred-live",
+            "--queue-seed-limit",
+            str(GRAPH_MAINTENANCE_LIVE_CATCHUP_QUEUE_SEED_LIMIT),
             "--apply",
             "--batch-limit",
-            str(GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT),
+            str(GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT),
             "--budget-seconds",
             "300",
+            "--max-refresh-nodes",
+            str(GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES),
+            "--max-refresh-edges",
+            str(GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES),
             "--write-report",
             "--write-hash-cache",
             "--write-queue",
@@ -54991,7 +55003,7 @@ def session_memory_live_tail_catchup_route(
             "target": "all",
             "ready_to_run": live_tail.get("status") == "ready_for_catchup",
             "graph_followup": "none; this route is the graph follow-up",
-            "note": "Run graph queue maintenance after the live quiet window.",
+            "note": "Seed the graph queue from the ledger including deferred live sources, then run a bounded graph catch-up batch after the live quiet window.",
         }
     command = [
         *cli,
@@ -55516,7 +55528,10 @@ def session_memory_agent_route_status(
         raw_or_deep_route = "Clean portable bundles have no live archive proof layer until installed or populated."
     elif recommendation == "run_live_catchup":
         action = "run_live_catchup_for_recent_live"
-        raw_or_deep_route = "Live quiet window is satisfied; run targeted search/atlas catch-up before claims about recent live transcripts; graph repair remains an explicit follow-up."
+        if int_value(graph.get("deferred_live_source_count")) > 0 and int_value(search.get("deferred_live_session_count")) <= 0:
+            raw_or_deep_route = "Live quiet window is satisfied; run the ledger-seeded graph queue catch-up for deferred live sources before claims about recent live graph topology."
+        else:
+            raw_or_deep_route = "Live quiet window is satisfied; run targeted search/atlas catch-up before claims about recent live transcripts; graph repair remains an explicit follow-up."
     elif recommendation == "wait_live_catchup":
         action = "use_graph_search_for_stable_archive_wait_for_recent_live"
         raw_or_deep_route = "For claims about very recent live transcripts, wait for catch-up or run a deep check."

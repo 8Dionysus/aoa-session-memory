@@ -14473,9 +14473,15 @@ def test_maintenance_status_routes_ready_graph_live_queue_before_source_scan(tmp
     assert payload["graph"]["latest_maintenance_remaining_count"] == 0
     assert payload["graph"]["deferred_live_source_count"] == 499
     assert " --use-queue " in f" {payload['exact_next_command']} "
-    assert f" --batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT} " in f" {payload['exact_next_command']} "
+    assert " --seed-queue-from-ledger " in f" {payload['exact_next_command']} "
+    assert " --queue-seed-include-deferred-live " in f" {payload['exact_next_command']} "
+    assert f" --queue-seed-limit {module.GRAPH_MAINTENANCE_LIVE_CATCHUP_QUEUE_SEED_LIMIT} " in f" {payload['exact_next_command']} "
+    assert f" --batch-limit {module.GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT} " in f" {payload['exact_next_command']} "
+    assert f" --max-refresh-nodes {module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES} " in f" {payload['exact_next_command']} "
+    assert f" --max-refresh-edges {module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES} " in f" {payload['exact_next_command']} "
     assert " --write-queue " in f" {payload['exact_next_command']} "
     assert " --write-ledger " in f" {payload['exact_next_command']} "
+    assert payload["agent_route"]["raw_or_deep_route"].startswith("Live quiet window is satisfied; run the ledger-seeded graph queue catch-up")
 
 
 def test_maintenance_status_surfaces_search_shard_tail_as_agent_action(tmp_path: Path, monkeypatch: Any) -> None:
