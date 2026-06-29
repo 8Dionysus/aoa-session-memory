@@ -975,6 +975,11 @@ Last observed result:
   registry docs in `3.332s`; the repeated current no-op completed in `219ms`
   with `document_count_source=session_index_state_plus_entity_registry` and
   `count_search_documents.elapsed_ms=0`.
+  A later stale source-shard mismatch showed that `auto` could still fall back
+  to `archived_route_terms` and spend `185.744s`; the route now uses a
+  stale-but-readable materialized rollup as navigation evidence with explicit
+  `observed_stale` refs and `observed_route_status`, leaving route-terms as the
+  explicit heavy/deep lane.
 - 2026-06-27 compact entity-usage scenario ref proof: after source-discovered
   MCP tools were registered, the live route audit exposed that compact
   `entity-usage-scenario-audit` samples had raw previews and document refs but

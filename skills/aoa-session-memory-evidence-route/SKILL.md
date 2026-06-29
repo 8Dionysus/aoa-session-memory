@@ -30,8 +30,9 @@ Use these first routes when available:
   source entity with zero session hits means “known but not yet observed in
   session usage”, not “missing”. Registry maintenance uses
   `entity-registry-search-sync --observed-source auto` by default: it prefers
-  the current operational route-rollup for observed archived entities and keeps
-  full route-term aggregation behind the explicit
+  the materialized operational route-rollup for observed archived entities,
+  including stale-but-readable rollups as navigation evidence with explicit
+  freshness flags, and keeps full route-term aggregation behind the explicit
   `--observed-source route-terms` heavy/deep lane. Treat registry packets as
   source/navigation identity; use usage routes for behavior evidence.
 - skill, MCP, hook, tool, API, script, validator, test, eval, graph, memory

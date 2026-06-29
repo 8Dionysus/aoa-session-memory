@@ -4333,19 +4333,37 @@ def entity_registry_entries_from_route_terms(
 
 def entity_registry_observed_rollup_ready(aoa_root: Path) -> dict[str, Any]:
     status = session_memory_operational_route_rollup_status(aoa_root=aoa_root, search_shards={})
+    status_value = str(status.get("status") or "")
+    route_rollup_row_count = int_value(status.get("route_rollup_row_count"))
+    diagnostics = status.get("diagnostics", [])
+    hard_diagnostics = {
+        "operational_route_rollup_schema_tables_missing",
+        "operational_route_rollup_schema_version_mismatch",
+        "operational_route_rollup_artifact_type_mismatch",
+    }
+    has_hard_diagnostic = any(
+        str(item) in hard_diagnostics or str(item).startswith("operational_route_rollup_unreadable:")
+        for item in diagnostics
+    ) if isinstance(diagnostics, list) else False
     ready = (
-        str(status.get("status") or "") == "current"
+        status_value == "current"
         and not bool(status.get("needs_refresh"))
         and int_value(status.get("source_mismatch_count")) == 0
-        and int_value(status.get("route_rollup_row_count")) > 0
+        and route_rollup_row_count > 0
+    )
+    usable = (
+        route_rollup_row_count > 0
+        and status_value not in {"missing", "empty", "invalid"}
+        and not has_hard_diagnostic
     )
     return {
         "ready": ready,
+        "usable": usable,
         "status": status.get("status"),
         "needs_refresh": bool(status.get("needs_refresh")),
-        "route_rollup_row_count": int_value(status.get("route_rollup_row_count")),
+        "route_rollup_row_count": route_rollup_row_count,
         "source_mismatch_count": int_value(status.get("source_mismatch_count")),
-        "diagnostics": status.get("diagnostics", []),
+        "diagnostics": diagnostics if isinstance(diagnostics, list) else [],
         "path": status.get("path"),
         "truth_status": status.get("truth_status"),
     }
@@ -4369,11 +4387,14 @@ def entity_registry_entries_from_operational_route_rollup(
     aoa_root: Path,
     *,
     limit_per_layer: int = 400,
+    observed_route_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     db_path = search_operational_route_rollup_db_path(aoa_root)
     if not db_path.exists():
         return []
     entries: list[dict[str, Any]] = []
+    route_status = observed_route_status if isinstance(observed_route_status, dict) else {}
+    source_ref_status = "observed" if bool(route_status.get("ready")) or not route_status else "observed_stale"
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
@@ -4427,7 +4448,9 @@ def entity_registry_entries_from_operational_route_rollup(
                             {
                                 "source_type": "operational_route_rollup",
                                 "path": str(db_path),
-                                "status": "observed",
+                                "status": source_ref_status,
+                                "rollup_status": route_status.get("status"),
+                                "rollup_needs_refresh": route_status.get("needs_refresh"),
                                 "first_session_date": row["first_session_date"],
                                 "latest_session_date": row["latest_session_date"],
                                 "raw_refs_sample": raw_refs,
@@ -4443,6 +4466,14 @@ def entity_registry_entries_from_operational_route_rollup(
                         session_count=int_value(row["session_count"]),
                     )
                 )
+                if source_ref_status != "observed":
+                    freshness = entries[-1].get("freshness") if isinstance(entries[-1].get("freshness"), dict) else {}
+                    diagnostics = freshness.get("diagnostics") if isinstance(freshness.get("diagnostics"), list) else []
+                    diagnostics.append(f"operational_route_rollup_used_with_status:{route_status.get('status') or 'unknown'}")
+                    freshness["diagnostics"] = diagnostics
+                    freshness["observed_route_source_status"] = route_status.get("status")
+                    freshness["observed_route_source_needs_refresh"] = route_status.get("needs_refresh")
+                    entries[-1]["freshness"] = freshness
     except sqlite3.Error:
         return entries
     finally:
@@ -4753,14 +4784,23 @@ def build_entity_registry(
     observed_entries: list[dict[str, Any]] = []
     if observed_source in {"auto", "route-rollup"}:
         observed_route_status = entity_registry_observed_rollup_ready(aoa_root)
-        if observed_route_status.get("ready"):
-            observed_entries = entity_registry_entries_from_operational_route_rollup(aoa_root)
+        use_rollup = bool(observed_route_status.get("ready")) or bool(observed_route_status.get("usable"))
+        if use_rollup:
+            observed_entries = entity_registry_entries_from_operational_route_rollup(
+                aoa_root,
+                observed_route_status=observed_route_status,
+            )
             if observed_entries:
                 observed_route_source = "operational_route_rollup"
                 source_surfaces.append("operational_route_rollup")
-        elif observed_source == "route-rollup":
+                if not bool(observed_route_status.get("ready")):
+                    diagnostics.append(f"operational_route_rollup_used_with_status:{observed_route_status.get('status') or 'unknown'}")
+        if not observed_entries and observed_source == "route-rollup":
             diagnostics.append(f"operational_route_rollup_not_ready:{observed_route_status.get('status') or 'unknown'}")
-    if not observed_entries and observed_source in {"auto", "route-terms"}:
+    if not observed_entries and (
+        observed_source == "route-terms"
+        or (observed_source == "auto" and not bool(observed_route_status.get("usable")))
+    ):
         observed_entries = entity_registry_entries_from_route_terms(aoa_root, db_path=route_terms_db_path)
         if observed_entries:
             observed_route_source = "archived_route_terms"
@@ -74000,7 +74040,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_registry_parser.add_argument("--write", action="store_true", help="Write maps/entity-registry.json and .md. Generated navigation only.")
     entity_registry_parser.add_argument("--no-runtime", action="store_true", help="Do not inspect live Codex skill/MCP runtime surfaces; use only the selected observed archived source.")
     entity_registry_parser.add_argument("--no-unknown", action="store_true", help="For --lookup, return zero matches instead of an unknown/unregistered packet.")
-    entity_registry_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source for --write. auto prefers current operational route-rollup and keeps full route_terms as explicit heavy fallback.")
+    entity_registry_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source for --write. auto prefers usable materialized operational route-rollup and keeps full route_terms as explicit heavy fallback.")
     entity_registry_parser.set_defaults(func=command_entity_registry)
 
     entity_registry_search_sync_parser = sub.add_parser(
@@ -74011,7 +74051,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_registry_search_sync_parser.add_argument("--workspace-root")
     entity_registry_search_sync_parser.add_argument("--aoa-root")
     entity_registry_search_sync_parser.add_argument("--budget-seconds", type=float, help="Record a soft wall-clock budget; the registry/search sync is atomic and is not interrupted mid-transaction.")
-    entity_registry_search_sync_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source. auto prefers current operational route-rollup; route-terms is the explicit heavy/deep route.")
+    entity_registry_search_sync_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source. auto prefers usable materialized operational route-rollup; route-terms is the explicit heavy/deep route.")
     entity_registry_search_sync_parser.add_argument("--write-report", action="store_true")
     entity_registry_search_sync_parser.set_defaults(func=command_entity_registry_search_sync)
 
