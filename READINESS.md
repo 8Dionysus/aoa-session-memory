@@ -74,7 +74,12 @@ Build the `.aoa` session-memory mechanism end to end:
   tools can be registered before they appear in archived usage; MCP access is
   read-only; direct `entity-registry-search-sync` refreshes the generated
   registry snapshot and SQLite registry docs without selecting an arbitrary
-  session for `search-index --no-rebuild`
+  session for `search-index --no-rebuild`; registry refresh now defaults to
+  `--observed-source auto`, preferring current operational route-rollup for
+  observed archived entities, retaining previous observed anchors up to prior
+  per-kind cardinality, and keeping full route-term aggregation behind the
+  explicit `--observed-source route-terms` heavy/deep lane; sync reports expose
+  `observed_route_source`, `document_count_source`, and `phase_timings`
 - Entity usage-chain consumer route: `usage-chain` is the compact first packet
   for operational entity usage/consequence questions; it returns direct usage,
   result/consequence chains, evidence refs, freshness, noise flags, and next
@@ -940,6 +945,16 @@ Last observed result:
   `aoa_session_entity_usage_chain --kind mcp_tool` returned an active
   `mcp_tool` with source surface `abyss_stack_mcp_tool_source`, proving new MCP
   tools can be registered from source before they appear in archived usage.
+- 2026-06-29 entity-registry observed-source proof: after diagnostics showed
+  direct `entity-registry-search-sync` taking `122.955s` to `223.008s` while
+  updating one registry doc, the observed archived entity lane was moved to
+  current operational route-rollup by default. Live dry run built the same
+  `4220` entities with `observed_route_source=operational_route_rollup` in
+  about `280ms` versus about `10.038s` for explicit `route-terms` on a warm
+  cache. The first live search sync after the route change reconciled `4049`
+  registry docs in `3.332s`; the repeated current no-op completed in `219ms`
+  with `document_count_source=session_index_state_plus_entity_registry` and
+  `count_search_documents.elapsed_ms=0`.
 - 2026-06-27 compact entity-usage scenario ref proof: after source-discovered
   MCP tools were registered, the live route audit exposed that compact
   `entity-usage-scenario-audit` samples had raw previews and document refs but

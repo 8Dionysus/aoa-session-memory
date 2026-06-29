@@ -4331,6 +4331,194 @@ def entity_registry_entries_from_route_terms(
     return entries
 
 
+def entity_registry_observed_rollup_ready(aoa_root: Path) -> dict[str, Any]:
+    status = session_memory_operational_route_rollup_status(aoa_root=aoa_root, search_shards={})
+    ready = (
+        str(status.get("status") or "") == "current"
+        and not bool(status.get("needs_refresh"))
+        and int_value(status.get("source_mismatch_count")) == 0
+        and int_value(status.get("route_rollup_row_count")) > 0
+    )
+    return {
+        "ready": ready,
+        "status": status.get("status"),
+        "needs_refresh": bool(status.get("needs_refresh")),
+        "route_rollup_row_count": int_value(status.get("route_rollup_row_count")),
+        "source_mismatch_count": int_value(status.get("source_mismatch_count")),
+        "diagnostics": status.get("diagnostics", []),
+        "path": status.get("path"),
+        "truth_status": status.get("truth_status"),
+    }
+
+
+def entity_registry_json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item)]
+
+
+def entity_registry_entries_from_operational_route_rollup(
+    aoa_root: Path,
+    *,
+    limit_per_layer: int = 400,
+) -> list[dict[str, Any]]:
+    db_path = search_operational_route_rollup_db_path(aoa_root)
+    if not db_path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        for layer in sorted(ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER):
+            rows = conn.execute(
+                """
+                SELECT layer, key, route_signal,
+                       COALESCE(SUM(posting_count), 0) AS signal_count,
+                       COALESCE(SUM(session_count), 0) AS session_count,
+                       MIN(first_session_date) AS first_session_date,
+                       MAX(last_session_date) AS latest_session_date,
+                       GROUP_CONCAT(raw_refs_json, '\n') AS raw_ref_groups,
+                       GROUP_CONCAT(segment_refs_json, '\n') AS segment_ref_groups,
+                       GROUP_CONCAT(session_ids_json, '\n') AS session_id_groups
+                FROM route_rollups
+                WHERE layer = ?
+                GROUP BY layer, key, route_signal
+                ORDER BY signal_count DESC, session_count DESC, key ASC
+                LIMIT ?
+                """,
+                (layer, limit_per_layer),
+            ).fetchall()
+            for row in rows:
+                key = str(row["key"] or "")
+                if not key:
+                    continue
+                raw_refs: list[str] = []
+                segment_refs: list[str] = []
+                session_ids: list[str] = []
+                for group, target in (
+                    (row["raw_ref_groups"], raw_refs),
+                    (row["segment_ref_groups"], segment_refs),
+                    (row["session_id_groups"], session_ids),
+                ):
+                    for line in str(group or "").splitlines():
+                        for item in entity_registry_json_list(line):
+                            if item not in target:
+                                target.append(item)
+                            if len(target) >= 3:
+                                break
+                        if len(target) >= 3:
+                            break
+                kind = "mcp_tool" if layer == "tool" and entity_registry_tool_key_is_mcp_tool(key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
+                entries.append(
+                    entity_registry_make_entry(
+                        kind=kind,
+                        key=key,
+                        aliases=[str(row["route_signal"] or "")],
+                        source_refs=[
+                            {
+                                "source_type": "operational_route_rollup",
+                                "path": str(db_path),
+                                "status": "observed",
+                                "first_session_date": row["first_session_date"],
+                                "latest_session_date": row["latest_session_date"],
+                                "raw_refs_sample": raw_refs,
+                                "segment_refs_sample": segment_refs,
+                                "session_ids_sample": session_ids,
+                                "rollup_grain": "route_term_plus_ref_samples",
+                            }
+                        ],
+                        source_surface="operational_route_rollup",
+                        owner="aoa-session-memory",
+                        status="observed",
+                        signal_count=int_value(row["signal_count"]),
+                        session_count=int_value(row["session_count"]),
+                    )
+                )
+    except sqlite3.Error:
+        return entries
+    finally:
+        if conn is not None:
+            conn.close()
+    return entries
+
+
+def entity_registry_retained_observed_entries_from_previous_snapshot(
+    aoa_root: Path,
+    *,
+    current_entity_ids: set[str],
+    target_counts_by_kind: dict[str, Any] | None = None,
+    current_counts_by_kind: Counter[str] | None = None,
+) -> list[dict[str, Any]]:
+    path = aoa_root / ENTITY_REGISTRY_PATH
+    if not path.exists():
+        return []
+    previous = read_json(path, {})
+    if not isinstance(previous, dict) or previous.get("artifact_type") != "entity_registry_snapshot":
+        return []
+    entries: list[dict[str, Any]] = []
+    observed_source_types = {"search_route_terms", "operational_route_rollup"}
+    observed_source_surfaces = {"archived_route_terms", "operational_route_rollup"}
+    target_counts = target_counts_by_kind if isinstance(target_counts_by_kind, dict) else {}
+    current_counts = current_counts_by_kind if current_counts_by_kind is not None else Counter()
+    for previous_entry in previous.get("entries", []) if isinstance(previous.get("entries"), list) else []:
+        if not isinstance(previous_entry, dict):
+            continue
+        entity_id = str(previous_entry.get("entity_id") or "")
+        if not entity_id or entity_id in current_entity_ids:
+            continue
+        kind = str(previous_entry.get("kind") or "entity")
+        target_count = int_value(target_counts.get(kind))
+        if target_count > 0 and current_counts.get(kind, 0) >= target_count:
+            continue
+        refs = previous_entry.get("source_refs") if isinstance(previous_entry.get("source_refs"), list) else []
+        has_observed_ref = any(
+            isinstance(ref, dict) and str(ref.get("source_type") or "") in observed_source_types
+            for ref in refs
+        )
+        if not has_observed_ref and str(previous_entry.get("source_surface") or "") not in observed_source_surfaces:
+            continue
+        freshness = previous_entry.get("freshness") if isinstance(previous_entry.get("freshness"), dict) else {}
+        retained_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            retained = dict(ref)
+            retained.setdefault("status", "observed")
+            retained["registry_refresh_status"] = "retained_from_previous_snapshot"
+            retained_refs.append(retained)
+        retained_entry = entity_registry_make_entry(
+            kind=kind,
+            key=str(previous_entry.get("canonical_key") or ""),
+            aliases=previous_entry.get("aliases") if isinstance(previous_entry.get("aliases"), list) else [],
+            source_refs=retained_refs,
+            source_surface=str(previous_entry.get("source_surface") or "previous_entity_registry_snapshot"),
+            owner=str(previous_entry.get("owner") or "aoa-session-memory"),
+            status=str(previous_entry.get("status") or "observed"),
+            signal_count=int_value(freshness.get("signal_count")),
+            session_count=int_value(freshness.get("session_count")),
+        )
+        retained_entry["retained_from_snapshot"] = {
+            "path": str(path),
+            "generated_at": previous.get("generated_at"),
+            "reason": "fast_observed_route_uses_operational_rollup",
+        }
+        retained_freshness = retained_entry.get("freshness") if isinstance(retained_entry.get("freshness"), dict) else {}
+        retained_freshness["diagnostics"] = ["observed_entity_retained_from_previous_snapshot"]
+        retained_entry["freshness"] = retained_freshness
+        entries.append(retained_entry)
+        current_counts[kind] += 1
+    return entries
+
+
 def entity_registry_lookup_entries_from_route_terms(
     aoa_root: Path,
     *,
@@ -4528,6 +4716,7 @@ def build_entity_registry(
     write: bool = False,
     include_runtime: bool = True,
     route_terms_db_path: Path | None = None,
+    observed_source: str = "auto",
     query: str = "",
     kind: str = "all",
     limit: int = 5000,
@@ -4535,6 +4724,11 @@ def build_entity_registry(
     entries_by_id: dict[str, dict[str, Any]] = {}
     source_surfaces: list[str] = []
     current_active_entity_ids: set[str] = set()
+    diagnostics: list[str] = []
+    observed_source = route_key_slug(observed_source, fallback="auto").replace("_", "-")
+    if observed_source not in {"auto", "route-rollup", "route-terms", "none"}:
+        diagnostics.append(f"unknown_observed_source:{observed_source}")
+        observed_source = "auto"
     if include_runtime:
         runtime_entries = [
             *entity_registry_discover_skills(aoa_root),
@@ -4554,9 +4748,42 @@ def build_entity_registry(
         ):
             entity_registry_merge_entry(entries_by_id, entry)
         source_surfaces.extend(["runtime_skills", "runtime_mcp_config", "runtime_mcp_service_dirs", "runtime_mcp_tool_sources", "previous_entity_registry_snapshot"])
-    for entry in entity_registry_entries_from_route_terms(aoa_root, db_path=route_terms_db_path):
+    observed_route_source = "none"
+    observed_route_status: dict[str, Any] = {}
+    observed_entries: list[dict[str, Any]] = []
+    if observed_source in {"auto", "route-rollup"}:
+        observed_route_status = entity_registry_observed_rollup_ready(aoa_root)
+        if observed_route_status.get("ready"):
+            observed_entries = entity_registry_entries_from_operational_route_rollup(aoa_root)
+            if observed_entries:
+                observed_route_source = "operational_route_rollup"
+                source_surfaces.append("operational_route_rollup")
+        elif observed_source == "route-rollup":
+            diagnostics.append(f"operational_route_rollup_not_ready:{observed_route_status.get('status') or 'unknown'}")
+    if not observed_entries and observed_source in {"auto", "route-terms"}:
+        observed_entries = entity_registry_entries_from_route_terms(aoa_root, db_path=route_terms_db_path)
+        if observed_entries:
+            observed_route_source = "archived_route_terms"
+            source_surfaces.append("archived_route_terms")
+    for entry in observed_entries:
         entity_registry_merge_entry(entries_by_id, entry)
-    source_surfaces.append("archived_route_terms")
+    if observed_route_source == "operational_route_rollup":
+        current_ids = {str(entity_id) for entity_id in entries_by_id if str(entity_id)}
+        previous_snapshot = read_json(aoa_root / ENTITY_REGISTRY_PATH, {})
+        previous_counts_by_kind = (
+            previous_snapshot.get("counts_by_kind")
+            if isinstance(previous_snapshot, dict) and isinstance(previous_snapshot.get("counts_by_kind"), dict)
+            else {}
+        )
+        current_counts_by_kind = Counter(str(entry.get("kind") or "unknown") for entry in entries_by_id.values())
+        for entry in entity_registry_retained_observed_entries_from_previous_snapshot(
+            aoa_root,
+            current_entity_ids=current_ids,
+            target_counts_by_kind=previous_counts_by_kind,
+            current_counts_by_kind=current_counts_by_kind,
+        ):
+            entity_registry_merge_entry(entries_by_id, entry)
+        source_surfaces.append("previous_entity_registry_snapshot")
     all_entries = sorted(
         entries_by_id.values(),
         key=lambda item: (str(item.get("kind") or ""), entity_registry_status_rank(str(item.get("status") or "")), str(item.get("canonical_key") or "")),
@@ -4586,6 +4813,9 @@ def build_entity_registry(
         "truth_status": "generated_entity_registry_navigation_not_source_truth",
         "registry_path": str(aoa_root / ENTITY_REGISTRY_PATH),
         "source_surfaces": sorted(set(source_surfaces)),
+        "observed_source": observed_source,
+        "observed_route_source": observed_route_source,
+        "observed_route_status": observed_route_status,
         "source_truth_surfaces": [
             "Codex runtime skill list",
             "CODEX_HOME/skills/*/SKILL.md",
@@ -4595,6 +4825,7 @@ def build_entity_registry(
             "abyss-stack/mcp/services/*",
             "abyss-stack/mcp/services/*/src/**/server.py @mcp.tool functions",
             "portable search route_terms archived evidence",
+            "operational route-rollup navigation evidence when current",
             "previous entity registry snapshot for stale/removed navigation state",
         ],
         "entity_count": len(all_entries),
@@ -4603,7 +4834,7 @@ def build_entity_registry(
         "query": "",
         "kind": "all",
         "entries": all_entries,
-        "diagnostics": [],
+        "diagnostics": diagnostics,
         "next_route": "Use trace-route/search/graph/entity-usage-audit for observed use; open source_refs for source truth.",
     }
     payload = {
@@ -4617,6 +4848,9 @@ def build_entity_registry(
         "truth_status": "generated_entity_registry_navigation_not_source_truth",
         "registry_path": str(aoa_root / ENTITY_REGISTRY_PATH),
         "source_surfaces": snapshot_payload["source_surfaces"],
+        "observed_source": observed_source,
+        "observed_route_source": observed_route_source,
+        "observed_route_status": observed_route_status,
         "source_truth_surfaces": snapshot_payload["source_truth_surfaces"],
         "total_entity_count": len(all_entries),
         "entity_count": len(entries),
@@ -4627,7 +4861,7 @@ def build_entity_registry(
         "query": query,
         "kind": selected_kind,
         "entries": entries,
-        "diagnostics": [],
+        "diagnostics": diagnostics,
         "next_route": "Use trace-route/search/graph/entity-usage-audit for observed use; open source_refs for source truth.",
     }
     if write:
@@ -30835,11 +31069,26 @@ def refresh_search_entity_registry_documents(
     *,
     aoa_root: Path,
     route_terms_db_path: Path,
+    observed_source: str = "auto",
 ) -> dict[str, Any]:
+    phase_timings: list[dict[str, Any]] = []
+
+    def record_phase(phase: str, phase_started: float, **extra: Any) -> None:
+        phase_timings.append({"phase": phase, "elapsed_ms": int((time.monotonic() - phase_started) * 1000), **extra})
+
+    build_started = time.monotonic()
     registry_documents = search_documents_for_entity_registry(
         aoa_root,
         write_snapshot=True,
         route_terms_db_path=route_terms_db_path,
+        observed_source=observed_source,
+    )
+    registry_snapshot = read_json(aoa_root / ENTITY_REGISTRY_PATH, {})
+    record_phase(
+        "build_entity_registry_documents",
+        build_started,
+        document_count=len(registry_documents),
+        observed_route_source=registry_snapshot.get("observed_route_source") if isinstance(registry_snapshot, dict) else None,
     )
     registry_documents_by_id = {
         str(doc.get("id") or ""): doc
@@ -30847,7 +31096,9 @@ def refresh_search_entity_registry_documents(
         if str(doc.get("id") or "").strip()
     }
     conn.execute("BEGIN")
+    existing_started = time.monotonic()
     existing_documents = search_document_existing_signatures(conn, doc_type="entity_registry")
+    record_phase("load_existing_entity_registry_signatures", existing_started, existing_count=len(existing_documents))
     stale_rowids = [
         int_value(item.get("rowid"))
         for doc_id, item in existing_documents.items()
@@ -30871,19 +31122,24 @@ def refresh_search_entity_registry_documents(
         changed_rowids.append(int_value(existing.get("rowid")))
         docs_to_insert.append(doc)
         updated_count += 1
+    delete_started = time.monotonic()
     removed_count = delete_search_documents_by_rowids(conn, [*stale_rowids, *changed_rowids])
+    record_phase("delete_stale_or_changed_entity_registry_documents", delete_started, removed_count=removed_count)
     stale_removed_count = len([rowid for rowid in stale_rowids if rowid > 0])
     changed_removed_count = max(0, removed_count - stale_removed_count)
+    insert_started = time.monotonic()
     for doc in docs_to_insert:
         insert_search_document(conn, doc)
-    registry_snapshot = read_json(aoa_root / ENTITY_REGISTRY_PATH, {})
+    record_phase("insert_changed_entity_registry_documents", insert_started, insert_count=len(docs_to_insert))
     snapshot_signature = entity_registry_snapshot_signature(registry_snapshot if isinstance(registry_snapshot, dict) else {})
     record_entity_registry_search_sync_meta(
         conn,
         snapshot_signature=snapshot_signature,
         document_count=len(registry_documents_by_id),
     )
+    commit_started = time.monotonic()
     conn.commit()
+    record_phase("commit_entity_registry_search_sync", commit_started)
     return {
         "inserted_count": inserted_count,
         "updated_count": updated_count,
@@ -30894,7 +31150,20 @@ def refresh_search_entity_registry_documents(
         "target_count": len(registry_documents_by_id),
         "skipped": False,
         "snapshot_signature": snapshot_signature,
+        "observed_source": observed_source,
+        "observed_route_source": registry_snapshot.get("observed_route_source") if isinstance(registry_snapshot, dict) else None,
+        "phase_timings": phase_timings,
     }
+
+
+def search_document_count_from_session_state(conn: sqlite3.Connection, *, entity_registry_document_count: int) -> tuple[int, str]:
+    if sqlite_table_exists(conn, "session_index_state"):
+        row = conn.execute("SELECT COALESCE(SUM(document_count), 0) FROM session_index_state").fetchone()
+        session_document_count = int_value(row[0] if row else 0)
+        if session_document_count > 0:
+            return session_document_count + max(0, int_value(entity_registry_document_count)), "session_index_state_plus_entity_registry"
+    row = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
+    return int_value(row[0] if row else 0), "documents_count_scan"
 
 
 def refresh_entity_registry_search_documents_only(
@@ -30902,6 +31171,7 @@ def refresh_entity_registry_search_documents_only(
     aoa_root: Path,
     write_report: bool = False,
     budget_seconds: float | None = None,
+    observed_source: str = "auto",
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -30909,25 +31179,46 @@ def refresh_entity_registry_search_documents_only(
     conn: sqlite3.Connection | None = None
     diagnostics: list[str] = []
     registry_state: dict[str, Any] = {}
+    phase_timings: list[dict[str, Any]] = []
+
+    def record_phase(phase: str, phase_started: float, **extra: Any) -> None:
+        phase_timings.append({"phase": phase, "elapsed_ms": int((time.monotonic() - phase_started) * 1000), **extra})
+
     try:
+        init_started = time.monotonic()
         conn = init_search_db(db_path, rebuild=False, create_indexes=True)
+        record_phase("init_search_db", init_started)
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("generated_at", now))
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("aoa_root", str(aoa_root)))
         conn.commit()
+        status_started = time.monotonic()
         registry_state = entity_registry_maintenance_status(aoa_root)
+        record_phase("entity_registry_maintenance_status", status_started, status=registry_state.get("status"))
+        noop_started = time.monotonic()
         registry_refresh = entity_registry_search_sync_current_noop(
             conn,
             aoa_root=aoa_root,
             registry_state=registry_state,
         )
+        record_phase("entity_registry_search_sync_current_noop", noop_started, skipped=registry_refresh is not None)
         if registry_refresh is None:
+            refresh_started = time.monotonic()
             registry_refresh = refresh_search_entity_registry_documents(
                 conn,
                 aoa_root=aoa_root,
                 route_terms_db_path=db_path,
+                observed_source=observed_source,
             )
+            record_phase(
+                "refresh_search_entity_registry_documents",
+                refresh_started,
+                observed_route_source=registry_refresh.get("observed_route_source"),
+                touched_count=registry_refresh.get("touched_count"),
+            )
+            phase_timings.extend(registry_refresh.get("phase_timings", []) if isinstance(registry_refresh.get("phase_timings"), list) else [])
             registry_state = entity_registry_maintenance_status(aoa_root)
+        count_started = time.monotonic()
         entity_registry_document_count = int_value(
             conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0]
         )
@@ -30936,7 +31227,17 @@ def refresh_entity_registry_search_documents_only(
         updated_entity_registry_document_count = int_value(registry_refresh.get("updated_count"))
         unchanged_entity_registry_document_count = int_value(registry_refresh.get("unchanged_count"))
         removed_entity_registry_document_count = int_value(registry_refresh.get("removed_count"))
-        document_count = int_value(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        document_count, document_count_source = search_document_count_from_session_state(
+            conn,
+            entity_registry_document_count=entity_registry_document_count,
+        )
+        record_phase(
+            "count_search_documents",
+            count_started,
+            document_count=document_count,
+            document_count_source=document_count_source,
+            entity_registry_document_count=entity_registry_document_count,
+        )
     except sqlite3.Error as exc:
         diagnostics.append(f"sqlite_error:{exc}")
         document_count = 0
@@ -30976,6 +31277,7 @@ def refresh_entity_registry_search_documents_only(
         "selected_count": 0,
         "processed_count": 0,
         "document_count": document_count,
+        "document_count_source": document_count_source if "document_count_source" in locals() else "unavailable",
         "entity_registry_document_count": entity_registry_document_count,
         "target_entity_registry_document_count": target_entity_registry_document_count,
         "inserted_entity_registry_document_count": inserted_entity_registry_document_count,
@@ -30987,10 +31289,13 @@ def refresh_entity_registry_search_documents_only(
         "entity_count": registry_state.get("entity_count"),
         "entity_registry": registry_state,
         "db_path": str(db_path),
+        "observed_source": observed_source,
+        "observed_route_source": registry_refresh.get("observed_route_source") if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else None,
         "budget_seconds": budget_seconds,
         "budget_exhausted": bool(budget_value is not None and elapsed_ms > int(budget_value * 1000)),
         "budget_policy": "soft_observed_atomic_sync_not_interrupted",
         "elapsed_ms": elapsed_ms,
+        "phase_timings": phase_timings,
         "diagnostics": diagnostics,
     }
     if write_report:
@@ -31889,12 +32194,14 @@ def search_documents_for_entity_registry(
     *,
     write_snapshot: bool = False,
     route_terms_db_path: Path | None = None,
+    observed_source: str = "auto",
 ) -> list[dict[str, Any]]:
     registry = build_entity_registry(
         aoa_root=aoa_root,
         write=write_snapshot,
         include_runtime=True,
         route_terms_db_path=route_terms_db_path,
+        observed_source=observed_source,
     )
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     registry_sha = sha256_file(registry_path) if registry_path.exists() else ""
@@ -67231,6 +67538,7 @@ def command_entity_registry(args: argparse.Namespace) -> int:
             aoa_root=root,
             write=args.write,
             include_runtime=not args.no_runtime,
+            observed_source=args.observed_source,
             query=args.query or "",
             kind=args.kind,
             limit=args.limit,
@@ -67248,6 +67556,7 @@ def command_entity_registry_search_sync(args: argparse.Namespace) -> int:
             aoa_root=root,
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
+            observed_source=args.observed_source,
         )
 
     payload = run_with_maintenance_lock(
@@ -73412,8 +73721,9 @@ def build_parser() -> argparse.ArgumentParser:
     entity_registry_parser.add_argument("--lookup", help="Return an agent route packet for one anchor.")
     entity_registry_parser.add_argument("--limit", type=int, default=5000)
     entity_registry_parser.add_argument("--write", action="store_true", help="Write maps/entity-registry.json and .md. Generated navigation only.")
-    entity_registry_parser.add_argument("--no-runtime", action="store_true", help="Do not inspect live Codex skill/MCP runtime surfaces; use archived route terms only.")
+    entity_registry_parser.add_argument("--no-runtime", action="store_true", help="Do not inspect live Codex skill/MCP runtime surfaces; use only the selected observed archived source.")
     entity_registry_parser.add_argument("--no-unknown", action="store_true", help="For --lookup, return zero matches instead of an unknown/unregistered packet.")
+    entity_registry_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source for --write. auto prefers current operational route-rollup and keeps full route_terms as explicit heavy fallback.")
     entity_registry_parser.set_defaults(func=command_entity_registry)
 
     entity_registry_search_sync_parser = sub.add_parser(
@@ -73424,6 +73734,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_registry_search_sync_parser.add_argument("--workspace-root")
     entity_registry_search_sync_parser.add_argument("--aoa-root")
     entity_registry_search_sync_parser.add_argument("--budget-seconds", type=float, help="Record a soft wall-clock budget; the registry/search sync is atomic and is not interrupted mid-transaction.")
+    entity_registry_search_sync_parser.add_argument("--observed-source", choices=["auto", "route-rollup", "route-terms", "none"], default="auto", help="Observed archived entity source. auto prefers current operational route-rollup; route-terms is the explicit heavy/deep route.")
     entity_registry_search_sync_parser.add_argument("--write-report", action="store_true")
     entity_registry_search_sync_parser.set_defaults(func=command_entity_registry_search_sync)
 

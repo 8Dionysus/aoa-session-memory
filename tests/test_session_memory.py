@@ -2646,6 +2646,119 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
     assert any(candidate["route_signal"] == "route_next_action:repair" for candidate in next_action_candidates)
 
 
+def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observed(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    (aoa_root / module.ENTITY_REGISTRY_PATH.parent).mkdir(parents=True)
+    previous_entry = module.entity_registry_make_entry(
+        kind="validator",
+        key="legacy_full_route_validator",
+        aliases=["validator:legacy_full_route_validator"],
+        source_refs=[
+            {
+                "source_type": "search_route_terms",
+                "path": str(module.search_db_path(aoa_root)),
+                "status": "observed",
+                "latest_session_date": "2026-06-25",
+            }
+        ],
+        source_surface="archived_route_terms",
+        owner="aoa-session-memory",
+        status="observed",
+        signal_count=7,
+        session_count=2,
+    )
+    module.write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-06-26T00:00:00Z",
+            "generated_at_epoch": 1782432000.0,
+            "ok": True,
+            "entity_count": 1,
+            "counts_by_kind": {"validator": 1},
+            "counts_by_status": {"observed": 1},
+            "entries": [previous_entry],
+        },
+    )
+    shard_db = aoa_root / "search" / "shards" / "2026-06.sqlite3"
+    shard_db.parent.mkdir(parents=True)
+    shard_db.write_text("dummy shard", encoding="utf-8")
+    rollup_db = module.search_operational_route_rollup_db_path(aoa_root)
+    conn = module.init_search_operational_route_rollup_db(rollup_db)
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        [
+            ("artifact_type", "session_memory_search_operational_route_rollup"),
+            ("rollup_schema_version", str(module.SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION)),
+            ("generated_at", "2026-06-26T00:01:00Z"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO shards(
+            shard, shard_db_path, source_size_bytes, source_mtime_ns, generated_at, status,
+            event_total, candidate_tail_count, candidate_tail_with_route_signals_count,
+            candidate_route_posting_count, candidate_route_term_count, elapsed_ms
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "month/2026-06",
+            str(shard_db),
+            module.path_total_size(shard_db),
+            shard_db.stat().st_mtime_ns,
+            "2026-06-26T00:01:00Z",
+            "current",
+            3,
+            3,
+            3,
+            3,
+            1,
+            1,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO route_rollups(
+            shard, layer, key, route_signal, posting_count, session_count,
+            first_session_date, last_session_date, raw_refs_json, segment_refs_json, session_ids_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "month/2026-06",
+            "script",
+            "fast_rollup_script",
+            "script:fast_rollup_script",
+            3,
+            1,
+            "2026-06-26",
+            "2026-06-26",
+            json.dumps(["raw:line:1"]),
+            json.dumps(["000__initial-to-latest.md#event-000001"]),
+            json.dumps(["rollup-session"]),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    payload = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=False,
+        observed_source="route-rollup",
+    )
+    entries = {(entry["kind"], entry["canonical_key"]): entry for entry in payload["entries"]}
+
+    assert payload["observed_route_source"] == "operational_route_rollup"
+    assert entries[("script", "fast_rollup_script")]["source_surface"] == "operational_route_rollup"
+    retained = entries[("validator", "legacy_full_route_validator")]
+    assert retained["source_surface"] == "archived_route_terms"
+    assert retained["retained_from_snapshot"]["reason"] == "fast_observed_route_uses_operational_rollup"
+    assert "observed_entity_retained_from_previous_snapshot" in retained["freshness"]["diagnostics"]
+
+
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

@@ -1328,6 +1328,7 @@ sync route:
 python3 scripts/aoa_session_memory.py entity-registry-search-sync \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
+  --observed-source auto \
   --write-report
 ```
 
@@ -1338,6 +1339,11 @@ docs because it also indexes selected session documents. A bare
 The route treats `--budget-seconds` as a soft observed budget because the
 generated snapshot and SQLite registry docs must stay synchronized; it does not
 interrupt the SQLite transaction mid-sync.
+The default `--observed-source auto` uses the current operational route-rollup
+for observed archived entities when it is available, while retaining previous
+observed anchors up to the prior per-kind registry cardinality. Use
+`--observed-source route-terms` only as an explicit heavy/deep refresh when the
+full route-posting aggregation is needed.
 The SQLite sync is delta-based: unchanged registry docs are left in place, new
 docs are inserted, changed docs are replaced by rowid, and missing docs are
 removed. Reports expose `inserted_entity_registry_document_count`,
@@ -1347,7 +1353,9 @@ removed. Reports expose `inserted_entity_registry_document_count`,
 full registry rewrite. After a successful sync, SQLite `meta` records a stable
 registry snapshot fingerprint; if the registry sources are current and the
 fingerprint still matches, registry-only refresh returns a fast no-op with
-`skipped=true` instead of scanning route terms again.
+`skipped=true`. Reports also expose `observed_route_source`,
+`document_count_source`, and `phase_timings` so slow refreshes point to the
+actual expensive phase.
 
 Ask how an entity was actually used, with consequences and evidence refs:
 

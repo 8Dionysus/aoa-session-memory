@@ -960,12 +960,22 @@ turn an otherwise unchanged inventory into a full FTS/body rewrite. A
 successful sync stores a stable snapshot fingerprint in SQLite `meta`; a later
 registry-only refresh may return `skipped=true` when sources and synced docs
 are already current, avoiding a cold route-term scan for no-op maintenance.
+For observed archived entities, the default source is `--observed-source auto`:
+use the current materialized operational route-rollup when available, retain
+previous observed snapshot anchors only up to the prior per-kind cardinality,
+and keep full `route_terms` aggregation as the explicit heavy/deep lane via
+`--observed-source route-terms`. This keeps auto-maintenance from scanning the
+large route-posting table on every registry refresh while preserving exact
+lookup fallback and raw/segment refs as the stronger evidence route. Reports
+expose `observed_route_source`, `document_count_source`, and `phase_timings` so
+slow syncs name the expensive phase instead of becoming a vague warning.
 When the entity registry is the only dirty surface, use the direct sync route:
 
 ```bash
 python3 scripts/aoa_session_memory.py entity-registry-search-sync \
   --workspace-root /srv/AbyssOS \
   --aoa-root /srv/AbyssOS/.aoa \
+  --observed-source auto \
   --write-report
 ```
 

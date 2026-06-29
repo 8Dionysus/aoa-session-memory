@@ -28,7 +28,12 @@ Use these first routes when available:
 - source identity, new entity registration, or “does this skill/MCP/hook/tool
   exist”: `entity-registry --lookup <anchor> --kind <kind>` first. A registered
   source entity with zero session hits means “known but not yet observed in
-  session usage”, not “missing”.
+  session usage”, not “missing”. Registry maintenance uses
+  `entity-registry-search-sync --observed-source auto` by default: it prefers
+  the current operational route-rollup for observed archived entities and keeps
+  full route-term aggregation behind the explicit
+  `--observed-source route-terms` heavy/deep lane. Treat registry packets as
+  source/navigation identity; use usage routes for behavior evidence.
 - skill, MCP, hook, tool, API, script, validator, test, eval, graph, memory
   surface, decision, error, receipt, or other operational entity usage and
   consequences: `usage-chain <anchor> --kind <kind>` first when the question
