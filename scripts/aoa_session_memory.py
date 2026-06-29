@@ -58561,7 +58561,7 @@ def session_memory_agent_route_status(
     elif recommendation == "run_live_catchup":
         action = "run_live_catchup_for_recent_live"
         if int_value(graph.get("deferred_live_source_count")) > 0 and int_value(search.get("deferred_live_session_count")) <= 0:
-            raw_or_deep_route = "Live quiet window is satisfied; run the ledger-seeded graph queue catch-up for deferred live sources before claims about recent live graph topology."
+            raw_or_deep_route = "Live quiet window is satisfied; run the ledger-seeded graph queue catch-up for deferred live or queued graph sources before claims about recent live graph topology."
         else:
             raw_or_deep_route = "Live quiet window is satisfied; run targeted search/atlas catch-up before claims about recent live transcripts; graph repair remains an explicit follow-up."
     elif recommendation == "wait_live_catchup":
@@ -58792,7 +58792,7 @@ def session_memory_maintenance_status(
                     "max_quiet_remaining_seconds": live_tail.get("max_quiet_remaining_seconds"),
                     "next_ready_at": live_tail.get("next_ready_at"),
                     "live_tail_status": live_tail.get("status"),
-                    "note": "Live quiet window is satisfied; run graph queue catch-up for deferred live sources before retrying source-scan graph maintenance.",
+                    "note": "Live quiet window is satisfied; run graph queue catch-up for deferred live or queued graph sources before retrying source-scan graph maintenance.",
                 }
             ]
             recommendation = "run_live_catchup"
