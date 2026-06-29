@@ -57574,6 +57574,21 @@ def entity_dossier(
     graph_nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     graph_edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
     graph_evidence_refs = graph.get("evidence_refs") if isinstance(graph.get("evidence_refs"), list) else []
+    route_ref_counts = live_scenario_evidence_counts(
+        {
+            "where_seen": where_seen,
+            "usage_document_refs": document_refs,
+            "graph_evidence_refs": graph_evidence_refs,
+            "strong_refs": strong_refs,
+            "weak_refs": weak_refs,
+        }
+    )
+    route_ref_count = sum(int_value(route_ref_counts.get(key)) for key in ("raw_ref", "segment_ref", "session_ref", "receipt_ref"))
+    raw_or_segment_ref_present = bool(
+        strong_refs
+        or int_value(route_ref_counts.get("raw_ref")) > 0
+        or int_value(route_ref_counts.get("segment_ref")) > 0
+    )
     event_count = int_value(usage.get("event_count"))
     usage_count = int_value(usage.get("usage_event_count"), len(usage_events))
     consequence_count = int_value(usage.get("consequence_event_count"), len(consequence_events))
@@ -57584,7 +57599,7 @@ def entity_dossier(
     graph_edge_count = int_value(graph.get("edge_count"), len(graph_edges))
     graph_ref_count = int_value(graph.get("evidence_ref_count"), len(graph_evidence_refs))
     noise_flags: list[str] = []
-    if not strong_refs:
+    if not raw_or_segment_ref_present:
         noise_flags.append("no_strong_raw_segment_session_refs")
     if usage_count <= 0 and not event_route_has_observed_events:
         noise_flags.append("no_usage_events_returned_by_usage_audit")
@@ -57600,8 +57615,10 @@ def entity_dossier(
         open_questions.append("quality flags need review: " + ", ".join(str(flag) for flag in quality_flags))
     if answer_rules.get("status") in {"insufficient_evidence", "weak_route", "stale"}:
         open_questions.append(f"answer rule gate is {answer_rules.get('status')}")
-    if not strong_refs:
-        open_questions.append("no strong raw+segment+session refs in the sampled dossier")
+    if not strong_refs and raw_or_segment_ref_present:
+        open_questions.append("no raw-preview strong refs in the sampled dossier; route refs are available")
+    elif not raw_or_segment_ref_present:
+        open_questions.append("no raw or segment refs in the sampled dossier")
     if noise_flags:
         open_questions.append("dossier route warnings: " + ", ".join(noise_flags))
     read_first = [
@@ -57611,11 +57628,39 @@ def entity_dossier(
         }
         for ref in strong_refs[:5]
     ]
+    if not read_first:
+        fallback_read_first: list[dict[str, Any]] = []
+
+        def add_fallback_refs(refs: Any) -> None:
+            if len(fallback_read_first) >= 5 or not isinstance(refs, dict):
+                return
+            compact_refs = {key: refs.get(key) for key in ("raw", "segment", "segment_index", "session", "receipt") if refs.get(key)}
+            if compact_refs:
+                fallback_read_first.append({"refs": compact_refs, "raw_preview": {"status": "not_hydrated_fast_route"}})
+
+        for item in where_seen:
+            add_fallback_refs(item.get("refs") if isinstance(item, dict) else {})
+        for ref in graph_evidence_refs:
+            add_fallback_refs(ref.get("refs") if isinstance(ref, dict) else {})
+        for ref in document_refs:
+            if len(fallback_read_first) >= 5 or not isinstance(ref, dict):
+                break
+            kind = str(ref.get("kind") or "")
+            value = ref.get("value")
+            if not value:
+                continue
+            if kind in {"raw_line", "raw_block"}:
+                add_fallback_refs({"raw": value})
+            elif kind in {"segment_markdown", "segment_index"}:
+                add_fallback_refs({"segment": value})
+            elif kind == "session_manifest":
+                add_fallback_refs({"session": value})
+        read_first = fallback_read_first
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_entity_dossier",
         "generated_at": now,
-        "ok": bool(strong_refs),
+        "ok": raw_or_segment_ref_present,
         "mutates": False,
         "truth_status": "entity_dossier_routes_to_evidence_not_reviewed_truth",
         "anchor": anchor,
@@ -57676,6 +57721,8 @@ def entity_dossier(
         "quality": {
             "one_short_route": True,
             "strong_ref_count": len(strong_refs),
+            "route_ref_count": route_ref_count,
+            "route_ref_counts": route_ref_counts,
             "weak_ref_count": len(weak_refs),
             "event_count": event_count,
             "usage_event_count": usage_count,
@@ -57685,7 +57732,7 @@ def entity_dossier(
             "graph_node_count": graph_node_count,
             "graph_edge_count": graph_edge_count,
             "graph_evidence_ref_count": graph_ref_count,
-            "raw_or_segment_ref_present": bool(strong_refs),
+            "raw_or_segment_ref_present": raw_or_segment_ref_present,
             "event_route_has_observed_events": event_route_has_observed_events,
             "noise_flag_count": len(noise_flags),
         },

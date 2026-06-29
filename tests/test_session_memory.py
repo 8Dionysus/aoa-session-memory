@@ -4878,6 +4878,89 @@ def test_live_scenario_audit_agent_event_dossier_uses_observed_events(tmp_path: 
     assert audit["quality"]["actionable_gap_count"] == 0
 
 
+def test_entity_dossier_accepts_route_refs_without_raw_preview_strong_refs(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_trace_route(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "result_count": 1,
+            "results": [
+                {
+                    "session_label": "session-a",
+                    "session_date": "2026-06-29",
+                    "event_type": "TOOL_CALL",
+                    "title": "Tool call",
+                    "refs": {
+                        "raw": "raw:line:7",
+                        "segment": "001.md#event-7",
+                        "session": "session.manifest.json",
+                    },
+                }
+            ],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "trace_route", fake_trace_route)
+    monkeypatch.setattr(module, "graph_rag_packet", lambda **_kwargs: {"answer_rules": {}, "diagnostics": []})
+    monkeypatch.setattr(module, "graph_timeline", lambda **_kwargs: {"freshness": {}})
+    monkeypatch.setattr(module, "graph_cooccurrence", lambda **_kwargs: {"cooccurrences": []})
+    monkeypatch.setattr(
+        module,
+        "entity_usage_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "event_count": 1,
+            "usage_event_count": 1,
+            "consequence_event_count": 1,
+            "document_refs": [
+                {"kind": "raw_line", "value": "raw:line:7"},
+                {"kind": "segment_markdown", "value": "001.md#event-7"},
+                {"kind": "session_manifest", "value": "session.manifest.json"},
+            ],
+            "usage_events": [{"event_id": "7"}],
+            "consequence_events": [{"event_id": "8"}],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_neighborhood",
+        lambda **_kwargs: {
+            "ok": True,
+            "node_count": 1,
+            "edge_count": 1,
+            "evidence_ref_count": 1,
+            "nodes": [{"id": "n1"}],
+            "edges": [{"id": "e1"}],
+            "evidence_refs": [
+                {
+                    "refs": {
+                        "raw": "raw:line:7",
+                        "segment": "001.md",
+                        "session": "session.manifest.json",
+                    }
+                }
+            ],
+            "freshness": {"status": "graph_store_read_model"},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_quality_audit",
+        lambda **_kwargs: {"samples": [{"evidence": {"sample_refs": []}, "graph": {"top_route_nodes": []}}], "diagnostics": []},
+    )
+
+    dossier = module.entity_dossier(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", limit=2)
+
+    assert dossier["ok"] is True
+    assert dossier["quality"]["strong_ref_count"] == 0
+    assert dossier["quality"]["route_ref_count"] >= 3
+    assert dossier["quality"]["raw_or_segment_ref_present"] is True
+    assert "no_strong_raw_segment_session_refs" not in dossier["noise_flags"]
+    assert dossier["read_first"][0]["refs"]["raw"] == "raw:line:7"
+
+
 def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
