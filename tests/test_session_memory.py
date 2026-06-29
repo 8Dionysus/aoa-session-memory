@@ -16337,7 +16337,33 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
                         "raw_refs": ["raw:error:1"],
                         "segment_refs": ["segments/error.md"],
                         "session_ids": ["session-error"],
-                    }
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "entity",
+                        "key": "skill",
+                        "route_signal": module.route_signal_token("entity", "skill"),
+                        "posting_count": 10,
+                        "session_count": 3,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:entity-skill:1"],
+                        "segment_refs": ["segments/entity-skill.md"],
+                        "session_ids": ["session-entity-skill"],
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "skill",
+                        "key": "aoa_change_protocol",
+                        "route_signal": module.route_signal_token("skill", "aoa_change_protocol"),
+                        "posting_count": 3,
+                        "session_count": 2,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:skill:1"],
+                        "segment_refs": ["segments/skill.md"],
+                        "session_ids": ["session-skill"],
+                    },
                 ],
             },
         ],
@@ -16372,7 +16398,7 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert payload["quality"]["agent_route_summary_status"] == "covered"
     assert payload["quality"]["agent_route_covered_lane_count"] >= 3
     assert payload["totals"]["matched_group_count"] == 1
-    assert payload["totals"]["source_candidate_route_posting_count"] == 13
+    assert payload["totals"]["source_candidate_route_posting_count"] == 26
     assert payload["agent_route_summary"]["status"] == "covered"
     assert payload["agent_route_summary"]["truth_status"] == "generated_search_route_rollup_agent_route_summary_not_archive_truth"
     lanes = {item["id"]: item for item in payload["agent_route_summary"]["lanes"]}
@@ -16380,6 +16406,11 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert lanes["tools"]["top_keys"][0]["key"] == "exec_command"
     assert lanes["mcp"]["status"] == "covered"
     assert lanes["mcp"]["top_keys"][0]["key"] == "aoa_session_memory_mcp"
+    assert lanes["skills"]["status"] == "covered"
+    assert lanes["skills"]["top_keys"][0]["layer"] == "skill"
+    assert lanes["skills"]["top_keys"][0]["key"] == "aoa_change_protocol"
+    assert lanes["skills"]["exact_layer_group_count"] == 1
+    assert lanes["skills"]["term_match_group_count"] == 1
     assert lanes["hooks"]["status"] == "covered"
     assert lanes["hooks"]["preferred_first_route"] == "hook_receipts_first_then_rollup"
     assert lanes["errors"]["status"] == "covered"
@@ -16409,6 +16440,58 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert human_mcp_query["quality"]["raw_or_segment_ref_present"] is True
     assert human_mcp_query["cost_profile"]["opens_monolith"] is False
     assert human_mcp_query["cost_profile"]["uses_fts"] is False
+
+    skill_query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="skill",
+        limit=5,
+        ref_limit=2,
+    )
+
+    assert skill_query["ok"] is True
+    assert skill_query["status"] == "matched"
+    assert skill_query["query_route_advice"]["status"] == "typed_lane_detected"
+    assert skill_query["query_route_advice"]["lane_id"] == "skills"
+    assert skill_query["query_route_advice"]["recommended_layer"] == "skill"
+    assert "--layer" in skill_query["query_route_advice"]["recommended_command"]
+    assert skill_query["quality"]["query_route_advice_status"] == "typed_lane_detected"
+
+    skills_query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="skills",
+        limit=5,
+        ref_limit=2,
+    )
+
+    assert skills_query["query_route_advice"]["status"] == "typed_lane_detected"
+    assert skills_query["query_route_advice"]["lane_id"] == "skills"
+    assert skills_query["query_route_advice"]["recommended_layer"] == "skill"
+
+    goals_query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="goals",
+        limit=5,
+        ref_limit=2,
+    )
+
+    assert goals_query["query_route_advice"]["status"] == "dedicated_lane_detected"
+    assert goals_query["query_route_advice"]["lane_id"] == "goals"
+    assert goals_query["query_route_advice"]["recommended_commands"][0]["route_kind"] == "goal_lifecycles"
+
+    decisions_query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="decisions",
+        limit=5,
+        ref_limit=2,
+    )
+
+    assert decisions_query["query_route_advice"]["status"] == "lane_route_detected"
+    assert decisions_query["query_route_advice"]["lane_id"] == "decisions"
+    assert decisions_query["query_route_advice"]["recommended_commands"][0]["route_kind"] == "search_operational_route_rollup_query"
 
     human_mcp_key = module.session_memory_search_operational_route_rollup_query(
         workspace_root=workspace,

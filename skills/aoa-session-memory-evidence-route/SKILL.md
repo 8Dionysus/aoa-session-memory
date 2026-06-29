@@ -72,7 +72,13 @@ Use these first routes when available:
   anchor forms such as `aoa-session-memory-mcp` are canonicalized into route
   keys such as `aoa_session_memory_mcp`; inspect `normalized_filters` if a
   result is surprising before widening the route. Read `agent_route_summary`
-  before trusting the top unfiltered rows: it maps
+  and `query_route_advice` before trusting the top unfiltered rows. If
+  `query_route_advice.status` is `typed_lane_detected`, run its recommended
+  exact layer command before broad fuzzy results. If it is
+  `dedicated_lane_detected`, use the returned dedicated route command first
+  (for example `goal-lifecycles` or `agent-responses`). If it is
+  `lane_route_detected`, keep the lane/owner boundary visible and use the
+  returned command as navigation, not as truth. The summary maps
   tools, skills, MCP, hooks, APIs, plugins, goals, answers, errors, tests,
   validators, decisions, memory surfaces, graphs, evals, scripts, mechanics,
   and agents to lane-specific rollup commands or dedicated first routes such
@@ -162,7 +168,9 @@ Prefer packets that expose:
 - normalized entity or route candidates;
 - usage, result, outcome, consequence, graph, and neighborhood counts;
 - freshness, ambiguity, truncation, and omitted counts;
-- agent-route lane coverage when a packet includes `agent_route_summary`;
+- agent-route lane coverage when a packet includes `agent_route_summary`; if
+  a packet includes `query_route_advice`, follow typed-lane, dedicated-route,
+  or owner-aware lane recommendations before broad fuzzy results;
 - cost profile, especially whether a route used materialized projections or
   expanded into shard search, monolith reads, FTS, or raw hydration;
 - literal route strategy, especially `uses_structured_first`, fallback

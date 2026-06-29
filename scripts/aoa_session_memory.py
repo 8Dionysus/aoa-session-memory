@@ -55641,6 +55641,7 @@ def search_operational_route_rollup_agent_route_summary(
     for lane_id, lane_layers, lane_terms, preferred_first_route, description in SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES:
         grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
         matched_shard_row_count = 0
+        lane_layer_set = {str(item) for item in lane_layers}
         for row in route_rows:
             layer = str(row["layer"] or "")
             key = str(row["key"] or "")
@@ -55693,10 +55694,25 @@ def search_operational_route_rollup_agent_route_summary(
                         bucket[target_key].append(value)
         top_keys = sorted(
             grouped.values(),
-            key=lambda item: (-int_value(item.get("posting_count")), str(item.get("layer") or ""), str(item.get("key") or "")),
+            key=lambda item: (
+                0 if not lane_layer_set or str(item.get("layer") or "") in lane_layer_set else 1,
+                -int_value(item.get("posting_count")),
+                str(item.get("layer") or ""),
+                str(item.get("key") or ""),
+            ),
         )
         posting_count = sum(int_value(item.get("posting_count")) for item in grouped.values())
         session_count = sum(int_value(item.get("session_count")) for item in grouped.values())
+        exact_layer_group_count = (
+            sum(1 for item in grouped.values() if str(item.get("layer") or "") in lane_layer_set)
+            if lane_layer_set
+            else len(grouped)
+        )
+        exact_layer_posting_count = (
+            sum(int_value(item.get("posting_count")) for item in grouped.values() if str(item.get("layer") or "") in lane_layer_set)
+            if lane_layer_set
+            else posting_count
+        )
         status = "covered" if posting_count > 0 else "not_observed"
         if status == "covered":
             covered_lane_count += 1
@@ -55734,7 +55750,11 @@ def search_operational_route_rollup_agent_route_summary(
                 "query_terms": list(lane_terms),
                 "matched_shard_row_count": matched_shard_row_count,
                 "group_count": len(grouped),
+                "exact_layer_group_count": exact_layer_group_count,
+                "term_match_group_count": max(0, len(grouped) - exact_layer_group_count),
                 "posting_count": posting_count,
+                "exact_layer_posting_count": exact_layer_posting_count,
+                "term_match_posting_count": max(0, posting_count - exact_layer_posting_count),
                 "session_count": session_count,
                 "top_keys": top_keys[:top_limit],
                 "commands": commands,
@@ -55756,6 +55776,88 @@ def search_operational_route_rollup_agent_route_summary(
         "lanes": lanes,
         "quality_boundary": "agent route summary is compact navigation over the generated rollup; use returned raw/segment refs or dedicated routes before proof claims.",
         "truth_status": "generated_search_route_rollup_agent_route_summary_not_archive_truth",
+    }
+
+
+def search_operational_route_rollup_query_advice(
+    *,
+    filters: dict[str, Any],
+    normalized_filters: dict[str, Any],
+    workspace_root: Path | str,
+    aoa_root: Path,
+    limit: int,
+    ref_limit: int,
+) -> dict[str, Any]:
+    query = str(filters.get("query") or "").strip().lower()
+    if not query:
+        return {
+            "status": "agent_lane_overview",
+            "reason": "no query supplied; inspect agent_route_summary lanes, then use a lane command before widening",
+        }
+    if normalized_filters.get("layer") or normalized_filters.get("key") or normalized_filters.get("route_signal"):
+        return {
+            "status": "explicit_filter_supplied",
+            "reason": "explicit layer/key/route_signal filters already narrow the rollup query",
+        }
+    query_terms = normalized_filters.get("query_terms") if isinstance(normalized_filters.get("query_terms"), list) else []
+    query_term_set = {str(item).lower() for item in query_terms if str(item)}
+    query_aliases = search_operational_route_rollup_lane_aliases(query, query_term_set)
+    for lane_id, lane_layers, lane_terms, preferred_first_route, _description in SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES:
+        lane_layer = str(lane_layers[0]) if lane_layers else ""
+        lane_term_set = {str(item).lower() for item in lane_terms if str(item)}
+        lane_aliases = search_operational_route_rollup_lane_aliases(
+            str(lane_id),
+            {*lane_term_set, *[str(item).lower() for item in lane_layers if str(item)]},
+        )
+        if query_aliases & lane_aliases:
+            if not lane_layer:
+                recommended_commands = search_operational_route_rollup_dedicated_lane_commands(
+                    lane_id=str(lane_id),
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                )
+                has_dedicated_commands = bool(recommended_commands)
+                if not has_dedicated_commands:
+                    recommended_commands = [
+                        {
+                            "route_kind": "search_operational_route_rollup_query",
+                            "command": search_operational_route_rollup_query_command(
+                                workspace_root=workspace_root,
+                                aoa_root=aoa_root,
+                                query=query,
+                                limit=limit,
+                                ref_limit=ref_limit,
+                            ),
+                        }
+                    ]
+                return {
+                    "status": "dedicated_lane_detected" if has_dedicated_commands else "lane_route_detected",
+                    "lane_id": str(lane_id),
+                    "preferred_first_route": str(preferred_first_route),
+                    "reason": (
+                        "query matches an agent route lane with a dedicated first route; use that route before broad rollup results"
+                        if has_dedicated_commands
+                        else "query matches an agent route lane without one exact layer; use the lane command and owner boundary before widening"
+                    ),
+                    "recommended_commands": recommended_commands,
+                }
+            return {
+                "status": "typed_lane_detected",
+                "lane_id": str(lane_id),
+                "preferred_first_route": str(preferred_first_route),
+                "recommended_layer": lane_layer,
+                "reason": "query matches a typed route-rollup lane; exact layer filtering avoids broad entity/path term noise",
+                "recommended_command": search_operational_route_rollup_query_command(
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                    layer=lane_layer,
+                    limit=limit,
+                    ref_limit=ref_limit,
+                ),
+            }
+    return {
+        "status": "broad_query",
+        "reason": "query does not map to one exact typed lane; keep broad rollup query, then narrow with returned layer/key/route_signal",
     }
 
 
@@ -55810,6 +55912,52 @@ def search_operational_route_rollup_filter_terms(value: str, *, max_chars: int =
     else:
         add(raw.replace("-", "_"))
     return terms
+
+
+def search_operational_route_rollup_lane_aliases(value: str, extra_terms: Iterable[str] = ()) -> set[str]:
+    aliases: set[str] = set()
+
+    def add(term: str) -> None:
+        candidate = str(term or "").strip().lower()
+        if not candidate:
+            return
+        aliases.add(candidate)
+        normalized = route_key_slug(candidate, fallback="", max_chars=120)
+        if normalized:
+            aliases.add(normalized)
+        if "-" in candidate:
+            aliases.add(candidate.replace("-", "_"))
+        if "_" in candidate:
+            aliases.add(candidate.replace("_", "-"))
+
+    for term in (value, *extra_terms):
+        add(str(term))
+
+    for term in list(aliases):
+        if len(term) > 3 and term.endswith("ies"):
+            add(f"{term[:-3]}y")
+        if len(term) > 3 and term.endswith("ses"):
+            add(term[:-2])
+        if len(term) > 2 and term.endswith("s"):
+            add(term[:-1])
+
+    explicit = {
+        "apis": "api",
+        "mcps": "mcp",
+        "mcp_servers": "mcp",
+        "mcp-servers": "mcp",
+        "answers": "answer",
+        "closeouts": "closeout",
+        "errors": "error",
+        "failures": "failure",
+        "memories": "memory",
+        "memory_surfaces": "memory",
+        "memory-surfaces": "memory",
+    }
+    for term, alias in explicit.items():
+        if term in aliases:
+            add(alias)
+    return aliases
 
 
 def search_operational_route_rollup_normalized_filters(
@@ -56089,6 +56237,14 @@ def session_memory_search_operational_route_rollup_query(
         aoa_root=aoa_root,
         ref_limit=ref_limit_value,
     )
+    query_advice = search_operational_route_rollup_query_advice(
+        filters=filters,
+        normalized_filters=normalized_filters,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        limit=limit_value,
+        ref_limit=ref_limit_value,
+    )
     grouped_rows = sorted(
         grouped.values(),
         key=lambda item: (-int_value(item.get("posting_count")), str(item.get("layer") or ""), str(item.get("key") or "")),
@@ -56130,6 +56286,7 @@ def session_memory_search_operational_route_rollup_query(
             "source_candidate_route_term_count": int_value(shard_summary_rows["candidate_route_term_count"] if shard_summary_rows else 0),
         },
         "agent_route_summary": agent_route_summary,
+        "query_route_advice": query_advice,
         "quality": {
             "uses_materialized_rollup": True,
             "raw_or_segment_ref_present": raw_or_segment_ref_present,
@@ -56141,6 +56298,7 @@ def session_memory_search_operational_route_rollup_query(
             "agent_route_summary_status": agent_route_summary.get("status"),
             "agent_route_covered_lane_count": agent_route_summary.get("covered_lane_count"),
             "agent_route_missing_lane_count": agent_route_summary.get("missing_lane_count"),
+            "query_route_advice_status": query_advice.get("status"),
         },
         "cost_profile": {
             "uses_materialized_route_rollup": True,
@@ -56175,6 +56333,7 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
     quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
     cost = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
     agent_route_summary = payload.get("agent_route_summary") if isinstance(payload.get("agent_route_summary"), dict) else {}
+    query_route_advice = payload.get("query_route_advice") if isinstance(payload.get("query_route_advice"), dict) else {}
     lines = [
         "# Search Operational Route Rollup Query",
         "",
@@ -56187,6 +56346,7 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
         f"- freshness_status: `{quality.get('freshness_status')}`",
         f"- raw_or_segment_ref_present: `{quality.get('raw_or_segment_ref_present')}`",
         f"- agent_route_summary: `{agent_route_summary.get('status')}` covered=`{agent_route_summary.get('covered_lane_count')}` missing=`{agent_route_summary.get('missing_lane_count')}`",
+        f"- query_route_advice: `{query_route_advice.get('status')}` lane=`{query_route_advice.get('lane_id', '')}` recommended_layer=`{query_route_advice.get('recommended_layer', '')}`",
         f"- elapsed_ms: `{cost.get('elapsed_ms')}`",
         "",
         "## Results",
