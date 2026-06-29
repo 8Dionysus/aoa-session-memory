@@ -53499,7 +53499,18 @@ def search_hotset_audit_probe_shard(
             )
             return payload
 
-        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
+        hotset_progress_opcodes = max(1000, SEARCH_FTS_QUERY_PROGRESS_OPCODES // 10)
+
+        def install_progress(stop_at: float) -> None:
+            conn.set_progress_handler(
+                lambda: 1 if time.monotonic() >= stop_at else 0,
+                hotset_progress_opcodes,
+            )
+
+        def remaining_seconds() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        install_progress(deadline)
         index_names = {str(item[1]) for item in conn.execute("PRAGMA index_list(documents)").fetchall()}
         doc_type_hint = " INDEXED BY idx_documents_doc_type_date" if "idx_documents_doc_type_date" in index_names else ""
         usage_hint = (
@@ -53519,13 +53530,91 @@ def search_hotset_audit_probe_shard(
             ).fetchone()
             return int_value(row["count"]) if row is not None else 0
 
+        def optional_count_documents(
+            label: str,
+            where_sql: str,
+            params: Sequence[Any] = (),
+            *,
+            index_hint: str = "",
+            min_remaining_seconds: float = 0.0,
+            max_query_seconds: float | None = None,
+        ) -> int | None:
+            if remaining_seconds() <= max(0.0, float(min_remaining_seconds)):
+                payload.setdefault("diagnostics", []).append(f"search_hotset_optional_count_skipped_timeout_budget:{label}")
+                return None
+            try:
+                if max_query_seconds is not None:
+                    install_progress(min(deadline, time.monotonic() + max(0.05, float(max_query_seconds))))
+                return count_documents(where_sql, params, index_hint=index_hint)
+            except sqlite3.Error as exc:
+                payload.setdefault("diagnostics", []).append(
+                    f"search_hotset_optional_count_skipped:{label}:{sqlite_error_status(exc)}:{exc}"
+                )
+                return None
+            finally:
+                if max_query_seconds is not None:
+                    install_progress(deadline)
+
         def group_counts(sql: str, params: Sequence[Any] = ()) -> dict[str, int]:
             rows = conn.execute(sql, tuple(params)).fetchall()
             return {str(row["key"] or "unknown"): int_value(row["count"]) for row in rows}
 
-        document_count_row = conn.execute("SELECT COUNT(*) AS count FROM documents").fetchone()
-        document_count = int_value(document_count_row["count"]) if document_count_row is not None else 0
-        doc_type_counts = group_counts(
+        def optional_group_counts(
+            label: str,
+            sql: str,
+            params: Sequence[Any] = (),
+            *,
+            min_remaining_seconds: float = 0.0,
+            max_query_seconds: float | None = None,
+        ) -> dict[str, int]:
+            if remaining_seconds() <= max(0.0, float(min_remaining_seconds)):
+                payload.setdefault("diagnostics", []).append(f"search_hotset_optional_group_skipped_timeout_budget:{label}")
+                return {}
+            try:
+                if max_query_seconds is not None:
+                    install_progress(min(deadline, time.monotonic() + max(0.05, float(max_query_seconds))))
+                return group_counts(sql, params)
+            except sqlite3.Error as exc:
+                payload.setdefault("diagnostics", []).append(
+                    f"search_hotset_optional_group_skipped:{label}:{sqlite_error_status(exc)}:{exc}"
+                )
+                return {}
+            finally:
+                if max_query_seconds is not None:
+                    install_progress(deadline)
+
+        def optional_single_row(
+            label: str,
+            sql: str,
+            params: Sequence[Any] = (),
+            *,
+            min_remaining_seconds: float = 0.0,
+            max_query_seconds: float | None = None,
+        ) -> sqlite3.Row | None:
+            if remaining_seconds() <= max(0.0, float(min_remaining_seconds)):
+                payload.setdefault("diagnostics", []).append(f"search_hotset_optional_row_skipped_timeout_budget:{label}")
+                return None
+            try:
+                if max_query_seconds is not None:
+                    install_progress(min(deadline, time.monotonic() + max(0.05, float(max_query_seconds))))
+                return conn.execute(sql, tuple(params)).fetchone()
+            except sqlite3.Error as exc:
+                payload.setdefault("diagnostics", []).append(
+                    f"search_hotset_optional_row_skipped:{label}:{sqlite_error_status(exc)}:{exc}"
+                )
+                return None
+            finally:
+                if max_query_seconds is not None:
+                    install_progress(deadline)
+
+        document_count_value = optional_count_documents(
+            "document_count",
+            "1 = 1",
+            max_query_seconds=2.0,
+        )
+        document_count = int_value(document_count_value)
+        doc_type_counts = optional_group_counts(
+            "doc_type_counts",
             f"""
             SELECT COALESCE(NULLIF(doc_type, ''), 'unknown') AS key, COUNT(*) AS count
             FROM documents{doc_type_hint}
@@ -53534,6 +53623,7 @@ def search_hotset_audit_probe_shard(
             LIMIT ?
             """,
             (limit,),
+            max_query_seconds=1.5,
         )
         direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
         protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
@@ -53552,19 +53642,102 @@ def search_hotset_audit_probe_shard(
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
         ]
 
-        event_document_count = count_documents("doc_type = 'event'", index_hint=doc_type_hint)
-        direct_actionable_event_count = count_documents(
+        event_document_count_value = optional_count_documents(
+            "event_document_count",
+            "doc_type = 'event'",
+            index_hint=doc_type_hint,
+            max_query_seconds=2.0,
+        )
+        context_event_count_value = optional_count_documents(
+            "context_event_count",
+            context_where,
+            context_params,
+            index_hint=usage_hint,
+            max_query_seconds=2.0,
+        )
+        event_document_count = int_value(event_document_count_value)
+        context_event_count = int_value(context_event_count_value)
+        candidate_context_tail_row = optional_single_row(
+            "candidate_context_tail_breakdown",
+            f"""
+            SELECT COUNT(*) AS candidate_context_tail_v1_count,
+                   SUM(CASE WHEN COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END)
+                     AS candidate_context_tail_with_route_signals_count,
+                   SUM(CASE WHEN COALESCE(route_signals, '') = '' THEN 1 ELSE 0 END)
+                     AS candidate_context_tail_without_route_signals_count
+            FROM documents{usage_hint}
+            WHERE {candidate_where_unqualified}
+            """,
+            candidate_params_unqualified,
+            max_query_seconds=4.5,
+        )
+        context_breakdown = {
+            "context_event_count": context_event_count,
+            "candidate_context_tail_v1_count": None
+            if candidate_context_tail_row is None
+            else int_value(candidate_context_tail_row["candidate_context_tail_v1_count"]),
+            "candidate_context_tail_with_route_signals_count": None
+            if candidate_context_tail_row is None
+            else int_value(candidate_context_tail_row["candidate_context_tail_with_route_signals_count"]),
+            "candidate_context_tail_without_route_signals_count": None
+            if candidate_context_tail_row is None
+            else int_value(candidate_context_tail_row["candidate_context_tail_without_route_signals_count"]),
+            "context_route_signal_preview_count": optional_count_documents(
+                "context_route_signal_preview",
+                f"{context_where} AND COALESCE(route_signals, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+                max_query_seconds=1.0,
+            ),
+            "context_agent_event_count": optional_count_documents(
+                "context_agent_event",
+                f"{context_where} AND COALESCE(agent_event, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+                max_query_seconds=1.0,
+            ),
+            "context_task_episode_count": optional_count_documents(
+                "context_task_episode",
+                f"{context_where} AND COALESCE(task_episode_id, '') <> ''",
+                context_params,
+                index_hint=usage_hint,
+                max_query_seconds=1.0,
+            ),
+            "context_protected_event_type_count": optional_count_documents(
+                "context_protected_event_type",
+                f"{context_where} AND COALESCE(event_type, '') IN ({protected_placeholders})",
+                [*context_params, *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES],
+                index_hint=usage_hint,
+                max_query_seconds=0.5,
+            ),
+        }
+        context_tail_measurement_mode = "exact"
+        context_tail_required_keys = (
+            "candidate_context_tail_v1_count",
+            "candidate_context_tail_with_route_signals_count",
+            "candidate_context_tail_without_route_signals_count",
+        )
+        if context_event_count_value is None or any(context_breakdown.get(key) is None for key in context_tail_required_keys):
+            context_tail_measurement_mode = "partial_timeout_budget"
+        candidate_context_tail_count = int_value(context_breakdown.get("candidate_context_tail_v1_count"))
+        direct_actionable_event_count_value = optional_count_documents(
+            "direct_actionable_event_count",
             f"doc_type = 'event' AND usage_role IN ({direct_placeholders})",
             SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
             index_hint=usage_hint,
+            max_query_seconds=1.5,
         )
-        context_event_count = count_documents(context_where, context_params, index_hint=usage_hint)
-        candidate_context_tail_count = count_documents(
-            candidate_where_unqualified,
-            candidate_params_unqualified,
-            index_hint=usage_hint,
+        direct_actionable_event_count = int_value(direct_actionable_event_count_value)
+        hotset_count_measurement_mode = (
+            "exact"
+            if document_count_value is not None
+            and event_document_count_value is not None
+            and direct_actionable_event_count_value is not None
+            and context_event_count_value is not None
+            else "partial_timeout_budget"
         )
-        role_counts = group_counts(
+        role_counts = optional_group_counts(
+            "usage_role_counts",
             f"""
             SELECT COALESCE(NULLIF(usage_role, ''), 'unknown') AS key, COUNT(*) AS count
             FROM documents{usage_hint}
@@ -53574,8 +53747,10 @@ def search_hotset_audit_probe_shard(
             LIMIT ?
             """,
             (limit,),
+            max_query_seconds=1.5,
         )
-        nonblank_agent_event_counts = group_counts(
+        nonblank_agent_event_counts = optional_group_counts(
+            "agent_event_counts",
             f"""
             SELECT agent_event AS key, COUNT(*) AS count
             FROM documents{agent_event_hint}
@@ -53585,14 +53760,17 @@ def search_hotset_audit_probe_shard(
             LIMIT ?
             """,
             (limit,),
+            max_query_seconds=1.0,
         )
-        nonblank_agent_event_total_row = conn.execute(
-            f"SELECT COUNT(*) AS count FROM documents{agent_event_hint} WHERE agent_event <> ''"
-        ).fetchone()
-        nonblank_agent_event_total = (
-            int_value(nonblank_agent_event_total_row["count"]) if nonblank_agent_event_total_row is not None else 0
+        nonblank_agent_event_total_value = optional_count_documents(
+            "agent_event_classified_total",
+            "agent_event <> ''",
+            index_hint=agent_event_hint,
+            max_query_seconds=1.0,
         )
-        agent_event_missing_eligible_count = count_documents(
+        nonblank_agent_event_total = int_value(nonblank_agent_event_total_value)
+        agent_event_missing_eligible_count_value = optional_count_documents(
+            "agent_event_missing_eligible",
             f"""
             doc_type = 'event'
             AND COALESCE(agent_event, '') = ''
@@ -53600,10 +53778,18 @@ def search_hotset_audit_probe_shard(
             """,
             SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES,
             index_hint=event_type_hint,
+            max_query_seconds=0.75,
         )
+        agent_event_coverage_measurement_mode = (
+            "exact"
+            if nonblank_agent_event_total_value is not None and agent_event_missing_eligible_count_value is not None
+            else "partial_timeout_budget"
+        )
+        agent_event_missing_eligible_count = int_value(agent_event_missing_eligible_count_value)
         agent_event_eligible_event_count = nonblank_agent_event_total + agent_event_missing_eligible_count
         non_agent_event_without_agent_event_count = max(0, event_document_count - agent_event_eligible_event_count)
-        event_type_counts = group_counts(
+        event_type_counts = optional_group_counts(
+            "event_type_counts",
             f"""
             SELECT COALESCE(NULLIF(event_type, ''), 'unknown') AS key, COUNT(*) AS count
             FROM documents{event_type_hint}
@@ -53613,71 +53799,76 @@ def search_hotset_audit_probe_shard(
             LIMIT ?
             """,
             (limit,),
+            max_query_seconds=1.0,
         )
-        top_session_rows = conn.execute(
-            f"""
-            SELECT COALESCE(NULLIF(session_label, ''), 'unknown') AS session_label,
-                   COUNT(*) AS document_count
-            FROM documents{session_hint}
-            GROUP BY session_label
-            ORDER BY document_count DESC, session_label ASC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
         session_rows: list[dict[str, Any]] = []
-        for top_row in top_session_rows:
-            label = str(top_row["session_label"] or "")
-            row = conn.execute(
-                f"""
-                SELECT COALESCE(NULLIF(MIN(session_id), ''), 'unknown') AS session_id,
-                       COALESCE(NULLIF(MIN(session_title), ''), '') AS session_title,
-                       MIN(session_date) AS first_session_date,
-                       MAX(session_date) AS last_session_date,
-                       COUNT(*) AS document_count,
-                       SUM(CASE WHEN doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
-                       SUM(CASE WHEN doc_type = 'event' AND usage_role = ? THEN 1 ELSE 0 END) AS context_event_count,
-                       SUM(CASE WHEN doc_type = 'event' AND COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END) AS agent_event_classified_event_count,
-                       SUM(CASE WHEN doc_type = 'event'
-                                AND COALESCE(agent_event, '') = ''
-                                AND COALESCE(event_type, '') IN ({agent_event_eligible_placeholders})
-                                THEN 1 ELSE 0 END) AS agent_event_missing_eligible_count
-                FROM documents{session_hint}
-                WHERE session_label = ?
-                """,
-                (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, *SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES, label),
-            ).fetchone()
-            if row is None:
-                continue
-            hotspot_agent_event_classified_count = int_value(row["agent_event_classified_event_count"])
-            hotspot_agent_event_missing_eligible_count = int_value(row["agent_event_missing_eligible_count"])
-            hotspot_agent_event_eligible_count = (
-                hotspot_agent_event_classified_count + hotspot_agent_event_missing_eligible_count
-            )
-            hotspot_event_document_count = int_value(row["event_document_count"])
-            session_rows.append(
-                {
-                    "session_id": str(row["session_id"] or ""),
-                    "session_label": label,
-                    "session_title": str(row["session_title"] or ""),
-                    "first_session_date": str(row["first_session_date"] or ""),
-                    "last_session_date": str(row["last_session_date"] or ""),
-                    "document_count": int_value(row["document_count"]),
-                    "event_document_count": hotspot_event_document_count,
-                    "context_event_count": int_value(row["context_event_count"]),
-                    "agent_event_eligible_event_count": hotspot_agent_event_eligible_count,
-                    "agent_event_classified_event_count": hotspot_agent_event_classified_count,
-                    "agent_event_missing_eligible_count": hotspot_agent_event_missing_eligible_count,
-                    "non_agent_event_without_agent_event_count": max(
-                        0, hotspot_event_document_count - hotspot_agent_event_eligible_count
-                    ),
-                }
-            )
+        session_hotspot_query_budget = min(1.0, max(0.25, float(per_shard_timeout_seconds) * 0.125))
+        if remaining_seconds() <= max(3.0, session_hotspot_query_budget):
+            payload.setdefault("diagnostics", []).append("search_hotset_session_hotspots_skipped_timeout_budget")
+        else:
+            try:
+                install_progress(min(deadline, time.monotonic() + session_hotspot_query_budget))
+                top_session_rows = conn.execute(
+                    f"""
+                    SELECT COALESCE(NULLIF(session_label, ''), 'unknown') AS session_label,
+                           COALESCE(NULLIF(MIN(session_id), ''), 'unknown') AS session_id,
+                           COALESCE(NULLIF(MIN(session_title), ''), '') AS session_title,
+                           MIN(session_date) AS first_session_date,
+                           MAX(session_date) AS last_session_date,
+                           COUNT(*) AS document_count,
+                           SUM(CASE WHEN doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
+                           SUM(CASE WHEN doc_type = 'event' AND usage_role = ? THEN 1 ELSE 0 END) AS context_event_count,
+                           SUM(CASE WHEN doc_type = 'event' AND COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END) AS agent_event_classified_event_count,
+                           SUM(CASE WHEN doc_type = 'event'
+                                    AND COALESCE(agent_event, '') = ''
+                                    AND COALESCE(event_type, '') IN ({agent_event_eligible_placeholders})
+                                    THEN 1 ELSE 0 END) AS agent_event_missing_eligible_count
+                    FROM documents{session_hint}
+                    GROUP BY session_label
+                    ORDER BY document_count DESC, session_label ASC
+                    LIMIT ?
+                    """,
+                    (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, *SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES, limit),
+                ).fetchall()
+            except sqlite3.Error as exc:
+                payload.setdefault("diagnostics", []).append(
+                    f"search_hotset_session_hotspots_skipped:{sqlite_error_status(exc)}:{exc}"
+                )
+                top_session_rows = []
+            finally:
+                install_progress(deadline)
+            for top_row in top_session_rows:
+                label = str(top_row["session_label"] or "")
+                hotspot_agent_event_classified_count = int_value(top_row["agent_event_classified_event_count"])
+                hotspot_agent_event_missing_eligible_count = int_value(top_row["agent_event_missing_eligible_count"])
+                hotspot_agent_event_eligible_count = (
+                    hotspot_agent_event_classified_count + hotspot_agent_event_missing_eligible_count
+                )
+                hotspot_event_document_count = int_value(top_row["event_document_count"])
+                session_rows.append(
+                    {
+                        "session_id": str(top_row["session_id"] or ""),
+                        "session_label": label,
+                        "session_title": str(top_row["session_title"] or ""),
+                        "first_session_date": str(top_row["first_session_date"] or ""),
+                        "last_session_date": str(top_row["last_session_date"] or ""),
+                        "document_count": int_value(top_row["document_count"]),
+                        "event_document_count": hotspot_event_document_count,
+                        "context_event_count": int_value(top_row["context_event_count"]),
+                        "agent_event_eligible_event_count": hotspot_agent_event_eligible_count,
+                        "agent_event_classified_event_count": hotspot_agent_event_classified_count,
+                        "agent_event_missing_eligible_count": hotspot_agent_event_missing_eligible_count,
+                        "non_agent_event_without_agent_event_count": max(
+                            0, hotspot_event_document_count - hotspot_agent_event_eligible_count
+                        ),
+                    }
+                )
         route_layer_counts: dict[str, int] = {}
         route_term_count = 0
         route_term_status = "missing_route_terms_table"
         if sqlite_table_exists(conn, "route_terms"):
-            route_rows = conn.execute(
+            route_layer_counts = optional_group_counts(
+                "route_layer_term_counts",
                 """
                 SELECT COALESCE(NULLIF(layer, ''), 'unknown') AS key, COUNT(*) AS count
                 FROM route_terms
@@ -53686,10 +53877,18 @@ def search_hotset_audit_probe_shard(
                 LIMIT ?
                 """,
                 (limit,),
-            ).fetchall()
-            route_layer_counts = {str(row["key"] or "unknown"): int_value(row["count"]) for row in route_rows}
-            term_row = conn.execute("SELECT COUNT(*) AS count FROM route_terms").fetchone()
-            route_term_count = int_value(term_row["count"]) if term_row is not None else 0
+                max_query_seconds=0.5,
+            )
+            if time.monotonic() >= deadline:
+                payload.setdefault("diagnostics", []).append("search_hotset_route_term_count_skipped_timeout_budget")
+            else:
+                try:
+                    term_row = conn.execute("SELECT COUNT(*) AS count FROM route_terms").fetchone()
+                    route_term_count = int_value(term_row["count"]) if term_row is not None else 0
+                except sqlite3.Error as exc:
+                    payload.setdefault("diagnostics", []).append(
+                        f"search_hotset_route_term_count_skipped:{sqlite_error_status(exc)}:{exc}"
+                    )
             route_term_status = "term_cardinality_only"
 
         payload.update(
@@ -53697,47 +53896,30 @@ def search_hotset_audit_probe_shard(
                 "ok": True,
                 "status": "sampled",
                 "document_count": document_count,
+                "hotset_count_measurement_mode": hotset_count_measurement_mode,
                 "event_document_count": event_document_count,
                 "event_document_ratio": round(event_document_count / document_count, 6) if document_count > 0 else 0.0,
                 "direct_actionable_event_count": direct_actionable_event_count,
                 "context_event_count": context_event_count,
-                "context_agent_event_count": count_documents(
-                    f"{context_where} AND COALESCE(agent_event, '') <> ''",
-                    context_params,
-                    index_hint=usage_hint,
-                ),
-                "context_task_episode_count": count_documents(
-                    f"{context_where} AND COALESCE(task_episode_id, '') <> ''",
-                    context_params,
-                    index_hint=usage_hint,
-                ),
-                "context_protected_event_type_count": count_documents(
-                    f"{context_where} AND COALESCE(event_type, '') IN ({protected_placeholders})",
-                    [*context_params, *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES],
-                    index_hint=usage_hint,
-                ),
-                "context_route_signal_preview_count": count_documents(
-                    f"{context_where} AND COALESCE(route_signals, '') <> ''",
-                    context_params,
-                    index_hint=usage_hint,
-                ),
+                "context_agent_event_count": int_value(context_breakdown["context_agent_event_count"]),
+                "context_task_episode_count": int_value(context_breakdown["context_task_episode_count"]),
+                "context_protected_event_type_count": int_value(context_breakdown["context_protected_event_type_count"]),
+                "context_route_signal_preview_count": int_value(context_breakdown["context_route_signal_preview_count"]),
                 "candidate_context_tail_v1_count": candidate_context_tail_count,
-                "candidate_context_tail_with_route_signals_count": count_documents(
-                    f"{candidate_where_unqualified} AND COALESCE(route_signals, '') <> ''",
-                    candidate_params_unqualified,
-                    index_hint=usage_hint,
+                "candidate_context_tail_with_route_signals_count": int_value(
+                    context_breakdown["candidate_context_tail_with_route_signals_count"]
                 ),
-                "candidate_context_tail_without_route_signals_count": count_documents(
-                    f"{candidate_where_unqualified} AND COALESCE(route_signals, '') = ''",
-                    candidate_params_unqualified,
-                    index_hint=usage_hint,
+                "candidate_context_tail_without_route_signals_count": int_value(
+                    context_breakdown["candidate_context_tail_without_route_signals_count"]
                 ),
+                "context_tail_measurement_mode": context_tail_measurement_mode,
                 "doc_type_counts": doc_type_counts,
                 "usage_role_counts": role_counts,
                 "agent_event_counts": nonblank_agent_event_counts,
                 "agent_event_eligible_event_count": agent_event_eligible_event_count,
                 "agent_event_classified_event_count": nonblank_agent_event_total,
                 "agent_event_missing_eligible_count": agent_event_missing_eligible_count,
+                "agent_event_coverage_measurement_mode": agent_event_coverage_measurement_mode,
                 "agent_event_coverage_ratio": round(nonblank_agent_event_total / agent_event_eligible_event_count, 6)
                 if agent_event_eligible_event_count > 0
                 else 0.0,
@@ -53830,6 +54012,22 @@ def session_memory_search_hotset_audit(
         if diag
     )
     successful = [item for item in shard_results if item.get("ok")]
+    failed = [item for item in shard_results if not item.get("ok")]
+    partial_hotset_count_shard_count = sum(
+        1 for item in successful if str(item.get("hotset_count_measurement_mode") or "exact") != "exact"
+    )
+    partial_context_tail_shard_count = sum(
+        1 for item in successful if str(item.get("context_tail_measurement_mode") or "exact") != "exact"
+    )
+    partial_agent_event_coverage_shard_count = sum(
+        1 for item in successful if str(item.get("agent_event_coverage_measurement_mode") or "exact") != "exact"
+    )
+    sample_quality_status = "not_sampled"
+    if successful:
+        if failed or partial_hotset_count_shard_count or partial_context_tail_shard_count or partial_agent_event_coverage_shard_count:
+            sample_quality_status = "partial_sample"
+        else:
+            sample_quality_status = "exact_sample"
     total_keys = (
         "document_count",
         "event_document_count",
@@ -53913,10 +54111,21 @@ def session_memory_search_hotset_audit(
                 "status": "active",
                 "count": context_event_count,
                 "candidate_context_tail_v1_count": candidate_context_tail_count,
+                "measurement_mode": "partial_lower_bound" if partial_context_tail_shard_count else "exact",
                 "reason": "context rows are the main candidate for compact operational projection work",
             }
         )
-    if agent_event_missing_eligible_count > 0:
+    if partial_agent_event_coverage_shard_count:
+        pressure_focus.append(
+            {
+                "id": "agent_event_coverage_partial",
+                "status": "partial",
+                "partial_shard_count": partial_agent_event_coverage_shard_count,
+                "successful_shard_count": len(successful),
+                "reason": "some shard-level agent_event coverage counts were skipped by timeout budget; missing count is a lower bound",
+            }
+        )
+    elif agent_event_missing_eligible_count > 0:
         pressure_focus.append(
             {
                 "id": "agent_event_classification_gap",
@@ -53941,8 +54150,17 @@ def session_memory_search_hotset_audit(
         status = "blocked_by_missing_shard_projection"
     elif not successful:
         status = "probe_degraded"
+    elif sample_quality_status == "partial_sample":
+        status = "hotset_partially_measured"
     else:
         status = "hotset_measured"
+    agent_event_coverage_status = "not_observed"
+    if partial_agent_event_coverage_shard_count:
+        agent_event_coverage_status = "partial_gap_observed" if agent_event_missing_eligible_count > 0 else "partial_unknown"
+    elif agent_event_missing_eligible_count > 0:
+        agent_event_coverage_status = "gap"
+    elif agent_event_eligible_count > 0:
+        agent_event_coverage_status = "covered"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_hotset_audit",
@@ -53958,9 +54176,25 @@ def session_memory_search_hotset_audit(
             "max_shards": max(1, int(max_shards)),
             "selected_shard_count": len(selected_shards),
             "successful_shard_count": len(successful),
+            "failed_shard_count": len(failed),
             "per_shard_timeout_seconds": per_shard_timeout_seconds,
             "top_limit": max(1, int(top_limit)),
             "selected_shards": selected_shards,
+        },
+        "sample_quality": {
+            "status": sample_quality_status,
+            "selected_shard_count": len(selected_shards),
+            "successful_shard_count": len(successful),
+            "failed_shard_count": len(failed),
+            "partial_context_tail_shard_count": partial_context_tail_shard_count,
+            "partial_agent_event_coverage_shard_count": partial_agent_event_coverage_shard_count,
+            "partial_hotset_count_shard_count": partial_hotset_count_shard_count,
+            "hotset_count_precision": "lower_bound" if partial_hotset_count_shard_count else "exact",
+            "context_tail_count_precision": "lower_bound" if partial_context_tail_shard_count else "exact",
+            "agent_event_coverage_count_precision": (
+                "lower_bound" if partial_agent_event_coverage_shard_count else "exact"
+            ),
+            "boundary": "partial hotset counts are route pressure evidence, not proof that gaps are absent",
         },
         "cost_profile": {
             "route_kind": "search_hotset_audit",
@@ -54005,12 +54239,21 @@ def session_memory_search_hotset_audit(
             "agent_event_counts": dict(counters["agent_event_counts"].most_common(max(1, int(top_limit)))),
             "event_type_counts": dict(counters["event_type_counts"].most_common(max(1, int(top_limit)))),
             "route_layer_term_counts": dict(counters["route_layer_term_counts"].most_common(max(1, int(top_limit)))),
+            "measurement_modes": {
+                "hotset_counts": "partial_timeout_budget" if partial_hotset_count_shard_count else "exact",
+                "context_tail": "partial_timeout_budget" if partial_context_tail_shard_count else "exact",
+                "agent_event_coverage": (
+                    "partial_timeout_budget" if partial_agent_event_coverage_shard_count else "exact"
+                ),
+            },
         },
         "agent_event_coverage": {
-            "status": "gap" if agent_event_missing_eligible_count > 0 else ("covered" if agent_event_eligible_count > 0 else "not_observed"),
+            "status": agent_event_coverage_status,
             "eligible_event_count": agent_event_eligible_count,
             "classified_event_count": agent_event_classified_count,
             "missing_eligible_count": agent_event_missing_eligible_count,
+            "count_precision": "lower_bound" if partial_agent_event_coverage_shard_count else "exact",
+            "partial_shard_count": partial_agent_event_coverage_shard_count,
             "coverage_ratio": round(agent_event_classified_count / agent_event_eligible_count, 6)
             if agent_event_eligible_count > 0
             else 0.0,
@@ -54099,6 +54342,7 @@ def session_memory_search_hotset_audit(
 def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
+    sample_quality = payload.get("sample_quality") if isinstance(payload.get("sample_quality"), dict) else {}
     projection = payload.get("projection_context") if isinstance(payload.get("projection_context"), dict) else {}
     agent_event_coverage = payload.get("agent_event_coverage") if isinstance(payload.get("agent_event_coverage"), dict) else {}
     lines = [
@@ -54109,11 +54353,13 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         f"- mutates: `{payload.get('mutates')}`",
         f"- selected_shards: `{sample.get('selected_shard_count')}`",
         f"- successful_shards: `{sample.get('successful_shard_count')}`",
+        f"- failed_shards: `{sample.get('failed_shard_count')}`",
+        f"- sample_quality: `{sample_quality.get('status')}` hotset_precision=`{sample_quality.get('hotset_count_precision')}` context_tail_precision=`{sample_quality.get('context_tail_count_precision')}` agent_event_precision=`{sample_quality.get('agent_event_coverage_count_precision')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- projection_status: `{projection.get('status')}` freshness=`{projection.get('freshness_status')}` actionability=`{projection.get('actionability')}`",
         f"- documents: `{totals.get('document_count')}` events=`{totals.get('event_document_count')}` ratio=`{totals.get('event_document_ratio')}`",
         f"- context_events: `{totals.get('context_event_count')}` candidate_tail=`{totals.get('candidate_context_tail_v1_count')}`",
-        f"- agent_event_coverage: `{agent_event_coverage.get('status')}` eligible=`{agent_event_coverage.get('eligible_event_count')}` missing=`{agent_event_coverage.get('missing_eligible_count')}` ratio=`{agent_event_coverage.get('coverage_ratio')}`",
+        f"- agent_event_coverage: `{agent_event_coverage.get('status')}` precision=`{agent_event_coverage.get('count_precision')}` eligible=`{agent_event_coverage.get('eligible_event_count')}` missing=`{agent_event_coverage.get('missing_eligible_count')}` ratio=`{agent_event_coverage.get('coverage_ratio')}`",
         "",
         "## Pressure Focus",
         "",
@@ -54131,6 +54377,8 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- eligible_event_count: `{agent_event_coverage.get('eligible_event_count')}`")
         lines.append(f"- classified_event_count: `{agent_event_coverage.get('classified_event_count')}`")
         lines.append(f"- missing_eligible_count: `{agent_event_coverage.get('missing_eligible_count')}`")
+        lines.append(f"- count_precision: `{agent_event_coverage.get('count_precision')}`")
+        lines.append(f"- partial_shard_count: `{agent_event_coverage.get('partial_shard_count')}`")
         lines.append(f"- non_agent_event_without_agent_event_count: `{agent_event_coverage.get('non_agent_event_without_agent_event_count')}`")
         lines.append(f"- scope_boundary: {agent_event_coverage.get('scope_boundary')}")
     else:
@@ -54246,68 +54494,78 @@ def search_operational_event_projection_probe_shard(
 
         context_where = "doc_type = 'event' AND usage_role = ?"
         context_params = (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,)
-        candidate_where_unqualified = f"""
-            doc_type = 'event'
-            AND usage_role = ?
-            AND COALESCE(agent_event, '') = ''
-            AND COALESCE(task_episode_id, '') = ''
-            AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
-        """
-        candidate_params_unqualified: list[Any] = [
-            SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
-            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
-        ]
         event_total = count_documents("doc_type = 'event'", index_hint=doc_type_hint)
         direct_actionable_event_count = count_documents(
             f"doc_type = 'event' AND usage_role IN ({direct_placeholders})",
             SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
             index_hint=usage_hint,
         )
-        context_event_count = count_documents(context_where, context_params, index_hint=usage_hint)
+        context_breakdown_row = conn.execute(
+            f"""
+            SELECT
+              COUNT(*) AS context_event_count,
+              SUM(CASE WHEN COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END) AS context_agent_event_count,
+              SUM(CASE WHEN COALESCE(task_episode_id, '') <> '' THEN 1 ELSE 0 END) AS context_task_episode_count,
+              SUM(CASE WHEN COALESCE(event_type, '') IN ({protected_placeholders}) THEN 1 ELSE 0 END) AS context_protected_event_type_count,
+              SUM(CASE WHEN COALESCE(route_signals, '') <> '' THEN 1 ELSE 0 END) AS context_route_signal_preview_count,
+              SUM(CASE WHEN COALESCE(session_act, '') = '' THEN 1 ELSE 0 END) AS context_empty_session_act_count,
+              SUM(CASE WHEN COALESCE(agent_event, '') = ''
+                        AND COALESCE(task_episode_id, '') = ''
+                        AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
+                        THEN 1 ELSE 0 END) AS candidate_context_tail_v1_count,
+              SUM(CASE WHEN COALESCE(agent_event, '') = ''
+                        AND COALESCE(task_episode_id, '') = ''
+                        AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
+                        AND COALESCE(route_signals, '') <> ''
+                        THEN 1 ELSE 0 END) AS candidate_context_tail_with_route_signals_count,
+              SUM(CASE WHEN COALESCE(agent_event, '') = ''
+                        AND COALESCE(task_episode_id, '') = ''
+                        AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
+                        AND COALESCE(route_signals, '') = ''
+                        THEN 1 ELSE 0 END) AS candidate_context_tail_without_route_signals_count
+            FROM documents{usage_hint}
+            WHERE doc_type = 'event'
+              AND usage_role = ?
+            """,
+            (
+                *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+                *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+                *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+                *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+                SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+            ),
+        ).fetchone()
+        context_breakdown = {
+            key: int_value(context_breakdown_row[key]) if context_breakdown_row is not None else 0
+            for key in (
+                "context_event_count",
+                "context_agent_event_count",
+                "context_task_episode_count",
+                "context_protected_event_type_count",
+                "context_route_signal_preview_count",
+                "context_empty_session_act_count",
+                "candidate_context_tail_v1_count",
+                "candidate_context_tail_with_route_signals_count",
+                "candidate_context_tail_without_route_signals_count",
+            )
+        }
+        context_event_count = context_breakdown["context_event_count"]
         result = {
             "event_total": event_total,
             "direct_actionable_event_count": direct_actionable_event_count,
             "context_event_count": context_event_count,
-            "context_agent_event_count": count_documents(
-                f"{context_where} AND COALESCE(agent_event, '') <> ''",
-                context_params,
-                index_hint=usage_hint,
-            ),
-            "context_task_episode_count": count_documents(
-                f"{context_where} AND COALESCE(task_episode_id, '') <> ''",
-                context_params,
-                index_hint=usage_hint,
-            ),
-            "context_protected_event_type_count": count_documents(
-                f"{context_where} AND COALESCE(event_type, '') IN ({protected_placeholders})",
-                [*context_params, *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES],
-                index_hint=usage_hint,
-            ),
-            "context_route_signal_preview_count": count_documents(
-                f"{context_where} AND COALESCE(route_signals, '') <> ''",
-                context_params,
-                index_hint=usage_hint,
-            ),
-            "context_empty_session_act_count": count_documents(
-                f"{context_where} AND COALESCE(session_act, '') = ''",
-                context_params,
-                index_hint=usage_hint,
-            ),
-            "candidate_context_tail_v1_count": count_documents(
-                candidate_where_unqualified,
-                candidate_params_unqualified,
-                index_hint=usage_hint,
-            ),
-            "candidate_context_tail_with_route_signals_count": count_documents(
-                f"{candidate_where_unqualified} AND COALESCE(route_signals, '') <> ''",
-                candidate_params_unqualified,
-                index_hint=usage_hint,
-            ),
-            "candidate_context_tail_without_route_signals_count": count_documents(
-                f"{candidate_where_unqualified} AND COALESCE(route_signals, '') = ''",
-                candidate_params_unqualified,
-                index_hint=usage_hint,
-            ),
+            "context_agent_event_count": context_breakdown["context_agent_event_count"],
+            "context_task_episode_count": context_breakdown["context_task_episode_count"],
+            "context_protected_event_type_count": context_breakdown["context_protected_event_type_count"],
+            "context_route_signal_preview_count": context_breakdown["context_route_signal_preview_count"],
+            "context_empty_session_act_count": context_breakdown["context_empty_session_act_count"],
+            "candidate_context_tail_v1_count": context_breakdown["candidate_context_tail_v1_count"],
+            "candidate_context_tail_with_route_signals_count": context_breakdown[
+                "candidate_context_tail_with_route_signals_count"
+            ],
+            "candidate_context_tail_without_route_signals_count": context_breakdown[
+                "candidate_context_tail_without_route_signals_count"
+            ],
         }
         role_rows = conn.execute(
             """

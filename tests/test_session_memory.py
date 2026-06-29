@@ -16645,6 +16645,99 @@ def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monol
     assert Path(audit["report_markdown"]).exists()
 
 
+def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverage(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    selected = [
+        {"shard": "month/2026-05", "db_path": str(tmp_path / "may.sqlite3"), "status": "current"},
+        {"shard": "month/2026-06", "db_path": str(tmp_path / "june.sqlite3"), "status": "current"},
+    ]
+
+    monkeypatch.setattr(
+        module,
+        "search_operational_event_projection_shard_candidates",
+        lambda _aoa_root, *, max_shards: (selected[:max_shards], {"status": "current"}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_projection_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "large_projection_stack",
+            "freshness_status": "current",
+            "actionability": "replacement_route_ready",
+            "next_route": "use_operational_route_rollup_before_physical_shrinkage",
+            "search_projection": {"raw_text_fallback_status": "structured_first"},
+            "document_hotset": {"status": "large_document_hotset"},
+            "operational_route_rollup": {"status": "current"},
+        },
+    )
+
+    def fake_probe(*, db_path: Path, shard: str, per_shard_timeout_seconds: float, top_limit: int) -> dict[str, Any]:
+        partial = shard == "month/2026-06"
+        return {
+            "ok": True,
+            "status": "sampled",
+            "shard": shard,
+            "db_path": str(db_path),
+            "size_bytes": 1,
+            "size_human": "1 B",
+            "document_count": 10,
+            "event_document_count": 9,
+            "direct_actionable_event_count": 3,
+            "context_event_count": 6,
+            "context_agent_event_count": 2,
+            "context_task_episode_count": 1,
+            "context_protected_event_type_count": 0,
+            "context_route_signal_preview_count": 4,
+            "candidate_context_tail_v1_count": 3,
+            "candidate_context_tail_with_route_signals_count": 2,
+            "candidate_context_tail_without_route_signals_count": 1,
+            "context_tail_measurement_mode": "exact",
+            "doc_type_counts": {"event": 9, "segment": 1},
+            "usage_role_counts": {"context": 6, "usage": 2, "result": 1},
+            "agent_event_counts": {"assistant_answer": 2},
+            "agent_event_eligible_event_count": 2,
+            "agent_event_classified_event_count": 2,
+            "agent_event_missing_eligible_count": 0,
+            "agent_event_coverage_measurement_mode": "partial_timeout_budget" if partial else "exact",
+            "agent_event_coverage_ratio": 1.0,
+            "non_agent_event_without_agent_event_count": 7,
+            "event_type_counts": {"ASSISTANT_MESSAGE": 2, "CONTEXT_STATE": 7},
+            "route_term_cardinality": {"status": "term_cardinality_only", "route_term_count": 0, "layer_counts": {}},
+            "session_hotspots": [],
+            "diagnostics": ["search_hotset_optional_count_skipped:agent_event_missing_eligible"] if partial else [],
+            "elapsed_ms": 20,
+        }
+
+    monkeypatch.setattr(module, "search_hotset_audit_probe_shard", fake_probe)
+
+    audit = module.session_memory_search_hotset_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=2,
+        top_limit=8,
+        write_report=False,
+    )
+
+    assert audit["ok"] is True
+    assert audit["status"] == "hotset_partially_measured"
+    assert audit["sample"]["successful_shard_count"] == 2
+    assert audit["sample"]["failed_shard_count"] == 0
+    assert audit["sample_quality"]["status"] == "partial_sample"
+    assert audit["sample_quality"]["partial_agent_event_coverage_shard_count"] == 1
+    assert audit["sample_quality"]["agent_event_coverage_count_precision"] == "lower_bound"
+    assert audit["totals"]["measurement_modes"]["agent_event_coverage"] == "partial_timeout_budget"
+    assert audit["agent_event_coverage"]["status"] == "partial_unknown"
+    assert audit["agent_event_coverage"]["count_precision"] == "lower_bound"
+    pressure_ids = {item["id"] for item in audit["pressure_focus"]}
+    assert "agent_event_coverage_partial" in pressure_ids
+    assert "agent_event_classification_gap" not in pressure_ids
+
+
 def test_search_operational_projection_plan_samples_candidate_tail_without_mutation(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
