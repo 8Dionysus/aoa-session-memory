@@ -1719,6 +1719,24 @@ Maintenance gates:
   diagnostic for the newest nonmaterialized shard instead of hiding the
   cardinality plan.
 
+- 2026-06-29 search hotset audit proof: `search-hotset-audit --max-shards 3
+  --per-shard-timeout 8 --top-limit 12 --write-report` now provides the fast
+  shard breakdown between the cached `search-projection-plan` and the heavier
+  operational projection planner. The live run wrote
+  `diagnostics/20260629T050248Z__search-hotset-audit.json`, returned
+  `ok=true`, `status=hotset_measured`, `successful_shard_count=3`, empty
+  diagnostics, and completed in `19192ms` without opening the monolith or using
+  FTS. Across the April/May/June structured shards it measured `1,889,196`
+  documents, `1,874,956` event docs (`99.2462%`), `654,790` context events,
+  `458,996` generic context-tail candidates, and `1,428,105` event rows still
+  unclassified by `agent_event`. The pressure focus is therefore event
+  document cardinality, agent-event classification depth, and the remaining
+  monolith raw-text fallback dependency, not SQLite vacuum or full-text shard
+  expansion. Regression proof:
+  `test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monolith`,
+  `test_search_projection_plan_uses_cached_projection_summaries`, and
+  `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`.
+
 - 2026-06-28 operational event projection measurement proof:
   `search-operational-projection-plan --max-shards 2 --per-shard-timeout 5
   --write-report` sampled the two largest structured shard DBs in about

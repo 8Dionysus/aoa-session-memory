@@ -16290,6 +16290,143 @@ def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path,
     assert Path(plan["report_markdown"]).exists()
 
 
+def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monolith(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    conn = module.init_search_db(shard_db, rebuild=True)
+
+    def insert_doc(
+        doc_id: str,
+        *,
+        doc_type: str = "event",
+        event_type: str = "CONTEXT_STATE",
+        usage_role: str = "context",
+        agent_event: str = "",
+        task_episode_id: str = "",
+        route_signal: str = "",
+        session_label: str = "2026-06-28__001__hotset-session",
+    ) -> None:
+        module.insert_search_document(
+            conn,
+            {
+                "id": doc_id,
+                "doc_type": doc_type,
+                "session_id": session_label,
+                "session_label": session_label,
+                "session_title": "Hotset session",
+                "session_date": "2026-06-28",
+                "event_id": doc_id if doc_type == "event" else "",
+                "event_type": event_type if doc_type == "event" else "",
+                "usage_role": usage_role if doc_type == "event" else "",
+                "agent_event": agent_event,
+                "task_episode_id": task_episode_id,
+                "session_act": "tool_context" if route_signal else "",
+                "route_layers": module.packed_route_values(["tool"]) if route_signal else "",
+                "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
+                "title": doc_id,
+                "body": doc_id,
+                "raw_ref": f"raw:line:{doc_id}",
+                "segment_ref": "segments/000__initial-to-latest.md",
+                "segment_index_path": "",
+                "payload_json": "{}",
+            },
+            store_raw_text=False,
+            storage_profile=module.search_document_storage_profile(store_raw_text=False),
+        )
+
+    insert_doc("usage-doc", event_type="TOOL_CALL", usage_role="usage")
+    insert_doc("result-doc", event_type="COMMAND_OUTPUT", usage_role="result")
+    insert_doc("agent-answer-context", agent_event="assistant_answer")
+    insert_doc("task-context", task_episode_id="task-1")
+    insert_doc("protected-context", event_type="ASSISTANT_MESSAGE")
+    insert_doc("candidate-with-route", route_signal=module.route_signal_token("tool", "exec_command"))
+    insert_doc("candidate-without-route")
+    insert_doc("segment-doc", doc_type="segment")
+    conn.commit()
+    conn.close()
+
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_count": 1,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": shard_key,
+                    "shard_db_path": str(shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 8,
+                    "total_with_wal_bytes": shard_db.stat().st_size,
+                    "total_with_wal_human": module.human_size(shard_db.stat().st_size),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    def fake_projection_plan(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "large_projection_stack",
+            "freshness_status": "current",
+            "actionability": "replacement_route_ready",
+            "next_route": "use_operational_route_rollup_before_physical_shrinkage",
+            "search_projection": {"raw_text_fallback_status": "monolith_required_for_raw_text_query"},
+            "document_hotset": {"status": "large_document_hotset"},
+            "operational_route_rollup": {"status": "current"},
+        }
+
+    monkeypatch.setattr(module, "session_memory_search_projection_plan", fake_projection_plan)
+
+    audit = module.session_memory_search_hotset_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        top_limit=8,
+        write_report=True,
+    )
+
+    assert audit["ok"] is True
+    assert audit["mutates"] is False
+    assert audit["status"] == "hotset_measured"
+    assert audit["cost_profile"]["opens_monolith"] is False
+    assert audit["cost_profile"]["uses_fts"] is False
+    assert audit["cost_profile"]["reads_structured_shards"] is True
+    assert audit["sample"]["successful_shard_count"] == 1
+    assert audit["projection_context"]["actionability"] == "replacement_route_ready"
+    assert audit["totals"]["document_count"] == 8
+    assert audit["totals"]["doc_type_counts"]["event"] == 7
+    assert audit["totals"]["doc_type_counts"]["segment"] == 1
+    assert audit["totals"]["event_document_count"] == 7
+    assert audit["totals"]["usage_role_counts"]["context"] == 5
+    assert audit["totals"]["usage_role_counts"]["usage"] == 1
+    assert audit["totals"]["agent_event_counts"]["assistant_answer"] == 1
+    assert audit["totals"]["agent_event_counts"]["unclassified"] == 6
+    assert audit["totals"]["candidate_context_tail_v1_count"] == 2
+    assert audit["totals"]["candidate_context_tail_with_route_signals_count"] == 1
+    assert audit["totals"]["route_layer_term_counts"]["tool"] == 1
+    assert audit["session_hotspots"][0]["document_count"] == 8
+    assert {item["id"] for item in audit["pressure_focus"]} >= {
+        "context_tail_pressure",
+        "agent_event_classification_gap",
+        "raw_text_fallback_dependency",
+    }
+    assert "do_not_delete_monolith_while_raw_text_fallback_depends_on_it" in audit["stop_lines"]
+    assert Path(audit["report_json"]).exists()
+    assert Path(audit["report_markdown"]).exists()
+
+
 def test_search_operational_projection_plan_samples_candidate_tail_without_mutation(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

@@ -130,6 +130,9 @@ SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT = 500_000
 SEARCH_USAGE_ROLE_PROJECTION_VERSION = 1
 SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS = 3
 SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 180.0
+SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS = 3
+SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS = 8.0
+SEARCH_HOTSET_AUDIT_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME = "operational-route-rollup.sqlite3"
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 1
@@ -53083,6 +53086,648 @@ def search_operational_event_projection_shard_candidates(
     return candidates[: max(1, max_shards)], catalog, diagnostics
 
 
+def search_hotset_audit_probe_shard(
+    *,
+    db_path: Path,
+    shard: str,
+    per_shard_timeout_seconds: float = SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS,
+    top_limit: int = SEARCH_HOTSET_AUDIT_TOP_LIMIT,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = started + max(0.1, float(per_shard_timeout_seconds))
+    payload: dict[str, Any] = {
+        "ok": False,
+        "status": "not_started",
+        "shard": shard,
+        "db_path": str(db_path),
+        "size_bytes": 0,
+        "size_human": "0 B",
+        "diagnostics": [],
+    }
+    if not db_path.exists():
+        payload.update({"status": "missing", "diagnostics": ["search_shard_db_missing"]})
+        return payload
+
+    size_bytes = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+    payload.update({"size_bytes": size_bytes, "size_human": human_size(size_bytes)})
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path, timeout=min(1.0, max(0.1, float(per_shard_timeout_seconds))))
+        if not sqlite_table_exists(conn, "documents"):
+            payload.update({"status": "missing_documents_table", "diagnostics": ["search_documents_table_missing"]})
+            return payload
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        required_columns = {
+            "doc_type",
+            "usage_role",
+            "agent_event",
+            "event_type",
+            "task_episode_id",
+            "route_signals",
+            "session_id",
+            "session_label",
+            "session_title",
+            "session_date",
+        }
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            payload.update(
+                {
+                    "status": "schema_missing_columns",
+                    "diagnostics": [f"search_hotset_audit_missing_columns:{','.join(missing_columns)}"],
+                }
+            )
+            return payload
+
+        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
+        index_names = {str(item[1]) for item in conn.execute("PRAGMA index_list(documents)").fetchall()}
+        doc_type_hint = " INDEXED BY idx_documents_doc_type_date" if "idx_documents_doc_type_date" in index_names else ""
+        usage_hint = (
+            " INDEXED BY idx_documents_doc_type_usage_role_date"
+            if "idx_documents_doc_type_usage_role_date" in index_names
+            else doc_type_hint
+        )
+        agent_event_hint = " INDEXED BY idx_documents_agent_event_date" if "idx_documents_agent_event_date" in index_names else doc_type_hint
+        event_type_hint = " INDEXED BY idx_documents_type" if "idx_documents_type" in index_names else doc_type_hint
+        session_hint = " INDEXED BY idx_documents_session" if "idx_documents_session" in index_names else ""
+        limit = max(1, int(top_limit))
+
+        def count_documents(where_sql: str, params: Sequence[Any] = (), *, index_hint: str = "") -> int:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count FROM documents{index_hint} WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()
+            return int_value(row["count"]) if row is not None else 0
+
+        def group_counts(sql: str, params: Sequence[Any] = ()) -> dict[str, int]:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            return {str(row["key"] or "unknown"): int_value(row["count"]) for row in rows}
+
+        document_count_row = conn.execute("SELECT COUNT(*) AS count FROM documents").fetchone()
+        document_count = int_value(document_count_row["count"]) if document_count_row is not None else 0
+        doc_type_counts = group_counts(
+            f"""
+            SELECT COALESCE(NULLIF(doc_type, ''), 'unknown') AS key, COUNT(*) AS count
+            FROM documents{doc_type_hint}
+            GROUP BY key
+            ORDER BY count DESC, key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
+        protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
+        context_where = "doc_type = 'event' AND usage_role = ?"
+        context_params = (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,)
+        candidate_where_unqualified = f"""
+            doc_type = 'event'
+            AND usage_role = ?
+            AND COALESCE(agent_event, '') = ''
+            AND COALESCE(task_episode_id, '') = ''
+            AND COALESCE(event_type, '') NOT IN ({protected_placeholders})
+        """
+        candidate_params_unqualified: list[Any] = [
+            SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+        ]
+
+        event_document_count = count_documents("doc_type = 'event'", index_hint=doc_type_hint)
+        direct_actionable_event_count = count_documents(
+            f"doc_type = 'event' AND usage_role IN ({direct_placeholders})",
+            SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
+            index_hint=usage_hint,
+        )
+        context_event_count = count_documents(context_where, context_params, index_hint=usage_hint)
+        candidate_context_tail_count = count_documents(
+            candidate_where_unqualified,
+            candidate_params_unqualified,
+            index_hint=usage_hint,
+        )
+        role_counts = group_counts(
+            f"""
+            SELECT COALESCE(NULLIF(usage_role, ''), 'unknown') AS key, COUNT(*) AS count
+            FROM documents{usage_hint}
+            WHERE doc_type = 'event'
+            GROUP BY key
+            ORDER BY count DESC, key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        nonblank_agent_event_counts = group_counts(
+            f"""
+            SELECT agent_event AS key, COUNT(*) AS count
+            FROM documents{agent_event_hint}
+            WHERE agent_event <> ''
+            GROUP BY key
+            ORDER BY count DESC, key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        nonblank_agent_event_total_row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM documents{agent_event_hint} WHERE agent_event <> ''"
+        ).fetchone()
+        nonblank_agent_event_total = (
+            int_value(nonblank_agent_event_total_row["count"]) if nonblank_agent_event_total_row is not None else 0
+        )
+        agent_event_counter: Counter[str] = Counter(nonblank_agent_event_counts)
+        agent_event_counter["unclassified"] = max(0, event_document_count - nonblank_agent_event_total)
+        agent_event_counts = dict(agent_event_counter.most_common(limit))
+        event_type_counts = group_counts(
+            f"""
+            SELECT COALESCE(NULLIF(event_type, ''), 'unknown') AS key, COUNT(*) AS count
+            FROM documents{event_type_hint}
+            WHERE doc_type = 'event'
+            GROUP BY key
+            ORDER BY count DESC, key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        top_session_rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(session_label, ''), 'unknown') AS session_label,
+                   COUNT(*) AS document_count
+            FROM documents{session_hint}
+            GROUP BY session_label
+            ORDER BY document_count DESC, session_label ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        session_rows: list[dict[str, Any]] = []
+        for top_row in top_session_rows:
+            label = str(top_row["session_label"] or "")
+            row = conn.execute(
+                f"""
+                SELECT COALESCE(NULLIF(MIN(session_id), ''), 'unknown') AS session_id,
+                       COALESCE(NULLIF(MIN(session_title), ''), '') AS session_title,
+                       MIN(session_date) AS first_session_date,
+                       MAX(session_date) AS last_session_date,
+                       COUNT(*) AS document_count,
+                       SUM(CASE WHEN doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
+                       SUM(CASE WHEN doc_type = 'event' AND usage_role = ? THEN 1 ELSE 0 END) AS context_event_count,
+                       SUM(CASE WHEN doc_type = 'event' AND agent_event = '' THEN 1 ELSE 0 END) AS unclassified_event_count
+                FROM documents{session_hint}
+                WHERE session_label = ?
+                """,
+                (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, label),
+            ).fetchone()
+            if row is None:
+                continue
+            session_rows.append(
+                {
+                    "session_id": str(row["session_id"] or ""),
+                    "session_label": label,
+                    "session_title": str(row["session_title"] or ""),
+                    "first_session_date": str(row["first_session_date"] or ""),
+                    "last_session_date": str(row["last_session_date"] or ""),
+                    "document_count": int_value(row["document_count"]),
+                    "event_document_count": int_value(row["event_document_count"]),
+                    "context_event_count": int_value(row["context_event_count"]),
+                    "unclassified_event_count": int_value(row["unclassified_event_count"]),
+                }
+            )
+        route_layer_counts: dict[str, int] = {}
+        route_term_count = 0
+        route_term_status = "missing_route_terms_table"
+        if sqlite_table_exists(conn, "route_terms"):
+            route_rows = conn.execute(
+                """
+                SELECT COALESCE(NULLIF(layer, ''), 'unknown') AS key, COUNT(*) AS count
+                FROM route_terms
+                GROUP BY key
+                ORDER BY count DESC, key ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            route_layer_counts = {str(row["key"] or "unknown"): int_value(row["count"]) for row in route_rows}
+            term_row = conn.execute("SELECT COUNT(*) AS count FROM route_terms").fetchone()
+            route_term_count = int_value(term_row["count"]) if term_row is not None else 0
+            route_term_status = "term_cardinality_only"
+
+        payload.update(
+            {
+                "ok": True,
+                "status": "sampled",
+                "document_count": document_count,
+                "event_document_count": event_document_count,
+                "event_document_ratio": round(event_document_count / document_count, 6) if document_count > 0 else 0.0,
+                "direct_actionable_event_count": direct_actionable_event_count,
+                "context_event_count": context_event_count,
+                "context_agent_event_count": count_documents(
+                    f"{context_where} AND COALESCE(agent_event, '') <> ''",
+                    context_params,
+                    index_hint=usage_hint,
+                ),
+                "context_task_episode_count": count_documents(
+                    f"{context_where} AND COALESCE(task_episode_id, '') <> ''",
+                    context_params,
+                    index_hint=usage_hint,
+                ),
+                "context_protected_event_type_count": count_documents(
+                    f"{context_where} AND COALESCE(event_type, '') IN ({protected_placeholders})",
+                    [*context_params, *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES],
+                    index_hint=usage_hint,
+                ),
+                "context_route_signal_preview_count": count_documents(
+                    f"{context_where} AND COALESCE(route_signals, '') <> ''",
+                    context_params,
+                    index_hint=usage_hint,
+                ),
+                "candidate_context_tail_v1_count": candidate_context_tail_count,
+                "candidate_context_tail_with_route_signals_count": count_documents(
+                    f"{candidate_where_unqualified} AND COALESCE(route_signals, '') <> ''",
+                    candidate_params_unqualified,
+                    index_hint=usage_hint,
+                ),
+                "candidate_context_tail_without_route_signals_count": count_documents(
+                    f"{candidate_where_unqualified} AND COALESCE(route_signals, '') = ''",
+                    candidate_params_unqualified,
+                    index_hint=usage_hint,
+                ),
+                "doc_type_counts": doc_type_counts,
+                "usage_role_counts": role_counts,
+                "agent_event_counts": agent_event_counts,
+                "event_type_counts": event_type_counts,
+                "route_term_cardinality": {
+                    "status": route_term_status,
+                    "route_term_count": route_term_count,
+                    "layer_counts": route_layer_counts,
+                    "boundary": "route_terms cardinality is not route posting pressure; use operational route-rollup for ref fanout",
+                },
+                "session_hotspots": [
+                    {
+                        "session_id": str(row.get("session_id") or ""),
+                        "session_label": str(row.get("session_label") or ""),
+                        "session_title": str(row.get("session_title") or ""),
+                        "first_session_date": str(row.get("first_session_date") or ""),
+                        "last_session_date": str(row.get("last_session_date") or ""),
+                        "document_count": int_value(row.get("document_count")),
+                        "event_document_count": int_value(row.get("event_document_count")),
+                        "context_event_count": int_value(row.get("context_event_count")),
+                        "unclassified_event_count": int_value(row.get("unclassified_event_count")),
+                    }
+                    for row in session_rows
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+    except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        payload.update(
+            {
+                "ok": False,
+                "status": status,
+                "diagnostics": [f"search_hotset_audit_probe_failed:{status}:{exc}"],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
+            conn.close()
+    return payload
+
+
+def session_memory_search_hotset_audit(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    max_shards: int = SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS,
+    per_shard_timeout_seconds: float = SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS,
+    top_limit: int = SEARCH_HOTSET_AUDIT_TOP_LIMIT,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
+        aoa_root,
+        max_shards=max_shards,
+    )
+    projection_plan = session_memory_search_projection_plan(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        write_report=False,
+    )
+    shard_results = [
+        search_hotset_audit_probe_shard(
+            db_path=Path(str(item.get("db_path") or "")),
+            shard=str(item.get("shard") or ""),
+            per_shard_timeout_seconds=per_shard_timeout_seconds,
+            top_limit=top_limit,
+        )
+        for item in selected_shards
+    ]
+    diagnostics.extend(
+        str(diag)
+        for item in shard_results
+        for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+        if diag
+    )
+    successful = [item for item in shard_results if item.get("ok")]
+    total_keys = (
+        "document_count",
+        "event_document_count",
+        "direct_actionable_event_count",
+        "context_event_count",
+        "context_agent_event_count",
+        "context_task_episode_count",
+        "context_protected_event_type_count",
+        "context_route_signal_preview_count",
+        "candidate_context_tail_v1_count",
+        "candidate_context_tail_with_route_signals_count",
+        "candidate_context_tail_without_route_signals_count",
+    )
+    totals: dict[str, int] = {key: sum(int_value(item.get(key)) for item in successful) for key in total_keys}
+    counters: dict[str, Counter[str]] = {
+        "doc_type_counts": Counter(),
+        "usage_role_counts": Counter(),
+        "agent_event_counts": Counter(),
+        "event_type_counts": Counter(),
+        "route_layer_term_counts": Counter(),
+    }
+    session_hotspots: Counter[tuple[str, str, str]] = Counter()
+    session_event_counts: Counter[tuple[str, str, str]] = Counter()
+    session_context_counts: Counter[tuple[str, str, str]] = Counter()
+    session_unclassified_counts: Counter[tuple[str, str, str]] = Counter()
+    for item in successful:
+        for key in ("doc_type_counts", "usage_role_counts", "agent_event_counts", "event_type_counts"):
+            for label, count in (item.get(key) if isinstance(item.get(key), dict) else {}).items():
+                counters[key][str(label)] += int_value(count)
+        route_terms = item.get("route_term_cardinality") if isinstance(item.get("route_term_cardinality"), dict) else {}
+        for layer, count in (route_terms.get("layer_counts") if isinstance(route_terms.get("layer_counts"), dict) else {}).items():
+            counters["route_layer_term_counts"][str(layer)] += int_value(count)
+        for row in item.get("session_hotspots", []) if isinstance(item.get("session_hotspots"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            token = (
+                str(row.get("session_id") or ""),
+                str(row.get("session_label") or ""),
+                str(row.get("session_title") or ""),
+            )
+            session_hotspots[token] += int_value(row.get("document_count"))
+            session_event_counts[token] += int_value(row.get("event_document_count"))
+            session_context_counts[token] += int_value(row.get("context_event_count"))
+            session_unclassified_counts[token] += int_value(row.get("unclassified_event_count"))
+
+    document_count = int_value(totals.get("document_count"))
+    event_document_count = int_value(totals.get("event_document_count"))
+    context_event_count = int_value(totals.get("context_event_count"))
+    candidate_context_tail_count = int_value(totals.get("candidate_context_tail_v1_count"))
+    unclassified_event_count = counters["agent_event_counts"].get("unclassified", 0)
+    pressure_focus: list[dict[str, Any]] = []
+    if event_document_count >= SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT:
+        pressure_focus.append(
+            {
+                "id": "event_document_cardinality",
+                "status": "active",
+                "count": event_document_count,
+                "reason": "event documents dominate the structured shard hotset",
+            }
+        )
+    if candidate_context_tail_count > 0:
+        pressure_focus.append(
+            {
+                "id": "context_tail_pressure",
+                "status": "active",
+                "count": context_event_count,
+                "candidate_context_tail_v1_count": candidate_context_tail_count,
+                "reason": "context rows are the main candidate for compact operational projection work",
+            }
+        )
+    if unclassified_event_count > 0:
+        pressure_focus.append(
+            {
+                "id": "agent_event_classification_gap",
+                "status": "active",
+                "count": unclassified_event_count,
+                "reason": "unclassified agent_event rows reduce precise answer/reasoning/closeout routing",
+            }
+        )
+    search_projection = projection_plan.get("search_projection") if isinstance(projection_plan.get("search_projection"), dict) else {}
+    if search_projection.get("raw_text_fallback_status") == "monolith_required_for_raw_text_query":
+        pressure_focus.append(
+            {
+                "id": "raw_text_fallback_dependency",
+                "status": "active",
+                "reason": "structured shards are fast projections but literal raw text still depends on the monolith fallback",
+            }
+        )
+
+    if not selected_shards:
+        status = "blocked_by_missing_shard_projection"
+    elif not successful:
+        status = "probe_degraded"
+    else:
+        status = "hotset_measured"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_hotset_audit",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "ok": bool(successful),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "status": status,
+        "catalog_status": catalog.get("status"),
+        "sample": {
+            "selection": "largest_existing_search_shards",
+            "max_shards": max(1, int(max_shards)),
+            "selected_shard_count": len(selected_shards),
+            "successful_shard_count": len(successful),
+            "per_shard_timeout_seconds": per_shard_timeout_seconds,
+            "top_limit": max(1, int(top_limit)),
+            "selected_shards": selected_shards,
+        },
+        "cost_profile": {
+            "route_kind": "search_hotset_audit",
+            "mutates": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "reads_structured_shards": True,
+            "resamples_shards": True,
+            "uses_cached_projection_plan": True,
+            "bounded_by_per_shard_timeout": True,
+        },
+        "projection_context": {
+            "status": projection_plan.get("status"),
+            "freshness_status": projection_plan.get("freshness_status"),
+            "actionability": projection_plan.get("actionability"),
+            "next_route": projection_plan.get("next_route"),
+            "search_projection": search_projection,
+            "document_hotset": projection_plan.get("document_hotset")
+            if isinstance(projection_plan.get("document_hotset"), dict)
+            else {},
+            "operational_route_rollup": projection_plan.get("operational_route_rollup")
+            if isinstance(projection_plan.get("operational_route_rollup"), dict)
+            else {},
+        },
+        "totals": {
+            **totals,
+            "event_document_ratio": round(event_document_count / document_count, 6) if document_count > 0 else 0.0,
+            "candidate_context_tail_v1_ratio": round(candidate_context_tail_count / event_document_count, 6)
+            if event_document_count > 0
+            else 0.0,
+            "candidate_context_tail_with_route_signals_ratio": round(
+                int_value(totals.get("candidate_context_tail_with_route_signals_count")) / candidate_context_tail_count,
+                6,
+            )
+            if candidate_context_tail_count > 0
+            else 0.0,
+            "doc_type_counts": dict(counters["doc_type_counts"].most_common(max(1, int(top_limit)))),
+            "usage_role_counts": dict(counters["usage_role_counts"].most_common(max(1, int(top_limit)))),
+            "agent_event_counts": dict(counters["agent_event_counts"].most_common(max(1, int(top_limit)))),
+            "event_type_counts": dict(counters["event_type_counts"].most_common(max(1, int(top_limit)))),
+            "route_layer_term_counts": dict(counters["route_layer_term_counts"].most_common(max(1, int(top_limit)))),
+        },
+        "session_hotspots": [
+            {
+                "session_id": token[0],
+                "session_label": token[1],
+                "session_title": token[2],
+                "document_count": count,
+                "event_document_count": session_event_counts[token],
+                "context_event_count": session_context_counts[token],
+                "unclassified_event_count": session_unclassified_counts[token],
+            }
+            for token, count in session_hotspots.most_common(max(1, int(top_limit)))
+        ],
+        "pressure_focus": pressure_focus,
+        "shards": shard_results,
+        "next_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-route-rollup-query",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--limit",
+                str(max(1, int(top_limit))),
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--max-shards",
+                str(max(1, int(max_shards))),
+                "--route-rollup-limit",
+                "0",
+                "--write-report",
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "literal-query-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--kind",
+                "auto",
+            ],
+        ],
+        "stop_lines": [
+            "do_not_treat_hotset_counts_as_archive_truth",
+            "do_not_delete_monolith_while_raw_text_fallback_depends_on_it",
+            "do_not_replace_route_rollup_or_raw_refs_with_group_counts",
+            "use_deep_operational_projection_plan_only_when_ref_preservation_design_needs_it",
+        ],
+        "diagnostics": diagnostics,
+        "quality_boundary": "hotset counts are routing pressure evidence only; raw transcripts and segment indexes remain authority",
+        "truth_status": "read_only_structured_shard_hotset_audit_not_archive_truth",
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-hotset-audit",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_hotset_audit_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
+    projection = payload.get("projection_context") if isinstance(payload.get("projection_context"), dict) else {}
+    lines = [
+        "# Search Hotset Audit",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- selected_shards: `{sample.get('selected_shard_count')}`",
+        f"- successful_shards: `{sample.get('successful_shard_count')}`",
+        f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
+        f"- projection_status: `{projection.get('status')}` freshness=`{projection.get('freshness_status')}` actionability=`{projection.get('actionability')}`",
+        f"- documents: `{totals.get('document_count')}` events=`{totals.get('event_document_count')}` ratio=`{totals.get('event_document_ratio')}`",
+        f"- context_events: `{totals.get('context_event_count')}` candidate_tail=`{totals.get('candidate_context_tail_v1_count')}`",
+        "",
+        "## Pressure Focus",
+        "",
+    ]
+    pressure_focus = payload.get("pressure_focus") if isinstance(payload.get("pressure_focus"), list) else []
+    if pressure_focus:
+        for item in pressure_focus:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('id')}`: `{item.get('status')}` count=`{item.get('count', '')}` - {item.get('reason')}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Top Counts", ""])
+    for label, key in (
+        ("doc types", "doc_type_counts"),
+        ("usage roles", "usage_role_counts"),
+        ("agent events", "agent_event_counts"),
+        ("event types", "event_type_counts"),
+        ("route layers", "route_layer_term_counts"),
+    ):
+        lines.append(f"### {label.title()}")
+        counts = totals.get(key) if isinstance(totals.get(key), dict) else {}
+        if counts:
+            for name, count in counts.items():
+                lines.append(f"- `{name}`: `{count}`")
+        else:
+            lines.append("- none")
+        lines.append("")
+    lines.extend(["## Session Hotspots", "", "| session | docs | events | context | unclassified |", "| --- | ---: | ---: | ---: | ---: |"])
+    for item in payload.get("session_hotspots", []) if isinstance(payload.get("session_hotspots"), list) else []:
+        if isinstance(item, dict):
+            lines.append(
+                f"| `{item.get('session_label') or item.get('session_id')}` | `{item.get('document_count')}` | "
+                f"`{item.get('event_document_count')}` | `{item.get('context_event_count')}` | `{item.get('unclassified_event_count')}` |"
+            )
+    lines.extend(["", "## Shards", "", "| shard | status | elapsed_ms | size | docs | events | candidate_tail |", "| --- | --- | ---: | ---: | ---: | ---: | ---: |"])
+    for item in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
+        if isinstance(item, dict):
+            lines.append(
+                f"| `{item.get('shard')}` | `{item.get('status')}` | `{item.get('elapsed_ms')}` | `{item.get('size_human')}` | "
+                f"`{item.get('document_count')}` | `{item.get('event_document_count')}` | `{item.get('candidate_context_tail_v1_count')}` |"
+            )
+    lines.extend(["", "## Stop Lines", ""])
+    for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
+        lines.append(f"- `{item}`")
+    lines.extend(["", "## Diagnostics", ""])
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def search_operational_event_projection_probe_shard(
     *,
     db_path: Path,
@@ -64416,6 +65061,22 @@ def command_search_projection_plan(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_hotset_audit(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_hotset_audit(
+        workspace_root=workspace,
+        aoa_root=root,
+        max_shards=args.max_shards,
+        per_shard_timeout_seconds=args.per_shard_timeout,
+        top_limit=args.top_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search_operational_projection_plan(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -70552,6 +71213,19 @@ def build_parser() -> argparse.ArgumentParser:
     search_projection_plan.add_argument("--aoa-root")
     search_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search projection plan reports under .aoa/diagnostics.")
     search_projection_plan.set_defaults(func=command_search_projection_plan)
+
+    search_hotset_audit = sub.add_parser(
+        "search-hotset-audit",
+        aliases=["search-cardinality-audit", "search-projection-hotset-audit"],
+        help="Fast read-only breakdown of structured shard hotset pressure by doc type, usage role, agent event, route layer, and session.",
+    )
+    search_hotset_audit.add_argument("--workspace-root")
+    search_hotset_audit.add_argument("--aoa-root")
+    search_hotset_audit.add_argument("--max-shards", type=int, default=SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS)
+    search_hotset_audit.add_argument("--per-shard-timeout", type=float, default=SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS)
+    search_hotset_audit.add_argument("--top-limit", type=int, default=SEARCH_HOTSET_AUDIT_TOP_LIMIT)
+    search_hotset_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search hotset audit reports under .aoa/diagnostics.")
+    search_hotset_audit.set_defaults(func=command_search_hotset_audit)
 
     search_operational_projection_plan = sub.add_parser(
         "search-operational-projection-plan",

@@ -327,6 +327,11 @@ When monthly shards are materialized, these agent-event routes accept
 `--use-shards` and return their `search_projection`; this is the preferred
 archive-wide route for MCP/agent answer, closeout, progress, and reasoning
 queries that do not need broad raw-text FTS.
+For search weight/cardinality pressure, route through `search-projection-plan`
+first, then `search-hotset-audit` for the fast shard breakdown by doc type,
+usage role, agent-event class, event type, route term cardinality, and session
+hotspot. Reserve `search-operational-projection-plan` for deeper replacement
+projection design; it is not the normal interactive pressure check.
 Goal lifecycle navigation also returns the same compact provider/freshness
 summary, so an MCP caller can judge projection currency before opening
 generated refs or raw transcript authority.

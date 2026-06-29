@@ -1161,6 +1161,12 @@ python3 scripts/aoa_session_memory.py search-projection-plan \
   --aoa-root /path/to/workspace/.aoa \
   --write-report
 
+python3 scripts/aoa_session_memory.py search-hotset-audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --max-shards 3 \
+  --write-report
+
 python3 scripts/aoa_session_memory.py search-operational-projection-plan \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
@@ -1181,6 +1187,14 @@ python3 scripts/aoa_session_memory.py search-operational-route-rollup-query \
   --key exec_command \
   --limit 12
 ```
+
+`search-hotset-audit` is the fast read-only breakdown between the cached plan
+and the heavier operational projection route. It samples the largest existing
+structured shard DBs with a per-shard timeout, opens no monolith, uses no FTS,
+and reports doc types, usage roles, agent-event classes, event types, route
+term cardinality, and session hotspots. Use it when an agent needs to answer
+"what is heavy and where?" before choosing a deeper route. The packet is
+pressure evidence only; raw transcripts and segment indexes remain authority.
 
 `search-operational-projection-plan` is the bounded follow-up for the compact
 operational event projection lane. It samples existing structured shard DBs,
