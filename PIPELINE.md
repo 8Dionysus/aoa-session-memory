@@ -1152,6 +1152,12 @@ monolith position, timeout posture, and next command without guessing. The
 strategy's `needs_scoped_full_text_for_repeated_literal` flag is the cue to
 materialize scoped full-text before repeating a costly literal load; it is not
 permission to delete the monolith fallback while exact recall depends on it.
+The nested `scoped_full_text_strategy` block names the current state:
+`ready` means the scoped search can use shard FTS now,
+`materialize_scoped_full_text_first` means run the listed shard-scoped
+`search-shards --full-text` command before repeating the scoped query, and
+`choose_date_or_session_scope_before_full_text` means the request is still too
+broad for a scoped materialization recommendation.
 For broad class questions with use/error/consequence intent, the plan includes
 an entity-usage scenario sample route after the inventory/registry route. The
 planner is route advice, not evidence truth; returned commands still route to

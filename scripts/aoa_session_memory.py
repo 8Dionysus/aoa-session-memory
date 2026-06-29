@@ -36945,6 +36945,65 @@ def literal_query_mcp_call(tool_name: str, **kwargs: Any) -> str:
     return f"mcp:{tool_name}({rendered})"
 
 
+def literal_query_scoped_full_text_strategy(
+    *,
+    raw_text_fallback: dict[str, Any],
+    has_literal_text: bool,
+    scoped_by_date_or_session: bool,
+    scoped_query_command: str,
+) -> dict[str, Any]:
+    raw_status = str(raw_text_fallback.get("status") or "unknown")
+    scoped_commands = [
+        item
+        for item in raw_text_fallback.get("scoped_full_text_next_commands", [])
+        if isinstance(item, dict) and item.get("command")
+    ]
+    needs_scoped_full_text = bool(
+        has_literal_text
+        and raw_status in {
+            SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+            "monolith_required_for_raw_text_query",
+        }
+    )
+    ready = has_literal_text and raw_status == "shard_full_text_ready"
+    if ready:
+        status = "ready"
+        next_action = "use_scoped_shard_full_text"
+    elif needs_scoped_full_text and scoped_by_date_or_session and scoped_commands:
+        status = "materialize_scoped_full_text_first"
+        next_action = "run_first_scoped_full_text_materialization_command_then_repeat_scoped_query"
+    elif needs_scoped_full_text and scoped_commands:
+        status = "choose_date_or_session_scope_before_full_text"
+        next_action = "narrow_to_date_or_session_scope_before_materializing_full_text"
+    elif has_literal_text:
+        status = "monolith_fallback_or_scope_unavailable"
+        next_action = str(raw_text_fallback.get("next_route") or "")
+    else:
+        status = "not_needed"
+        next_action = ""
+    return {
+        "status": status,
+        "raw_text_fallback_status": raw_status,
+        "scoped_by_date_or_session": scoped_by_date_or_session,
+        "ready": ready,
+        "needs_scoped_full_text_for_repeated_literal": needs_scoped_full_text,
+        "materialize_before_repeating": status == "materialize_scoped_full_text_first",
+        "scope_required_before_materialization": status == "choose_date_or_session_scope_before_full_text",
+        "candidate_shard_count": raw_text_fallback.get("candidate_shard_count"),
+        "queried_shard_count": raw_text_fallback.get("queried_shard_count"),
+        "full_text_shard_count": raw_text_fallback.get("full_text_shard_count"),
+        "structured_only_shard_count": raw_text_fallback.get("structured_only_shard_count"),
+        "route_blocked_shards": list(raw_text_fallback.get("route_blocked_shards") or []),
+        "materialization_commands": scoped_commands,
+        "first_materialization_command": str(scoped_commands[0].get("command") or "") if scoped_commands else "",
+        "global_full_text_next_command": raw_text_fallback.get("global_full_text_next_command") or "",
+        "post_materialization_query_command": scoped_query_command if scoped_by_date_or_session else "",
+        "quality_tradeoff": raw_text_fallback.get("quality_tradeoff") or "",
+        "weight_tradeoff": raw_text_fallback.get("weight_tradeoff") or "",
+        "next_action": next_action,
+    }
+
+
 def literal_query_route_strategy(
     *,
     shape: dict[str, Any],
@@ -36953,6 +37012,8 @@ def literal_query_route_strategy(
     fallback_plan: dict[str, Any] | None,
     raw_text_fallback: dict[str, Any],
     has_literal_text: bool,
+    scoped_by_date_or_session: bool,
+    scoped_query_command: str,
     query_timeout_ms: int | None,
 ) -> dict[str, Any]:
     query_class = str(shape.get("primary") or LITERAL_QUERY_KIND_HUMAN_PHRASE)
@@ -36982,6 +37043,12 @@ def literal_query_route_strategy(
         )
     raw_status = str(raw_text_fallback.get("status") or "unknown")
     exact_recall_preserved = bool(has_literal_text and fallback_route_id)
+    scoped_full_text_strategy = literal_query_scoped_full_text_strategy(
+        raw_text_fallback=raw_text_fallback,
+        has_literal_text=has_literal_text,
+        scoped_by_date_or_session=scoped_by_date_or_session,
+        scoped_query_command=scoped_query_command,
+    )
     return {
         "query_class": query_class,
         "class_contract": LITERAL_QUERY_CLASS_ROUTE_CONTRACTS.get(query_class, {}),
@@ -36997,13 +37064,8 @@ def literal_query_route_strategy(
         "monolith_is_fallback_only": not monolith_fallback_position or monolith_fallback_position > 1,
         "exact_recall_preserved_by_fallback": exact_recall_preserved,
         "fallback_preserves_exact_recall": exact_recall_preserved,
-        "needs_scoped_full_text_for_repeated_literal": bool(
-            has_literal_text
-            and raw_status in {
-                SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
-                "monolith_required_for_raw_text_query",
-            }
-        ),
+        "needs_scoped_full_text_for_repeated_literal": scoped_full_text_strategy["needs_scoped_full_text_for_repeated_literal"],
+        "scoped_full_text_strategy": scoped_full_text_strategy,
         "query_timeout_ms": normalized_search_fts_query_timeout_ms(query_timeout_ms) if has_literal_text else 0,
         "route_sequence": route_sequence,
     }
@@ -37571,6 +37633,24 @@ def literal_query_plan(
                 "authority": "generated_search_refs",
                 "command": scoped_next.get("command"),
             }
+    scoped_full_text_query_command = ""
+    if has_literal_text and scoped_by_date_or_session:
+        scoped_full_text_query_command = literal_query_command_line(
+            aoa_root=aoa_root,
+            query=text,
+            session=session,
+            doc_type=doc_type,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            agent_event=agent_event,
+            usage_role=usage_role,
+            task_episode_id=task_episode_id,
+            date_from=date_from,
+            date_to=date_to,
+            use_shards=True,
+            max_shards=max_shards,
+            query_timeout_ms=query_timeout_ms,
+        )
     route_strategy = literal_query_route_strategy(
         shape=shape,
         primary_route=primary_route,
@@ -37578,6 +37658,8 @@ def literal_query_plan(
         fallback_plan=fallback_plan,
         raw_text_fallback=raw_text_fallback,
         has_literal_text=has_literal_text,
+        scoped_by_date_or_session=scoped_by_date_or_session,
+        scoped_query_command=scoped_full_text_query_command,
         query_timeout_ms=query_timeout_ms,
     )
     payload = {

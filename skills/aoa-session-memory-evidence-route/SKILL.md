@@ -57,10 +57,12 @@ Use these first routes when available:
   `cost_profile`, `fallback_plan`, and `next_expansion_command` before opening
   raw. The strategy names the literal class, first route, route sequence,
   monolith/raw fallback position, scoped full-text need, and exact-recall
-  posture. For commands, use the planner's command anchor for structured routes
-  and preserve the full command text for exact recall. For exact session ids,
-  use the planner's rehydrate/session search route before global literal
-  fallback.
+  posture. Its nested `scoped_full_text_strategy` says whether a repeated
+  literal load should first materialize a scoped full-text shard, which shard
+  command to run, and which scoped query to repeat afterward. For commands, use
+  the planner's command anchor for structured routes and preserve the full
+  command text for exact recall. For exact session ids, use the planner's
+  rehydrate/session search route before global literal fallback.
 - operational route-rollup navigation: when `maintenance-status`,
   `literal-query-plan`, or another route packet says
   `use_operational_route_rollup_projection`, use
@@ -162,7 +164,9 @@ Prefer packets that expose:
   expanded into shard search, monolith reads, FTS, or raw hydration;
 - literal route strategy, especially `uses_structured_first`, fallback
   position, and whether scoped full-text is needed before repeating a literal
-  load;
+  load; if `scoped_full_text_strategy.status` is
+  `materialize_scoped_full_text_first`, run its first materialization command
+  only as an explicit heavy/operator route and then repeat its scoped query;
 - `raw`, `segment`, `segment_index`, and `session` refs;
 - `next_command` or next expansion route.
 

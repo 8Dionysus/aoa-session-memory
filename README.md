@@ -1342,9 +1342,13 @@ For literal text, path, command, error text, or session-id inputs, use
 compact consumer contract: it names the literal class, cheapest first route,
 ordered route sequence, raw/monolith fallback position, scoped full-text need
 for repeated literal loads, and whether exact recall remains preserved by
-fallback. Exact session ids route to `rehydrate` and session-scoped search
-before global literal fallback; this keeps exact recall available without
-making monolith FTS the first move.
+fallback. Its `scoped_full_text_strategy` block keeps repeated literal loads
+operator-bounded: `materialize_scoped_full_text_first` names the shard
+materialization command and the scoped query to repeat afterward, while
+`choose_date_or_session_scope_before_full_text` tells the agent to narrow the
+query before paying for FTS. Exact session ids route to `rehydrate` and
+session-scoped search before global literal fallback; this keeps exact recall
+available without making monolith FTS the first move.
 
 Query it without losing evidence routing:
 

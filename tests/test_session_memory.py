@@ -19683,6 +19683,26 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert raw_text_fallback["search_projection"]["raw_text_fallback"]["global_full_text_next_command"] == module.search_shard_full_text_command(aoa_root)
     assert raw_text_fallback["result_count"] >= 1
 
+    scoped_literal_before_full_text = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="may-shard-anchor",
+        doc_type="event",
+        date_from="2026-05-01",
+        date_to="2026-05-31",
+        max_shards=2,
+    )
+    before_strategy = scoped_literal_before_full_text["literal_route_strategy"]
+    before_scoped = before_strategy["scoped_full_text_strategy"]
+    assert scoped_literal_before_full_text["primary_route"]["route_id"] == "monolith_raw_text_fallback"
+    assert before_strategy["needs_scoped_full_text_for_repeated_literal"] is True
+    assert before_scoped["status"] == "materialize_scoped_full_text_first"
+    assert before_scoped["scoped_by_date_or_session"] is True
+    assert before_scoped["materialize_before_repeating"] is True
+    assert before_scoped["route_blocked_shards"] == ["month/2026-05"]
+    assert before_scoped["first_materialization_command"] == module.search_shard_full_text_command(aoa_root, "month/2026-05")
+    assert "--use-shards" in before_scoped["post_materialization_query_command"]
+    assert "may-shard-anchor" in before_scoped["post_materialization_query_command"]
+
     full_text_shard = module.materialize_search_shards(
         aoa_root=aoa_root,
         target="all",
@@ -19702,6 +19722,25 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert full_text_fanout["ok"] is True
     assert full_text_fanout["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
     assert full_text_fanout["result_count"] >= 1
+    scoped_literal_after_full_text = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="may-shard-anchor",
+        doc_type="event",
+        date_from="2026-05-01",
+        date_to="2026-05-31",
+        max_shards=2,
+    )
+    after_strategy = scoped_literal_after_full_text["literal_route_strategy"]
+    after_scoped = after_strategy["scoped_full_text_strategy"]
+    assert scoped_literal_after_full_text["primary_route"]["route_id"] == "scoped_shard_full_text"
+    assert after_strategy["fallback_route_id"] == "scoped_shard_full_text"
+    assert after_strategy["uses_fts_first"] is True
+    assert after_strategy["monolith_fallback_position"] == 0
+    assert after_strategy["exact_recall_preserved_by_fallback"] is True
+    assert after_scoped["status"] == "ready"
+    assert after_scoped["ready"] is True
+    assert after_scoped["needs_scoped_full_text_for_repeated_literal"] is False
+    assert after_scoped["post_materialization_query_command"]
 
     june_sessions = module.search_sessions(
         aoa_root=aoa_root,

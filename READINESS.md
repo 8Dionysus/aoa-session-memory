@@ -793,6 +793,18 @@ Last observed result:
   `ok=true`, `sample_count=5`, `failed_count=0`, and primary routes
   `command_structured_search`, `entity_inventory`, `entity_usage_chain`,
   `route_signal_structured_search`, and `session_rehydrate`.
+- 2026-06-29 scoped full-text literal strategy proof: the planner now nests
+  `scoped_full_text_strategy` inside `literal_route_strategy`. A live read-only
+  scoped query for `hook timed out` over `2026-06-01..2026-06-30` kept
+  `route_signal_structured_search` first, preserved `monolith_raw_text_fallback`
+  for exact recall, and returned
+  `materialize_scoped_full_text_first` with the exact
+  `search-shards all --shard month/2026-06 --full-text --write-report`
+  materialization command plus the scoped `search --use-shards` query to repeat
+  afterward. Regression coverage also verifies a temp archive before and after
+  full-text materialization: before, the plan recommends scoped materialization;
+  after, the primary route becomes `scoped_shard_full_text` with no monolith
+  fallback position.
 - 2026-06-27 live scenario corpus gate: consumer-loop regression controls now
   live under `config/live-scenario-regression-corpus.json` and are checked by
   `live-scenario-corpus check`. The gate preserves allowed warnings as
