@@ -1723,16 +1723,20 @@ Maintenance gates:
   --per-shard-timeout 8 --top-limit 12 --write-report` now provides the fast
   shard breakdown between the cached `search-projection-plan` and the heavier
   operational projection planner. The live run wrote
-  `diagnostics/20260629T050248Z__search-hotset-audit.json`, returned
+  `diagnostics/20260629T051751Z__search-hotset-audit.json`, returned
   `ok=true`, `status=hotset_measured`, `successful_shard_count=3`, empty
-  diagnostics, and completed in `19192ms` without opening the monolith or using
+  diagnostics, and completed in `13753ms` without opening the monolith or using
   FTS. Across the April/May/June structured shards it measured `1,889,196`
   documents, `1,874,956` event docs (`99.2462%`), `654,790` context events,
-  `458,996` generic context-tail candidates, and `1,428,105` event rows still
-  unclassified by `agent_event`. The pressure focus is therefore event
-  document cardinality, agent-event classification depth, and the remaining
-  monolith raw-text fallback dependency, not SQLite vacuum or full-text shard
-  expansion. Regression proof:
+  `458,996` generic context-tail candidates, and agent-event coverage
+  `covered`: `446,851` eligible assistant/reasoning/agent-state events,
+  `446,851` classified, `0` missing. The `1,428,105` event rows without
+  `agent_event` are intentionally outside that lane and route through
+  `usage_role`, `event_type`, `session_act`, and route signals instead of being
+  treated as an `agent_event` classification gap. The pressure focus is
+  therefore event document cardinality, context-tail projection pressure, and
+  the remaining monolith raw-text fallback dependency, not SQLite vacuum,
+  full-text shard expansion, or blanket agent-event relabeling. Regression proof:
   `test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monolith`,
   `test_search_projection_plan_uses_cached_projection_summaries`, and
   `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`.

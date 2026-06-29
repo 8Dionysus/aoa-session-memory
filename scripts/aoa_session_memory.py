@@ -133,6 +133,18 @@ SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 180.0
 SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS = 3
 SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS = 8.0
 SEARCH_HOTSET_AUDIT_TOP_LIMIT = 12
+SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES = (
+    "ASSISTANT_MESSAGE",
+    "ASSISTANT_REASONING_BOUNDARY",
+    "ASSISTANT_PLAN",
+    "DECISION",
+    "ASSUMPTION",
+    "OPEN_THREAD",
+    "PROCESS_LESSON",
+    "CHECKPOINT",
+    "FINAL_STATE",
+    "DEAD_BRANCH",
+)
 SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME = "operational-route-rollup.sqlite3"
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 1
@@ -53177,6 +53189,7 @@ def search_hotset_audit_probe_shard(
         )
         direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
         protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
+        agent_event_eligible_placeholders = ", ".join("?" for _ in SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES)
         context_where = "doc_type = 'event' AND usage_role = ?"
         context_params = (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,)
         candidate_where_unqualified = f"""
@@ -53231,9 +53244,17 @@ def search_hotset_audit_probe_shard(
         nonblank_agent_event_total = (
             int_value(nonblank_agent_event_total_row["count"]) if nonblank_agent_event_total_row is not None else 0
         )
-        agent_event_counter: Counter[str] = Counter(nonblank_agent_event_counts)
-        agent_event_counter["unclassified"] = max(0, event_document_count - nonblank_agent_event_total)
-        agent_event_counts = dict(agent_event_counter.most_common(limit))
+        agent_event_missing_eligible_count = count_documents(
+            f"""
+            doc_type = 'event'
+            AND COALESCE(agent_event, '') = ''
+            AND COALESCE(event_type, '') IN ({agent_event_eligible_placeholders})
+            """,
+            SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES,
+            index_hint=event_type_hint,
+        )
+        agent_event_eligible_event_count = nonblank_agent_event_total + agent_event_missing_eligible_count
+        non_agent_event_without_agent_event_count = max(0, event_document_count - agent_event_eligible_event_count)
         event_type_counts = group_counts(
             f"""
             SELECT COALESCE(NULLIF(event_type, ''), 'unknown') AS key, COUNT(*) AS count
@@ -53268,14 +53289,24 @@ def search_hotset_audit_probe_shard(
                        COUNT(*) AS document_count,
                        SUM(CASE WHEN doc_type = 'event' THEN 1 ELSE 0 END) AS event_document_count,
                        SUM(CASE WHEN doc_type = 'event' AND usage_role = ? THEN 1 ELSE 0 END) AS context_event_count,
-                       SUM(CASE WHEN doc_type = 'event' AND agent_event = '' THEN 1 ELSE 0 END) AS unclassified_event_count
+                       SUM(CASE WHEN doc_type = 'event' AND COALESCE(agent_event, '') <> '' THEN 1 ELSE 0 END) AS agent_event_classified_event_count,
+                       SUM(CASE WHEN doc_type = 'event'
+                                AND COALESCE(agent_event, '') = ''
+                                AND COALESCE(event_type, '') IN ({agent_event_eligible_placeholders})
+                                THEN 1 ELSE 0 END) AS agent_event_missing_eligible_count
                 FROM documents{session_hint}
                 WHERE session_label = ?
                 """,
-                (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, label),
+                (SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE, *SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES, label),
             ).fetchone()
             if row is None:
                 continue
+            hotspot_agent_event_classified_count = int_value(row["agent_event_classified_event_count"])
+            hotspot_agent_event_missing_eligible_count = int_value(row["agent_event_missing_eligible_count"])
+            hotspot_agent_event_eligible_count = (
+                hotspot_agent_event_classified_count + hotspot_agent_event_missing_eligible_count
+            )
+            hotspot_event_document_count = int_value(row["event_document_count"])
             session_rows.append(
                 {
                     "session_id": str(row["session_id"] or ""),
@@ -53284,9 +53315,14 @@ def search_hotset_audit_probe_shard(
                     "first_session_date": str(row["first_session_date"] or ""),
                     "last_session_date": str(row["last_session_date"] or ""),
                     "document_count": int_value(row["document_count"]),
-                    "event_document_count": int_value(row["event_document_count"]),
+                    "event_document_count": hotspot_event_document_count,
                     "context_event_count": int_value(row["context_event_count"]),
-                    "unclassified_event_count": int_value(row["unclassified_event_count"]),
+                    "agent_event_eligible_event_count": hotspot_agent_event_eligible_count,
+                    "agent_event_classified_event_count": hotspot_agent_event_classified_count,
+                    "agent_event_missing_eligible_count": hotspot_agent_event_missing_eligible_count,
+                    "non_agent_event_without_agent_event_count": max(
+                        0, hotspot_event_document_count - hotspot_agent_event_eligible_count
+                    ),
                 }
             )
         route_layer_counts: dict[str, int] = {}
@@ -53350,7 +53386,18 @@ def search_hotset_audit_probe_shard(
                 ),
                 "doc_type_counts": doc_type_counts,
                 "usage_role_counts": role_counts,
-                "agent_event_counts": agent_event_counts,
+                "agent_event_counts": nonblank_agent_event_counts,
+                "agent_event_eligible_event_count": agent_event_eligible_event_count,
+                "agent_event_classified_event_count": nonblank_agent_event_total,
+                "agent_event_missing_eligible_count": agent_event_missing_eligible_count,
+                "agent_event_coverage_ratio": round(nonblank_agent_event_total / agent_event_eligible_event_count, 6)
+                if agent_event_eligible_event_count > 0
+                else 0.0,
+                "non_agent_event_without_agent_event_count": non_agent_event_without_agent_event_count,
+                "agent_event_scope_boundary": (
+                    "agent_event covers assistant/reasoning/agent-state events; command/tool/output rows route through "
+                    "usage_role, event_type, session_act, and route signals instead"
+                ),
                 "event_type_counts": event_type_counts,
                 "route_term_cardinality": {
                     "status": route_term_status,
@@ -53368,7 +53415,12 @@ def search_hotset_audit_probe_shard(
                         "document_count": int_value(row.get("document_count")),
                         "event_document_count": int_value(row.get("event_document_count")),
                         "context_event_count": int_value(row.get("context_event_count")),
-                        "unclassified_event_count": int_value(row.get("unclassified_event_count")),
+                        "agent_event_eligible_event_count": int_value(row.get("agent_event_eligible_event_count")),
+                        "agent_event_classified_event_count": int_value(row.get("agent_event_classified_event_count")),
+                        "agent_event_missing_eligible_count": int_value(row.get("agent_event_missing_eligible_count")),
+                        "non_agent_event_without_agent_event_count": int_value(
+                            row.get("non_agent_event_without_agent_event_count")
+                        ),
                     }
                     for row in session_rows
                 ],
@@ -53442,6 +53494,10 @@ def session_memory_search_hotset_audit(
         "candidate_context_tail_v1_count",
         "candidate_context_tail_with_route_signals_count",
         "candidate_context_tail_without_route_signals_count",
+        "agent_event_eligible_event_count",
+        "agent_event_classified_event_count",
+        "agent_event_missing_eligible_count",
+        "non_agent_event_without_agent_event_count",
     )
     totals: dict[str, int] = {key: sum(int_value(item.get(key)) for item in successful) for key in total_keys}
     counters: dict[str, Counter[str]] = {
@@ -53454,7 +53510,10 @@ def session_memory_search_hotset_audit(
     session_hotspots: Counter[tuple[str, str, str]] = Counter()
     session_event_counts: Counter[tuple[str, str, str]] = Counter()
     session_context_counts: Counter[tuple[str, str, str]] = Counter()
-    session_unclassified_counts: Counter[tuple[str, str, str]] = Counter()
+    session_agent_event_eligible_counts: Counter[tuple[str, str, str]] = Counter()
+    session_agent_event_classified_counts: Counter[tuple[str, str, str]] = Counter()
+    session_agent_event_missing_eligible_counts: Counter[tuple[str, str, str]] = Counter()
+    session_non_agent_event_without_agent_event_counts: Counter[tuple[str, str, str]] = Counter()
     for item in successful:
         for key in ("doc_type_counts", "usage_role_counts", "agent_event_counts", "event_type_counts"):
             for label, count in (item.get(key) if isinstance(item.get(key), dict) else {}).items():
@@ -53473,13 +53532,22 @@ def session_memory_search_hotset_audit(
             session_hotspots[token] += int_value(row.get("document_count"))
             session_event_counts[token] += int_value(row.get("event_document_count"))
             session_context_counts[token] += int_value(row.get("context_event_count"))
-            session_unclassified_counts[token] += int_value(row.get("unclassified_event_count"))
+            session_agent_event_eligible_counts[token] += int_value(row.get("agent_event_eligible_event_count"))
+            session_agent_event_classified_counts[token] += int_value(row.get("agent_event_classified_event_count"))
+            session_agent_event_missing_eligible_counts[token] += int_value(
+                row.get("agent_event_missing_eligible_count")
+            )
+            session_non_agent_event_without_agent_event_counts[token] += int_value(
+                row.get("non_agent_event_without_agent_event_count")
+            )
 
     document_count = int_value(totals.get("document_count"))
     event_document_count = int_value(totals.get("event_document_count"))
     context_event_count = int_value(totals.get("context_event_count"))
     candidate_context_tail_count = int_value(totals.get("candidate_context_tail_v1_count"))
-    unclassified_event_count = counters["agent_event_counts"].get("unclassified", 0)
+    agent_event_eligible_count = int_value(totals.get("agent_event_eligible_event_count"))
+    agent_event_classified_count = int_value(totals.get("agent_event_classified_event_count"))
+    agent_event_missing_eligible_count = int_value(totals.get("agent_event_missing_eligible_count"))
     pressure_focus: list[dict[str, Any]] = []
     if event_document_count >= SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT:
         pressure_focus.append(
@@ -53500,13 +53568,15 @@ def session_memory_search_hotset_audit(
                 "reason": "context rows are the main candidate for compact operational projection work",
             }
         )
-    if unclassified_event_count > 0:
+    if agent_event_missing_eligible_count > 0:
         pressure_focus.append(
             {
                 "id": "agent_event_classification_gap",
                 "status": "active",
-                "count": unclassified_event_count,
-                "reason": "unclassified agent_event rows reduce precise answer/reasoning/closeout routing",
+                "count": agent_event_missing_eligible_count,
+                "eligible_event_count": agent_event_eligible_count,
+                "classified_event_count": agent_event_classified_count,
+                "reason": "eligible assistant/reasoning events without agent_event reduce precise answer/reasoning/closeout routing",
             }
         )
     search_projection = projection_plan.get("search_projection") if isinstance(projection_plan.get("search_projection"), dict) else {}
@@ -53579,11 +53649,29 @@ def session_memory_search_hotset_audit(
             )
             if candidate_context_tail_count > 0
             else 0.0,
+            "agent_event_coverage_ratio": round(agent_event_classified_count / agent_event_eligible_count, 6)
+            if agent_event_eligible_count > 0
+            else 0.0,
             "doc_type_counts": dict(counters["doc_type_counts"].most_common(max(1, int(top_limit)))),
             "usage_role_counts": dict(counters["usage_role_counts"].most_common(max(1, int(top_limit)))),
             "agent_event_counts": dict(counters["agent_event_counts"].most_common(max(1, int(top_limit)))),
             "event_type_counts": dict(counters["event_type_counts"].most_common(max(1, int(top_limit)))),
             "route_layer_term_counts": dict(counters["route_layer_term_counts"].most_common(max(1, int(top_limit)))),
+        },
+        "agent_event_coverage": {
+            "status": "gap" if agent_event_missing_eligible_count > 0 else ("covered" if agent_event_eligible_count > 0 else "not_observed"),
+            "eligible_event_count": agent_event_eligible_count,
+            "classified_event_count": agent_event_classified_count,
+            "missing_eligible_count": agent_event_missing_eligible_count,
+            "coverage_ratio": round(agent_event_classified_count / agent_event_eligible_count, 6)
+            if agent_event_eligible_count > 0
+            else 0.0,
+            "non_agent_event_without_agent_event_count": int_value(totals.get("non_agent_event_without_agent_event_count")),
+            "eligible_event_types": list(SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES),
+            "scope_boundary": (
+                "agent_event is intentionally scoped to assistant/reasoning/agent-state events; operational command/tool/output "
+                "rows should be classified through usage_role, event_type, session_act, and route signals"
+            ),
         },
         "session_hotspots": [
             {
@@ -53593,7 +53681,10 @@ def session_memory_search_hotset_audit(
                 "document_count": count,
                 "event_document_count": session_event_counts[token],
                 "context_event_count": session_context_counts[token],
-                "unclassified_event_count": session_unclassified_counts[token],
+                "agent_event_eligible_event_count": session_agent_event_eligible_counts[token],
+                "agent_event_classified_event_count": session_agent_event_classified_counts[token],
+                "agent_event_missing_eligible_count": session_agent_event_missing_eligible_counts[token],
+                "non_agent_event_without_agent_event_count": session_non_agent_event_without_agent_event_counts[token],
             }
             for token, count in session_hotspots.most_common(max(1, int(top_limit)))
         ],
@@ -53661,6 +53752,7 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     projection = payload.get("projection_context") if isinstance(payload.get("projection_context"), dict) else {}
+    agent_event_coverage = payload.get("agent_event_coverage") if isinstance(payload.get("agent_event_coverage"), dict) else {}
     lines = [
         "# Search Hotset Audit",
         "",
@@ -53673,6 +53765,7 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         f"- projection_status: `{projection.get('status')}` freshness=`{projection.get('freshness_status')}` actionability=`{projection.get('actionability')}`",
         f"- documents: `{totals.get('document_count')}` events=`{totals.get('event_document_count')}` ratio=`{totals.get('event_document_ratio')}`",
         f"- context_events: `{totals.get('context_event_count')}` candidate_tail=`{totals.get('candidate_context_tail_v1_count')}`",
+        f"- agent_event_coverage: `{agent_event_coverage.get('status')}` eligible=`{agent_event_coverage.get('eligible_event_count')}` missing=`{agent_event_coverage.get('missing_eligible_count')}` ratio=`{agent_event_coverage.get('coverage_ratio')}`",
         "",
         "## Pressure Focus",
         "",
@@ -53682,6 +53775,16 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         for item in pressure_focus:
             if isinstance(item, dict):
                 lines.append(f"- `{item.get('id')}`: `{item.get('status')}` count=`{item.get('count', '')}` - {item.get('reason')}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Agent Event Coverage", ""])
+    if agent_event_coverage:
+        lines.append(f"- status: `{agent_event_coverage.get('status')}`")
+        lines.append(f"- eligible_event_count: `{agent_event_coverage.get('eligible_event_count')}`")
+        lines.append(f"- classified_event_count: `{agent_event_coverage.get('classified_event_count')}`")
+        lines.append(f"- missing_eligible_count: `{agent_event_coverage.get('missing_eligible_count')}`")
+        lines.append(f"- non_agent_event_without_agent_event_count: `{agent_event_coverage.get('non_agent_event_without_agent_event_count')}`")
+        lines.append(f"- scope_boundary: {agent_event_coverage.get('scope_boundary')}")
     else:
         lines.append("- none")
     lines.extend(["", "## Top Counts", ""])
@@ -53700,12 +53803,22 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         else:
             lines.append("- none")
         lines.append("")
-    lines.extend(["## Session Hotspots", "", "| session | docs | events | context | unclassified |", "| --- | ---: | ---: | ---: | ---: |"])
+    lines.extend(
+        [
+            "## Session Hotspots",
+            "",
+            "| session | docs | events | context | agent eligible | agent missing | non-agent blank |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for item in payload.get("session_hotspots", []) if isinstance(payload.get("session_hotspots"), list) else []:
         if isinstance(item, dict):
             lines.append(
                 f"| `{item.get('session_label') or item.get('session_id')}` | `{item.get('document_count')}` | "
-                f"`{item.get('event_document_count')}` | `{item.get('context_event_count')}` | `{item.get('unclassified_event_count')}` |"
+                f"`{item.get('event_document_count')}` | `{item.get('context_event_count')}` | "
+                f"`{item.get('agent_event_eligible_event_count')}` | "
+                f"`{item.get('agent_event_missing_eligible_count')}` | "
+                f"`{item.get('non_agent_event_without_agent_event_count')}` |"
             )
     lines.extend(["", "## Shards", "", "| shard | status | elapsed_ms | size | docs | events | candidate_tail |", "| --- | --- | ---: | ---: | ---: | ---: | ---: |"])
     for item in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:

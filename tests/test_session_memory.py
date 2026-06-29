@@ -16338,9 +16338,9 @@ def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monol
 
     insert_doc("usage-doc", event_type="TOOL_CALL", usage_role="usage")
     insert_doc("result-doc", event_type="COMMAND_OUTPUT", usage_role="result")
-    insert_doc("agent-answer-context", agent_event="assistant_answer")
+    insert_doc("agent-answer-context", event_type="ASSISTANT_MESSAGE", agent_event="assistant_answer")
     insert_doc("task-context", task_episode_id="task-1")
-    insert_doc("protected-context", event_type="ASSISTANT_MESSAGE")
+    insert_doc("protected-context", event_type="USER_INTENT")
     insert_doc("candidate-with-route", route_signal=module.route_signal_token("tool", "exec_command"))
     insert_doc("candidate-without-route")
     insert_doc("segment-doc", doc_type="segment")
@@ -16412,16 +16412,27 @@ def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monol
     assert audit["totals"]["usage_role_counts"]["context"] == 5
     assert audit["totals"]["usage_role_counts"]["usage"] == 1
     assert audit["totals"]["agent_event_counts"]["assistant_answer"] == 1
-    assert audit["totals"]["agent_event_counts"]["unclassified"] == 6
+    assert "unclassified" not in audit["totals"]["agent_event_counts"]
+    assert audit["totals"]["agent_event_eligible_event_count"] == 1
+    assert audit["totals"]["agent_event_classified_event_count"] == 1
+    assert audit["totals"]["agent_event_missing_eligible_count"] == 0
+    assert audit["totals"]["agent_event_coverage_ratio"] == 1.0
+    assert audit["totals"]["non_agent_event_without_agent_event_count"] == 6
+    assert audit["agent_event_coverage"]["status"] == "covered"
+    assert audit["agent_event_coverage"]["missing_eligible_count"] == 0
+    assert audit["agent_event_coverage"]["non_agent_event_without_agent_event_count"] == 6
     assert audit["totals"]["candidate_context_tail_v1_count"] == 2
     assert audit["totals"]["candidate_context_tail_with_route_signals_count"] == 1
     assert audit["totals"]["route_layer_term_counts"]["tool"] == 1
     assert audit["session_hotspots"][0]["document_count"] == 8
-    assert {item["id"] for item in audit["pressure_focus"]} >= {
-        "context_tail_pressure",
-        "agent_event_classification_gap",
-        "raw_text_fallback_dependency",
-    }
+    assert audit["session_hotspots"][0]["agent_event_eligible_event_count"] == 1
+    assert audit["session_hotspots"][0]["agent_event_classified_event_count"] == 1
+    assert audit["session_hotspots"][0]["agent_event_missing_eligible_count"] == 0
+    assert audit["session_hotspots"][0]["non_agent_event_without_agent_event_count"] == 6
+    assert "unclassified_event_count" not in audit["session_hotspots"][0]
+    pressure_ids = {item["id"] for item in audit["pressure_focus"]}
+    assert pressure_ids >= {"context_tail_pressure", "raw_text_fallback_dependency"}
+    assert "agent_event_classification_gap" not in pressure_ids
     assert "do_not_delete_monolith_while_raw_text_fallback_depends_on_it" in audit["stop_lines"]
     assert Path(audit["report_json"]).exists()
     assert Path(audit["report_markdown"]).exists()

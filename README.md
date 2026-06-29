@@ -1192,9 +1192,14 @@ python3 scripts/aoa_session_memory.py search-operational-route-rollup-query \
 and the heavier operational projection route. It samples the largest existing
 structured shard DBs with a per-shard timeout, opens no monolith, uses no FTS,
 and reports doc types, usage roles, agent-event classes, event types, route
-term cardinality, and session hotspots. Use it when an agent needs to answer
-"what is heavy and where?" before choosing a deeper route. The packet is
-pressure evidence only; raw transcripts and segment indexes remain authority.
+term cardinality, scoped agent-event coverage, and session hotspots. Use it
+when an agent needs to answer "what is heavy and where?" before choosing a
+deeper route. `agent_event` coverage is intentionally scoped to
+assistant/reasoning/agent-state events; command, tool, output, and operational
+rows without `agent_event` route through `usage_role`, `event_type`,
+`session_act`, and route signals instead of becoming blanket classification
+gaps. The packet is pressure evidence only; raw transcripts and segment
+indexes remain authority.
 
 `search-operational-projection-plan` is the bounded follow-up for the compact
 operational event projection lane. It samples existing structured shard DBs,
