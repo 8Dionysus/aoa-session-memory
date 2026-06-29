@@ -396,6 +396,9 @@ generated shard projection. Reports expose `pre_filter_selected_count`,
 `selected_sessions`, and budget-exhausted `remaining_sessions` / `active_session`
 phase packets so operators can prove the run touched only the intended stale
 rows and can see which heavy session or indexing phase consumed the budget.
+Dirty-only selection is cheap-first by catalog `document_count`, so small stale
+rows can be repaired before a known heavy-tail session without hiding the heavy
+session from the remaining packet.
 Scoped shard maintenance refreshes `search/catalog.json` from the selected
 records plus existing catalog fallback, rather than forcing a full live
 session-index scan after every dirty-only tick.

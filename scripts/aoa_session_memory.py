@@ -28873,8 +28873,7 @@ def filter_search_records_to_dirty_shard_sessions(
         shard=shard,
         include_deferred_live=include_deferred_live,
     )
-    selected: list[dict[str, Any]] = []
-    selected_session_rows: list[dict[str, Any]] = []
+    selected_entries: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     skipped_current = 0
     skipped_deferred_live = 0
     for record in records:
@@ -28883,27 +28882,37 @@ def filter_search_records_to_dirty_shard_sessions(
             str(record.get("session_label") or session_dir_from_record(record).name),
         ]
         if any(key and key in dirty_keys for key in keys):
-            selected.append(record)
             catalog_item = next((dirty_keys[key] for key in keys if key and key in dirty_keys), None)
-            if len(selected_session_rows) < OPS_SLOW_SESSION_SAMPLE_LIMIT:
-                selected_session_rows.append(
-                    search_record_route_sample(
-                        record,
-                        catalog_item=catalog_item,
-                        shard=shard or search_shard_key_for_record(record),
-                        record_index=len(selected),
-                    )
-                )
+            selected_entries.append((record, catalog_item))
         elif any(key and key in deferred_live_keys for key in keys):
             skipped_deferred_live += 1
         else:
             skipped_current += 1
+    selected_entries.sort(
+        key=lambda pair: (
+            int_value((pair[1] or {}).get("document_count"), int_value(pair[0].get("document_count"))),
+            str((pair[1] or {}).get("session_label") or pair[0].get("session_label") or ""),
+            str((pair[1] or {}).get("session_id") or pair[0].get("session_id") or ""),
+        )
+    )
+    selected = [record for record, _catalog_item in selected_entries]
+    selected_session_rows: list[dict[str, Any]] = []
+    for index, (record, catalog_item) in enumerate(selected_entries[:OPS_SLOW_SESSION_SAMPLE_LIMIT], start=1):
+        selected_session_rows.append(
+            search_record_route_sample(
+                record,
+                catalog_item=catalog_item,
+                shard=shard or search_shard_key_for_record(record),
+                record_index=index,
+            )
+        )
     return selected, {
         "dirty_candidate_count": int_value(catalog_counts.get("dirty_candidate_count")),
         "deferred_live_skipped_count": skipped_deferred_live,
         "pre_filter_selected_count": len(records),
         "dirty_selected_count": len(selected),
         "skipped_current_count": skipped_current,
+        "selection_order": "catalog_document_count_asc",
         "dirty_selected_sessions": selected_session_rows,
     }
 
@@ -28930,6 +28939,7 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
         f"- pre_filter_selected_count: `{payload.get('pre_filter_selected_count')}`",
         f"- dirty_candidate_count: `{payload.get('dirty_candidate_count')}`",
         f"- dirty_selected_count: `{payload.get('dirty_selected_count')}`",
+        f"- dirty_selection_order: `{payload.get('dirty_selection_order')}`",
         f"- dirty_pre_limit_selected_count: `{payload.get('dirty_pre_limit_selected_count')}`",
         f"- dirty_limit: `{payload.get('dirty_limit')}`",
         f"- dirty_limited_count: `{payload.get('dirty_limited_count')}`",
@@ -29363,6 +29373,7 @@ def materialize_search_shards(
         "include_deferred_live": include_deferred_live,
         "dirty_candidate_count": dirty_selection.get("dirty_candidate_count", 0),
         "dirty_selected_count": dirty_selection.get("dirty_selected_count", 0),
+        "dirty_selection_order": dirty_selection.get("selection_order"),
         "dirty_pre_limit_selected_count": dirty_selection.get("dirty_pre_limit_selected_count"),
         "dirty_limit": dirty_selection.get("dirty_limit"),
         "dirty_limited_count": dirty_selection.get("dirty_limited_count"),

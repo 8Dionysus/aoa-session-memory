@@ -209,11 +209,13 @@ Build the `.aoa` session-memory mechanism end to end:
   `deferred_live_skipped_count`. It also reports `selected_sessions`, phase
   timings, and budget-exhausted `active_session` / `remaining_sessions` rows,
   so a large dirty session becomes an explicit heavy-tail route instead of a
-  silent `processed_count=0`. Scoped dirty-only catalog refresh uses selected
-  records plus existing catalog fallback, avoiding a full live session-index
-  scan after each bounded shard tick. This gives operators an automatic route
-  for “repair the few stale sessions in this shard” without rematerializing the
-  whole month or masking live-tail catch-up.
+  silent `processed_count=0`. Dirty-only selection is cheap-first by catalog
+  `document_count`, so small stale rows can drain before a known heavy-tail
+  session. Scoped dirty-only catalog refresh uses selected records plus
+  existing catalog fallback, avoiding a full live session-index scan after each
+  bounded shard tick. This gives operators an automatic route for “repair the
+  few stale sessions in this shard” without rematerializing the whole month or
+  masking live-tail catch-up.
 - `maintenance-status` surfaces actionable search-shard tails in the agent
   packet: `next_actions` can include `refresh_search_shard_structured` beside
   graph/live-tail repair, while `agent_route.search_shard_next_action` carries
@@ -234,6 +236,11 @@ Build the `.aoa` session-memory mechanism end to end:
   used `selected_records_with_catalog_fallback` in `134ms` instead of the prior
   full-scan tail, while the heavy session remained an explicit budget-exhausted
   follow-up.
+  A follow-up cheap-first live slice selected
+  `2026-06-29__001__codex-in-memories` before the Gmail heavy-tail row and
+  processed it in `217ms` (`document_count=5`), reducing `month/2026-06`
+  stale rows from `2` to `1`; `maintenance-status` then switched the shard
+  action to `search_shard_structured_dirty_only_drip` with `dirty_drip_limit=1`.
 - Operations warnings distinguish current failures from repaired shard
   freshness failures: an `index-maintenance` report that failed only because a
   monthly shard had `search_documents_stale_segment_refs` is no longer kept as

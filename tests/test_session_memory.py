@@ -20524,6 +20524,7 @@ def test_search_shard_dirty_selection_skips_deferred_live_by_default(tmp_path: P
     assert [item["session_id"] for item in selected] == ["stale-session"]
     assert stats["dirty_candidate_count"] == 1
     assert stats["dirty_selected_count"] == 1
+    assert stats["selection_order"] == "catalog_document_count_asc"
     assert stats["deferred_live_skipped_count"] == 1
     assert stats["skipped_current_count"] == 1
 
@@ -20537,6 +20538,53 @@ def test_search_shard_dirty_selection_skips_deferred_live_by_default(tmp_path: P
     assert [item["session_id"] for item in selected_with_deferred] == ["deferred-session", "stale-session"]
     assert stats_with_deferred["dirty_candidate_count"] == 2
     assert stats_with_deferred["deferred_live_skipped_count"] == 0
+
+
+def test_search_shard_dirty_selection_prioritizes_small_catalog_rows(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "sessions": [
+                {
+                    "session_id": "heavy-session",
+                    "session_label": "2026-06-13__003__heavy",
+                    "shard": "month/2026-06",
+                    "shard_status": "stale",
+                    "shard_materialized": False,
+                    "document_count": 208490,
+                    "freshness": {"status": "current"},
+                },
+                {
+                    "session_id": "small-session",
+                    "session_label": "2026-06-29__001__small",
+                    "shard": "month/2026-06",
+                    "shard_status": "stale",
+                    "shard_materialized": False,
+                    "document_count": 5,
+                    "freshness": {"status": "current"},
+                },
+            ],
+        },
+    )
+    records = [
+        {"session_id": "heavy-session", "session_label": "2026-06-13__003__heavy"},
+        {"session_id": "small-session", "session_label": "2026-06-29__001__small"},
+    ]
+
+    selected, stats = module.filter_search_records_to_dirty_shard_sessions(
+        aoa_root,
+        records,
+        shard="month/2026-06",
+    )
+
+    assert [item["session_id"] for item in selected] == ["small-session", "heavy-session"]
+    assert stats["selection_order"] == "catalog_document_count_asc"
+    assert [item["session_id"] for item in stats["dirty_selected_sessions"]] == ["small-session", "heavy-session"]
+    assert [item["document_count"] for item in stats["dirty_selected_sessions"]] == [5, 208490]
 
 
 def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tmp_path: Path) -> None:
