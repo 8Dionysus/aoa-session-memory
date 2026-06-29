@@ -19189,6 +19189,7 @@ def maintain_indexes(
     entity_registry_search_command = (
         base
         + ["entity-registry-search-sync", *root_args]
+        + ["--observed-source", "auto"]
         + ["--write-report"]
     )
     operational_route_rollup_command = (
