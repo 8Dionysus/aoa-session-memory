@@ -4656,6 +4656,16 @@ def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> Non
             "uses_fts": False,
             "hydrates_body": False,
         },
+        "agent_route_summary": {
+            "status": "covered",
+            "covered_lane_count": 3,
+            "missing_lane_count": 0,
+            "lanes": [
+                {"id": "tools", "status": "covered"},
+                {"id": "mcp", "status": "covered"},
+                {"id": "hooks", "status": "covered"},
+            ],
+        },
     }
 
     result = module.live_scenario_result("route_rollup_query", payload, elapsed_ms=7)
@@ -4668,6 +4678,8 @@ def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> Non
     assert result["first_ref"]["raw"] == "raw:line:1"
     assert result["uses_materialized_route_rollup"] is True
     assert result["resamples_shards"] is False
+    assert result["agent_route_summary_status"] == "covered"
+    assert result["agent_route_covered_lane_count"] == 3
 
     slow_payload = {
         **payload,
@@ -4680,6 +4692,12 @@ def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> Non
 
     assert slow_result["status"] == "warn"
     assert "route_rollup_query_opens_monolith" in slow_result["quality_flags"]
+
+    no_summary_payload = {key: value for key, value in payload.items() if key != "agent_route_summary"}
+    no_summary_result = module.live_scenario_result("route_rollup_query", no_summary_payload, elapsed_ms=8)
+
+    assert no_summary_result["status"] == "warn"
+    assert "route_rollup_query_agent_route_summary_missing_or_empty" in no_summary_result["quality_flags"]
 
 
 def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
@@ -4709,6 +4727,16 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
                 "uses_fts": False,
                 "hydrates_body": False,
             },
+            "agent_route_summary": {
+                "status": "covered",
+                "covered_lane_count": 3,
+                "missing_lane_count": 0,
+                "lanes": [
+                    {"id": "tools", "status": "covered"},
+                    {"id": "mcp", "status": "covered"},
+                    {"id": "hooks", "status": "covered"},
+                ],
+            },
         }
 
     monkeypatch.setattr(module, "session_memory_search_operational_route_rollup_query", fake_route_rollup_query)
@@ -4728,6 +4756,7 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
     assert scenario["status"] == "passed"
     assert scenario["result_count"] == 1
     assert scenario["uses_materialized_route_rollup"] is True
+    assert scenario["agent_route_summary_status"] == "covered"
     assert scenario["opens_monolith"] is False
 
 
@@ -16153,6 +16182,19 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
                         "raw_refs": ["raw:a:1"],
                         "segment_refs": ["segments/a.md"],
                         "session_ids": ["session-a"],
+                    },
+                    {
+                        "shard": "month/2026-05",
+                        "layer": "mcp",
+                        "key": "aoa_session_memory_mcp",
+                        "route_signal": module.route_signal_token("mcp", "aoa_session_memory_mcp"),
+                        "posting_count": 2,
+                        "session_count": 1,
+                        "first_session_date": "2026-05-01",
+                        "last_session_date": "2026-05-30",
+                        "raw_refs": ["raw:mcp:1"],
+                        "segment_refs": ["segments/mcp.md"],
+                        "session_ids": ["session-mcp"],
                     }
                 ],
             },
@@ -16179,6 +16221,32 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
                         "raw_refs": ["raw:b:1"],
                         "segment_refs": ["segments/b.md"],
                         "session_ids": ["session-b"],
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "hook",
+                        "key": "precompact",
+                        "route_signal": module.route_signal_token("hook", "precompact"),
+                        "posting_count": 2,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:hook:1"],
+                        "segment_refs": ["segments/hook.md"],
+                        "session_ids": ["session-hook"],
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "failure_mode",
+                        "key": "timeout",
+                        "route_signal": module.route_signal_token("failure_mode", "timeout"),
+                        "posting_count": 1,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:error:1"],
+                        "segment_refs": ["segments/error.md"],
+                        "session_ids": ["session-error"],
                     }
                 ],
             },
@@ -16211,8 +16279,23 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert result["segment_refs"] == ["segments/a.md", "segments/b.md"]
     assert result["session_ids"] == ["session-a", "session-b"]
     assert payload["quality"]["raw_or_segment_ref_present"] is True
+    assert payload["quality"]["agent_route_summary_status"] == "covered"
+    assert payload["quality"]["agent_route_covered_lane_count"] >= 3
     assert payload["totals"]["matched_group_count"] == 1
-    assert payload["totals"]["source_candidate_route_posting_count"] == 8
+    assert payload["totals"]["source_candidate_route_posting_count"] == 13
+    assert payload["agent_route_summary"]["status"] == "covered"
+    assert payload["agent_route_summary"]["truth_status"] == "generated_search_route_rollup_agent_route_summary_not_archive_truth"
+    lanes = {item["id"]: item for item in payload["agent_route_summary"]["lanes"]}
+    assert lanes["tools"]["status"] == "covered"
+    assert lanes["tools"]["top_keys"][0]["key"] == "exec_command"
+    assert lanes["mcp"]["status"] == "covered"
+    assert lanes["mcp"]["top_keys"][0]["key"] == "aoa_session_memory_mcp"
+    assert lanes["hooks"]["status"] == "covered"
+    assert lanes["hooks"]["preferred_first_route"] == "hook_receipts_first_then_rollup"
+    assert lanes["errors"]["status"] == "covered"
+    assert lanes["goals"]["preferred_first_route"] == "goal_lifecycles_first_then_rollup"
+    assert any(command["route_kind"] == "goal_lifecycles" for command in lanes["goals"]["commands"])
+    assert any(command["route_kind"] == "agent_responses" for command in lanes["answers"]["commands"])
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
 

@@ -1872,6 +1872,34 @@ Maintenance gates:
   `search-operational-route-rollup-query` / `aoa_session_operational_route_rollup_query`
   before broad search or raw expansion.
 
+- 2026-06-29 route-rollup agent-route summary proof:
+  `search-operational-route-rollup-query --limit 6 --ref-limit 2
+  --write-report` now returns `agent_route_summary` over the current
+  materialized `31.4 MiB` rollup instead of making agents infer useful lanes
+  from the unfiltered top rows. Live report
+  `diagnostics/20260629T052937Z__search-operational-route-rollup-query.json`
+  returned `ok=true`, `status=matched`, `freshness_status=current`,
+  `agent_route_summary.status=covered`, `covered_lane_count=18`,
+  `missing_lane_count=0`, `resamples_shards=false`, `opens_monolith=false`,
+  `uses_fts=false`, and `hydrates_body=false` with `elapsed_ms=2122`.
+  Covered lanes include tools, skills, MCP, hooks, APIs, plugins, goals,
+  answers, errors, tests, validators, decisions, memory surfaces, graphs,
+  evals, scripts, mechanics, and agents. The packet includes lane-specific
+  rollup commands and dedicated first routes for goals, answers, and graphs,
+  while keeping raw/segment refs as authority. Regression proof:
+  `test_search_operational_route_rollup_query_reads_materialized_projection`
+  now checks `agent_route_summary`, lane coverage, top keys, and dedicated
+  route commands; `test_live_scenario_result_enforces_route_rollup_query_cost_contract`
+  warns when the route-rollup query packet loses the agent-route summary. Live
+  scenario proof:
+  `diagnostics/20260629T053144Z__live-scenario-audit.json` returned
+  `passed_count=1`, `warn_count=0`, `first_useful_packet_ms=1375`,
+  `agent_route_summary_status=covered`, and
+  `agent_route_covered_lane_count=18`. Corpus proof:
+  `diagnostics/20260629T053327Z__live-scenario-corpus-check.json` returned
+  `case_count=12`, `passed_count=12`, `failed_count=0`, and
+  `actionable_gap_count=0`.
+
 - 2026-06-28 graph queue aggregate-refresh tail reduction: live graph queue
   reports showed that the remaining interactive cost was dominated by
   `replace_sources` aggregate refresh, especially edge representative payload

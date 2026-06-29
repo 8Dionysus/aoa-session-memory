@@ -149,6 +149,135 @@ SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME = "operational-route-rollup.sqlite3"
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 1
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT = 3
+SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_TOP_KEYS = 3
+SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
+    (
+        "tools",
+        ("tool",),
+        (),
+        "rollup_first",
+        "Tool and developer-tool route signals.",
+    ),
+    (
+        "skills",
+        ("skill",),
+        ("skill",),
+        "rollup_first",
+        "Skill route signals and nearby skill inventory evidence.",
+    ),
+    (
+        "mcp",
+        ("mcp",),
+        ("mcp",),
+        "rollup_first",
+        "MCP service/tool route signals and nearby MCP usage evidence.",
+    ),
+    (
+        "hooks",
+        ("hook", "hook_health"),
+        ("hook",),
+        "hook_receipts_first_then_rollup",
+        "Hook receipts and hook-health evidence; use receipt routes first for health questions.",
+    ),
+    (
+        "apis",
+        ("api",),
+        ("api",),
+        "rollup_first",
+        "API route signals and adjacent operational evidence.",
+    ),
+    (
+        "plugins",
+        ("plugin",),
+        ("plugin",),
+        "rollup_first",
+        "Plugin route signals and adjacent operational evidence.",
+    ),
+    (
+        "goals",
+        (),
+        ("goal",),
+        "goal_lifecycles_first_then_rollup",
+        "Goal lifecycle questions start with goal-lifecycles; rollup helps find surrounding operational signals.",
+    ),
+    (
+        "answers",
+        (),
+        ("answer", "closeout"),
+        "agent_event_routes_first_then_rollup",
+        "Assistant answer/closeout questions start with agent-event routes; rollup helps find surrounding operational signals.",
+    ),
+    (
+        "errors",
+        ("failure_mode",),
+        ("error", "failure", "timeout"),
+        "rollup_first_then_literal",
+        "Failure/error route signals before literal raw-text fallback.",
+    ),
+    (
+        "tests",
+        ("test",),
+        ("test", "pytest"),
+        "rollup_first",
+        "Test route signals and nearby validation evidence.",
+    ),
+    (
+        "validators",
+        ("validator",),
+        ("validator", "validate"),
+        "rollup_first",
+        "Validator route signals and nearby validation evidence.",
+    ),
+    (
+        "decisions",
+        (),
+        ("decision", "decisions"),
+        "rollup_first_then_owner_authority",
+        "Decision-lane evidence in sessions; decision truth remains in the owning repo.",
+    ),
+    (
+        "memory_surfaces",
+        ("memory", "memory_provenance"),
+        ("memory", "session_memory"),
+        "rollup_first",
+        "Memory and memory-provenance route signals.",
+    ),
+    (
+        "graphs",
+        ("graph",),
+        ("graph",),
+        "graph_routes_first_then_rollup",
+        "Graph questions start with graph routes; rollup helps find operational graph evidence.",
+    ),
+    (
+        "evals",
+        ("eval",),
+        ("eval", "evals"),
+        "rollup_first_then_eval_owner",
+        "Eval route signals in sessions; proof verdicts remain in eval owners.",
+    ),
+    (
+        "scripts",
+        ("script",),
+        ("script",),
+        "rollup_first",
+        "Script route signals and nearby operational evidence.",
+    ),
+    (
+        "mechanics",
+        ("mechanic",),
+        ("mechanic", "mechanics"),
+        "rollup_first",
+        "Mechanic route signals and nearby operational evidence.",
+    ),
+    (
+        "agents",
+        ("agent",),
+        ("agent", "agents"),
+        "rollup_first",
+        "Agent route signals and nearby operational evidence.",
+    ),
+)
 SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES = ("usage", "result", "outcome", "entrypoint")
 SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE = "context"
 SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES = (
@@ -54967,6 +55096,192 @@ def search_operational_route_rollup_string_list(value: Any) -> tuple[list[str], 
     return [str(item) for item in loaded if str(item)], True
 
 
+def search_operational_route_rollup_lane_matches(
+    *,
+    layer: str,
+    key: str,
+    route_signal: str,
+    layers: Sequence[str],
+    terms: Sequence[str],
+) -> bool:
+    if layer and layer in layers:
+        return True
+    haystack = f"{layer} {key} {route_signal}".lower()
+    return any(str(term).lower() in haystack for term in terms if str(term))
+
+
+def search_operational_route_rollup_dedicated_lane_commands(
+    *,
+    lane_id: str,
+    workspace_root: Path | str,
+    aoa_root: Path,
+) -> list[dict[str, Any]]:
+    base = session_memory_cli_command(aoa_root)
+    workspace = str(workspace_root)
+    root = str(aoa_root)
+    if lane_id == "goals":
+        return [
+            {
+                "route_kind": "goal_lifecycles",
+                "command": [*base, "goal-lifecycles", "all", "--workspace-root", workspace, "--aoa-root", root, "--limit", "20"],
+            }
+        ]
+    if lane_id == "answers":
+        return [
+            {
+                "route_kind": "agent_responses",
+                "command": [*base, "agent-responses", "--workspace-root", workspace, "--aoa-root", root, "--use-shards", "--limit", "20"],
+            },
+            {
+                "route_kind": "agent_closeouts",
+                "command": [*base, "agent-closeouts", "--workspace-root", workspace, "--aoa-root", root, "--use-shards", "--limit", "20"],
+            },
+        ]
+    if lane_id == "graphs":
+        return [
+            {
+                "route_kind": "graph_neighborhood",
+                "command": [*base, "graph-neighborhood", "--aoa-root", root, "--limit", "12", "--edge-limit", "48"],
+            }
+        ]
+    return []
+
+
+def search_operational_route_rollup_agent_route_summary(
+    *,
+    route_rows: Sequence[Any],
+    workspace_root: Path | str,
+    aoa_root: Path,
+    ref_limit: int,
+    top_key_limit: int = SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_TOP_KEYS,
+) -> dict[str, Any]:
+    lanes: list[dict[str, Any]] = []
+    covered_lane_count = 0
+    direct_rollup_lane_count = 0
+    top_limit = max(1, int(top_key_limit))
+    ref_limit_value = max(0, min(5, int(ref_limit)))
+    total_route_row_count = len(route_rows)
+    for lane_id, lane_layers, lane_terms, preferred_first_route, description in SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES:
+        grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        matched_shard_row_count = 0
+        for row in route_rows:
+            layer = str(row["layer"] or "")
+            key = str(row["key"] or "")
+            route_signal = str(row["route_signal"] or "")
+            if not search_operational_route_rollup_lane_matches(
+                layer=layer,
+                key=key,
+                route_signal=route_signal,
+                layers=lane_layers,
+                terms=lane_terms,
+            ):
+                continue
+            matched_shard_row_count += 1
+            token = (layer, key, route_signal)
+            bucket = grouped.setdefault(
+                token,
+                {
+                    "layer": layer,
+                    "key": key,
+                    "route_signal": route_signal,
+                    "posting_count": 0,
+                    "session_count": 0,
+                    "first_session_date": "",
+                    "last_session_date": "",
+                    "raw_refs": [],
+                    "segment_refs": [],
+                    "session_ids": [],
+                },
+            )
+            bucket["posting_count"] += int_value(row["posting_count"])
+            bucket["session_count"] += int_value(row["session_count"])
+            first_date = str(row["first_session_date"] or "")
+            last_date = str(row["last_session_date"] or "")
+            if first_date and (not bucket["first_session_date"] or first_date < bucket["first_session_date"]):
+                bucket["first_session_date"] = first_date
+            if last_date and (not bucket["last_session_date"] or last_date > bucket["last_session_date"]):
+                bucket["last_session_date"] = last_date
+            for json_key, target_key in (
+                ("raw_refs_json", "raw_refs"),
+                ("segment_refs_json", "segment_refs"),
+                ("session_ids_json", "session_ids"),
+            ):
+                if len(bucket[target_key]) >= ref_limit_value:
+                    continue
+                values, valid_json = search_operational_route_rollup_string_list(row[json_key])
+                if not valid_json:
+                    continue
+                for value in values:
+                    if value and value not in bucket[target_key] and len(bucket[target_key]) < ref_limit_value:
+                        bucket[target_key].append(value)
+        top_keys = sorted(
+            grouped.values(),
+            key=lambda item: (-int_value(item.get("posting_count")), str(item.get("layer") or ""), str(item.get("key") or "")),
+        )
+        posting_count = sum(int_value(item.get("posting_count")) for item in grouped.values())
+        session_count = sum(int_value(item.get("session_count")) for item in grouped.values())
+        status = "covered" if posting_count > 0 else "not_observed"
+        if status == "covered":
+            covered_lane_count += 1
+        if status == "covered" and str(preferred_first_route).startswith("rollup_first"):
+            direct_rollup_lane_count += 1
+        query = lane_terms[0] if lane_terms and (len(lane_layers) != 1 or lane_id in {"goals", "answers", "decisions", "errors", "hooks"}) else ""
+        exact_layer = lane_layers[0] if len(lane_layers) == 1 and not query else ""
+        commands = [
+            {
+                "route_kind": "search_operational_route_rollup_query",
+                "command": search_operational_route_rollup_query_command(
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                    query=query,
+                    layer=exact_layer,
+                    limit=12,
+                    ref_limit=ref_limit_value,
+                ),
+            }
+        ]
+        commands.extend(
+            search_operational_route_rollup_dedicated_lane_commands(
+                lane_id=str(lane_id),
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+            )
+        )
+        lanes.append(
+            {
+                "id": str(lane_id),
+                "status": status,
+                "preferred_first_route": str(preferred_first_route),
+                "description": str(description),
+                "layers": list(lane_layers),
+                "query_terms": list(lane_terms),
+                "matched_shard_row_count": matched_shard_row_count,
+                "group_count": len(grouped),
+                "posting_count": posting_count,
+                "session_count": session_count,
+                "top_keys": top_keys[:top_limit],
+                "commands": commands,
+            }
+        )
+    missing = [str(item.get("id") or "") for item in lanes if item.get("status") != "covered"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_operational_route_rollup_agent_route_summary",
+        "status": "covered" if covered_lane_count else "not_observed",
+        "lane_count": len(lanes),
+        "covered_lane_count": covered_lane_count,
+        "missing_lane_count": len(missing),
+        "missing_lanes": missing,
+        "direct_rollup_lane_count": direct_rollup_lane_count,
+        "total_route_row_count": total_route_row_count,
+        "top_key_limit": top_limit,
+        "ref_limit": ref_limit_value,
+        "lanes": lanes,
+        "quality_boundary": "agent route summary is compact navigation over the generated rollup; use returned raw/segment refs or dedicated routes before proof claims.",
+        "truth_status": "generated_search_route_rollup_agent_route_summary_not_archive_truth",
+    }
+
+
 def search_operational_route_rollup_query_command(
     *,
     workspace_root: Path | str,
@@ -55115,6 +55430,7 @@ def session_memory_search_operational_route_rollup_query(
 
     conn: sqlite3.Connection | None = None
     bad_json_field_count = 0
+    all_route_rows: list[Any] = []
     try:
         conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
         conn.row_factory = sqlite3.Row
@@ -55140,6 +55456,14 @@ def session_memory_search_operational_route_rollup_query(
             FROM shards
             """
         ).fetchone()
+        all_route_rows = conn.execute(
+            """
+            SELECT shard, layer, key, route_signal, posting_count, session_count,
+                   first_session_date, last_session_date, raw_refs_json,
+                   segment_refs_json, session_ids_json
+            FROM route_rollups
+            """
+        ).fetchall()
     except sqlite3.Error as exc:
         diagnostics.append(f"operational_route_rollup_query_unreadable:{sqlite_error_diagnostic(exc)}")
         return {
@@ -55222,6 +55546,12 @@ def session_memory_search_operational_route_rollup_query(
     if bad_json_field_count:
         diagnostics.append(f"operational_route_rollup_query_bad_json_fields:{bad_json_field_count}")
 
+    agent_route_summary = search_operational_route_rollup_agent_route_summary(
+        route_rows=all_route_rows,
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        ref_limit=ref_limit_value,
+    )
     grouped_rows = sorted(
         grouped.values(),
         key=lambda item: (-int_value(item.get("posting_count")), str(item.get("layer") or ""), str(item.get("key") or "")),
@@ -55262,6 +55592,7 @@ def session_memory_search_operational_route_rollup_query(
             "source_candidate_route_posting_count": int_value(shard_summary_rows["candidate_route_posting_count"] if shard_summary_rows else 0),
             "source_candidate_route_term_count": int_value(shard_summary_rows["candidate_route_term_count"] if shard_summary_rows else 0),
         },
+        "agent_route_summary": agent_route_summary,
         "quality": {
             "uses_materialized_rollup": True,
             "raw_or_segment_ref_present": raw_or_segment_ref_present,
@@ -55270,6 +55601,9 @@ def session_memory_search_operational_route_rollup_query(
             "truncated": len(grouped_rows) > len(results),
             "omitted_group_count": max(0, len(grouped_rows) - len(results)),
             "ref_limit": ref_limit_value,
+            "agent_route_summary_status": agent_route_summary.get("status"),
+            "agent_route_covered_lane_count": agent_route_summary.get("covered_lane_count"),
+            "agent_route_missing_lane_count": agent_route_summary.get("missing_lane_count"),
         },
         "cost_profile": {
             "uses_materialized_route_rollup": True,
@@ -55303,6 +55637,7 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
     cost = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+    agent_route_summary = payload.get("agent_route_summary") if isinstance(payload.get("agent_route_summary"), dict) else {}
     lines = [
         "# Search Operational Route Rollup Query",
         "",
@@ -55314,6 +55649,7 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
         f"- omitted_groups: `{totals.get('omitted_group_count')}`",
         f"- freshness_status: `{quality.get('freshness_status')}`",
         f"- raw_or_segment_ref_present: `{quality.get('raw_or_segment_ref_present')}`",
+        f"- agent_route_summary: `{agent_route_summary.get('status')}` covered=`{agent_route_summary.get('covered_lane_count')}` missing=`{agent_route_summary.get('missing_lane_count')}`",
         f"- elapsed_ms: `{cost.get('elapsed_ms')}`",
         "",
         "## Results",
@@ -55328,6 +55664,27 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
             )
             lines.append(
                 f"| `{item.get('layer')}` | `{item.get('key')}` | `{item.get('posting_count')}` | `{item.get('session_count')}` | `{ref_count}` |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Agent Route Summary",
+            "",
+            "| lane | status | postings | groups | preferred route | top keys |",
+            "| --- | --- | ---: | ---: | --- | --- |",
+        ]
+    )
+    for item in agent_route_summary.get("lanes", []) if isinstance(agent_route_summary.get("lanes"), list) else []:
+        if isinstance(item, dict):
+            top_keys = item.get("top_keys") if isinstance(item.get("top_keys"), list) else []
+            key_text = ", ".join(
+                str(key_item.get("key") or "")
+                for key_item in top_keys[:3]
+                if isinstance(key_item, dict) and key_item.get("key")
+            )
+            lines.append(
+                f"| `{item.get('id')}` | `{item.get('status')}` | `{item.get('posting_count')}` | "
+                f"`{item.get('group_count')}` | `{item.get('preferred_first_route')}` | {key_text or '-'} |"
             )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     lines.extend(["", "## Diagnostics", ""])
@@ -62420,6 +62777,7 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
         cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
         totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+        agent_route_summary = payload.get("agent_route_summary") if isinstance(payload.get("agent_route_summary"), dict) else {}
         counts = live_scenario_evidence_counts(payload)
         result_count = int_value(payload.get("result_count"), len(payload.get("results") or []))
         result.update(
@@ -62435,6 +62793,9 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "opens_monolith": cost_profile.get("opens_monolith"),
                 "uses_fts": cost_profile.get("uses_fts"),
                 "hydrates_body": cost_profile.get("hydrates_body"),
+                "agent_route_summary_status": agent_route_summary.get("status"),
+                "agent_route_covered_lane_count": int_value(agent_route_summary.get("covered_lane_count")),
+                "agent_route_missing_lane_count": int_value(agent_route_summary.get("missing_lane_count")),
                 "evidence_ref_counts": counts,
                 "first_ref": live_scenario_first_ref(payload),
             }
@@ -62448,6 +62809,8 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             quality_flags.append("route_rollup_query_not_current")
         if cost_profile.get("uses_materialized_route_rollup") is not True:
             quality_flags.append("route_rollup_query_not_materialized_rollup")
+        if agent_route_summary.get("status") != "covered" or int_value(agent_route_summary.get("covered_lane_count")) <= 0:
+            quality_flags.append("route_rollup_query_agent_route_summary_missing_or_empty")
         for key in ("resamples_shards", "opens_monolith", "uses_fts", "hydrates_body"):
             if cost_profile.get(key) is True:
                 quality_flags.append(f"route_rollup_query_{key}")

@@ -63,7 +63,12 @@ Use these first routes when available:
   `use_operational_route_rollup_projection`, use
   `search-operational-route-rollup-query <query> --layer <layer>` first. This
   route reads the materialized rollup only; it must not rebuild maintenance,
-  resample shards, open the monolith, use FTS, or hydrate raw body text.
+  resample shards, open the monolith, use FTS, or hydrate raw body text. Read
+  `agent_route_summary` before trusting the top unfiltered rows: it maps
+  tools, skills, MCP, hooks, APIs, plugins, goals, answers, errors, tests,
+  validators, decisions, memory surfaces, graphs, evals, scripts, mechanics,
+  and agents to lane-specific rollup commands or dedicated first routes such
+  as `goal-lifecycles`, `agent-responses`, and graph routes.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
@@ -149,6 +154,7 @@ Prefer packets that expose:
 - normalized entity or route candidates;
 - usage, result, outcome, consequence, graph, and neighborhood counts;
 - freshness, ambiguity, truncation, and omitted counts;
+- agent-route lane coverage when a packet includes `agent_route_summary`;
 - cost profile, especially whether a route used materialized projections or
   expanded into shard search, monolith reads, FTS, or raw hydration;
 - `raw`, `segment`, `segment_index`, and `session` refs;
