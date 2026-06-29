@@ -241,6 +241,14 @@ Build the `.aoa` session-memory mechanism end to end:
   processed it in `217ms` (`document_count=5`), reducing `month/2026-06`
   stale rows from `2` to `1`; `maintenance-status` then switched the shard
   action to `search_shard_structured_dirty_only_drip` with `dirty_drip_limit=1`.
+  The final dirty-only drip then processed the remaining Gmail heavy-tail row
+  `2026-06-13__003__подключайся-к-моему-gmail-и-анализируй-все` in
+  `246680ms`, indexed `208490` structured documents, returned
+  `budget_exhausted=false`, and moved `month/2026-06` to `status=current`.
+  Follow-up graph queue catch-up and route-rollup refresh returned the archive
+  to `maintenance-status ok=true`, `search_shards=current`,
+  `graph.status=current_with_retired_sources`, and
+  `operational_route_rollup.status=current`.
 - Operations warnings distinguish current failures from repaired shard
   freshness failures: an `index-maintenance` report that failed only because a
   monthly shard had `search_documents_stale_segment_refs` is no longer kept as
@@ -1943,6 +1951,16 @@ Maintenance gates:
   search omission/apply path exists. The two bounded shard-probe timeouts remain
   visible as diagnostics, so the gate is live route evidence, not a claim of
   full archive cardinality coverage.
+  After the Gmail heavy-tail shard was repaired and the rollup was refreshed,
+  `diagnostics/20260629T200720Z__search-operational-shrink-gates.json`
+  returned the same guarded posture with current sources: `ok=true`,
+  `status=blocked_before_apply`, `apply_ready=false`, no failed gates,
+  `470723` context-tail candidates, `377579` route-ref-backed omission
+  candidates, `93144` unrouted keep candidates, current rollup size `32.8 MiB`,
+  `53583` rollup rows, and `1027653` candidate route postings. This proves the
+  next weight-reduction step is an explicit generated-search omission policy
+  with before/after storage and recall gates, not physical SQLite compaction or
+  raw fallback removal.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over
