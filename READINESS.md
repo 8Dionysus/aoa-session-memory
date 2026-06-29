@@ -1876,6 +1876,20 @@ Maintenance gates:
   rather than another route-rollup build. Physical compaction is still not safe
   from this packet alone; raw/segment refs remain authority. Regression proof:
   `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`.
+  Follow-up live proof
+  `diagnostics/20260629T085037Z__search-operational-projection-plan.json`
+  added the explicit `physical_shrink_plan` packet. It reported
+  `status=guarded_plan_ready`, `safe_to_apply_physical_compaction=false`,
+  `apply_status=not_implemented`, `51,683` sampled context-tail candidates,
+  `45,913` route-ref-backed omission candidates, `5,770` unrouted keep
+  candidates, route-ref coverage `0.888358`, materialized rollup `current`,
+  `51,676` rollup rows, and `977,275` materialized route postings. The same
+  run kept two bounded shard-probe timeouts in diagnostics, so this remains a
+  partial pressure sample plus current materialized rollup proof, not a claim
+  that physical shrink is safe. Required gates are now named in the packet:
+  live scenario corpus, search-hotset before/after, route-rollup ref check,
+  literal exact-recall check, agent-event route regression, storage before/after,
+  and bundle parity.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over

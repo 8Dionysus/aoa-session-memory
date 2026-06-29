@@ -16940,6 +16940,14 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert plan["projection_candidate"]["replacement_route_ready"] is False
     assert plan["projection_candidate"]["safe_to_apply_physical_compaction"] is False
     assert plan["projection_candidate"]["candidate_route_posting_count"] == 1
+    assert plan["projection_candidate"]["physical_shrink_plan_status"] == "blocked_missing_materialized_rollup"
+    assert plan["physical_shrink_plan"]["status"] == "blocked_missing_materialized_rollup"
+    assert plan["physical_shrink_plan"]["safe_to_apply"] is False
+    assert plan["physical_shrink_plan"]["apply_status"] == "not_implemented"
+    assert plan["physical_shrink_plan"]["context_tail_candidate_count"] == 2
+    assert plan["physical_shrink_plan"]["route_ref_backed_omission_candidate_count"] == 1
+    assert plan["physical_shrink_plan"]["unrouted_keep_candidate_count"] == 1
+    assert plan["physical_shrink_plan"]["materialized_rollup_status"] == "missing"
     assert "do_not_drop_candidate_tail_without_route_ref_rehome" in plan["stop_lines"]
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()
@@ -16968,7 +16976,21 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert ready_plan["route_ref_rollup_plan"]["materialized_route_rollup_row_count"] == 1
     assert ready_plan["projection_candidate"]["replacement_route_ready"] is True
     assert ready_plan["projection_candidate"]["replacement_route_kind"] == "operational_route_rollup"
+    assert ready_plan["projection_candidate"]["physical_shrink_plan_status"] == "guarded_plan_ready"
+    assert ready_plan["projection_candidate"]["route_ref_backed_omission_candidate_count"] == 1
+    assert ready_plan["projection_candidate"]["unrouted_keep_candidate_count"] == 1
     assert ready_plan["projection_candidate"]["next_design_route"] == "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
+    assert ready_plan["physical_shrink_plan"]["status"] == "guarded_plan_ready"
+    assert ready_plan["physical_shrink_plan"]["safe_to_apply_physical_compaction"] is False
+    assert ready_plan["physical_shrink_plan"]["apply_status"] == "not_implemented"
+    assert ready_plan["physical_shrink_plan"]["materialized_rollup_ready"] is True
+    assert ready_plan["physical_shrink_plan"]["materialized_rollup_status"] == "current"
+    assert ready_plan["physical_shrink_plan"]["materialized_route_rollup_row_count"] == 1
+    assert ready_plan["physical_shrink_plan"]["materialized_candidate_route_posting_count"] == 1
+    assert "live_scenario_corpus_check" in ready_plan["physical_shrink_plan"]["required_verification_gates"]
+    assert "unrouted context-tail rows are kept until literal/raw fallback replacement is proven" in ready_plan[
+        "physical_shrink_plan"
+    ]["required_invariants"]
 
 
 def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:

@@ -1216,6 +1216,13 @@ packet reports `route_ref_rollup_plan.status=materialized_rollup_ready` and
 `replacement_read_model_status=ready`. Treat sampled route-ref counts as
 pressure evidence and the materialized rollup counts as the current compact
 navigation surface; neither replaces raw or segment refs.
+The packet also carries `physical_shrink_plan`, a read-only guarded plan for
+the later generated-search shrink route. `status=guarded_plan_ready` only means
+the route-ref-backed context tail has a current replacement navigation surface;
+`safe_to_apply_physical_compaction` remains `false` until live-scenario,
+literal-recall, route-rollup ref, storage, and bundle-parity gates prove an
+explicit apply route. Unrouted context-tail rows stay in search until their own
+literal/raw fallback replacement is proven.
 
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with

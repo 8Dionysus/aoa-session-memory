@@ -54743,6 +54743,89 @@ def search_operational_event_projection_probe_shard(
     return payload
 
 
+def search_operational_context_tail_physical_shrink_plan(
+    *,
+    candidate_count: int,
+    candidate_with_routes: int,
+    candidate_without_routes: int,
+    sampled_route_posting_count: int,
+    materialized_rollup: dict[str, Any],
+    materialized_rollup_ready: bool,
+) -> dict[str, Any]:
+    materialized_status = str(materialized_rollup.get("status") or "unknown")
+    materialized_row_count = int_value(materialized_rollup.get("route_rollup_row_count"))
+    materialized_posting_count = int_value(materialized_rollup.get("candidate_route_posting_count"))
+    if candidate_count <= 0:
+        status = "not_needed"
+        blocked_reason = ""
+    elif candidate_with_routes <= 0:
+        status = "blocked_unrouted_context_tail"
+        blocked_reason = "candidate context-tail rows do not have route refs to rehome"
+    elif not materialized_rollup_ready:
+        status = "blocked_missing_materialized_rollup"
+        blocked_reason = "materialized operational route-rollup is missing, stale, or source-mismatched"
+    else:
+        status = "guarded_plan_ready"
+        blocked_reason = "apply route and regression gates are not implemented yet"
+    route_ref_coverage_ratio = round(candidate_with_routes / candidate_count, 6) if candidate_count > 0 else 0.0
+    return {
+        "schema_version": 1,
+        "id": "guarded_context_tail_physical_shrink_v1",
+        "status": status,
+        "mutates": False,
+        "safe_to_apply": False,
+        "safe_to_apply_physical_compaction": False,
+        "apply_status": "not_implemented",
+        "blocked_reason": blocked_reason,
+        "candidate_selector": (
+            "doc_type=event AND usage_role=context AND agent_event='' AND task_episode_id='' "
+            "AND event_type NOT IN protected_context_event_types"
+        ),
+        "route_ref_backed_candidate_selector": (
+            "candidate_selector AND route_signals!='' AND route refs are present in operational_route_rollup"
+        ),
+        "unrouted_tail_selector": "candidate_selector AND route_signals=''",
+        "protected_selectors": [
+            "agent_event!=''",
+            "task_episode_id!=''",
+            "event_type IN protected_context_event_types",
+        ],
+        "context_tail_candidate_count": candidate_count,
+        "route_ref_backed_omission_candidate_count": candidate_with_routes,
+        "unrouted_keep_candidate_count": max(0, candidate_without_routes),
+        "route_ref_coverage_ratio": route_ref_coverage_ratio,
+        "sampled_candidate_route_posting_count": sampled_route_posting_count,
+        "materialized_rollup_status": materialized_status,
+        "materialized_rollup_ready": materialized_rollup_ready,
+        "materialized_route_rollup_row_count": materialized_row_count,
+        "materialized_candidate_route_posting_count": materialized_posting_count,
+        "required_invariants": [
+            "materialized operational route-rollup status is current",
+            "materialized operational route-rollup source_mismatch_count is 0",
+            "route-ref backed candidates keep bounded raw, segment, and session refs in the rollup",
+            "unrouted context-tail rows are kept until literal/raw fallback replacement is proven",
+            "agent_event, task_episode, and protected event-type context rows are never omitted by this route",
+            "monolith/raw-text fallback remains available until exact recall replacement is proven",
+            "raw transcripts and segment indexes remain the authority layer",
+        ],
+        "required_verification_gates": [
+            "live_scenario_corpus_check",
+            "search_hotset_audit_before_after",
+            "search_operational_route_rollup_query_refs_check",
+            "literal_query_plan_exact_recall_check",
+            "agent_event_routes_regression",
+            "storage_audit_before_after",
+            "bundle_parity_validation",
+        ],
+        "next_implementation_route": (
+            "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
+        ),
+        "rollback_route": "rebuild structured search shards from raw/session indexes; do not repair by deleting raw evidence",
+        "mutation_boundary": "read-only plan packet; no search/raw/graph/session mutation is performed here",
+        "authority_boundary": "physical shrink may reduce generated search rows only after replacement refs are proven; raw and segment refs remain authority",
+    }
+
+
 def session_memory_search_operational_event_projection_plan(
     *,
     workspace_root: Path | str,
@@ -54889,6 +54972,14 @@ def session_memory_search_operational_event_projection_plan(
         status = "candidate_tail_measured"
     else:
         status = "no_context_tail_seen"
+    physical_shrink_plan = search_operational_context_tail_physical_shrink_plan(
+        candidate_count=candidate_count,
+        candidate_with_routes=candidate_with_routes,
+        candidate_without_routes=int_value(totals.get("candidate_context_tail_without_route_signals_count")),
+        sampled_route_posting_count=route_posting_total,
+        materialized_rollup=materialized_rollup,
+        materialized_rollup_ready=materialized_rollup_ready,
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_operational_event_projection_plan",
@@ -54963,13 +55054,19 @@ def session_memory_search_operational_event_projection_plan(
             "replacement_route_ready": materialized_rollup_ready,
             "replacement_route_kind": "operational_route_rollup" if materialized_rollup_ready else "",
             "candidate_route_posting_count": route_posting_total,
-            "safe_to_apply_physical_compaction": False,
+            "physical_shrink_plan_status": physical_shrink_plan["status"],
+            "route_ref_backed_omission_candidate_count": physical_shrink_plan[
+                "route_ref_backed_omission_candidate_count"
+            ],
+            "unrouted_keep_candidate_count": physical_shrink_plan["unrouted_keep_candidate_count"],
+            "safe_to_apply_physical_compaction": physical_shrink_plan["safe_to_apply_physical_compaction"],
             "next_design_route": (
                 "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
                 if materialized_rollup_ready
                 else "design_route_ref_preserving_operational_event_rollup"
             ),
         },
+        "physical_shrink_plan": physical_shrink_plan,
         "shards": shard_results,
         "stop_lines": [
             "do_not_drop_candidate_tail_without_route_ref_rehome",
@@ -55020,6 +55117,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
     rollup = payload.get("route_ref_rollup_plan") if isinstance(payload.get("route_ref_rollup_plan"), dict) else {}
+    physical = payload.get("physical_shrink_plan") if isinstance(payload.get("physical_shrink_plan"), dict) else {}
     materialized_rollup = rollup.get("materialized_rollup") if isinstance(rollup.get("materialized_rollup"), dict) else {}
     lines = [
         "# Search Operational Event Projection Plan",
@@ -55039,6 +55137,8 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- route_ref_rollup_status: `{rollup.get('status')}`",
         f"- replacement_read_model_status: `{rollup.get('replacement_read_model_status')}`",
         f"- replacement_route_refs_required: `{totals.get('replacement_route_refs_required')}`",
+        f"- physical_shrink_plan_status: `{physical.get('status')}`",
+        f"- safe_to_apply_physical_compaction: `{physical.get('safe_to_apply_physical_compaction')}`",
         f"- next_design_route: `{candidate.get('next_design_route')}`",
         "",
         "## Shards",
@@ -55074,6 +55174,27 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     for item in rollup.get("top_route_terms", []) if isinstance(rollup.get("top_route_terms"), list) else []:
         if isinstance(item, dict):
             lines.append(f"| `{item.get('layer')}` | `{item.get('key')}` | `{item.get('posting_count')}` |")
+    lines.extend(["", "## Physical Shrink Plan", ""])
+    lines.append(f"- status: `{physical.get('status')}`")
+    lines.append(f"- mutates: `{physical.get('mutates')}`")
+    lines.append(f"- safe_to_apply: `{physical.get('safe_to_apply')}`")
+    lines.append(f"- apply_status: `{physical.get('apply_status')}`")
+    lines.append(f"- blocked_reason: `{physical.get('blocked_reason')}`")
+    lines.append(f"- context_tail_candidate_count: `{physical.get('context_tail_candidate_count')}`")
+    lines.append(
+        f"- route_ref_backed_omission_candidate_count: `{physical.get('route_ref_backed_omission_candidate_count')}`"
+    )
+    lines.append(f"- unrouted_keep_candidate_count: `{physical.get('unrouted_keep_candidate_count')}`")
+    lines.append(f"- route_ref_coverage_ratio: `{physical.get('route_ref_coverage_ratio')}`")
+    lines.append(f"- materialized_rollup_status: `{physical.get('materialized_rollup_status')}`")
+    lines.append(f"- materialized_route_rollup_row_count: `{physical.get('materialized_route_rollup_row_count')}`")
+    lines.append(
+        f"- materialized_candidate_route_posting_count: `{physical.get('materialized_candidate_route_posting_count')}`"
+    )
+    lines.append(f"- next_implementation_route: `{physical.get('next_implementation_route')}`")
+    lines.extend(["", "### Required Verification Gates", ""])
+    for item in physical.get("required_verification_gates", []) if isinstance(physical.get("required_verification_gates"), list) else []:
+        lines.append(f"- `{item}`")
     lines.extend(["", "## Stop Lines", ""])
     for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
         lines.append(f"- `{item}`")
