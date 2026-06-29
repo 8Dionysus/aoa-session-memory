@@ -14722,6 +14722,150 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_auto_maintenance_resource_launch_uses_graph_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    graph_command = [
+        "python3",
+        "scripts/aoa_session_memory.py",
+        "graph-maintenance",
+        "all",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+        "--use-queue",
+        "--seed-queue-from-ledger",
+        "--queue-seed-include-deferred-live",
+        "--queue-seed-limit",
+        str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_QUEUE_SEED_LIMIT),
+        "--apply",
+        "--batch-limit",
+        str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT),
+        "--budget-seconds",
+        "300",
+        "--max-refresh-nodes",
+        str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES),
+        "--max-refresh-edges",
+        str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES),
+        "--write-report",
+        "--write-hash-cache",
+        "--write-queue",
+        "--write-ledger",
+    ]
+
+    def fake_maintenance_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "recommendation": "run_live_catchup",
+            "live_tail": {
+                "status": "ready_for_catchup",
+                "catchup_ready_to_run": True,
+                "catchup_command_kind": "graph_queue_maintenance",
+                "catchup_scope": "graph_deferred_live_sources",
+                "catchup_target": "all",
+                "catchup_command": graph_command,
+                "graph_followup": "none; this route is the graph follow-up",
+            },
+        }
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls["command"] = command
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-06-29T12:00:00-06:00",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {"ok": True, "returncode": 0, "stdout_tail": "{\"ok\": true}"},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="timer_catchup",
+        budget_seconds=900,
+    )
+
+    separator = calls["command"].index("--")
+    child = calls["command"][separator + 1 :]
+    assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["live_tail_fast_path"]["used"] is True
+    assert payload["live_tail_fast_path"]["command_kind"] == "graph_queue_maintenance"
+    assert payload["live_tail_fast_path"]["scope"] == "graph_deferred_live_sources"
+    assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "graph-maintenance", "all"]
+    assert "auto-maintenance" not in child
+    assert "--use-queue" in child
+    assert "--seed-queue-from-ledger" in child
+    assert "--queue-seed-include-deferred-live" in child
+    assert child[child.index("--queue-seed-limit") + 1] == str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_QUEUE_SEED_LIMIT)
+    assert child[child.index("--batch-limit") + 1] == str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT)
+    assert child[child.index("--max-refresh-nodes") + 1] == str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES)
+    assert child[child.index("--max-refresh-edges") + 1] == str(module.GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES)
+    assert "--write-queue" in child
+    assert "--write-ledger" in child
+    assert "--reason" not in child
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_auto_maintenance_resource_live_tail_fast_path_respects_explicit_graph_skip(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_maintenance_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "recommendation": "run_live_catchup",
+            "live_tail": {
+                "status": "ready_for_catchup",
+                "catchup_ready_to_run": True,
+                "catchup_command_kind": "graph_queue_maintenance",
+                "catchup_scope": "graph_deferred_live_sources",
+                "catchup_target": "all",
+                "catchup_command": ["python3", "scripts/aoa_session_memory.py", "graph-maintenance", "all"],
+            },
+        }
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+
+    payload = module.auto_maintenance_live_tail_resource_route(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+        since=None,
+        since_days=None,
+        until=None,
+        limit=None,
+        repair_indexes=None,
+        repair_graph=False,
+        reason="timer_catchup",
+        budget_seconds=None,
+    )
+
+    assert payload["used"] is False
+    assert payload["reason"] == "graph_repair_disabled_for_graph_live_tail"
+    assert payload["command_kind"] == "graph_queue_maintenance"
+
+
 def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

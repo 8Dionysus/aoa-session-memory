@@ -20010,8 +20010,6 @@ def auto_maintenance_live_tail_resource_route(
         return {"used": False, "reason": "explicit_selection_filters_present"}
     if repair_indexes is False:
         return {"used": False, "reason": "index_repair_disabled"}
-    if repair_graph is True:
-        return {"used": False, "reason": "explicit_graph_repair_requested"}
     try:
         status = session_memory_maintenance_status(workspace_root=workspace_root, aoa_root=aoa_root, include_timers=False)
     except Exception as exc:
@@ -20023,13 +20021,18 @@ def auto_maintenance_live_tail_resource_route(
         return {"used": False, "reason": "recommendation_not_live_catchup", "recommendation": status.get("recommendation")}
     if not live_tail.get("catchup_ready_to_run"):
         return {"used": False, "reason": "live_tail_not_ready", "live_tail_status": live_tail.get("status")}
-    if command_kind not in {"targeted_index_maintenance_without_graph", "bounded_index_maintenance_without_graph"}:
+    if command_kind in {"targeted_index_maintenance_without_graph", "bounded_index_maintenance_without_graph"} and repair_graph is True:
+        return {"used": False, "reason": "explicit_graph_repair_requested", "command_kind": command_kind}
+    if command_kind == "graph_queue_maintenance" and repair_graph is False:
+        return {"used": False, "reason": "graph_repair_disabled_for_graph_live_tail", "command_kind": command_kind}
+    if command_kind not in {"targeted_index_maintenance_without_graph", "bounded_index_maintenance_without_graph", "graph_queue_maintenance"}:
         return {"used": False, "reason": "unsupported_live_tail_command_kind", "command_kind": command_kind}
     if not command:
         return {"used": False, "reason": "missing_live_tail_command"}
     child_command = normalize_session_memory_child_command(command)
     append_child_arg(child_command, "--budget-seconds", budget_seconds)
-    append_child_arg(child_command, "--reason", f"auto_maintenance_resource:{profile}:{reason}")
+    if command_kind != "graph_queue_maintenance":
+        append_child_arg(child_command, "--reason", f"auto_maintenance_resource:{profile}:{reason}")
     return {
         "used": True,
         "reason": "ready_live_tail_catchup",

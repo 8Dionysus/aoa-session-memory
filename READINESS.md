@@ -166,10 +166,12 @@ Build the `.aoa` session-memory mechanism end to end:
   quiet-window remaining seconds, `next_ready_at`, and the typed catch-up
   command so agents do not confuse non-actionable live tail with broken search;
   `auto-maintenance-resource catchup all` uses that same packet as a fast-path
-  preflight and wraps targeted `index-maintenance <session>
-  --skip-graph-repair --skip-token-accounting` when live-tail is ready, instead
-  of launching broad `auto-maintenance catchup all` for a single deferred live
-  session;
+  preflight when live-tail is ready, instead of launching broad
+  `auto-maintenance catchup all` for a single deferred live tail: search-deferred
+  sessions wrap targeted `index-maintenance <session> --skip-graph-repair
+  --skip-token-accounting`, while graph-only deferred live sources wrap the
+  ledger-seeded `graph-maintenance --use-queue --queue-seed-include-deferred-live`
+  route;
   2026-06-21 live proof: manual `graph-maintenance all --apply` behind an
   active `auto-maintenance:hot` lease returned `mutates=false` and persisted
   `last_conflict` with `blocking_owner=auto-maintenance:hot`,

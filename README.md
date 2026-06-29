@@ -685,10 +685,13 @@ directly. The wrapper still uses `abyss-machine resource launch --kind indexing
 gate blocks or denies the child before `auto-maintenance` starts. This keeps
 heavier work outside hooks and MCP reads without hiding resource-pressure
 deferrals from agents. For `catchup all`, the wrapper reuses the live-tail
-packet and launches the targeted `index-maintenance <session>
---skip-graph-repair --skip-token-accounting` route when the quiet window is
-ready, instead of starting broad `auto-maintenance catchup all` for a single
-deferred live session. Resource-blocked backlog and deep runs fall back to a
+packet when the quiet window is ready instead of starting broad
+`auto-maintenance catchup all` for a single deferred live tail. Search-deferred
+sessions launch targeted `index-maintenance <session> --skip-graph-repair
+--skip-token-accounting`; graph-only deferred live sources launch the
+ledger-seeded `graph-maintenance --use-queue --queue-seed-include-deferred-live`
+route surfaced by `maintenance-status`. Resource-blocked backlog and deep runs
+fall back to a
 tightly capped probe-class graph drip instead of leaving graph maintenance
 idle. Both profiles enable this by default because unattended medium/heavy
 indexing can be capped by the host resource policy. The report keeps the outer
