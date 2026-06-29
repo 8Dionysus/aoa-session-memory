@@ -55524,6 +55524,55 @@ def search_operational_route_rollup_query_command(
     return command
 
 
+def search_operational_route_rollup_filter_terms(value: str, *, max_chars: int = 120) -> list[str]:
+    raw = str(value or "").strip().lower()
+    terms: list[str] = []
+
+    def add(term: str) -> None:
+        candidate = str(term or "").strip().lower()
+        if candidate and candidate not in terms:
+            terms.append(candidate)
+
+    add(raw)
+    add(route_key_slug(raw, fallback="", max_chars=max_chars))
+    if ":" in raw:
+        raw_layer, raw_key = raw.split(":", 1)
+        layer_key = route_key_slug(raw_layer, fallback="", max_chars=40)
+        route_key = route_key_slug(raw_key, fallback="", max_chars=max_chars)
+        if layer_key and route_key:
+            add(route_signal_token(layer_key, route_key))
+    else:
+        add(raw.replace("-", "_"))
+    return terms
+
+
+def search_operational_route_rollup_normalized_filters(
+    *,
+    query: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+) -> dict[str, Any]:
+    normalized_layer = route_key_slug(layer, fallback="", max_chars=40) if layer else ""
+    normalized_key = route_key_slug(key, fallback="", max_chars=120) if key else ""
+    normalized_route_signal = ""
+    if route_signal:
+        raw_signal = str(route_signal or "").strip().lower()
+        if ":" in raw_signal:
+            raw_layer, raw_key = raw_signal.split(":", 1)
+            signal_layer = route_key_slug(raw_layer, fallback="", max_chars=40)
+            signal_key = route_key_slug(raw_key, fallback="", max_chars=120)
+            normalized_route_signal = route_signal_token(signal_layer, signal_key) if signal_layer and signal_key else ""
+        else:
+            normalized_route_signal = route_key_slug(raw_signal, fallback="", max_chars=160)
+    return {
+        "query_terms": search_operational_route_rollup_filter_terms(query) if query else [],
+        "layer": normalized_layer,
+        "key": normalized_key,
+        "route_signal": normalized_route_signal,
+    }
+
+
 def session_memory_search_operational_route_rollup_query(
     *,
     workspace_root: Path | str,
@@ -55549,6 +55598,12 @@ def session_memory_search_operational_route_rollup_query(
         "limit": limit_value,
         "ref_limit": ref_limit_value,
     }
+    normalized_filters = search_operational_route_rollup_normalized_filters(
+        query=filters["query"],
+        layer=filters["layer"],
+        key=filters["key"],
+        route_signal=filters["route_signal"],
+    )
     diagnostics: list[str] = []
     rollup_status = session_memory_operational_route_rollup_status(aoa_root=aoa_root)
     rollup_state = str(rollup_status.get("status") or "missing")
@@ -55562,6 +55617,7 @@ def session_memory_search_operational_route_rollup_query(
         "aoa_root": str(aoa_root),
         "target_db": str(target_db),
         "filters": filters,
+        "normalized_filters": normalized_filters,
         "rollup_status": {
             key: rollup_status.get(key)
             for key in (
@@ -55624,19 +55680,23 @@ def session_memory_search_operational_route_rollup_query(
 
     where: list[str] = []
     params: list[Any] = []
-    if filters["layer"]:
+    if normalized_filters["layer"]:
         where.append("layer = ?")
-        params.append(filters["layer"])
-    if filters["key"]:
+        params.append(normalized_filters["layer"])
+    if normalized_filters["key"]:
         where.append("key = ?")
-        params.append(filters["key"])
-    if filters["route_signal"]:
+        params.append(normalized_filters["key"])
+    if normalized_filters["route_signal"]:
         where.append("route_signal = ?")
-        params.append(filters["route_signal"])
-    if filters["query"]:
-        needle = f"%{filters['query'].lower()}%"
-        where.append("(lower(layer) LIKE ? OR lower(key) LIKE ? OR lower(route_signal) LIKE ?)")
-        params.extend([needle, needle, needle])
+        params.append(normalized_filters["route_signal"])
+    query_terms = normalized_filters.get("query_terms") if isinstance(normalized_filters.get("query_terms"), list) else []
+    if query_terms:
+        query_clauses: list[str] = []
+        for term in query_terms:
+            needle = f"%{str(term).lower()}%"
+            query_clauses.append("(lower(layer) LIKE ? OR lower(key) LIKE ? OR lower(route_signal) LIKE ?)")
+            params.extend([needle, needle, needle])
+        where.append(f"({' OR '.join(query_clauses)})")
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
     conn: sqlite3.Connection | None = None
@@ -63338,8 +63398,8 @@ def live_scenario_audit(
                     lambda: session_memory_search_operational_route_rollup_query(
                         workspace_root=aoa_root.parent,
                         aoa_root=aoa_root,
-                        query="exec_command",
-                        layer="tool",
+                        query="aoa-session-memory-mcp",
+                        layer="mcp",
                         limit=max(selected_limit, 3),
                         ref_limit=3,
                     ),

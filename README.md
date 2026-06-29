@@ -1226,7 +1226,11 @@ segment, and session refs, and reports a cost profile showing that it does not
 resample shards, open the monolith, use FTS, or hydrate raw body text. Use the
 materialize command only for missing or stale rollups; use the query command
 when the rollup is current and an agent needs compact navigation proof. The
-query packet also includes `agent_route_summary`, a compact lane map for
+query route canonicalizes human anchor forms such as
+`aoa-session-memory-mcp` into the route-signal key form
+`aoa_session_memory_mcp`; the packet exposes `normalized_filters` so agents can
+see the canonical terms without guessing them or widening into broad search.
+The query packet also includes `agent_route_summary`, a compact lane map for
 tools, skills, MCP, hooks, APIs, plugins, goals, answers, errors, tests,
 validators, decisions, memory surfaces, graphs, evals, scripts, mechanics, and
 agents. Use that summary to choose a lane-specific rollup query or a dedicated

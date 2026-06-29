@@ -517,7 +517,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-06-28",
-        "note": "Route-rollup query must stay the fast consumer route over the materialized projection: no maintenance rebuild, shard resampling, monolith read, FTS, or raw hydration; returned refs remain the evidence handoff."
+        "note": "Route-rollup query must stay the fast consumer route over the materialized projection: human anchors such as aoa-session-memory-mcp must canonicalize to route keys without maintenance rebuild, shard resampling, monolith read, FTS, or raw hydration; returned refs remain the evidence handoff."
       },
       "expect": {
         "max_failed_count": 0,

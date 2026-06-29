@@ -68,8 +68,11 @@ Use these first routes when available:
   `use_operational_route_rollup_projection`, use
   `search-operational-route-rollup-query <query> --layer <layer>` first. This
   route reads the materialized rollup only; it must not rebuild maintenance,
-  resample shards, open the monolith, use FTS, or hydrate raw body text. Read
-  `agent_route_summary` before trusting the top unfiltered rows: it maps
+  resample shards, open the monolith, use FTS, or hydrate raw body text. Human
+  anchor forms such as `aoa-session-memory-mcp` are canonicalized into route
+  keys such as `aoa_session_memory_mcp`; inspect `normalized_filters` if a
+  result is surprising before widening the route. Read `agent_route_summary`
+  before trusting the top unfiltered rows: it maps
   tools, skills, MCP, hooks, APIs, plugins, goals, answers, errors, tests,
   validators, decisions, memory surfaces, graphs, evals, scripts, mechanics,
   and agents to lane-specific rollup commands or dedicated first routes such

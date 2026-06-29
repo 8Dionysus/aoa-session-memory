@@ -1922,6 +1922,32 @@ Maintenance gates:
   `case_count=12`, `passed_count=12`, `failed_count=0`, and
   `actionable_gap_count=0`.
 
+- 2026-06-29 route-rollup canonical human-anchor proof:
+  `search-operational-route-rollup-query aoa-session-memory-mcp --layer mcp
+  --limit 3 --ref-limit 1 --write-report` now canonicalizes the human anchor
+  to `normalized_filters.query_terms=["aoa-session-memory-mcp",
+  "aoa_session_memory_mcp"]` and returns the current materialized MCP route row
+  `mcp:aoa_session_memory_mcp` without shard resampling, monolith reads, FTS,
+  or raw-body hydration. Live report
+  `diagnostics/20260629T062417Z__search-operational-route-rollup-query.json`
+  returned `ok=true`, `status=matched`, `result_count=2`,
+  `freshness_status=current`, `agent_route_summary_status=covered`,
+  `covered_lane_count=18`, and first evidence refs
+  `raw:line:27697`,
+  `136__compaction-to-compaction.md#event-027697--security_touchpoint--tool-output-call_bdoxqrgjyp3qamrir8hxx2iv`,
+  session `019edd27-0d1b-7d83-ad01-c7c72effc9bc`. The profile live proof
+  `diagnostics/20260629T062417Z__live-scenario-audit.json` returned
+  `passed_count=1`, `warn_count=0`, `first_useful_packet_ms=1363`,
+  `uses_materialized_route_rollup=true`, `opens_monolith=false`,
+  `uses_fts=false`, and `hydrates_body=false`. The reviewed corpus gate
+  `diagnostics/20260629T062448Z__live-scenario-corpus-check.json` returned
+  `case_count=12`, `passed_count=12`, `failed_count=0`, and
+  `actionable_gap_count=0`. A direct live MCP call through the exposed
+  operational rollup tool also returned `status=matched`,
+  `normalized_filters.query_terms=["aoa-session-memory-mcp",
+  "aoa_session_memory_mcp"]`, `mcp_access.response_compacted=true`, and
+  `mcp_access.does_not_materialize_rollup=true`.
+
 - 2026-06-28 graph queue aggregate-refresh tail reduction: live graph queue
   reports showed that the remaining interactive cost was dominated by
   `replace_sources` aggregate refresh, especially edge representative payload

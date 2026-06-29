@@ -4702,8 +4702,8 @@ def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> Non
 
 def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
     def fake_route_rollup_query(**kwargs: Any) -> dict[str, Any]:
-        assert kwargs["query"] == "exec_command"
-        assert kwargs["layer"] == "tool"
+        assert kwargs["query"] == "aoa-session-memory-mcp"
+        assert kwargs["layer"] == "mcp"
         return {
             "ok": True,
             "result_count": 1,
@@ -16338,6 +16338,40 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert any(command["route_kind"] == "agent_responses" for command in lanes["answers"]["commands"])
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+    human_mcp_query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        query="aoa-session-memory-mcp",
+        layer="mcp",
+        limit=5,
+        ref_limit=4,
+    )
+
+    assert human_mcp_query["ok"] is True
+    assert human_mcp_query["status"] == "matched"
+    assert human_mcp_query["normalized_filters"]["query_terms"] == [
+        "aoa-session-memory-mcp",
+        "aoa_session_memory_mcp",
+    ]
+    assert human_mcp_query["normalized_filters"]["layer"] == "mcp"
+    assert human_mcp_query["results"][0]["key"] == "aoa_session_memory_mcp"
+    assert human_mcp_query["quality"]["raw_or_segment_ref_present"] is True
+    assert human_mcp_query["cost_profile"]["opens_monolith"] is False
+    assert human_mcp_query["cost_profile"]["uses_fts"] is False
+
+    human_mcp_key = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        key="aoa-session-memory-mcp",
+        route_signal="mcp:aoa-session-memory-mcp",
+    )
+
+    assert human_mcp_key["ok"] is True
+    assert human_mcp_key["status"] == "matched"
+    assert human_mcp_key["normalized_filters"]["key"] == "aoa_session_memory_mcp"
+    assert human_mcp_key["normalized_filters"]["route_signal"] == "mcp:aoa_session_memory_mcp"
+    assert human_mcp_key["results"][0]["route_signal"] == "mcp:aoa_session_memory_mcp"
 
     no_match = module.session_memory_search_operational_route_rollup_query(
         workspace_root=workspace,
