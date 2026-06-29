@@ -10758,6 +10758,146 @@ def test_route_cache_hot_gate_uses_cached_states_without_source_scan(tmp_path: P
     assert payload["selected_count"] == 7
 
 
+def test_route_cache_hot_gate_tracks_stale_operational_rollup(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "indexed_session_state_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 7, "diagnostics": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "current", "shard_count": 3, "largest_shards": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "stale",
+            "needs_refresh": True,
+            "shard_count": 3,
+            "diagnostics": ["operational_route_rollup_source_shards_changed"],
+        },
+    )
+
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
+    counts = module.auto_maintenance_freshness_work_counts(payload)
+
+    assert payload["ok"] is False
+    assert payload["needs_index_maintenance"] is True
+    assert payload["operational_route_rollup_repair_needed"] is True
+    assert "operational_route_rollup_missing_or_stale" in payload["diagnostics"]
+    assert counts["operational_route_rollup_dirty_count"] == 1
+    assert counts["dirty_count"] == 1
+    assert module.auto_maintenance_clean_noop_reason(payload) == ""
+
+
+def test_route_cache_hot_gate_tracks_incomplete_search_shards(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "indexed_session_state_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_refresh": False,
+            "projection_session_count": 7,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_hot_state",
+        lambda _aoa_root: {
+            "status": "current_with_retired_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 7, "diagnostics": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {
+            "status": "incomplete",
+            "shard_count": 3,
+            "materialized_shard_count": 2,
+            "actionable_noncurrent_shard_count": 1,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "blocked_by_search_freshness",
+            "needs_refresh": False,
+            "diagnostics": ["operational_route_rollup_search_shards_not_current:incomplete"],
+        },
+    )
+
+    payload = module.route_cache_freshness_gates(aoa_root=aoa_root)
+    counts = module.auto_maintenance_freshness_work_counts(payload)
+
+    assert payload["ok"] is False
+    assert payload["needs_index_maintenance"] is True
+    assert payload["search_shards_repair_needed"] is True
+    assert payload["operational_route_rollup_repair_needed"] is False
+    assert "search_shards_incomplete_or_stale" in payload["diagnostics"]
+    assert counts["search_shards_dirty_count"] == 1
+    assert counts["dirty_count"] == 1
+    assert module.auto_maintenance_clean_noop_reason(payload) == ""
+
+
 def test_route_cache_hot_gate_scoped_filters_scan_selected_records(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "2026-06-15__001__scoped-hot-gate"
@@ -15238,6 +15378,103 @@ def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_auto_maintenance_resource_launch_surfaces_child_lock_held(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    child = {
+        "schema_version": 1,
+        "artifact_type": "session_memory_auto_maintenance",
+        "ok": True,
+        "status": "skipped_lock_held",
+        "mutates": False,
+        "apply": True,
+        "profile": "hot",
+        "target": "all",
+        "maintenance_coordinator": {
+            "status": "skipped_lock_held",
+            "blocking_owner": {
+                "owner_job": "hook-worker",
+                "mode": "hook-worker",
+                "target": "hook-jobs",
+            },
+        },
+        "diagnostics": ["lock_held"],
+    }
+    child_report = aoa_root / "diagnostics" / "child-auto-maintenance.json"
+    child_report.parent.mkdir(parents=True)
+    child_report.write_text(json.dumps(child), encoding="utf-8")
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-06-29T12:00:00-06:00",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "probe", "kind": "indexing"},
+                "execution": {
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout_tail": f'... "report_json": "{child_report}" ...',
+                    "stderr_tail": "Finished with result: success",
+                },
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="operator_requested",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "skipped_lock_held"
+    assert payload["mutates"] is False
+    assert payload["recommended_exit_code"] == 0
+    assert payload["child_status"] == "skipped_lock_held"
+    assert payload["child_ok"] is True
+    assert payload["child"]["maintenance_coordinator"]["blocking_owner"]["owner_job"] == "hook-worker"
+    assert "lock_held" in payload["diagnostics"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+    assert "child_status: `skipped_lock_held`" in Path(payload["report_markdown"]).read_text(encoding="utf-8")
+
+
+def test_compact_maintenance_child_summary_promotes_nested_rollup_state() -> None:
+    summary = module.compact_maintenance_child_summary(
+        {
+            "ok": True,
+            "status": "applied_with_deferred_live",
+            "maintenance": {
+                "status": "applied",
+                "operational_route_rollup_repair_needed": True,
+                "final_operational_route_rollup": {"status": "current", "source_mismatch_count": 0},
+                "action_counts": {"applied": 2},
+                "actions": [
+                    {"id": "refresh_operational_route_rollup", "status": "applied", "needed": True},
+                ],
+            },
+        }
+    )
+
+    assert summary["status"] == "applied_with_deferred_live"
+    assert summary["maintenance_status"] == "applied"
+    assert summary["operational_route_rollup_repair_needed"] is True
+    assert summary["final_operational_route_rollup"]["status"] == "current"
+    assert summary["action_counts"] == {"applied": 2}
+    assert summary["actions"] == [{"id": "refresh_operational_route_rollup", "status": "applied", "needed": True}]
+
+
 def test_catchup_auto_maintenance_resource_defaults_to_index_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -17150,11 +17387,14 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert plan["projection_candidate"]["physical_shrink_plan_status"] == "blocked_missing_materialized_rollup"
     assert plan["physical_shrink_plan"]["status"] == "blocked_missing_materialized_rollup"
     assert plan["physical_shrink_plan"]["safe_to_apply"] is False
-    assert plan["physical_shrink_plan"]["apply_status"] == "blocked"
+    assert plan["physical_shrink_plan"]["apply_status"] == "operator_rebuild_route_available_but_blocked"
+    assert plan["physical_shrink_plan"]["operator_rebuild_route_available"] is True
+    assert "--context-tail-omission-policy" in plan["physical_shrink_plan"]["operator_rebuild_command"]
     assert plan["physical_shrink_plan"]["context_tail_candidate_count"] == 2
     assert plan["physical_shrink_plan"]["route_ref_backed_omission_candidate_count"] == 1
     assert plan["physical_shrink_plan"]["unrouted_keep_candidate_count"] == 1
     assert plan["physical_shrink_plan"]["materialized_rollup_status"] == "missing"
+    assert plan["physical_shrink_plan"]["next_implementation_route"] == "refresh_operational_route_rollup_then_recheck_shrink_gates"
     assert "do_not_drop_candidate_tail_without_route_ref_rehome" in plan["stop_lines"]
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()
@@ -17364,6 +17604,150 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     parsed = parser.parse_args(["search-operational-shrink-gates", "--live-scenario-case-limit", "2"])
     assert parsed.func == module.command_search_operational_shrink_gates
     assert parsed.live_scenario_case_limit == 2
+
+
+def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup_stale(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_event_projection_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "candidate_tail_measured",
+            "diagnostics": [],
+            "physical_shrink_plan": {
+                "status": "blocked_missing_materialized_rollup",
+                "safe_to_apply_physical_compaction": False,
+                "context_tail_candidate_count": 20,
+                "route_ref_backed_omission_candidate_count": 16,
+                "unrouted_keep_candidate_count": 4,
+                "materialized_rollup_status": "stale",
+                "apply_status": "operator_rebuild_route_available_but_blocked",
+                "operator_rebuild_route_available": True,
+                "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
+                "operator_rebuild_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "operator_rebuild_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-shards",
+                    "all",
+                    "--context-tail-omission-policy",
+                    "route-ref-backed",
+                    "--write-report",
+                ],
+                "next_implementation_route": "refresh_operational_route_rollup_then_recheck_shrink_gates",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup_query",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "matched",
+            "results": [{"raw_refs": ["raw:line:7"], "segment_refs": []}],
+            "totals": {"matched_group_count": 1},
+            "quality": {
+                "raw_or_segment_ref_present": True,
+                "freshness_status": "stale",
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": 3,
+            },
+            "agent_route_summary": {
+                "status": "covered",
+                "covered_lane_count": 13,
+                "missing_lane_count": 0,
+                "direct_rollup_lane_count": 11,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "literal_query_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "diagnostics": [],
+            "primary_route": {"route_id": "entity_usage_chain"},
+            "literal_route_strategy": {
+                "query_class": "entity_anchor",
+                "primary_route_id": "entity_usage_chain",
+                "uses_structured_first": True,
+                "uses_fts_first": False,
+                "monolith_fallback_first": False,
+                "monolith_is_fallback_only": True,
+                "exact_recall_preserved_by_fallback": True,
+                "fallback_preserves_exact_recall": True,
+                "fallback_route_id": "monolith_raw_text_fallback",
+            },
+            "cost_profile": {
+                "structured_first": True,
+                "uses_fts_first": False,
+                "monolith_fallback_first": False,
+                "exact_recall_preserved_by_fallback": True,
+            },
+            "next_command": "python3 scripts/aoa_session_memory.py usage-chain anchor",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_scenario_corpus_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "case_count": 1,
+            "available_case_count": 13,
+            "passed_count": 1,
+            "failed_count": 0,
+            "actionable_gap_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "storage_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "deep_dbstat": False,
+            "row_counts": False,
+            "search_store": {
+                "exists": True,
+                "total_with_wal_bytes": 1234,
+                "total_with_wal_human": "1.2 KiB",
+            },
+            "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+        },
+    )
+
+    payload = module.session_memory_search_operational_shrink_gates(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        live_scenario_case_limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "blocked_before_apply"
+    assert payload["failed_gate_ids"] == []
+    assert "projection_guard" in payload["blocked_gate_ids"]
+    assert "storage_before_after_comparison" in payload["blocked_gate_ids"]
+    assert "explicit_apply_route" in payload["passed_gate_ids"]
+    projection_gate = next(gate for gate in payload["gates"] if gate["id"] == "projection_guard")
+    assert projection_gate["status"] == "blocked"
+    apply_gate = next(gate for gate in payload["gates"] if gate["id"] == "explicit_apply_route")
+    assert apply_gate["status"] == "pass"
+    assert apply_gate["summary"]["operator_rebuild_route_available"] is True
+    assert apply_gate["summary"]["operator_rebuild_route_ready"] is False
+    assert apply_gate["summary"]["next_implementation_route"] == "refresh_operational_route_rollup_then_recheck_shrink_gates"
 
 
 def test_search_index_sessions_applies_explicit_context_tail_omission_policy(

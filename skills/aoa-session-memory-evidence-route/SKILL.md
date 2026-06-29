@@ -101,6 +101,11 @@ Use these first routes when available:
   `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
   omission is a route/read-model regression. Keep unrouted context-tail rows
   and the monolith raw-text fallback until their replacements are proven.
+  If stale/source-mismatched rollup is the only projection blocker, prefer
+  `auto-maintenance-resource hot all --apply --skip-graph-repair --write-report`
+  before re-running shrink gates; this route should refresh the rollup from
+  stable shards and expose child `skipped_lock_held`/deferred statuses rather
+  than hiding them as successful completion.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with

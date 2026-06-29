@@ -21649,6 +21649,8 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- resource_ok: `{payload.get('resource_ok')}`",
         f"- execution_ok: `{execution.get('ok')}`",
         f"- execution_returncode: `{execution.get('returncode')}`",
+        f"- child_status: `{payload.get('child_status')}`",
+        f"- child_ok: `{payload.get('child_ok')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         "",
         "## Resource Command",
@@ -21733,6 +21735,28 @@ def parse_json_object_from_stdout(text: str) -> dict[str, Any]:
     return {}
 
 
+def child_json_payload_from_stdout_tail(text: str, *, aoa_root: Path) -> dict[str, Any]:
+    payload = parse_json_object_from_stdout(text)
+    if payload:
+        return payload
+    for match in reversed(list(re.finditer(r'"report_json"\s*:\s*"([^"]+)"', text or ""))):
+        report_path = Path(match.group(1))
+        try:
+            resolved = report_path.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(aoa_root.resolve())
+        except ValueError:
+            continue
+        if resolved.suffix != ".json" or not resolved.exists():
+            continue
+        loaded = read_json(resolved, {})
+        if isinstance(loaded, dict):
+            return loaded
+    return {}
+
+
 def maintenance_child_defer_status(child_payload: dict[str, Any]) -> str:
     if not isinstance(child_payload, dict) or not child_payload:
         return ""
@@ -21751,6 +21775,49 @@ def maintenance_child_defer_status(child_payload: dict[str, Any]) -> str:
             return "deferred_conflicting_lease"
         return "skipped_lock_held"
     return ""
+
+
+def compact_maintenance_child_summary(child_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(child_payload, dict) or not child_payload:
+        return {}
+    maintenance = child_payload.get("maintenance") if isinstance(child_payload.get("maintenance"), dict) else {}
+    summary: dict[str, Any] = {
+        key: child_payload.get(key)
+        for key in (
+            "ok",
+            "status",
+            "mutates",
+            "apply",
+            "profile",
+            "target",
+            "diagnostics",
+            "maintenance_coordinator",
+        )
+        if key in child_payload
+    }
+    for key in (
+        "action_counts",
+        "operational_route_rollup_repair_needed",
+        "final_operational_route_rollup",
+    ):
+        if key in child_payload:
+            summary[key] = child_payload.get(key)
+        elif key in maintenance:
+            summary[key] = maintenance.get(key)
+    if maintenance and "maintenance_status" not in summary:
+        summary["maintenance_status"] = maintenance.get("status")
+    actions = maintenance.get("actions") if isinstance(maintenance.get("actions"), list) else []
+    if actions:
+        summary["actions"] = [
+            {
+                key: action.get(key)
+                for key in ("id", "status", "needed")
+                if isinstance(action, dict) and key in action
+            }
+            for action in actions[:12]
+            if isinstance(action, dict)
+        ]
+    return summary
 
 
 def resource_fallback_child_status(fallback: dict[str, Any]) -> str:
@@ -21999,6 +22066,17 @@ def auto_maintenance_resource_launch(
     resource_ok = resource_payload.get("ok")
     execution_ok = execution.get("ok") if isinstance(execution, dict) else None
     execution_returncode = execution.get("returncode") if isinstance(execution, dict) else None
+    child_payload = (
+        child_json_payload_from_stdout_tail(str(execution.get("stdout_tail") or ""), aoa_root=aoa_root)
+        if isinstance(execution, dict)
+        else {}
+    )
+    child_status = maintenance_child_defer_status(child_payload)
+    child_diagnostics = (
+        [str(item) for item in child_payload.get("diagnostics", []) if item]
+        if isinstance(child_payload.get("diagnostics"), list)
+        else []
+    )
     if blocked_reasons:
         status = "resource_blocked"
         diagnostics.extend(f"resource_blocked:{item}" for item in blocked_reasons)
@@ -22009,6 +22087,12 @@ def auto_maintenance_resource_launch(
         status = "resource_launcher_timeout"
     elif diagnostics:
         status = "resource_launcher_failed"
+    elif child_status in {"skipped_lock_held", "deferred_conflicting_lease"}:
+        status = child_status
+        diagnostics.extend(child_diagnostics or [child_status])
+    elif child_payload and child_payload.get("ok") is False:
+        status = "child_failed"
+        diagnostics.extend(child_diagnostics or ["auto_maintenance_child_failed"])
     elif resource_ok is True and (execution_ok is True or execution_returncode == 0):
         status = "completed"
     elif resource_ok is True:
@@ -22094,7 +22178,11 @@ def auto_maintenance_resource_launch(
         fallback_execution = fallback_payload.get("execution") if isinstance(fallback_payload.get("execution"), dict) else {}
         fallback_execution_ok = fallback_execution.get("ok") if isinstance(fallback_execution, dict) else None
         fallback_execution_returncode = fallback_execution.get("returncode") if isinstance(fallback_execution, dict) else None
-        fallback_child_payload = parse_json_object_from_stdout(str(fallback_execution.get("stdout_tail") or "")) if isinstance(fallback_execution, dict) else {}
+        fallback_child_payload = (
+            child_json_payload_from_stdout_tail(str(fallback_execution.get("stdout_tail") or ""), aoa_root=aoa_root)
+            if isinstance(fallback_execution, dict)
+            else {}
+        )
         fallback_child_status = maintenance_child_defer_status(fallback_child_payload)
         fallback_child_diagnostics = (
             [str(item) for item in fallback_child_payload.get("diagnostics", []) if item]
@@ -22148,11 +22236,7 @@ def auto_maintenance_resource_launch(
                 "stdout_tail": fallback_execution.get("stdout_tail") if isinstance(fallback_execution, dict) else None,
                 "systemd": fallback_execution.get("systemd") if isinstance(fallback_execution, dict) else None,
             },
-            "child": {
-                key: fallback_child_payload.get(key)
-                for key in ("ok", "status", "mutates", "target", "action_counts", "diagnostics")
-                if key in fallback_child_payload
-            },
+            "child": compact_maintenance_child_summary(fallback_child_payload),
             "command": fallback_command,
             "exact_command": shlex.join(fallback_command),
             "stdout_tail": fallback_stdout[-4000:],
@@ -22235,7 +22319,11 @@ def auto_maintenance_resource_launch(
         fallback_execution = fallback_payload.get("execution") if isinstance(fallback_payload.get("execution"), dict) else {}
         fallback_execution_ok = fallback_execution.get("ok") if isinstance(fallback_execution, dict) else None
         fallback_execution_returncode = fallback_execution.get("returncode") if isinstance(fallback_execution, dict) else None
-        fallback_child_payload = parse_json_object_from_stdout(str(fallback_execution.get("stdout_tail") or "")) if isinstance(fallback_execution, dict) else {}
+        fallback_child_payload = (
+            child_json_payload_from_stdout_tail(str(fallback_execution.get("stdout_tail") or ""), aoa_root=aoa_root)
+            if isinstance(fallback_execution, dict)
+            else {}
+        )
         fallback_child_status = maintenance_child_defer_status(fallback_child_payload)
         fallback_child_diagnostics = (
             [str(item) for item in fallback_child_payload.get("diagnostics", []) if item]
@@ -22293,11 +22381,7 @@ def auto_maintenance_resource_launch(
                 "stdout_tail": fallback_execution.get("stdout_tail") if isinstance(fallback_execution, dict) else None,
                 "systemd": fallback_execution.get("systemd") if isinstance(fallback_execution, dict) else None,
             },
-            "child": {
-                key: fallback_child_payload.get(key)
-                for key in ("ok", "status", "mutates", "target", "selected_count", "remaining_count", "diagnostics")
-                if key in fallback_child_payload
-            },
+            "child": compact_maintenance_child_summary(fallback_child_payload),
             "command": fallback_command,
             "exact_command": shlex.join(fallback_command),
             "stdout_tail": fallback_stdout[-4000:],
@@ -22312,6 +22396,7 @@ def auto_maintenance_resource_launch(
             diagnostics.append(f"graph_drip_fallback_{fallback_status}")
     elapsed_ms = int((time.monotonic() - started) * 1000)
     payload_ok = status in {"completed", "completed_without_execution_summary"}
+    deferred_status = status in {"skipped_lock_held", "deferred_conflicting_lease"}
     fallback_ok = (
         bool(fallback_index_drip.get("ok"))
         if fallback_index_drip
@@ -22354,6 +22439,9 @@ def auto_maintenance_resource_launch(
             "stdout_tail": execution.get("stdout_tail") if isinstance(execution, dict) else None,
             "systemd": execution.get("systemd") if isinstance(execution, dict) else None,
         },
+        "child_status": child_status,
+        "child_ok": child_payload.get("ok") if child_payload else None,
+        "child": compact_maintenance_child_summary(child_payload),
         "stdout_tail": stdout[-4000:],
         "stderr_tail": stderr[-4000:],
         "resource_result": {
@@ -22364,7 +22452,7 @@ def auto_maintenance_resource_launch(
         "diagnostics": sorted(set(diagnostics)),
         "owner_boundary": ".aoa owns session-memory archives, generated indexes, route atlas, graph store, diagnostics, and auto-maintenance.",
         "mcp_boundary": "aoa_session_memory MCP remains read-only and plan-only; resource-gated maintenance runs outside MCP.",
-        "exit_status_policy": "resource_blocked returns process success unless --fail-on-block is used; diagnostics carry the failure for agents/operators.",
+        "exit_status_policy": "resource/deferred blocks return process success unless --fail-on-block is used; status and diagnostics carry the deferred repair for agents/operators.",
     }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
@@ -22377,7 +22465,7 @@ def auto_maintenance_resource_launch(
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     blocked_status = str(status).startswith("resource_blocked")
-    payload["recommended_exit_code"] = 1 if (fail_on_block and blocked_status) or (not payload_ok and not blocked_status) else 0
+    payload["recommended_exit_code"] = 1 if (fail_on_block and (blocked_status or deferred_status)) or (not payload_ok and not blocked_status and not deferred_status) else 0
     return payload
 
 
@@ -23225,6 +23313,8 @@ def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[st
     atlas_state = freshness.get("atlas_index") if isinstance(freshness.get("atlas_index"), dict) else {}
     entity_registry_state = freshness.get("entity_registry") if isinstance(freshness.get("entity_registry"), dict) else {}
     graph_state = freshness.get("graph_store") if isinstance(freshness.get("graph_store"), dict) else {}
+    search_shards_dirty = 1 if bool(freshness.get("search_shards_repair_needed")) else 0
+    operational_route_rollup_dirty = 1 if bool(freshness.get("operational_route_rollup_repair_needed")) else 0
     search_dirty = int_value(search_state.get("dirty_session_count"))
     search_actionable = int_value(search_state.get("actionable_dirty_session_count"))
     search_deferred = int_value(search_state.get("deferred_live_session_count"))
@@ -23233,7 +23323,7 @@ def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[st
     route_drift = int_value(freshness.get("route_drift_count"))
     graph_actionable = graph_actionable_count_from_state(graph_state)
     graph_deferred = graph_deferred_live_count_from_state(graph_state)
-    dirty_count = route_drift + max(search_dirty, search_actionable) + atlas_dirty + entity_registry_dirty + graph_actionable
+    dirty_count = route_drift + max(search_dirty, search_actionable) + atlas_dirty + entity_registry_dirty + search_shards_dirty + operational_route_rollup_dirty + graph_actionable
     deferred_count = search_deferred + graph_deferred
     return {
         "selected_count": int_value(freshness.get("selected_count")),
@@ -23243,6 +23333,8 @@ def auto_maintenance_freshness_work_counts(freshness: dict[str, Any]) -> dict[st
         "search_deferred_live_session_count": search_deferred,
         "atlas_dirty_session_count": atlas_dirty,
         "entity_registry_dirty_count": entity_registry_dirty,
+        "search_shards_dirty_count": search_shards_dirty,
+        "operational_route_rollup_dirty_count": operational_route_rollup_dirty,
         "graph_actionable_count": graph_actionable,
         "graph_deferred_live_source_count": graph_deferred,
         "dirty_count": dirty_count,
@@ -52148,17 +52240,42 @@ def route_cache_freshness_gates(
     graph_hot_state = graph_store_hot_state(aoa_root)
     entity_registry_state = entity_registry_maintenance_status(aoa_root)
     entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
+    search_shards_state = session_memory_search_shard_projection_summary(aoa_root)
+    has_materialized_search_shards = int_value(search_shards_state.get("materialized_shard_count")) > 0
+    search_shards_repair_needed = (
+        has_materialized_search_shards
+        and (
+            str(search_shards_state.get("status") or "") in {"incomplete", "stale"}
+            or int_value(search_shards_state.get("actionable_noncurrent_shard_count")) > 0
+        )
+    )
+    operational_route_rollup_state = session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards_state,
+    )
+    operational_route_rollup_repair_needed = (
+        bool(operational_route_rollup_state.get("needs_refresh"))
+        and str(search_shards_state.get("status") or "") in {"current", "current_with_deferred_live_updates"}
+    )
     needs_index_maintenance = (
         bool(route_drift)
         or bool(search_state.get("needs_refresh"))
         or bool(atlas_state.get("needs_refresh"))
         or entity_registry_repair_needed
+        or search_shards_repair_needed
+        or operational_route_rollup_repair_needed
     )
     needs_graph_maintenance = bool(graph_hot_state.get("needs_maintenance")) or graph_hot_state.get("status") in {"missing", "stale"}
     diagnostics = ["index_maintenance_needed"] if needs_index_maintenance else []
     if entity_registry_repair_needed:
         diagnostics.append("entity_registry_missing_or_stale")
         diagnostics.extend(str(item) for item in entity_registry_state.get("diagnostics", []) if item)
+    if search_shards_repair_needed:
+        diagnostics.append("search_shards_incomplete_or_stale")
+        diagnostics.extend(str(item) for item in search_shards_state.get("diagnostics", []) if item)
+    if operational_route_rollup_repair_needed:
+        diagnostics.append("operational_route_rollup_missing_or_stale")
+        diagnostics.extend(str(item) for item in operational_route_rollup_state.get("diagnostics", []) if item)
     if needs_graph_maintenance:
         diagnostics.append("graph_maintenance_needed")
     diagnostics.extend(str(item) for item in search_state.get("diagnostics", []) if item)
@@ -52196,6 +52313,10 @@ def route_cache_freshness_gates(
         "atlas_index": atlas_state,
         "entity_registry": entity_registry_state,
         "entity_registry_repair_needed": entity_registry_repair_needed,
+        "search_shards": search_shards_state,
+        "search_shards_repair_needed": search_shards_repair_needed,
+        "operational_route_rollup": operational_route_rollup_state,
+        "operational_route_rollup_repair_needed": operational_route_rollup_repair_needed,
         "graph_store": graph_hot_state,
         "diagnostics": diagnostics,
     }
@@ -55826,7 +55947,13 @@ def search_operational_context_tail_physical_shrink_plan(
         "route-ref-backed",
         "--write-report",
     ]
-    apply_status = "operator_rebuild_route_available" if status == "guarded_plan_ready" else "blocked"
+    operator_rebuild_route_available = candidate_with_routes > 0
+    if status == "guarded_plan_ready":
+        apply_status = "operator_rebuild_route_available"
+    elif operator_rebuild_route_available:
+        apply_status = "operator_rebuild_route_available_but_blocked"
+    else:
+        apply_status = "blocked"
     return {
         "schema_version": 1,
         "id": "guarded_context_tail_physical_shrink_v1",
@@ -55835,9 +55962,10 @@ def search_operational_context_tail_physical_shrink_plan(
         "safe_to_apply": False,
         "safe_to_apply_physical_compaction": False,
         "apply_status": apply_status,
+        "operator_rebuild_route_available": operator_rebuild_route_available,
         "blocked_reason": blocked_reason,
         "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
-        "operator_rebuild_command": operator_rebuild_command if status == "guarded_plan_ready" else [],
+        "operator_rebuild_command": operator_rebuild_command if operator_rebuild_route_available else [],
         "operator_rebuild_policy": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
         "operator_rebuild_policy_cli_value": "route-ref-backed",
         "candidate_selector": (
@@ -55883,7 +56011,11 @@ def search_operational_context_tail_physical_shrink_plan(
         "next_implementation_route": (
             "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates"
             if status == "guarded_plan_ready"
-            else "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
+            else (
+                "refresh_operational_route_rollup_then_recheck_shrink_gates"
+                if operator_rebuild_route_available
+                else "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
+            )
         ),
         "rollback_route": "rebuild structured search shards from raw/session indexes; do not repair by deleting raw evidence",
         "mutation_boundary": "read-only plan packet; no search/raw/graph/session mutation is performed here",
@@ -56006,10 +56138,12 @@ def session_memory_search_operational_shrink_gates(
         if isinstance(projection_plan.get("diagnostics"), list) and item
     )
     physical = projection_plan.get("physical_shrink_plan") if isinstance(projection_plan.get("physical_shrink_plan"), dict) else {}
-    projection_passed = bool(projection_plan.get("ok")) and str(physical.get("status") or "") == "guarded_plan_ready"
+    physical_status = str(physical.get("status") or "")
+    projection_passed = bool(projection_plan.get("ok")) and physical_status == "guarded_plan_ready"
+    projection_blocked = bool(projection_plan.get("ok")) and physical_status.startswith("blocked_")
     projection_gate = search_operational_shrink_gate_packet(
         gate_id="projection_guard",
-        status=search_operational_shrink_gate_status(passed=projection_passed),
+        status=search_operational_shrink_gate_status(passed=projection_passed, blocked=projection_blocked),
         passed=projection_passed,
         summary={
             "projection_status": projection_plan.get("status"),
@@ -56155,18 +56289,29 @@ def session_memory_search_operational_shrink_gates(
             "after_search_store_size_human": "",
         },
     )
-    explicit_operator_route_ready = (
-        str(physical.get("apply_status") or "") == "operator_rebuild_route_available"
-        and bool(physical.get("operator_rebuild_command"))
-    )
+    apply_status = str(physical.get("apply_status") or "")
+    explicit_operator_route_available = (
+        bool(physical.get("operator_rebuild_route_available"))
+        or apply_status.startswith("operator_rebuild_route_available")
+    ) and bool(physical.get("operator_rebuild_command"))
+    explicit_operator_route_ready = apply_status == "operator_rebuild_route_available" and explicit_operator_route_available
     apply_route_gate = search_operational_shrink_gate_packet(
         gate_id="explicit_apply_route",
-        status=search_operational_shrink_gate_status(passed=explicit_operator_route_ready, blocked=not explicit_operator_route_ready),
-        passed=explicit_operator_route_ready,
+        status=search_operational_shrink_gate_status(passed=explicit_operator_route_available, blocked=not explicit_operator_route_available),
+        passed=explicit_operator_route_available,
         summary={
-            "reason": "explicit structured-shard omission rebuild route is available"
-            if explicit_operator_route_ready
-            else "context-tail physical omission policy and rebuild/apply route are not implemented",
+            "reason": (
+                "explicit structured-shard omission rebuild route is available and guarded"
+                if explicit_operator_route_ready
+                else (
+                    "explicit structured-shard omission rebuild route exists but current projection gates still block apply"
+                    if explicit_operator_route_available
+                    else "context-tail physical omission policy and rebuild/apply route are not implemented"
+                )
+            ),
+            "apply_status": apply_status,
+            "operator_rebuild_route_available": explicit_operator_route_available,
+            "operator_rebuild_route_ready": explicit_operator_route_ready,
             "next_implementation_route": physical.get("next_implementation_route")
             or "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates",
             "operator_rebuild_route_kind": physical.get("operator_rebuild_route_kind"),

@@ -157,6 +157,24 @@ read that sidecar as well as remaining candidate documents. After this rebuild,
 refresh `search-operational-route-rollup`, then run
 `search-operational-shrink-gates`; an empty route-rollup after omission is a
 regression, not a successful shrink.
+If shrink gates report `projection_guard=blocked` only because the operational
+route-rollup is stale or source-mismatched, do not describe the apply route as
+missing. Run the generated maintenance lane first:
+
+```bash
+python3 scripts/aoa_session_memory.py auto-maintenance-resource hot all \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --apply \
+  --skip-graph-repair \
+  --write-report \
+  --full
+```
+
+Then re-run `search-operational-shrink-gates`. The resource wrapper should
+surface child statuses such as `skipped_lock_held` instead of hiding them as
+completed repairs; treat those as retry/defer signals with a named blocking
+owner.
 
 When only the generated entity inventory is stale, refresh it without touching
 session documents:

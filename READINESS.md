@@ -1996,6 +1996,21 @@ Maintenance gates:
   shrink gates pass projection, route refs, agent route lane coverage, literal
   exact recall, live scenario corpus, storage baseline, and explicit apply
   route, while still blocking only `storage_before_after_comparison`.
+  Follow-up auto-maintenance route repair fixed the stale-rollup clean-skip
+  gap: `route-cache-freshness-gates` now reports
+  `operational_route_rollup_repair_needed=true` when structured shards are
+  current but the materialized rollup is stale/source-mismatched, and
+  `auto-maintenance-resource hot all --apply --skip-graph-repair` no longer
+  presents child `skipped_lock_held` as a completed repair. Live proof:
+  `diagnostics/20260629T223907Z__auto-maintenance-resource-hot.json` wrapped
+  child status `applied_with_deferred_live`; the child
+  `diagnostics/20260629T223907Z__auto-maintenance-hot.json` applied
+  `refresh_operational_route_rollup` in `121148ms` and moved
+  `final_operational_route_rollup.status` to `current` with
+  `source_mismatch_count=0`. Final route query and route-cache checks returned
+  rollup `current`, `needs_refresh=false`, and the next shrink-gate report
+  returned `ok=true`, `status=blocked_before_apply`, with all quality gates
+  passing and only `storage_before_after_comparison` blocked.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over

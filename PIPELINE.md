@@ -708,6 +708,17 @@ touching graph/search read-model stores. Dirty runs still run freshness gates
 before and after the maintenance pass and delegate actual
 route/search/atlas/graph work to `index-maintenance`. Its profiles are:
 
+The route-cache freshness gate includes structured search shards and the
+generated operational route-rollup as repairable search/read-model surfaces.
+An `incomplete` or `stale` shard packet with actionable noncurrent shards must
+set `search_shards_repair_needed=true` and prevent the clean-noop shortcut. A
+stale, missing, invalid, or source-mismatched rollup must set
+`operational_route_rollup_repair_needed=true`, add an
+`operational_route_rollup_missing_or_stale` diagnostic once structured shards
+are `current` or `current_with_deferred_live_updates`. Deferred live sessions
+may still keep the overall status at `wait_live_catchup`, but they must not
+hide a shard or rollup refresh lane that can be repaired from stable sources.
+
 - `hot`: two-day recent window, probe resource route, route/search/atlas repair
   for interactive agent routes, and a small bounded graph repair tick with
   explicit deferred remainder. If the route-cache repair spends the hot budget
@@ -816,6 +827,12 @@ hooks and MCP read paths light while allowing the machine resource layer to use
 available CPU, memory, IO, and thermal headroom without hiding resource-pressure
 deferrals. `aoa_session_memory` MCP remains read-only and plan-only; it may
 report freshness and the maintenance route, but it must not run maintenance.
+The wrapper must also inspect the child `auto-maintenance` payload. If the
+child returns `skipped_lock_held` or `deferred_conflicting_lease`, the outer
+report must surface that status, child diagnostics, and blocking owner instead
+of presenting the run as a completed repair. When systemd stdout only contains
+a tail, the wrapper may follow the child `report_json` path under `.aoa` to
+build a compact child summary for agents.
 For `catchup all`, the resource wrapper first checks the same `live_tail`
 packet as `maintenance-status`: when a deferred search session is already past
 the quiet window, the child command is the targeted
