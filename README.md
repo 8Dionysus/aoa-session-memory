@@ -1224,6 +1224,23 @@ literal-recall, route-rollup ref, storage, and bundle-parity gates prove an
 explicit apply route. Unrouted context-tail rows stay in search until their own
 literal/raw fallback replacement is proven.
 
+`search-operational-shrink-gates` is the read-only gate packet for that later
+physical route:
+
+```bash
+python3 scripts/aoa_session_memory.py search-operational-shrink-gates \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --write-report
+```
+
+It runs the operational projection plan, materialized route-rollup ref query,
+literal exact-recall probes, a bounded live-scenario corpus check, and a storage
+baseline. A passing gate packet still reports `apply_ready=false` until the
+explicit context-tail omission/apply route and after-shrink storage comparison
+exist. This is the route exposed by `maintenance-status` for the current
+`search_projection_combined_large` warning when the rollup is current.
+
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with
 route term counts plus bounded raw, segment, and session ref samples for the

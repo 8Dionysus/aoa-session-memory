@@ -1890,6 +1890,19 @@ Maintenance gates:
   live scenario corpus, search-hotset before/after, route-rollup ref check,
   literal exact-recall check, agent-event route regression, storage before/after,
   and bundle parity.
+  Follow-up gate proof
+  `diagnostics/20260629T090557Z__search-operational-shrink-gates.json` added
+  the read-only `search-operational-shrink-gates` route and connected
+  `maintenance-status` next action to `run_operational_shrink_gates` while the
+  rollup is current. The live gate returned `ok=true`,
+  `status=blocked_before_apply`, `apply_ready=false`, passed
+  `projection_guard`, `route_rollup_refs`, `agent_route_lane_coverage`,
+  `literal_exact_recall`, `live_scenario_corpus`, and `storage_baseline`, with
+  no failed gates. It blocked `storage_before_after_comparison` and
+  `explicit_apply_route`, which is the intended posture before a real generated
+  search omission/apply path exists. The two bounded shard-probe timeouts remain
+  visible as diagnostics, so the gate is live route evidence, not a claim of
+  full archive cardinality coverage.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over

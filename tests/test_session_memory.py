@@ -16122,16 +16122,19 @@ def test_search_projection_next_action_requires_current_large_projection(tmp_pat
         search_shards={"status": "current"},
     )
     assert ready_action is not None
-    assert ready_action["id"] == "use_operational_route_rollup_projection"
-    assert ready_action["route_kind"] == "search_operational_route_rollup_ready"
+    assert ready_action["id"] == "run_operational_shrink_gates"
+    assert ready_action["route_kind"] == "search_operational_shrink_gate_check"
     assert ready_action["route_rollup_status"] == "current"
     assert ready_action["route_rollup_row_count"] == 43_630
-    assert "search-operational-route-rollup-query" in ready_action["command"]
-    assert "search-operational-route-rollup" not in ready_action["command"]
+    assert "search-operational-shrink-gates" in ready_action["command"]
     ready_command_text = module.shlex.join(ready_action["command"])
-    assert "search-operational-route-rollup-query" in ready_command_text
+    assert "search-operational-shrink-gates" in ready_command_text
+    assert "search-operational-route-rollup-query" not in ready_command_text
     assert "--apply" not in ready_command_text
-    assert "--max-shards" not in ready_command_text
+    assert "--max-shards" in ready_command_text
+    supporting_command_text = module.shlex.join(ready_action["supporting_route_rollup_query_command"])
+    assert "search-operational-route-rollup-query" in supporting_command_text
+    assert "--apply" not in supporting_command_text
 
     assert (
         module.session_memory_search_projection_next_action(
@@ -16991,6 +16994,157 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert "unrouted context-tail rows are kept until literal/raw fallback replacement is proven" in ready_plan[
         "physical_shrink_plan"
     ]["required_invariants"]
+
+
+def test_search_operational_shrink_gates_block_apply_until_explicit_route(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_event_projection_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "candidate_tail_measured",
+            "diagnostics": [],
+            "route_ref_rollup_plan": {"status": "materialized_rollup_ready"},
+            "physical_shrink_plan": {
+                "status": "guarded_plan_ready",
+                "safe_to_apply_physical_compaction": False,
+                "context_tail_candidate_count": 20,
+                "route_ref_backed_omission_candidate_count": 16,
+                "unrouted_keep_candidate_count": 4,
+                "materialized_rollup_status": "current",
+                "next_implementation_route": "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup_query",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "matched",
+            "result_count": 1,
+            "results": [
+                {
+                    "raw_refs": ["raw:line:7"],
+                    "segment_refs": ["segments/000__initial-to-latest.md"],
+                }
+            ],
+            "totals": {"matched_group_count": 1},
+            "quality": {
+                "raw_or_segment_ref_present": True,
+                "freshness_status": "current",
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": 3,
+            },
+            "agent_route_summary": {
+                "status": "covered",
+                "covered_lane_count": 13,
+                "missing_lane_count": 0,
+                "direct_rollup_lane_count": 11,
+            },
+            "diagnostics": [],
+        },
+    )
+
+    def fake_literal_query_plan(**kwargs: Any) -> dict[str, Any]:
+        query = str(kwargs.get("query") or "")
+        structured = "search_projection_combined_large" not in query
+        return {
+            "ok": True,
+            "diagnostics": [],
+            "primary_route": {"route_id": "entity_usage_chain" if structured else "monolith_raw_text_fallback"},
+            "literal_route_strategy": {
+                "query_class": "entity_anchor" if structured else "error_text",
+                "primary_route_id": "entity_usage_chain" if structured else "monolith_raw_text_fallback",
+                "uses_structured_first": structured,
+                "uses_fts_first": not structured,
+                "monolith_fallback_first": False if structured else False,
+                "monolith_is_fallback_only": True,
+                "exact_recall_preserved_by_fallback": True,
+                "fallback_preserves_exact_recall": True,
+                "fallback_route_id": "monolith_raw_text_fallback",
+            },
+            "cost_profile": {
+                "structured_first": structured,
+                "uses_fts_first": not structured,
+                "monolith_fallback_first": False,
+                "exact_recall_preserved_by_fallback": True,
+            },
+            "next_command": "python3 scripts/aoa_session_memory.py usage-chain anchor",
+        }
+
+    monkeypatch.setattr(module, "literal_query_plan", fake_literal_query_plan)
+    monkeypatch.setattr(
+        module,
+        "live_scenario_corpus_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "case_count": 1,
+            "available_case_count": 13,
+            "passed_count": 1,
+            "failed_count": 0,
+            "actionable_gap_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "storage_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "deep_dbstat": False,
+            "row_counts": False,
+            "search_store": {
+                "exists": True,
+                "total_with_wal_bytes": 1234,
+                "total_with_wal_human": "1.2 KiB",
+            },
+            "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+        },
+    )
+
+    payload = module.session_memory_search_operational_shrink_gates(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        live_scenario_case_limit=1,
+    )
+
+    assert payload["artifact_type"] == "session_memory_search_operational_shrink_gate_check"
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["status"] == "blocked_before_apply"
+    assert payload["apply_ready"] is False
+    assert payload["safe_to_apply_physical_compaction"] is False
+    assert set(payload["passed_gate_ids"]) >= {
+        "projection_guard",
+        "route_rollup_refs",
+        "agent_route_lane_coverage",
+        "literal_exact_recall",
+        "live_scenario_corpus",
+        "storage_baseline",
+    }
+    assert payload["failed_gate_ids"] == []
+    assert payload["blocked_gate_ids"] == ["storage_before_after_comparison", "explicit_apply_route"]
+    literal_gate = next(gate for gate in payload["gates"] if gate["id"] == "literal_exact_recall")
+    assert literal_gate["summary"]["probe_count"] == len(module.SEARCH_OPERATIONAL_SHRINK_LITERAL_PROBES)
+    route_gate = next(gate for gate in payload["gates"] if gate["id"] == "route_rollup_refs")
+    assert route_gate["evidence_refs"][:2] == ["raw:line:7", "segments/000__initial-to-latest.md"]
+    parser = module.build_parser()
+    parsed = parser.parse_args(["search-operational-shrink-gates", "--live-scenario-case-limit", "2"])
+    assert parsed.func == module.command_search_operational_shrink_gates
+    assert parsed.live_scenario_case_limit == 2
 
 
 def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:

@@ -330,8 +330,13 @@ queries that do not need broad raw-text FTS.
 For search weight/cardinality pressure, route through `search-projection-plan`
 first, then `search-hotset-audit` for the fast shard breakdown by doc type,
 usage role, agent-event class, event type, route term cardinality, and session
-hotspot. Reserve `search-operational-projection-plan` for deeper replacement
-projection design; it is not the normal interactive pressure check.
+hotspot. When the operational route-rollup is already current, use
+`search-operational-shrink-gates --write-report` as the next warning route:
+it composes the operational projection plan, route-rollup ref query, literal
+exact-recall probes, live-scenario corpus, and storage baseline without
+mutating search. Reserve raw `search-operational-projection-plan` for deeper
+replacement projection design or for inspecting the embedded
+`physical_shrink_plan`; it is not the normal interactive pressure check.
 Goal lifecycle navigation also returns the same compact provider/freshness
 summary, so an MCP caller can judge projection currency before opening
 generated refs or raw transcript authority.

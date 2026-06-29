@@ -85,13 +85,14 @@ Use these first routes when available:
   as `goal-lifecycles`, `agent-responses`, and graph routes.
 - search projection weight, context-tail pressure, or a
   `search_projection_combined_large` warning: use
-  `search-operational-projection-plan --write-report` after confirming the
-  rollup is current. Read `route_ref_rollup_plan` and `physical_shrink_plan`
-  before proposing shrinkage. `physical_shrink_plan.status=guarded_plan_ready`
-  is only a design/apply-route readiness signal; `safe_to_apply` must remain
-  false until live-scenario, literal exact-recall, route-ref, storage, and
-  bundle-parity gates pass. Keep unrouted context-tail rows and the monolith
-  raw-text fallback until their replacements are proven.
+  `search-operational-shrink-gates --write-report` when the operational
+  route-rollup is current. The gate packet reads `route_ref_rollup_plan` and
+  `physical_shrink_plan`, checks route-rollup refs/cost, literal exact-recall
+  posture, live scenario corpus, and storage baseline, and still keeps
+  `apply_ready=false` until the explicit apply route and after-shrink storage
+  comparison exist. If the gate reports a missing/stale rollup, materialize the
+  route-rollup first. Keep unrouted context-tail rows and the monolith raw-text
+  fallback until their replacements are proven.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
