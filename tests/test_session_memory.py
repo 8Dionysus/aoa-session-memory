@@ -4300,6 +4300,32 @@ def test_entity_usage_scenario_layers_accept_default_and_kind_aliases() -> None:
     ]
 
 
+def test_entity_usage_scenario_probes_normalize_typed_anchors() -> None:
+    probes = module.normalize_entity_usage_scenario_probes(
+        [
+            {"name": "validator", "anchor": "validate_session_memory_mcp", "kind": "validator"},
+            {"name": "test", "anchor": "test_session_memory", "kind": "test"},
+        ]
+    )
+
+    assert probes == [
+        {
+            "name": "validator",
+            "layer": "validator",
+            "key": "validate_session_memory_mcp",
+            "kind": "validator",
+            "anchor": "validate_session_memory_mcp",
+        },
+        {
+            "name": "test",
+            "layer": "test",
+            "key": "test_session_memory",
+            "kind": "test",
+            "anchor": "test_session_memory",
+        },
+    ]
+
+
 def test_hook_receipt_route_search_reads_bounded_receipts(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / module.SESSION_ROOT / "2026-06-27__001__hook-receipts"
@@ -5044,6 +5070,14 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                     "seed": "usage-test",
                     "sample_size": 3,
                     "limit": 3,
+                    "entity_usage_probes": [
+                        {
+                            "name": "test_probe",
+                            "anchor": "test_session_memory",
+                            "kind": "test",
+                            "layer": "test",
+                        }
+                    ],
                     "expect": {
                         "max_failed_count": 0,
                         "min_raw_or_segment_ref_scenario_count": 1,
@@ -5097,6 +5131,9 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                 ],
                 "actionable_gaps": [],
             }
+        entity_usage_probes = kwargs.get("entity_usage_probes") or []
+        assert entity_usage_probes[0]["anchor"] == "test_session_memory"
+        assert entity_usage_probes[0]["kind"] == "test"
         return {
             "ok": True,
             "profiles": profiles,
@@ -5523,6 +5560,19 @@ def test_trace_route_supports_agent_event_kind() -> None:
 
     assert any(
         candidate.get("layer") == "agent_event" and candidate.get("key") == "assistant_answer"
+        for candidate in candidates
+    )
+
+
+def test_trace_route_supports_test_kind_specific_anchor() -> None:
+    candidates = module.trace_route_candidates("test_session_memory", kind="test")
+
+    assert any(
+        candidate.get("layer") == "test" and candidate.get("key") == "test_session_memory"
+        for candidate in candidates
+    )
+    assert any(
+        candidate.get("layer") == "entity" and candidate.get("key") == "test_session_memory"
         for candidate in candidates
     )
 

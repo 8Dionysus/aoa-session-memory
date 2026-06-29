@@ -3746,6 +3746,14 @@ def test_entity_candidates_from_texts(texts: list[str]) -> set[str]:
         key = path_stem_entity_key(match.group(1))
         if key:
             candidates.add(key)
+    for match in re.finditer(
+        r"\b(test_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+_(?:test|tests|spec))(?:\.(?:py|js|ts|tsx|go|rs))?\b",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        key = operational_entity_key(match.group(1), allow_plain=True)
+        if key and key not in {"test", "tests", "spec"}:
+            candidates.add(key)
     return candidates
 
 
@@ -61110,6 +61118,35 @@ def normalize_entity_usage_scenario_layers(layers: list[str] | None) -> list[str
     return list(dict.fromkeys(normalized))
 
 
+def normalize_entity_usage_scenario_probes(probes: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for index, probe in enumerate(probes or []):
+        if not isinstance(probe, dict):
+            continue
+        requested_kind = normalize_trace_route_kind(probe.get("kind"))
+        raw_layer = str(probe.get("layer") or "")
+        if not raw_layer and requested_kind != "auto":
+            raw_layer = ENTITY_REGISTRY_ROUTE_LAYER_BY_KIND.get(requested_kind, requested_kind)
+        layer = route_key_slug(raw_layer, fallback="")
+        if layer == "receipt":
+            layer = "hook_health"
+        raw_anchor = str(probe.get("anchor") or probe.get("key") or "")
+        key = route_key_slug(str(probe.get("key") or raw_anchor), fallback="")
+        if not layer or not key:
+            continue
+        kind = requested_kind if requested_kind != "auto" else entity_usage_scenario_candidate_kind(layer)
+        normalized.append(
+            {
+                "name": str(probe.get("name") or f"probe_{index + 1}"),
+                "layer": layer,
+                "key": key,
+                "kind": kind,
+                "anchor": raw_anchor or entity_usage_scenario_anchor(layer, key),
+            }
+        )
+    return normalized
+
+
 def entity_usage_scenario_candidate_kind(layer: str, kind: str | None = None) -> str:
     normalized_kind = normalize_trace_route_kind(kind)
     if normalized_kind != "auto" and normalized_kind in TRACE_ROUTE_KINDS:
@@ -61326,11 +61363,13 @@ def entity_usage_scenario_candidates(
     sample_size: int = 8,
     seed: str = "entity-usage-scenario-audit",
     min_postings: int = 1,
+    probes: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
         return [], ["search_index_missing"]
+    normalized_probes = normalize_entity_usage_scenario_probes(probes)
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path)
@@ -61340,6 +61379,10 @@ def entity_usage_scenario_candidates(
         if not sqlite_table_exists(conn, "route_terms") or not sqlite_table_exists(conn, "document_routes"):
             return [], diagnostics + ["search_route_terms_missing"]
         selected_layers = normalize_entity_usage_scenario_layers(layers)
+        for probe in normalized_probes:
+            probe_layer = str(probe.get("layer") or "")
+            if probe_layer and probe_layer not in selected_layers:
+                selected_layers.append(probe_layer)
         placeholders = ",".join("?" for _ in selected_layers)
         rows = conn.execute(
             f"""
@@ -61359,10 +61402,14 @@ def entity_usage_scenario_candidates(
             conn.close()
         return [], diagnostics + [sqlite_error_diagnostic(exc)]
     rng = random.Random(str(seed))
-    requested = max(1, min(int_value(sample_size, 8), 50))
+    requested = max(1, min(max(int_value(sample_size, 8), len(normalized_probes)), 50))
     registry_index = cached_entity_registry_entry_index(aoa_root)
     raw_candidates: list[dict[str, Any]] = []
     rejected_counts: Counter[str] = Counter()
+    route_rows_by_layer_key = {
+        (str(row["layer"]), str(row["key"])): row
+        for row in rows
+    }
     for row in rows:
         layer = str(row["layer"])
         key = str(row["key"])
@@ -61395,6 +61442,7 @@ def entity_usage_scenario_candidates(
     rng.shuffle(layer_order)
     selected: list[dict[str, Any]] = []
     seen_route_ids: set[int] = set()
+    explicit_probe_route_ids: set[int] = set()
     probe_count = 0
     probe_budget = max(
         ENTITY_USAGE_SCENARIO_PROBE_BATCH_FLOOR,
@@ -61426,6 +61474,45 @@ def entity_usage_scenario_candidates(
         return candidate
 
     try:
+        for probe in normalized_probes:
+            row = route_rows_by_layer_key.get((str(probe.get("layer") or ""), str(probe.get("key") or "")))
+            if row is None:
+                diagnostics.append(
+                    "explicit_probe_route_missing:"
+                    f"{probe.get('name')}:{probe.get('layer')}:{probe.get('key')}"
+                )
+                continue
+            route_id = int(row["route_id"])
+            if route_id in seen_route_ids:
+                continue
+            layer = str(row["layer"])
+            key = str(row["key"])
+            anchor = str(probe.get("anchor") or entity_usage_scenario_anchor(layer, key))
+            registry_entry = entity_usage_scenario_registry_entry(registry_index, layer=layer, key=key, anchor=anchor)
+            probed = probe_candidate(
+                {
+                    "route_id": route_id,
+                    "layer": layer,
+                    "key": key,
+                    "kind": str(probe.get("kind") or entity_usage_scenario_candidate_kind(layer)),
+                    "anchor": anchor,
+                    "route_signal": str(row["route_signal"]),
+                    "registry_tier": entity_usage_scenario_registry_tier(layer=layer, registry_entry=registry_entry),
+                    "registry_status": str(registry_entry.get("status") or ""),
+                    "registry_source_surface": str(registry_entry.get("source_surface") or ""),
+                    "probe_name": str(probe.get("name") or ""),
+                    "probe_source": "explicit_entity_usage_probe",
+                }
+            )
+            if not probed:
+                diagnostics.append(
+                    "explicit_probe_filtered:"
+                    f"{probe.get('name')}:{probe.get('layer')}:{probe.get('key')}"
+                )
+                continue
+            selected.append(probed)
+            seen_route_ids.add(route_id)
+            explicit_probe_route_ids.add(route_id)
         for layer in layer_order:
             items = by_layer.get(layer) or []
             for candidate in items:
@@ -61470,11 +61557,17 @@ def entity_usage_scenario_candidates(
     for reason, count in sorted(rejected_counts.items()):
         diagnostics.append(f"candidate_pool_filtered:{reason}:{count}")
     selected.sort(key=lambda item: int_value(item.get("scenario_score")), reverse=True)
-    layer_first_selected: list[dict[str, Any]] = []
-    seen_layers: set[str] = set()
+    layer_first_selected: list[dict[str, Any]] = [
+        candidate
+        for candidate in selected
+        if int_value(candidate.get("route_id")) in explicit_probe_route_ids
+    ]
+    seen_layers: set[str] = {str(candidate.get("layer") or "") for candidate in layer_first_selected}
     for candidate in selected:
         if len(layer_first_selected) >= requested:
             break
+        if int_value(candidate.get("route_id")) in explicit_probe_route_ids:
+            continue
         layer = str(candidate.get("layer") or "")
         if layer in seen_layers:
             continue
@@ -61611,6 +61704,7 @@ def entity_usage_scenario_audit(
     sample_size: int = 8,
     seed: str = "entity-usage-scenario-audit",
     layers: list[str] | None = None,
+    probes: list[dict[str, Any]] | None = None,
     min_postings: int = 1,
     limit: int = 8,
     per_route_limit: int = 8,
@@ -61629,6 +61723,7 @@ def entity_usage_scenario_audit(
         sample_size=sample_size,
         seed=seed,
         min_postings=min_postings,
+        probes=probes,
     )
     candidate_selection_elapsed_ms = int((time.monotonic() - candidate_started) * 1000)
     samples: list[dict[str, Any]] = []
@@ -61849,6 +61944,7 @@ def entity_usage_scenario_audit(
         "seed": seed,
         "sample_size": sample_size,
         "layers": normalize_entity_usage_scenario_layers(layers),
+        "probe_count": len(normalize_entity_usage_scenario_probes(probes)),
         "min_postings": min_postings,
         "quality": quality,
         "samples": samples,
@@ -63228,6 +63324,7 @@ def live_scenario_audit(
     recent_days: int = 7,
     limit: int = 3,
     literal_probes: list[dict[str, Any]] | None = None,
+    entity_usage_probes: list[dict[str, Any]] | None = None,
     write_report: bool = False,
 ) -> dict[str, Any]:
     allowed_profiles = {
@@ -63322,6 +63419,7 @@ def live_scenario_audit(
                         consequence_window=4,
                         document_limit=max(6, selected_limit * 3),
                         raw_preview_limit=2,
+                        probes=entity_usage_probes,
                         full=False,
                     ),
                 )
@@ -63441,6 +63539,7 @@ def live_scenario_audit(
             "date_from": date_from,
             "limit": selected_limit,
             "literal_probe_count": len(literal_probes or []),
+            "entity_usage_probe_count": len(entity_usage_probes or []),
         },
         "quality": quality,
         "scenarios": scenarios,
@@ -63725,6 +63824,7 @@ def live_scenario_corpus_case_check(
         recent_days=max(1, min(int_value(case.get("recent_days"), 7), 90)),
         limit=max(1, min(int_value(case.get("limit"), 3), 10)),
         literal_probes=case.get("literal_probes") if isinstance(case.get("literal_probes"), list) else None,
+        entity_usage_probes=case.get("entity_usage_probes") if isinstance(case.get("entity_usage_probes"), list) else None,
         write_report=False,
     )
     failures = live_scenario_expectation_failures(audit, expect)

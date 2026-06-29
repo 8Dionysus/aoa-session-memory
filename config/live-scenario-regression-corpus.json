@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 12,
+  "case_count": 13,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -312,6 +312,61 @@
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
             "min_session_ref_count": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "entity_usage_tail_entities_contract",
+      "profiles": [
+        "entity_usage"
+      ],
+      "seed": "corpus-tail-validator-test",
+      "sample_size": 4,
+      "recent_days": 14,
+      "limit": 3,
+      "entity_usage_probes": [
+        {
+          "name": "validator_route_specific_anchor",
+          "anchor": "validate_session_memory_mcp",
+          "kind": "validator",
+          "layer": "validator"
+        },
+        {
+          "name": "test_route_specific_anchor",
+          "anchor": "test_session_memory",
+          "kind": "test",
+          "layer": "test"
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-29",
+        "note": "Tail operational entity classes must not depend on random spread: validator and test anchors must route through typed usage evidence with raw or segment refs."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "entity_usage",
+            "allowed_statuses": [
+              "passed",
+              "warn"
+            ],
+            "min_sample_count": 4,
+            "max_failed_count": 0,
+            "required_kinds": [
+              "test",
+              "validator"
+            ],
+            "required_layers": [
+              "test",
+              "validator"
+            ],
+            "min_direct_usage_sample_count": 2,
+            "min_raw_or_segment_ref_sample_count": 2
           }
         ]
       }
