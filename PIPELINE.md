@@ -392,8 +392,13 @@ instead of rematerializing the full month. `--dirty-only` is intentionally
 incremental-only: it refuses rebuild mode and refuses missing shard DBs because
 a partial rebuild from only dirty sessions would drop current sessions from the
 generated shard projection. Reports expose `pre_filter_selected_count`,
-`dirty_candidate_count`, `dirty_selected_count`, and `skipped_current_count`
-so operators can prove the run touched only the intended stale rows.
+`dirty_candidate_count`, `dirty_selected_count`, `skipped_current_count`,
+`selected_sessions`, and budget-exhausted `remaining_sessions` / `active_session`
+phase packets so operators can prove the run touched only the intended stale
+rows and can see which heavy session or indexing phase consumed the budget.
+Scoped shard maintenance refreshes `search/catalog.json` from the selected
+records plus existing catalog fallback, rather than forcing a full live
+session-index scan after every dirty-only tick.
 By default dirty selection skips `freshness.status=deferred_live`; the
 live-tail catch-up route must first preserve and index the newer transcript.
 Use `--include-deferred-live` only for a deliberate operator override.

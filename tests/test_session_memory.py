@@ -14337,6 +14337,11 @@ def test_search_index_partial_update_reports_budget_exhausted_on_sqlite_interrup
     assert result["processed_count"] == 0
     assert result["remaining_count"] == 1
     assert result["diagnostics"] == ["search_index_budget_exhausted"]
+    assert result["active_session"]["session_id"] == "budgeted-search"
+    assert result["active_session"]["active_phase"] == "delete_existing_documents"
+    assert result["active_session"]["candidate_document_count"] > 0
+    assert result["remaining_sessions"][0]["session_id"] == "budgeted-search"
+    assert result["remaining_sessions"][0]["active_phase"] == "delete_existing_documents"
 
 
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
@@ -17731,7 +17736,18 @@ def test_search_shards_dirty_only_limit_applies_after_dirty_filter(tmp_path: Pat
     monkeypatch.setattr(module, "search_records_for_target", fake_records)
     monkeypatch.setattr(module, "filter_search_records_to_dirty_shard_sessions", fake_dirty_filter)
     monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
-    monkeypatch.setattr(module, "build_search_catalog", lambda *_args, **_kwargs: {"ok": True, "status": "current"})
+
+    def fake_build_search_catalog(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        selected = kwargs.get("selected_records") or []
+        calls["catalog_selected_labels"] = [item["session_label"] for item in selected]
+        return {
+            "ok": True,
+            "status": "current",
+            "catalog_state_basis": "selected_records",
+            "selected_state_key_count": len(selected),
+        }
+
+    monkeypatch.setattr(module, "build_search_catalog", fake_build_search_catalog)
 
     result = module.materialize_search_shards(
         aoa_root=aoa_root,
@@ -17751,6 +17767,110 @@ def test_search_shards_dirty_only_limit_applies_after_dirty_filter(tmp_path: Pat
     assert result["dirty_pre_limit_selected_count"] == 5
     assert result["dirty_limit"] == 3
     assert result["dirty_limited_count"] == 3
+    assert [item["session_label"] for item in result["selected_sessions"]] == [item["session_label"] for item in records[:3]]
+    assert calls["catalog_selected_labels"] == [item["session_label"] for item in records[:3]]
+    assert result["phase_timings"][-1]["phase"] == "search_catalog_refresh"
+    assert result["phase_timings"][-1]["catalog_state_basis"] == "selected_records"
+
+
+def test_search_shards_dirty_only_budget_exhaustion_reports_remaining_session(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shard = "month/2026-05"
+    module.search_shard_db_path(aoa_root, shard).parent.mkdir(parents=True)
+    module.search_shard_db_path(aoa_root, shard).touch()
+    records = [{"session_id": "heavy-session", "session_label": "2026-05-01__001__heavy-session"}]
+
+    monkeypatch.setattr(
+        module,
+        "search_records_for_target",
+        lambda *_args, **_kwargs: list(records),
+    )
+    monkeypatch.setattr(
+        module,
+        "filter_search_records_to_dirty_shard_sessions",
+        lambda _aoa_root, selected_records, **_kwargs: (
+            list(selected_records),
+            {
+                "dirty_candidate_count": 1,
+                "deferred_live_skipped_count": 0,
+                "pre_filter_selected_count": 1,
+                "dirty_selected_count": 1,
+                "skipped_current_count": 0,
+                "dirty_selected_sessions": [
+                    {
+                        "session_id": "heavy-session",
+                        "session_label": "2026-05-01__001__heavy-session",
+                        "shard": shard,
+                        "document_count": 200000,
+                        "shard_status": "stale",
+                        "freshness_status": "current",
+                    }
+                ],
+            },
+        ),
+    )
+
+    def fake_search_index_sessions(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "selected_count": 1,
+            "processed_count": 0,
+            "remaining_count": 1,
+            "budget_exhausted": True,
+            "document_count": 0,
+            "session_document_count": 0,
+            "segment_document_count": 0,
+            "event_document_count": 0,
+            "incident_document_count": 0,
+            "goal_lifecycle_document_count": 0,
+            "task_episode_document_count": 0,
+            "slow_sessions": [],
+            "slow_session_warning_count": 0,
+            "slow_session_threshold_ms": module.OPS_SEARCH_SESSION_WARNING_MS,
+            "active_session": {
+                "session_id": "heavy-session",
+                "session_label": "2026-05-01__001__heavy-session",
+                "record_index": 1,
+                "selected_count": 1,
+                "active_phase": "insert_documents",
+                "candidate_document_count": 200000,
+                "elapsed_ms": 300000,
+                "warning": True,
+            },
+            "remaining_sessions": [
+                {
+                    "session_id": "heavy-session",
+                    "session_label": "2026-05-01__001__heavy-session",
+                    "record_index": 1,
+                    "selected_count": 1,
+                    "active_phase": "insert_documents",
+                    "candidate_document_count": 200000,
+                    "elapsed_ms": 300000,
+                    "warning": True,
+                }
+            ],
+            "diagnostics": ["search_index_budget_exhausted"],
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+    monkeypatch.setattr(module, "build_search_catalog", lambda *_args, **_kwargs: {"ok": True, "status": "current"})
+
+    result = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard=shard,
+        rebuild_shards=False,
+        dirty_only=True,
+        budget_seconds=300,
+    )
+
+    assert result["ok"] is False
+    assert result["budget_exhausted"] is True
+    assert result["selected_sessions"][0]["document_count"] == 200000
+    assert result["remaining_sessions"][0]["session_id"] == "heavy-session"
+    assert result["remaining_sessions"][0]["active_phase"] == "insert_documents"
+    assert result["remaining_sessions"][0]["candidate_document_count"] == 200000
+    assert result["shards"][0]["active_session"]["session_id"] == "heavy-session"
 
 
 def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) -> None:

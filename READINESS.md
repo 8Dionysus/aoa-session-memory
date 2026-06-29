@@ -206,8 +206,13 @@ Build the `.aoa` session-memory mechanism end to end:
   sessions from `search/catalog.json`, skips `deferred_live` rows by default,
   refuses missing shard DBs, and reports `pre_filter_selected_count`,
   `dirty_selected_count`, `skipped_current_count`, and
-  `deferred_live_skipped_count`. This gives operators an automatic route for
-  “repair the few stale sessions in this shard” without rematerializing the
+  `deferred_live_skipped_count`. It also reports `selected_sessions`, phase
+  timings, and budget-exhausted `active_session` / `remaining_sessions` rows,
+  so a large dirty session becomes an explicit heavy-tail route instead of a
+  silent `processed_count=0`. Scoped dirty-only catalog refresh uses selected
+  records plus existing catalog fallback, avoiding a full live session-index
+  scan after each bounded shard tick. This gives operators an automatic route
+  for “repair the few stale sessions in this shard” without rematerializing the
   whole month or masking live-tail catch-up.
 - `maintenance-status` surfaces actionable search-shard tails in the agent
   packet: `next_actions` can include `refresh_search_shard_structured` beside
@@ -221,6 +226,14 @@ Build the `.aoa` session-memory mechanism end to end:
   `search_shards.status=current`; the slowest session contributed `146325`
   documents and took `170372ms`, making large per-session document fan-out the
   visible bottleneck.
+  2026-06-29 live proof: a bounded `month/2026-06` dirty-only tick selected
+  the stale Gmail session
+  `2026-06-13__003__подключайся-к-моему-gmail-и-анализируй-все`, exposed
+  `candidate_document_count=208490`, `active_phase=delete_existing_documents`,
+  and `remaining_sessions[0]` for the same session; scoped catalog refresh then
+  used `selected_records_with_catalog_fallback` in `134ms` instead of the prior
+  full-scan tail, while the heavy session remained an explicit budget-exhausted
+  follow-up.
 - Operations warnings distinguish current failures from repaired shard
   freshness failures: an `index-maintenance` report that failed only because a
   monthly shard had `search_documents_stale_segment_refs` is no longer kept as

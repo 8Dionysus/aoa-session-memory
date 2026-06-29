@@ -28747,6 +28747,82 @@ def search_shard_key_for_record(record: dict[str, Any]) -> str:
     return search_shard_key_for_session(session_label, session_record_date(record))
 
 
+def search_record_route_sample(
+    record: dict[str, Any],
+    *,
+    catalog_item: dict[str, Any] | None = None,
+    shard: str | None = None,
+    record_index: int | None = None,
+    selected_count: int | None = None,
+    projection_state: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item = catalog_item if isinstance(catalog_item, dict) else {}
+    state = projection_state if isinstance(projection_state, dict) else {}
+    label = str(record.get("session_label") or item.get("session_label") or session_dir_from_record(record).name)
+    session_id = str(record.get("session_id") or item.get("session_id") or "")
+    row: dict[str, Any] = {
+        "session_id": session_id,
+        "session_label": label,
+        "shard": shard or str(item.get("shard") or search_shard_key_for_record(record)),
+    }
+    session_dir_value = str(record.get("path") or record.get("navigation_path") or item.get("session_dir") or "")
+    if session_dir_value:
+        row["session_dir"] = session_dir_value
+    if record_index is not None:
+        row["record_index"] = record_index
+    if selected_count is not None:
+        row["selected_count"] = selected_count
+    if item:
+        freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+        row.update(
+            {
+                "shard_status": str(item.get("shard_status") or ""),
+                "shard_materialized": bool(item.get("shard_materialized")),
+                "freshness_status": str(freshness.get("status") or ""),
+                "freshness_reason": str(freshness.get("reason") or ""),
+                "last_indexed_at": str(freshness.get("last_indexed_at") or ""),
+                "document_count": int_value(item.get("document_count")),
+                "source_fingerprint": str(item.get("source_fingerprint") or ""),
+                "source_latest_mtime": ops_float_value(item.get("source_latest_mtime")),
+            }
+        )
+    if state:
+        row.update(
+            {
+                "source_fingerprint": str(state.get("fingerprint") or row.get("source_fingerprint") or ""),
+                "source_latest_mtime": ops_float_value(
+                    state.get("latest_source_mtime"),
+                    ops_float_value(row.get("source_latest_mtime")),
+                ),
+                "source_path_count": int_value(state.get("source_path_count")),
+            }
+        )
+    if isinstance(extra, dict):
+        row.update(extra)
+    return row
+
+
+def search_record_route_samples(
+    records: list[dict[str, Any]],
+    *,
+    shard: str | None = None,
+    limit: int = OPS_SLOW_SESSION_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    selected_count = len(records)
+    for index, record in enumerate(records[: max(0, limit)], start=1):
+        rows.append(
+            search_record_route_sample(
+                record,
+                shard=shard,
+                record_index=index,
+                selected_count=selected_count,
+            )
+        )
+    return rows
+
+
 def search_catalog_dirty_shard_session_keys(
     aoa_root: Path,
     *,
@@ -28798,6 +28874,7 @@ def filter_search_records_to_dirty_shard_sessions(
         include_deferred_live=include_deferred_live,
     )
     selected: list[dict[str, Any]] = []
+    selected_session_rows: list[dict[str, Any]] = []
     skipped_current = 0
     skipped_deferred_live = 0
     for record in records:
@@ -28807,6 +28884,16 @@ def filter_search_records_to_dirty_shard_sessions(
         ]
         if any(key and key in dirty_keys for key in keys):
             selected.append(record)
+            catalog_item = next((dirty_keys[key] for key in keys if key and key in dirty_keys), None)
+            if len(selected_session_rows) < OPS_SLOW_SESSION_SAMPLE_LIMIT:
+                selected_session_rows.append(
+                    search_record_route_sample(
+                        record,
+                        catalog_item=catalog_item,
+                        shard=shard or search_shard_key_for_record(record),
+                        record_index=len(selected),
+                    )
+                )
         elif any(key and key in deferred_live_keys for key in keys):
             skipped_deferred_live += 1
         else:
@@ -28817,6 +28904,7 @@ def filter_search_records_to_dirty_shard_sessions(
         "pre_filter_selected_count": len(records),
         "dirty_selected_count": len(selected),
         "skipped_current_count": skipped_current,
+        "dirty_selected_sessions": selected_session_rows,
     }
 
 
@@ -28869,6 +28957,25 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
                 f"`{shard.get('document_count')}` | `{shard.get('ok')}` | "
                 f"`{shard.get('db_path')}` |"
             )
+    phase_timings = payload.get("phase_timings") if isinstance(payload.get("phase_timings"), list) else []
+    if phase_timings:
+        lines.extend(["", "## Phase Timings", "", "| phase | elapsed_ms | detail |", "| --- | ---: | --- |"])
+        for item in phase_timings:
+            if not isinstance(item, dict):
+                continue
+            detail = {key: value for key, value in item.items() if key not in {"phase", "elapsed_ms"}}
+            lines.append(f"| `{item.get('phase')}` | `{item.get('elapsed_ms')}` | `{json.dumps(detail, ensure_ascii=False, sort_keys=True)}` |")
+    selected_sessions = payload.get("selected_sessions") if isinstance(payload.get("selected_sessions"), list) else []
+    if selected_sessions:
+        lines.extend(["", "## Selected Sessions", "", "| shard | session | docs | status | freshness |", "| --- | --- | ---: | --- | --- |"])
+        for item in selected_sessions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('shard')}` | `{item.get('session_label')}` | "
+                f"`{item.get('document_count')}` | `{item.get('shard_status')}` | "
+                f"`{item.get('freshness_status')}` |"
+            )
     slow_sessions = payload.get("slow_sessions") if isinstance(payload.get("slow_sessions"), list) else []
     if slow_sessions:
         lines.extend(["", "## Slowest Sessions", "", "| shard | session | elapsed_ms | documents | docs/sec |", "| --- | --- | ---: | ---: | ---: |"])
@@ -28879,6 +28986,17 @@ def search_shards_markdown(payload: dict[str, Any]) -> str:
                 f"| `{item.get('shard')}` | `{item.get('session_label')}` | "
                 f"`{item.get('elapsed_ms')}` | `{item.get('document_count')}` | "
                 f"`{item.get('documents_per_second')}` |"
+            )
+    remaining_sessions = payload.get("remaining_sessions") if isinstance(payload.get("remaining_sessions"), list) else []
+    if remaining_sessions:
+        lines.extend(["", "## Remaining Sessions", "", "| shard | session | phase | elapsed_ms | candidate_docs |", "| --- | --- | --- | ---: | ---: |"])
+        for item in remaining_sessions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('shard')}` | `{item.get('session_label')}` | "
+                f"`{item.get('active_phase')}` | `{item.get('elapsed_ms')}` | "
+                f"`{item.get('candidate_document_count')}` |"
             )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
@@ -29014,9 +29132,17 @@ def materialize_search_shards(
             dirty_selection["dirty_limit"] = int_value(limit)
             dirty_records = dirty_records[: int_value(limit)]
             dirty_selection["dirty_limited_count"] = len(dirty_records)
+            if isinstance(dirty_selection.get("dirty_selected_sessions"), list):
+                dirty_selection["dirty_selected_sessions"] = dirty_selection["dirty_selected_sessions"][: int_value(limit)]
         for record in dirty_records:
             filtered_groups[search_shard_key_for_record(record)].append(record)
         groups = filtered_groups
+    selected_records_for_report = [record for shard_records in groups.values() for record in shard_records]
+    selected_session_rows = (
+        dirty_selection.get("dirty_selected_sessions")
+        if dirty_only and isinstance(dirty_selection.get("dirty_selected_sessions"), list)
+        else search_record_route_samples(selected_records_for_report, shard=shard)
+    )
     if not groups:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -29038,6 +29164,7 @@ def materialize_search_shards(
             "dirty_only": dirty_only,
             "include_deferred_live": include_deferred_live,
             **dirty_selection,
+            "selected_sessions": selected_session_rows,
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
@@ -29048,10 +29175,13 @@ def materialize_search_shards(
         }
     shard_results: list[dict[str, Any]] = []
     slow_session_rows: list[dict[str, Any]] = []
+    remaining_session_rows: list[dict[str, Any]] = []
+    phase_timings: list[dict[str, Any]] = []
     processed_count = 0
     document_count = 0
     budget_exhausted = False
     document_type_counts: Counter[str] = Counter()
+    shard_materialization_started = time.monotonic()
     for shard_key in sorted(groups):
         if deadline is not None and processed_count > 0 and time.monotonic() >= deadline:
             diagnostics.append("search_shard_materialization_budget_exhausted")
@@ -29113,6 +29243,17 @@ def materialize_search_shards(
             for item in result.get("slow_sessions", [])
             if isinstance(item, dict)
         ]
+        shard_remaining_sessions = [
+            {"shard": shard_key, **item}
+            for item in result.get("remaining_sessions", [])
+            if isinstance(item, dict)
+        ]
+        shard_active_session = result.get("active_session") if isinstance(result.get("active_session"), dict) else {}
+        if shard_active_session:
+            shard_active_session = {"shard": shard_key, **shard_active_session}
+            if not shard_remaining_sessions:
+                shard_remaining_sessions = [shard_active_session]
+        remaining_session_rows.extend(shard_remaining_sessions)
         slow_session_rows.extend(shard_slow_sessions)
         diagnostics.extend(f"{shard_key}:{item}" for item in shard_diagnostics)
         processed_count += int_value(result.get("processed_count"))
@@ -29145,6 +29286,8 @@ def materialize_search_shards(
                 if shard_elapsed_ms > 0 and int_value(result.get("document_count")) > 0
                 else None,
                 "slow_sessions": shard_slow_sessions,
+                "active_session": shard_active_session,
+                "remaining_sessions": search_slow_session_rows(shard_remaining_sessions),
                 "slow_session_warning_count": result.get("slow_session_warning_count"),
                 "slow_session_threshold_ms": result.get("slow_session_threshold_ms"),
                 "search_schema_version": result.get("search_schema_version"),
@@ -29163,7 +29306,30 @@ def materialize_search_shards(
                 "diagnostics": shard_diagnostics,
             }
         )
-    catalog_refresh = build_search_catalog(aoa_root, write=True)
+    phase_timings.append(
+        {
+            "phase": "shard_materialization",
+            "elapsed_ms": int((time.monotonic() - shard_materialization_started) * 1000),
+            "shard_count": len(shard_results),
+            "processed_count": processed_count,
+            "budget_exhausted": budget_exhausted,
+        }
+    )
+    catalog_started = time.monotonic()
+    catalog_refresh = build_search_catalog(
+        aoa_root,
+        write=True,
+        selected_records=selected_records_for_report if selected_records_for_report else None,
+    )
+    phase_timings.append(
+        {
+            "phase": "search_catalog_refresh",
+            "elapsed_ms": int((time.monotonic() - catalog_started) * 1000),
+            "catalog_state_basis": catalog_refresh.get("catalog_state_basis"),
+            "selected_state_key_count": catalog_refresh.get("selected_state_key_count"),
+            "status": catalog_refresh.get("status"),
+        }
+    )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -29182,6 +29348,7 @@ def materialize_search_shards(
         "processed_count": processed_count,
         "budget_exhausted": budget_exhausted,
         "partial": budget_exhausted,
+        "phase_timings": phase_timings,
         "elapsed_ms": elapsed_ms,
         "documents_per_second": round(document_count / (elapsed_ms / 1000.0), 2)
         if elapsed_ms > 0 and document_count > 0
@@ -29199,6 +29366,8 @@ def materialize_search_shards(
         "dirty_pre_limit_selected_count": dirty_selection.get("dirty_pre_limit_selected_count"),
         "dirty_limit": dirty_selection.get("dirty_limit"),
         "dirty_limited_count": dirty_selection.get("dirty_limited_count"),
+        "selected_sessions": selected_session_rows,
+        "remaining_sessions": search_slow_session_rows(remaining_session_rows),
         "skipped_current_count": dirty_selection.get("skipped_current_count", 0),
         "deferred_live_skipped_count": dirty_selection.get("deferred_live_skipped_count", 0),
         "shard_storage_mode": shard_storage_mode,
@@ -29312,6 +29481,17 @@ def search_report_markdown(payload: dict[str, Any]) -> str:
                 f"| `{item.get('session_label')}` | `{item.get('elapsed_ms')}` | "
                 f"`{item.get('document_count')}` | `{item.get('documents_per_second')}` | "
                 f"`{item.get('raw_text_status')}` |"
+            )
+    remaining_sessions = payload.get("remaining_sessions") if isinstance(payload.get("remaining_sessions"), list) else []
+    if remaining_sessions:
+        lines.extend(["", "## Remaining Sessions", "", "| session | phase | elapsed_ms | candidate_docs | removed_docs |", "| --- | --- | ---: | ---: | ---: |"])
+        for item in remaining_sessions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('session_label')}` | `{item.get('active_phase')}` | "
+                f"`{item.get('elapsed_ms')}` | `{item.get('candidate_document_count')}` | "
+                f"`{item.get('removed_document_count')}` |"
             )
     lines.extend(["", "## Diagnostics", ""])
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
@@ -32773,9 +32953,14 @@ def search_slow_session_rows(
                     "session_id",
                     "session_label",
                     "shard",
+                    "record_index",
+                    "selected_count",
                     "status",
+                    "active_phase",
+                    "active_phase_elapsed_ms",
                     "raw_text_status",
                     "document_count",
+                    "candidate_document_count",
                     "removed_document_count",
                     "elapsed_ms",
                     "documents_per_second",
@@ -32898,6 +33083,9 @@ def search_index_sessions(
     updated_entity_registry_document_count = 0
     unchanged_entity_registry_document_count = 0
     budget_exhausted = False
+    active_session: dict[str, Any] | None = None
+    active_session_started = 0.0
+    active_phase_started = 0.0
 
     def progress_event(event: str, payload: dict[str, Any]) -> None:
         if progress_every <= 0:
@@ -32917,6 +33105,43 @@ def search_index_sessions(
         }
         phase_timings.append(item)
         progress_event("search_index_phase_done", item)
+
+    def set_active_phase(phase: str, **extra: Any) -> None:
+        nonlocal active_phase_started
+        active_phase_started = time.monotonic()
+        if active_session is not None:
+            active_session["active_phase"] = phase
+            active_session.update(extra)
+
+    def active_session_snapshot() -> dict[str, Any]:
+        if active_session is None:
+            return {}
+        row = dict(active_session)
+        elapsed_ms = int((time.monotonic() - active_session_started) * 1000) if active_session_started else 0
+        phase_elapsed_ms = int((time.monotonic() - active_phase_started) * 1000) if active_phase_started else 0
+        row["elapsed_ms"] = elapsed_ms
+        row["active_phase_elapsed_ms"] = phase_elapsed_ms
+        row["warning"] = elapsed_ms >= OPS_SEARCH_SESSION_WARNING_MS
+        return row
+
+    def remaining_session_samples() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        snapshot = active_session_snapshot()
+        if snapshot:
+            rows.append(snapshot)
+            start_index = int_value(snapshot.get("record_index"))
+        else:
+            start_index = committed_count
+        for offset, record in enumerate(records[start_index : start_index + max(0, OPS_SLOW_SESSION_SAMPLE_LIMIT - len(rows))], start=1):
+            rows.append(
+                search_record_route_sample(
+                    record,
+                    record_index=start_index + offset,
+                    selected_count=len(records),
+                    extra={"active_phase": "pending"},
+                )
+            )
+        return rows
 
     try:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
@@ -33019,14 +33244,41 @@ def search_index_sessions(
                 budget_exhausted = True
                 break
             record_started = time.monotonic()
+            active_session_started = record_started
+            active_session = search_record_route_sample(
+                record,
+                record_index=record_index,
+                selected_count=len(records),
+                extra={"active_phase": "begin"},
+            )
             conn.execute("BEGIN")
+            set_active_phase("projection_fingerprint")
             projection_state = session_projection_fingerprint(record, include_rendered_markdown=False)
+            if active_session is not None:
+                active_session.update(
+                    {
+                        "source_fingerprint": str(projection_state.get("fingerprint") or ""),
+                        "source_latest_mtime": ops_float_value(projection_state.get("latest_source_mtime")),
+                        "source_path_count": int_value(projection_state.get("source_path_count")),
+                    }
+                )
+            set_active_phase("document_generation")
             documents, result = search_documents_for_record(
                 aoa_root,
                 record,
                 max_raw_bytes=effective_max_raw_bytes,
                 include_raw_event_text=include_raw_event_text,
             )
+            if active_session is not None:
+                active_session.update(
+                    {
+                        "session_id": str(result.get("session_id") or active_session.get("session_id") or ""),
+                        "session_label": str(result.get("session_label") or active_session.get("session_label") or ""),
+                        "status": result.get("status"),
+                        "raw_text_status": result.get("raw_text_status"),
+                        "candidate_document_count": len(documents),
+                    }
+                )
             session_results.append(result)
             raw_text_status_counts[str(result.get("raw_text_status") or "unknown")] += 1
             record_counts: Counter[str] = Counter()
@@ -33034,20 +33286,26 @@ def search_index_sessions(
             if result.get("diagnostics"):
                 diagnostics.extend(str(item) for item in result.get("diagnostics", []))
             if not rebuild:
+                set_active_phase("delete_existing_documents")
                 record_removed_document_count = delete_search_documents_for_session(
                     conn,
                     session_label=str(result.get("session_label") or record.get("session_label") or session_dir_from_record(record).name),
                     session_id=str(record.get("session_id") or ""),
                 )
+                if active_session is not None:
+                    active_session["removed_document_count"] = record_removed_document_count
+            set_active_phase("insert_documents")
             for doc in documents:
                 insert_search_document(conn, doc, store_raw_text=store_raw_text, storage_profile=storage_profile)
                 record_counts[str(doc.get("doc_type") or "unknown")] += 1
+            set_active_phase("session_state_upsert")
             upsert_search_session_state(
                 conn,
                 projection_state=projection_state,
                 indexed_at=now,
                 document_count=len(documents),
             )
+            set_active_phase("commit")
             conn.commit()
             counts.update(record_counts)
             removed_document_count += record_removed_document_count
@@ -33070,6 +33328,7 @@ def search_index_sessions(
                     "warning": record_elapsed_ms >= OPS_SEARCH_SESSION_WARNING_MS,
                 }
             )
+            active_session = None
             if progress_every > 0 and record_index % progress_every == 0:
                 progress_event(
                     "search_index_progress",
@@ -33189,6 +33448,8 @@ def search_index_sessions(
                 "phase_timings": phase_timings,
                 "session_timings": session_timings,
                 "slow_sessions": search_slow_session_rows(session_timings),
+                "active_session": active_session_snapshot(),
+                "remaining_sessions": remaining_session_samples(),
                 "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
                 "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
                 "inline_optimize_policy": {
@@ -33235,6 +33496,8 @@ def search_index_sessions(
             "phase_timings": phase_timings,
             "session_timings": session_timings,
             "slow_sessions": search_slow_session_rows(session_timings),
+            "active_session": active_session_snapshot(),
+            "remaining_sessions": remaining_session_samples(),
             "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
             "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
             "inline_optimize_policy": {
@@ -33290,6 +33553,8 @@ def search_index_sessions(
         "phase_timings": phase_timings,
         "session_timings": session_timings,
         "slow_sessions": search_slow_session_rows(session_timings),
+        "active_session": active_session_snapshot(),
+        "remaining_sessions": remaining_session_samples() if budget_exhausted else [],
         "slow_session_warning_count": sum(1 for item in session_timings if item.get("warning")),
         "slow_session_threshold_ms": OPS_SEARCH_SESSION_WARNING_MS,
         "inline_optimize_policy": {
