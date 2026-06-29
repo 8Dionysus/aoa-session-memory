@@ -108,7 +108,7 @@ query is fuzzy:
 - graph topology: `aoa_session_graph_neighborhood`
 - graph relation bridge: `aoa_session_graph_bridge`
 - operational route-rollup projection:
-  `aoa_session_operational_route_rollup_query`
+  `aoa_session_route_rollup_query`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
 - reviewed live quality regression gate:
   `aoa_session_live_scenario_corpus_check`

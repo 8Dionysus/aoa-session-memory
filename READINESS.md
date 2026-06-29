@@ -1891,7 +1891,7 @@ Maintenance gates:
   --case-limit 12` returned `12/12` passed with `actionable_gap_count=0`.
   The `aoa-session-memory-evidence-route` skill also routes
   `use_operational_route_rollup_projection` to
-  `search-operational-route-rollup-query` / `aoa_session_operational_route_rollup_query`
+  `search-operational-route-rollup-query` / `aoa_session_route_rollup_query`
   before broad search or raw expansion.
 
 - 2026-06-29 route-rollup agent-route summary proof:
