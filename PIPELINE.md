@@ -1145,13 +1145,17 @@ registry/inventory for broad class questions such as `skills`, `MCP`, `hooks`,
 or `tools`, session rehydration plus session-scoped search for exact session
 ids, structured search for exact filters, scoped full-text shards when a
 bounded shard can answer, or the monolith fallback only when raw literal recall
-is the right safety net. The packet exposes `classifications`,
-`cost_profile`, `fallback_plan`, and `next_expansion` so an agent can see the
-selected plan, bounded fallback, timeout posture, and next command without
-guessing. For broad class questions with use/error/consequence intent, the
-plan includes an entity-usage scenario sample route after the inventory/registry
-route. The planner is route advice, not evidence truth; returned commands still
-route to raw/segment/session refs.
+is the right safety net. The packet exposes `literal_route_strategy`,
+`classifications`, `cost_profile`, `fallback_plan`, and `next_expansion` so an
+agent can see the selected literal class, route sequence, bounded fallback,
+monolith position, timeout posture, and next command without guessing. The
+strategy's `needs_scoped_full_text_for_repeated_literal` flag is the cue to
+materialize scoped full-text before repeating a costly literal load; it is not
+permission to delete the monolith fallback while exact recall depends on it.
+For broad class questions with use/error/consequence intent, the plan includes
+an entity-usage scenario sample route after the inventory/registry route. The
+planner is route advice, not evidence truth; returned commands still route to
+raw/segment/session refs.
 For command literals, the planner separates the executable/script anchor from
 the full raw phrase. Structured routes use the command anchor; exact recall
 still keeps the original command text as the last fallback.

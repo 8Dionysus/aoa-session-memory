@@ -36528,6 +36528,77 @@ LITERAL_QUERY_ROUTE_SIGNAL_MARKER_TERMS = {
     "timeout",
     "typing_prompt_bridge_failed",
 }
+LITERAL_QUERY_RAW_TEXT_FALLBACK_ROUTE_IDS = {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+LITERAL_QUERY_STRUCTURED_FIRST_ROUTE_IDS = {
+    "entity_inventory",
+    "entity_registry_class",
+    "entity_usage_scenario_audit",
+    "entity_usage_chain",
+    "entity_usage_audit",
+    "trace_route",
+    "graph_neighborhood",
+    "structured_search",
+    "route_signal_structured_search",
+    "agent_event_route",
+    "task_episode_route",
+    "session_rehydrate",
+    "session_structured_search",
+    "raw_ref_scoped_verification",
+    "hook_receipts",
+    "command_structured_search",
+}
+LITERAL_QUERY_CLASS_ROUTE_CONTRACTS = {
+    LITERAL_QUERY_KIND_COMMAND: {
+        "meaning": "shell or test command literal",
+        "cheapest_first_routes": ["command_structured_search", "entity_usage_chain", "entity_usage_audit", "trace_route"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_PATH: {
+        "meaning": "repo path or file-like anchor",
+        "cheapest_first_routes": ["entity_usage_chain", "entity_usage_audit", "trace_route", "route_signal_structured_search"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_ERROR_TEXT: {
+        "meaning": "error/failure/timeout phrase",
+        "cheapest_first_routes": ["route_signal_structured_search", "hook_receipts"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_SESSION_ID: {
+        "meaning": "exact Codex/session UUID",
+        "cheapest_first_routes": ["session_rehydrate", "session_structured_search"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_ENTITY_ANCHOR: {
+        "meaning": "specific skill/MCP/hook/tool/API/script/goal or other operational entity",
+        "cheapest_first_routes": ["entity_usage_chain", "entity_usage_audit", "trace_route", "graph_neighborhood"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_ENTITY_CLASS: {
+        "meaning": "broad class inventory or class usage query",
+        "cheapest_first_routes": ["entity_registry_class", "entity_inventory", "entity_usage_scenario_audit"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_EXACT_PHRASE: {
+        "meaning": "short literal phrase without a stronger typed anchor",
+        "cheapest_first_routes": ["structured_search", "route_signal_structured_search"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_HUMAN_PHRASE: {
+        "meaning": "long natural-language phrase that may embed an entity or route signal",
+        "cheapest_first_routes": ["entity_usage_chain", "route_signal_structured_search", "structured_search"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_RAW_REF: {
+        "meaning": "raw/segment evidence coordinate",
+        "cheapest_first_routes": ["raw_ref_scoped_verification"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+    LITERAL_QUERY_KIND_HOOK_RECEIPT: {
+        "meaning": "hook receipt or hook lifecycle status phrase",
+        "cheapest_first_routes": ["hook_receipts", "route_signal_structured_search"],
+        "exact_recall_fallback_routes": ["scoped_shard_full_text", "monolith_raw_text_fallback"],
+    },
+}
 
 
 def literal_query_tokens(query: str) -> set[str]:
@@ -36872,6 +36943,70 @@ def literal_query_command_line(
 def literal_query_mcp_call(tool_name: str, **kwargs: Any) -> str:
     rendered = ", ".join(f"{key}={value!r}" for key, value in kwargs.items() if value not in (None, "", [], {}))
     return f"mcp:{tool_name}({rendered})"
+
+
+def literal_query_route_strategy(
+    *,
+    shape: dict[str, Any],
+    primary_route: dict[str, Any],
+    routes: list[dict[str, Any]],
+    fallback_plan: dict[str, Any] | None,
+    raw_text_fallback: dict[str, Any],
+    has_literal_text: bool,
+    query_timeout_ms: int | None,
+) -> dict[str, Any]:
+    query_class = str(shape.get("primary") or LITERAL_QUERY_KIND_HUMAN_PHRASE)
+    primary_route_id = str(primary_route.get("route_id") or "")
+    fallback_route_id = str((fallback_plan or {}).get("route_id") or "")
+    route_sequence: list[dict[str, Any]] = []
+    monolith_fallback_position = 0
+    raw_text_fallback_position = 0
+    for ordinal, route in enumerate(routes, start=1):
+        route_id = str(route.get("route_id") or "")
+        uses_monolith = route_id == "monolith_raw_text_fallback"
+        uses_fts = route_id in LITERAL_QUERY_RAW_TEXT_FALLBACK_ROUTE_IDS
+        if uses_monolith and not monolith_fallback_position:
+            monolith_fallback_position = ordinal
+        if uses_fts and not raw_text_fallback_position:
+            raw_text_fallback_position = ordinal
+        route_sequence.append(
+            {
+                "ordinal": ordinal,
+                "route_id": route_id,
+                "estimated_cost": route.get("estimated_cost") or "unknown",
+                "uses_fts": uses_fts,
+                "uses_monolith": uses_monolith,
+                "authority": route.get("authority") or "",
+                "purpose": route.get("reason") or "",
+            }
+        )
+    raw_status = str(raw_text_fallback.get("status") or "unknown")
+    exact_recall_preserved = bool(has_literal_text and fallback_route_id)
+    return {
+        "query_class": query_class,
+        "class_contract": LITERAL_QUERY_CLASS_ROUTE_CONTRACTS.get(query_class, {}),
+        "primary_route_id": primary_route_id,
+        "primary_route_cost": primary_route.get("estimated_cost") or "unknown",
+        "uses_structured_first": primary_route_id in LITERAL_QUERY_STRUCTURED_FIRST_ROUTE_IDS,
+        "uses_fts_first": primary_route_id in LITERAL_QUERY_RAW_TEXT_FALLBACK_ROUTE_IDS,
+        "monolith_fallback_first": primary_route_id == "monolith_raw_text_fallback",
+        "fallback_route_id": fallback_route_id,
+        "raw_text_fallback_status": raw_status,
+        "raw_text_fallback_position": raw_text_fallback_position,
+        "monolith_fallback_position": monolith_fallback_position,
+        "monolith_is_fallback_only": not monolith_fallback_position or monolith_fallback_position > 1,
+        "exact_recall_preserved_by_fallback": exact_recall_preserved,
+        "fallback_preserves_exact_recall": exact_recall_preserved,
+        "needs_scoped_full_text_for_repeated_literal": bool(
+            has_literal_text
+            and raw_status in {
+                SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK,
+                "monolith_required_for_raw_text_query",
+            }
+        ),
+        "query_timeout_ms": normalized_search_fts_query_timeout_ms(query_timeout_ms) if has_literal_text else 0,
+        "route_sequence": route_sequence,
+    }
 
 
 def literal_query_plan(
@@ -37420,8 +37555,7 @@ def literal_query_plan(
         )
 
     primary_route = routes[0]
-    raw_text_fallback_route_ids = {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    fallback_plan = next((route for route in routes if route.get("route_id") in raw_text_fallback_route_ids), None)
+    fallback_plan = next((route for route in routes if route.get("route_id") in LITERAL_QUERY_RAW_TEXT_FALLBACK_ROUTE_IDS), None)
     next_expansion = next((route for route in routes[1:] if route.get("command")), None)
     if (
         primary_route.get("route_id") == "monolith_raw_text_fallback"
@@ -37437,6 +37571,15 @@ def literal_query_plan(
                 "authority": "generated_search_refs",
                 "command": scoped_next.get("command"),
             }
+    route_strategy = literal_query_route_strategy(
+        shape=shape,
+        primary_route=primary_route,
+        routes=routes,
+        fallback_plan=fallback_plan,
+        raw_text_fallback=raw_text_fallback,
+        has_literal_text=has_literal_text,
+        query_timeout_ms=query_timeout_ms,
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_literal_query_plan",
@@ -37475,6 +37618,8 @@ def literal_query_plan(
         "omitted_structured_route_signal_candidate_count": max(0, len(structured_route_signal_candidates) - 5),
         "primary_route": primary_route,
         "ordered_routes": routes,
+        "literal_route_strategy": route_strategy,
+        "literal_class_contracts": LITERAL_QUERY_CLASS_ROUTE_CONTRACTS,
         "search_projection": {
             "catalog_status": catalog.get("status"),
             "active_projection": catalog.get("active_projection") or SEARCH_ACTIVE_PROJECTION_MONOLITH,
@@ -37484,27 +37629,11 @@ def literal_query_plan(
             "raw_text_fallback": raw_text_fallback,
         },
         "cost_profile": {
-            "structured_first": primary_route.get("route_id") in {
-                "entity_inventory",
-                "entity_registry_class",
-                "entity_usage_scenario_audit",
-                "entity_usage_chain",
-                "entity_usage_audit",
-                "trace_route",
-                "structured_search",
-                "route_signal_structured_search",
-                "agent_event_route",
-                "task_episode_route",
-                "session_rehydrate",
-                "session_structured_search",
-                "raw_ref_scoped_verification",
-                "hook_receipts",
-                "command_structured_search",
-            },
-            "uses_fts_first": primary_route.get("route_id") in {"scoped_shard_full_text", "monolith_raw_text_fallback"},
-            "monolith_fallback_first": primary_route.get("route_id") == "monolith_raw_text_fallback",
-            "query_timeout_ms": normalized_search_fts_query_timeout_ms(query_timeout_ms) if has_literal_text else 0,
-            "exact_recall_preserved_by_fallback": bool(has_literal_text),
+            "structured_first": route_strategy["uses_structured_first"],
+            "uses_fts_first": route_strategy["uses_fts_first"],
+            "monolith_fallback_first": route_strategy["monolith_fallback_first"],
+            "query_timeout_ms": route_strategy["query_timeout_ms"],
+            "exact_recall_preserved_by_fallback": route_strategy["exact_recall_preserved_by_fallback"],
         },
         "fallback_plan": fallback_plan,
         "next_command": primary_route.get("command"),

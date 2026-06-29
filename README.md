@@ -1337,10 +1337,14 @@ raw/session refs or
 
 For literal text, path, command, error text, or session-id inputs, use
 `literal-query-plan` before `search`. The packet exposes the detected
-`classifications`, primary route, `cost_profile`, `fallback_plan`, and
-`next_expansion_command`. Exact session ids route to `rehydrate` and
-session-scoped search before global literal fallback; this keeps exact recall
-available without making monolith FTS the first move.
+`classifications`, primary route, `literal_route_strategy`, `cost_profile`,
+`fallback_plan`, and `next_expansion_command`. `literal_route_strategy` is the
+compact consumer contract: it names the literal class, cheapest first route,
+ordered route sequence, raw/monolith fallback position, scoped full-text need
+for repeated literal loads, and whether exact recall remains preserved by
+fallback. Exact session ids route to `rehydrate` and session-scoped search
+before global literal fallback; this keeps exact recall available without
+making monolith FTS the first move.
 
 Query it without losing evidence routing:
 

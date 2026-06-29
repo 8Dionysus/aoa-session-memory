@@ -6360,6 +6360,17 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert typed_literal_plan["cost_profile"]["structured_first"] is True
     assert typed_literal_plan["classifications"]["primary"] == "entity_anchor"
     assert typed_literal_plan["fallback_plan"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    typed_strategy = typed_literal_plan["literal_route_strategy"]
+    assert typed_strategy["query_class"] == "entity_anchor"
+    assert typed_strategy["primary_route_id"] == "entity_usage_chain"
+    assert typed_strategy["uses_structured_first"] is True
+    assert typed_strategy["uses_fts_first"] is False
+    assert typed_strategy["fallback_route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert typed_strategy["monolith_is_fallback_only"] is True
+    assert typed_strategy["exact_recall_preserved_by_fallback"] is True
+    assert typed_strategy["route_sequence"][0]["route_id"] == "entity_usage_chain"
+    assert typed_strategy["class_contract"]["cheapest_first_routes"][0] == "entity_usage_chain"
+    assert typed_literal_plan["literal_class_contracts"]["command"]["cheapest_first_routes"][0] == "command_structured_search"
     assert typed_literal_plan["next_expansion"]["route_id"] == "entity_usage_audit"
     assert typed_literal_plan["next_expansion_command"]
     assert typed_literal_plan["cost_profile"]["monolith_fallback_first"] is False
@@ -6371,12 +6382,22 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert error_literal_plan["query_shape"]["primary"] == "error_text"
     assert error_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is True
     assert error_literal_plan["cost_profile"]["structured_first"] is False
+    assert error_literal_plan["literal_route_strategy"]["query_class"] == "error_text"
+    assert error_literal_plan["literal_route_strategy"]["fallback_route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert error_literal_plan["literal_route_strategy"]["exact_recall_preserved_by_fallback"] is True
+    assert error_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "route_signal_structured_search"
     assert noisy_route_signal_literal_plan["query_shape"]["primary"] == "error_text"
     assert noisy_route_signal_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
     assert noisy_route_signal_literal_plan["cost_profile"]["structured_first"] is True
     assert noisy_route_signal_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert noisy_route_signal_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert noisy_route_signal_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is True
+    noisy_strategy = noisy_route_signal_literal_plan["literal_route_strategy"]
+    assert noisy_strategy["query_class"] == "error_text"
+    assert noisy_strategy["primary_route_id"] == "route_signal_structured_search"
+    assert noisy_strategy["uses_structured_first"] is True
+    assert noisy_strategy["monolith_fallback_position"] > 1
+    assert noisy_strategy["fallback_preserves_exact_recall"] is True
     assert noisy_route_signal_literal_plan["structured_route_signal_candidates"][0]["route_signal"] == "hook_health:raw_unavailable"
     assert "--route-signal hook_health:raw_unavailable" in noisy_route_signal_literal_plan["next_command"]
     assert noisy_route_signal_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
@@ -6402,6 +6423,9 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert broad_mcp_usage_literal_plan["cost_profile"]["structured_first"] is True
     assert broad_mcp_usage_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert broad_mcp_usage_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["query_class"] == "entity_class"
+    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["primary_route_id"] == "entity_inventory"
+    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["route_sequence"][0]["route_id"] == "entity_inventory"
     assert [route["route_id"] for route in broad_mcp_usage_literal_plan["ordered_routes"][:3]] == [
         "entity_inventory",
         "entity_registry_class",
@@ -6415,6 +6439,9 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert broad_skill_inventory_literal_plan["primary_route"]["route_id"] == "entity_registry_class"
     assert "--kind skill" in broad_skill_inventory_literal_plan["next_command"]
     assert broad_skill_inventory_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["query_class"] == "entity_class"
+    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["primary_route_id"] == "entity_registry_class"
+    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["monolith_is_fallback_only"] is True
     assert concrete_mcp_literal_plan["query_shape"]["primary"] == "entity_anchor"
     assert concrete_mcp_literal_plan["route_anchor"] == "aoa_session_memory_mcp"
     assert concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
@@ -6452,6 +6479,13 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert command_literal_plan["cost_profile"]["structured_first"] is True
     assert command_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert command_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    command_strategy = command_literal_plan["literal_route_strategy"]
+    assert command_strategy["query_class"] == "command"
+    assert command_strategy["primary_route_id"] == "command_structured_search"
+    assert command_strategy["route_sequence"][0]["route_id"] == "command_structured_search"
+    assert command_strategy["class_contract"]["cheapest_first_routes"][0] == "command_structured_search"
+    assert command_strategy["raw_text_fallback_position"] > 1
+    assert command_strategy["monolith_is_fallback_only"] is True
     assert session_id_literal_plan["query_shape"]["primary"] == "session_id"
     assert session_id_literal_plan["classifications"]["primary"] == "session_id"
     assert session_id_literal_plan["primary_route"]["route_id"] == "session_rehydrate"
@@ -6462,6 +6496,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert session_id_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert "rehydrate" in session_id_literal_plan["next_command"]
     assert "--session" in session_id_literal_plan["next_expansion_command"]
+    session_strategy = session_id_literal_plan["literal_route_strategy"]
+    assert session_strategy["query_class"] == "session_id"
+    assert session_strategy["primary_route_id"] == "session_rehydrate"
+    assert session_strategy["route_sequence"][0]["route_id"] == "session_rehydrate"
+    assert session_strategy["route_sequence"][1]["route_id"] == "session_structured_search"
+    assert session_strategy["monolith_fallback_position"] > 1
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])

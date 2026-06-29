@@ -53,11 +53,14 @@ Use these first routes when available:
   `agent-reasoning-windows`, or `answer-neighborhood`.
 - exact text, path, command, error, session id, or human phrase:
   `literal-query-plan` first; follow its cheaper structured route or bounded
-  raw fallback. Read `classifications`, `cost_profile`, `fallback_plan`, and
-  `next_expansion_command` before opening raw. For commands, use the planner's
-  command anchor for structured routes and preserve the full command text for
-  exact recall. For exact session ids, use the planner's rehydrate/session
-  search route before global literal fallback.
+  raw fallback. Read `literal_route_strategy` first, then `classifications`,
+  `cost_profile`, `fallback_plan`, and `next_expansion_command` before opening
+  raw. The strategy names the literal class, first route, route sequence,
+  monolith/raw fallback position, scoped full-text need, and exact-recall
+  posture. For commands, use the planner's command anchor for structured routes
+  and preserve the full command text for exact recall. For exact session ids,
+  use the planner's rehydrate/session search route before global literal
+  fallback.
 - operational route-rollup navigation: when `maintenance-status`,
   `literal-query-plan`, or another route packet says
   `use_operational_route_rollup_projection`, use
@@ -157,6 +160,9 @@ Prefer packets that expose:
 - agent-route lane coverage when a packet includes `agent_route_summary`;
 - cost profile, especially whether a route used materialized projections or
   expanded into shard search, monolith reads, FTS, or raw hydration;
+- literal route strategy, especially `uses_structured_first`, fallback
+  position, and whether scoped full-text is needed before repeating a literal
+  load;
 - `raw`, `segment`, `segment_index`, and `session` refs;
 - `next_command` or next expansion route.
 

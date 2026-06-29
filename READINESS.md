@@ -783,6 +783,16 @@ Last observed result:
   `ok=true`, `failed_count=0`, `elapsed_ms=533`, with primary route counts
   including `entity_usage_chain=1`, `entity_inventory=1`,
   `route_signal_structured_search=1`, and `command_structured_search=1`.
+- 2026-06-29 literal planner strategy contract: `literal-query-plan` now
+  exposes `literal_route_strategy` and `literal_class_contracts` so MCP/skills
+  consumers can read the query class, cheapest first route, ordered route
+  sequence, fallback route, monolith position, exact-recall posture, and scoped
+  full-text need without reconstructing the plan from scattered fields. Live
+  checks covered command, concrete entity, broad skill inventory, exact
+  session id, and the `literal_planner` scenario profile; the profile returned
+  `ok=true`, `sample_count=5`, `failed_count=0`, and primary routes
+  `command_structured_search`, `entity_inventory`, `entity_usage_chain`,
+  `route_signal_structured_search`, and `session_rehydrate`.
 - 2026-06-27 live scenario corpus gate: consumer-loop regression controls now
   live under `config/live-scenario-regression-corpus.json` and are checked by
   `live-scenario-corpus check`. The gate preserves allowed warnings as
