@@ -54845,6 +54845,42 @@ def session_memory_search_operational_event_projection_plan(
         }
         for (layer, key, signal), count in route_term_counts.most_common(max(1, int(route_rollup_limit)))
     ]
+    materialized_rollup = session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=catalog,
+    )
+    materialized_rollup_ready = (
+        str(materialized_rollup.get("status") or "") == "current"
+        and not bool(materialized_rollup.get("needs_refresh"))
+        and int_value(materialized_rollup.get("source_mismatch_count")) == 0
+        and int_value(materialized_rollup.get("route_rollup_row_count")) > 0
+    )
+    if candidate_with_routes <= 0:
+        route_ref_rollup_status = "not_needed"
+    elif materialized_rollup_ready:
+        route_ref_rollup_status = "materialized_rollup_ready"
+    else:
+        route_ref_rollup_status = "needs_route_ref_rollup"
+    materialized_rollup_summary = {
+        key: materialized_rollup.get(key)
+        for key in (
+            "status",
+            "needs_refresh",
+            "size_human",
+            "generated_at",
+            "shard_count",
+            "route_rollup_row_count",
+            "candidate_route_posting_count",
+            "sampled_raw_term_count",
+            "sampled_segment_term_count",
+            "source_mismatch_count",
+            "query_command",
+            "refresh_command",
+            "quality_boundary",
+            "truth_status",
+        )
+        if key in materialized_rollup
+    }
     if not selected_shards:
         status = "blocked_by_missing_shard_projection"
     elif not successful:
@@ -54887,9 +54923,16 @@ def session_memory_search_operational_event_projection_plan(
             "role_counts": dict(sorted(role_counts.items())),
         },
         "route_ref_rollup_plan": {
-            "status": "needs_route_ref_rollup" if candidate_with_routes > 0 else "not_needed",
+            "status": route_ref_rollup_status,
+            "replacement_read_model_status": "ready" if materialized_rollup_ready else "missing_or_stale",
+            "materialized_rollup": materialized_rollup_summary,
             "sampled_shard_status_counts": dict(sorted(route_rollup_status_counts.items())),
-            "candidate_route_posting_count": route_posting_total,
+            "candidate_route_posting_count": int_value(materialized_rollup.get("candidate_route_posting_count"))
+            if materialized_rollup_ready
+            else route_posting_total,
+            "sampled_candidate_route_posting_count": route_posting_total,
+            "materialized_candidate_route_posting_count": int_value(materialized_rollup.get("candidate_route_posting_count")),
+            "materialized_route_rollup_row_count": int_value(materialized_rollup.get("route_rollup_row_count")),
             "candidate_route_term_count_sum": route_term_total_sum,
             "sampled_route_rollup_elapsed_ms": route_rollup_elapsed_total_ms,
             "top_route_layers": top_route_layers,
@@ -54917,9 +54960,15 @@ def session_memory_search_operational_event_projection_plan(
             "candidate_tail_count": candidate_count,
             "candidate_tail_with_route_signals_count": candidate_with_routes,
             "replacement_route_refs_required": candidate_with_routes > 0,
+            "replacement_route_ready": materialized_rollup_ready,
+            "replacement_route_kind": "operational_route_rollup" if materialized_rollup_ready else "",
             "candidate_route_posting_count": route_posting_total,
             "safe_to_apply_physical_compaction": False,
-            "next_design_route": "design_route_ref_preserving_operational_event_rollup",
+            "next_design_route": (
+                "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
+                if materialized_rollup_ready
+                else "design_route_ref_preserving_operational_event_rollup"
+            ),
         },
         "shards": shard_results,
         "stop_lines": [
@@ -54971,6 +55020,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
     rollup = payload.get("route_ref_rollup_plan") if isinstance(payload.get("route_ref_rollup_plan"), dict) else {}
+    materialized_rollup = rollup.get("materialized_rollup") if isinstance(rollup.get("materialized_rollup"), dict) else {}
     lines = [
         "# Search Operational Event Projection Plan",
         "",
@@ -54987,6 +55037,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- candidate_context_tail_with_route_signals_count: `{totals.get('candidate_context_tail_with_route_signals_count')}`",
         f"- candidate_route_posting_count: `{totals.get('candidate_route_posting_count')}`",
         f"- route_ref_rollup_status: `{rollup.get('status')}`",
+        f"- replacement_read_model_status: `{rollup.get('replacement_read_model_status')}`",
         f"- replacement_route_refs_required: `{totals.get('replacement_route_refs_required')}`",
         f"- next_design_route: `{candidate.get('next_design_route')}`",
         "",
@@ -55005,7 +55056,13 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         )
     lines.extend(["", "## Route Ref Rollup", ""])
     lines.append(f"- status: `{rollup.get('status')}`")
+    lines.append(f"- replacement_read_model_status: `{rollup.get('replacement_read_model_status')}`")
+    lines.append(f"- materialized_status: `{materialized_rollup.get('status')}`")
+    lines.append(f"- materialized_size: `{materialized_rollup.get('size_human')}`")
+    lines.append(f"- materialized_route_rollup_row_count: `{materialized_rollup.get('route_rollup_row_count')}`")
     lines.append(f"- candidate_route_posting_count: `{rollup.get('candidate_route_posting_count')}`")
+    lines.append(f"- sampled_candidate_route_posting_count: `{rollup.get('sampled_candidate_route_posting_count')}`")
+    lines.append(f"- materialized_candidate_route_posting_count: `{rollup.get('materialized_candidate_route_posting_count')}`")
     lines.append(f"- candidate_route_term_count_sum: `{rollup.get('candidate_route_term_count_sum')}`")
     lines.append(f"- sampled_route_rollup_elapsed_ms: `{rollup.get('sampled_route_rollup_elapsed_ms')}`")
     lines.append(f"- recommended_rollup_grain: `{rollup.get('recommended_rollup_grain')}`")

@@ -1211,6 +1211,11 @@ next design step can preserve navigation fanout before any physical row
 reduction. The full rollup is bounded by `--per-shard-timeout` (default 180s);
 use `--route-rollup-limit 0` only for a core-count probe without route-term
 detail. It does not mutate search, raw, graph, or session archives.
+When the materialized operational route-rollup is already current, the same
+packet reports `route_ref_rollup_plan.status=materialized_rollup_ready` and
+`replacement_read_model_status=ready`. Treat sampled route-ref counts as
+pressure evidence and the materialized rollup counts as the current compact
+navigation surface; neither replaces raw or segment refs.
 
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with

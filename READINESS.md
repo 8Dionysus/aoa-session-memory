@@ -1858,6 +1858,25 @@ Maintenance gates:
   proves the action moves `final_operational_route_rollup.status` to `current`
   through the normal maintenance pipeline.
 
+- 2026-06-29 operational projection / route-rollup sync proof:
+  `search-operational-projection-plan --max-shards 3 --per-shard-timeout 8
+  --route-rollup-limit 12 --write-report` now keeps sampled context-tail
+  pressure separate from the current materialized replacement read-model. The
+  live run wrote
+  `diagnostics/20260629T083242Z__search-operational-projection-plan.json`,
+  returned `ok=true`, `status=candidate_tail_measured`, and, despite two
+  bounded shard probe timeouts, reported
+  `route_ref_rollup_plan.status=materialized_rollup_ready`,
+  `replacement_read_model_status=ready`, materialized rollup size `31.4 MiB`,
+  `51,676` route rows, `977,275` materialized route postings, and
+  `source_mismatch_count=0`. Sampled candidate counts remain pressure evidence:
+  the measured shard showed `51,683` candidate context-tail rows and `118,386`
+  sampled candidate route postings. The next design route is now
+  `design_physical_context_tail_shrink_using_materialized_route_rollup_guard`
+  rather than another route-rollup build. Physical compaction is still not safe
+  from this packet alone; raw/segment refs remain authority. Regression proof:
+  `test_search_operational_projection_plan_samples_candidate_tail_without_mutation`.
+
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over
   the materialized `search/operational-route-rollup.sqlite3` read-model. It

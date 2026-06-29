@@ -16931,14 +16931,44 @@ def test_search_operational_projection_plan_samples_candidate_tail_without_mutat
     assert plan["totals"]["replacement_route_refs_required"] is True
     assert plan["totals"]["candidate_route_posting_count"] == 1
     assert plan["route_ref_rollup_plan"]["status"] == "needs_route_ref_rollup"
+    assert plan["route_ref_rollup_plan"]["replacement_read_model_status"] == "missing_or_stale"
+    assert plan["route_ref_rollup_plan"]["materialized_rollup"]["status"] == "missing"
     assert plan["route_ref_rollup_plan"]["candidate_route_posting_count"] == 1
+    assert plan["route_ref_rollup_plan"]["sampled_candidate_route_posting_count"] == 1
     assert plan["route_ref_rollup_plan"]["top_route_layers"][0]["layer"] == "tool"
     assert plan["route_ref_rollup_plan"]["top_route_terms"][0]["route_signal"] == "tool:exec_command"
+    assert plan["projection_candidate"]["replacement_route_ready"] is False
     assert plan["projection_candidate"]["safe_to_apply_physical_compaction"] is False
     assert plan["projection_candidate"]["candidate_route_posting_count"] == 1
     assert "do_not_drop_candidate_tail_without_route_ref_rehome" in plan["stop_lines"]
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()
+
+    applied_rollup = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=True,
+        write_report=True,
+    )
+    assert applied_rollup["ok"] is True
+    assert applied_rollup["status"] == "current"
+
+    ready_plan = module.session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+    )
+
+    assert ready_plan["route_ref_rollup_plan"]["status"] == "materialized_rollup_ready"
+    assert ready_plan["route_ref_rollup_plan"]["replacement_read_model_status"] == "ready"
+    assert ready_plan["route_ref_rollup_plan"]["materialized_rollup"]["status"] == "current"
+    assert ready_plan["route_ref_rollup_plan"]["sampled_candidate_route_posting_count"] == 1
+    assert ready_plan["route_ref_rollup_plan"]["materialized_candidate_route_posting_count"] == 1
+    assert ready_plan["route_ref_rollup_plan"]["materialized_route_rollup_row_count"] == 1
+    assert ready_plan["projection_candidate"]["replacement_route_ready"] is True
+    assert ready_plan["projection_candidate"]["replacement_route_kind"] == "operational_route_rollup"
+    assert ready_plan["projection_candidate"]["next_design_route"] == "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
 
 
 def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:
