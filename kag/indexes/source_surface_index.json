@@ -14,7 +14,7 @@
   },
   "index_identity": {
     "artifact_kind": "source_surface_index",
-    "content_digest": "8e71150c8d4a59453f9bc535be7d02a437088ac5ec8a89e865f7556d40144273",
+    "content_digest": "40955744b377d004d44e9f5adc0b3162201305917c864076ceebe186b95087b0",
     "local_id": "index:repo-local:source-surfaces",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-index.schema.json"
   },
@@ -15017,13 +15017,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "4bc0a032308b182e0d2b77ff1f7f5f62e1fb9c32dc3b9705803c44c91a87c959",
+        "content_hash": "e64918e87f439a2a841ceba643bd8f1185bdc29cd833b2edf679626ebd0ed64b",
         "git_ref": "git-index-source-tree",
         "id": "file:scripts/aoa_session_memory.py:b3e675a74e",
         "mime": "text/x-python",
         "path": "scripts/aoa_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 3366714
+        "size_bytes": 3367734
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -15056,7 +15056,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "4bc0a032308b182e0d2b77ff1f7f5f62e1fb9c32dc3b9705803c44c91a87c959",
+        "digest": "e64918e87f439a2a841ceba643bd8f1185bdc29cd833b2edf679626ebd0ed64b",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -17979,13 +17979,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "e06d1ade1d2d8461a32cd26fa5c205dc5fcbd3e6296959570aa41ffb55f067fd",
+        "content_hash": "a7857a167e3242548c83808d25d05a492dbbdce60b1693977ccabab28f2211f6",
         "git_ref": "git-index-source-tree",
         "id": "file:tests/test_session_memory.py:97b303350c",
         "mime": "text/x-python",
         "path": "tests/test_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 1200962
+        "size_bytes": 1201673
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -18018,7 +18018,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "e06d1ade1d2d8461a32cd26fa5c205dc5fcbd3e6296959570aa41ffb55f067fd",
+        "digest": "a7857a167e3242548c83808d25d05a492dbbdce60b1693977ccabab28f2211f6",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
