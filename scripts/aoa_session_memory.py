@@ -100,7 +100,7 @@ TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
-SEARCH_SCHEMA_VERSION = 13
+SEARCH_SCHEMA_VERSION = 14
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
 ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
@@ -29493,6 +29493,7 @@ def materialize_search_shards(
             "policy": effective_context_tail_omission_policy,
             "counts": dict(sorted(context_tail_omission_counts.items())),
             "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+            "omitted_route_ref_row_count": int_value(context_tail_omission_counts.get("omitted_route_ref_row_count")),
             "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
             "protected_boundary": "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept",
             "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
@@ -30774,6 +30775,10 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_document_routes_route ON document_routes(route_id, doc_rowid)",
     "CREATE INDEX IF NOT EXISTS idx_session_index_state_label ON session_index_state(session_label)",
     "CREATE INDEX IF NOT EXISTS idx_search_freshness_state_status ON search_freshness_state(status, session_label)",
+    "CREATE INDEX IF NOT EXISTS idx_omitted_context_tail_route_refs_layer_key ON omitted_context_tail_route_refs(layer, key)",
+    "CREATE INDEX IF NOT EXISTS idx_omitted_context_tail_route_refs_signal ON omitted_context_tail_route_refs(route_signal)",
+    "CREATE INDEX IF NOT EXISTS idx_omitted_context_tail_route_refs_session ON omitted_context_tail_route_refs(session_label, session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_omitted_context_tail_route_refs_date ON omitted_context_tail_route_refs(session_date DESC, id DESC)",
 ]
 
 
@@ -30995,6 +31000,24 @@ def init_search_db(
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS omitted_context_tail_route_refs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            session_label TEXT NOT NULL DEFAULT '',
+            session_date TEXT NOT NULL DEFAULT '',
+            event_id TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL DEFAULT '',
+            raw_ref TEXT NOT NULL DEFAULT '',
+            segment_ref TEXT NOT NULL DEFAULT '',
+            layer TEXT NOT NULL,
+            key TEXT NOT NULL,
+            route_signal TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS session_index_state (
             session_id TEXT PRIMARY KEY,
             session_label TEXT,
@@ -31074,6 +31097,7 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM document_bodies")
     conn.execute("DELETE FROM document_routes")
     conn.execute("DELETE FROM route_terms")
+    conn.execute("DELETE FROM omitted_context_tail_route_refs")
     conn.execute("DELETE FROM documents")
     conn.execute("DELETE FROM session_index_state")
     conn.execute("DELETE FROM search_freshness_state")
@@ -31311,6 +31335,11 @@ def delete_search_documents_for_session(
         values.append(session_id)
     if not clauses:
         return 0
+    if sqlite_table_exists(conn, "omitted_context_tail_route_refs"):
+        conn.execute(
+            f"DELETE FROM omitted_context_tail_route_refs WHERE {' OR '.join(clauses)}",
+            values,
+        )
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS search_delete_rowids(rowid INTEGER PRIMARY KEY)")
     conn.execute("DELETE FROM search_delete_rowids")
     conn.execute(
@@ -31333,6 +31362,8 @@ def delete_search_documents_by_doc_type(conn: sqlite3.Connection, doc_type: str)
     doc_type = str(doc_type or "").strip()
     if not doc_type:
         return 0
+    if doc_type == "event" and sqlite_table_exists(conn, "omitted_context_tail_route_refs"):
+        conn.execute("DELETE FROM omitted_context_tail_route_refs")
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS search_delete_rowids(rowid INTEGER PRIMARY KEY)")
     conn.execute("DELETE FROM search_delete_rowids")
     conn.execute(
@@ -31987,14 +32018,80 @@ def search_document_has_route_ref_backing(doc: dict[str, Any]) -> bool:
     )
 
 
+def omitted_context_tail_route_ref_rows_for_doc(doc: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for entry in document_route_entries(
+        doc.get("route_layers"),
+        doc.get("route_signals"),
+        doc_type=str(doc.get("doc_type") or ""),
+    ):
+        layer = str(entry.get("layer") or "")
+        key = str(entry.get("key") or "")
+        if not layer or not key:
+            continue
+        route_signal = str(entry.get("route_signal") or route_signal_token(layer, key))
+        rows.append(
+            {
+                "doc_id": str(doc.get("id") or ""),
+                "session_id": str(doc.get("session_id") or ""),
+                "session_label": str(doc.get("session_label") or ""),
+                "session_date": str(doc.get("session_date") or ""),
+                "event_id": str(doc.get("event_id") or ""),
+                "event_type": str(doc.get("event_type") or ""),
+                "raw_ref": str(doc.get("raw_ref") or ""),
+                "segment_ref": str(doc.get("segment_ref") or ""),
+                "layer": layer,
+                "key": key,
+                "route_signal": route_signal,
+            }
+        )
+    return rows
+
+
+def insert_omitted_context_tail_route_refs(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
+    normalized_rows = [
+        {
+            "doc_id": str(row.get("doc_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+            "session_label": str(row.get("session_label") or ""),
+            "session_date": str(row.get("session_date") or ""),
+            "event_id": str(row.get("event_id") or ""),
+            "event_type": str(row.get("event_type") or ""),
+            "raw_ref": str(row.get("raw_ref") or ""),
+            "segment_ref": str(row.get("segment_ref") or ""),
+            "layer": str(row.get("layer") or ""),
+            "key": str(row.get("key") or ""),
+            "route_signal": str(row.get("route_signal") or ""),
+        }
+        for row in rows
+        if str(row.get("layer") or "") and str(row.get("key") or "")
+    ]
+    if not normalized_rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO omitted_context_tail_route_refs(
+            doc_id, session_id, session_label, session_date, event_id,
+            event_type, raw_ref, segment_ref, layer, key, route_signal
+        ) VALUES (
+            :doc_id, :session_id, :session_label, :session_date, :event_id,
+            :event_type, :raw_ref, :segment_ref, :layer, :key, :route_signal
+        )
+        """,
+        normalized_rows,
+    )
+    return len(normalized_rows)
+
+
 def apply_search_context_tail_omission_policy(
     documents: list[dict[str, Any]],
     *,
     policy: str | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, str]]]:
     normalized_policy = normalize_search_context_tail_omission_policy(policy)
     counts: Counter[str] = Counter()
     kept: list[dict[str, Any]] = []
+    omitted_route_ref_rows: list[dict[str, str]] = []
     omitted_examples: list[dict[str, Any]] = []
     for doc in documents:
         counts["input_document_count"] += 1
@@ -32013,6 +32110,9 @@ def apply_search_context_tail_omission_policy(
             kept.append(doc)
             continue
         counts["omitted_document_count"] += 1
+        doc_route_ref_rows = omitted_context_tail_route_ref_rows_for_doc(doc)
+        omitted_route_ref_rows.extend(doc_route_ref_rows)
+        counts["omitted_route_ref_row_count"] += len(doc_route_ref_rows)
         if len(omitted_examples) < 5:
             omitted_examples.append(
                 {
@@ -32040,6 +32140,7 @@ def apply_search_context_tail_omission_policy(
         ),
         "unrouted_keep_candidate_count": int_value(counts.get("unrouted_keep_candidate_count")),
         "omitted_document_count": int_value(counts.get("omitted_document_count")),
+        "omitted_route_ref_row_count": int_value(counts.get("omitted_route_ref_row_count")),
         "omitted_examples": omitted_examples,
         "protected_boundary": (
             "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept"
@@ -32049,7 +32150,7 @@ def apply_search_context_tail_omission_policy(
             "raw-text fallback remain authority"
         ),
         "truth_status": "generated_search_projection_policy_not_archive_truth",
-    }
+    }, omitted_route_ref_rows
 
 
 def bounded_packed_route_values(value: Any, *, max_chars: int) -> str:
@@ -33510,7 +33611,7 @@ def search_index_sessions(
                 max_raw_bytes=effective_max_raw_bytes,
                 include_raw_event_text=include_raw_event_text,
             )
-            documents, omission_summary = apply_search_context_tail_omission_policy(
+            documents, omission_summary, omitted_route_ref_rows = apply_search_context_tail_omission_policy(
                 documents,
                 policy=effective_context_tail_omission_policy if not store_raw_text else SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
             )
@@ -33540,6 +33641,7 @@ def search_index_sessions(
                         "candidate_document_count": int_value(omission_summary.get("input_document_count"), len(documents)),
                         "context_tail_omission_policy": effective_context_tail_omission_policy,
                         "context_tail_omitted_document_count": omission_summary.get("omitted_document_count"),
+                        "context_tail_omitted_route_ref_row_count": omission_summary.get("omitted_route_ref_row_count"),
                         "indexed_document_count_after_omission": len(documents),
                     }
                 )
@@ -33559,6 +33661,9 @@ def search_index_sessions(
                 if active_session is not None:
                     active_session["removed_document_count"] = record_removed_document_count
             set_active_phase("insert_documents")
+            omitted_route_ref_row_count = insert_omitted_context_tail_route_refs(conn, omitted_route_ref_rows)
+            if active_session is not None:
+                active_session["omitted_route_ref_row_count"] = omitted_route_ref_row_count
             for doc in documents:
                 insert_search_document(conn, doc, store_raw_text=store_raw_text, storage_profile=storage_profile)
                 record_counts[str(doc.get("doc_type") or "unknown")] += 1
@@ -33710,6 +33815,7 @@ def search_index_sessions(
                     "policy": effective_context_tail_omission_policy,
                     "counts": dict(sorted(context_tail_omission_counts.items())),
                     "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+                    "omitted_route_ref_row_count": int_value(context_tail_omission_counts.get("omitted_route_ref_row_count")),
                     "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
                     "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
                 },
@@ -33767,6 +33873,7 @@ def search_index_sessions(
                 "policy": effective_context_tail_omission_policy,
                 "counts": dict(sorted(context_tail_omission_counts.items())),
                 "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+                "omitted_route_ref_row_count": int_value(context_tail_omission_counts.get("omitted_route_ref_row_count")),
                 "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
                 "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
             },
@@ -33815,6 +33922,7 @@ def search_index_sessions(
             "policy": effective_context_tail_omission_policy,
             "counts": dict(sorted(context_tail_omission_counts.items())),
             "omitted_document_count": int_value(context_tail_omission_counts.get("omitted_document_count")),
+            "omitted_route_ref_row_count": int_value(context_tail_omission_counts.get("omitted_route_ref_row_count")),
             "session_samples": context_tail_omission_session_samples[:OPS_SLOW_SESSION_SAMPLE_LIMIT],
             "protected_boundary": "agent_event, task_episode, protected event types, and unrouted context-tail rows are kept",
             "authority_boundary": "raw transcripts, segment indexes, and monolith fallback remain authority",
@@ -55438,23 +55546,47 @@ def search_operational_event_projection_probe_shard(
                 "candidate_context_tail_without_route_signals_count",
             )
         }
-        context_event_count = context_breakdown["context_event_count"]
+        omitted_context_tail_route_ref_row_count = 0
+        omitted_context_tail_route_ref_document_count = 0
+        if sqlite_table_exists(conn, "omitted_context_tail_route_refs"):
+            omitted_row = conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS row_count,
+                  COUNT(DISTINCT COALESCE(
+                    NULLIF(doc_id, ''),
+                    session_label || ':' || event_id || ':' || raw_ref || ':' || segment_ref
+                  )) AS document_count
+                FROM omitted_context_tail_route_refs
+                """
+            ).fetchone()
+            if omitted_row is not None:
+                omitted_context_tail_route_ref_row_count = int_value(omitted_row["row_count"])
+                omitted_context_tail_route_ref_document_count = int_value(omitted_row["document_count"])
+        context_event_count = context_breakdown["context_event_count"] + omitted_context_tail_route_ref_document_count
         result = {
-            "event_total": event_total,
+            "event_total": event_total + omitted_context_tail_route_ref_document_count,
             "direct_actionable_event_count": direct_actionable_event_count,
             "context_event_count": context_event_count,
             "context_agent_event_count": context_breakdown["context_agent_event_count"],
             "context_task_episode_count": context_breakdown["context_task_episode_count"],
             "context_protected_event_type_count": context_breakdown["context_protected_event_type_count"],
-            "context_route_signal_preview_count": context_breakdown["context_route_signal_preview_count"],
+            "context_route_signal_preview_count": (
+                context_breakdown["context_route_signal_preview_count"] + omitted_context_tail_route_ref_document_count
+            ),
             "context_empty_session_act_count": context_breakdown["context_empty_session_act_count"],
-            "candidate_context_tail_v1_count": context_breakdown["candidate_context_tail_v1_count"],
-            "candidate_context_tail_with_route_signals_count": context_breakdown[
-                "candidate_context_tail_with_route_signals_count"
-            ],
+            "candidate_context_tail_v1_count": (
+                context_breakdown["candidate_context_tail_v1_count"] + omitted_context_tail_route_ref_document_count
+            ),
+            "candidate_context_tail_with_route_signals_count": (
+                context_breakdown["candidate_context_tail_with_route_signals_count"]
+                + omitted_context_tail_route_ref_document_count
+            ),
             "candidate_context_tail_without_route_signals_count": context_breakdown[
                 "candidate_context_tail_without_route_signals_count"
             ],
+            "omitted_context_tail_route_ref_row_count": omitted_context_tail_route_ref_row_count,
+            "omitted_context_tail_route_ref_document_count": omitted_context_tail_route_ref_document_count,
         }
         role_rows = conn.execute(
             """
@@ -55534,36 +55666,59 @@ def search_operational_event_projection_probe_shard(
                 SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
                 *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
             ]
+            omitted_union_sql = ""
+            if sqlite_table_exists(conn, "omitted_context_tail_route_refs"):
+                omitted_union_sql = """
+                    UNION ALL
+                    SELECT layer,
+                           key,
+                           route_signal,
+                           COALESCE(session_id, '') AS session_id,
+                           COALESCE(session_date, '') AS session_date
+                    FROM omitted_context_tail_route_refs
+                """
+            candidate_route_refs_sql = f"""
+                SELECT route_terms.layer AS layer,
+                       route_terms.key AS key,
+                       route_terms.route_signal AS route_signal,
+                       COALESCE(documents.session_id, '') AS session_id,
+                       COALESCE(documents.session_date, '') AS session_date
+                FROM documents
+                JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+                JOIN route_terms ON route_terms.id = document_routes.route_id
+                WHERE {candidate_where}
+                {omitted_union_sql}
+            """
             try:
                 layer_rows = conn.execute(
                     f"""
-                    SELECT route_terms.layer AS layer,
+                    WITH candidate_route_refs AS (
+                        {candidate_route_refs_sql}
+                    )
+                    SELECT layer AS layer,
                            COUNT(*) AS posting_count,
-                           COUNT(DISTINCT route_terms.key) AS key_count
-                    FROM documents
-                    JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-                    JOIN route_terms ON route_terms.id = document_routes.route_id
-                    WHERE {candidate_where}
-                    GROUP BY route_terms.layer
-                    ORDER BY posting_count DESC, route_terms.layer ASC
+                           COUNT(DISTINCT key) AS key_count
+                    FROM candidate_route_refs
+                    GROUP BY layer
+                    ORDER BY posting_count DESC, layer ASC
                     """,
                     candidate_params,
                 ).fetchall()
                 term_rows = conn.execute(
                     f"""
-                    SELECT route_terms.layer AS layer,
-                           route_terms.key AS key,
-                           route_terms.route_signal AS route_signal,
+                    WITH candidate_route_refs AS (
+                        {candidate_route_refs_sql}
+                    )
+                    SELECT layer AS layer,
+                           key AS key,
+                           route_signal AS route_signal,
                            COUNT(*) AS posting_count,
-                           COUNT(DISTINCT COALESCE(documents.session_id, '')) AS session_count,
-                           MIN(documents.session_date) AS first_session_date,
-                           MAX(documents.session_date) AS last_session_date
-                    FROM documents
-                    JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-                    JOIN route_terms ON route_terms.id = document_routes.route_id
-                    WHERE {candidate_where}
-                    GROUP BY route_terms.layer, route_terms.key, route_terms.route_signal
-                    ORDER BY posting_count DESC, route_terms.layer ASC, route_terms.key ASC
+                           COUNT(DISTINCT session_id) AS session_count,
+                           MIN(session_date) AS first_session_date,
+                           MAX(session_date) AS last_session_date
+                    FROM candidate_route_refs
+                    GROUP BY layer, key, route_signal
+                    ORDER BY posting_count DESC, layer ASC, key ASC
                     LIMIT ?
                     """,
                     [*candidate_params, max(1, int(route_rollup_limit))],
@@ -56674,21 +56829,50 @@ def search_operational_route_rollup_shard_rows(
             SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
         ]
-        aggregate_rows = conn.execute(
-            f"""
+        omitted_union_sql = ""
+        if sqlite_table_exists(conn, "omitted_context_tail_route_refs"):
+            omitted_union_sql = """
+                UNION ALL
+                SELECT layer,
+                       key,
+                       route_signal,
+                       COALESCE(session_id, '') AS session_id,
+                       COALESCE(session_date, '') AS session_date,
+                       COALESCE(raw_ref, '') AS raw_ref,
+                       COALESCE(segment_ref, '') AS segment_ref,
+                       printf('%020d', id) AS sort_id
+                FROM omitted_context_tail_route_refs
+            """
+        candidate_route_refs_sql = f"""
             SELECT route_terms.layer AS layer,
                    route_terms.key AS key,
                    route_terms.route_signal AS route_signal,
-                   COUNT(*) AS posting_count,
-                   COUNT(DISTINCT COALESCE(documents.session_id, '')) AS session_count,
-                   MIN(documents.session_date) AS first_session_date,
-                   MAX(documents.session_date) AS last_session_date
+                   COALESCE(documents.session_id, '') AS session_id,
+                   COALESCE(documents.session_date, '') AS session_date,
+                   COALESCE(documents.raw_ref, '') AS raw_ref,
+                   COALESCE(documents.segment_ref, '') AS segment_ref,
+                   printf('%020d', documents.rowid) AS sort_id
             FROM documents
             JOIN document_routes ON document_routes.doc_rowid = documents.rowid
             JOIN route_terms ON route_terms.id = document_routes.route_id
             WHERE {candidate_where}
-            GROUP BY route_terms.layer, route_terms.key, route_terms.route_signal
-            ORDER BY posting_count DESC, route_terms.layer ASC, route_terms.key ASC
+            {omitted_union_sql}
+        """
+        aggregate_rows = conn.execute(
+            f"""
+            WITH candidate_route_refs AS (
+                {candidate_route_refs_sql}
+            )
+            SELECT layer AS layer,
+                   key AS key,
+                   route_signal AS route_signal,
+                   COUNT(*) AS posting_count,
+                   COUNT(DISTINCT session_id) AS session_count,
+                   MIN(session_date) AS first_session_date,
+                   MAX(session_date) AS last_session_date
+            FROM candidate_route_refs
+            GROUP BY layer, key, route_signal
+            ORDER BY posting_count DESC, layer ASC, key ASC
             """,
             candidate_params,
         ).fetchall()
@@ -56699,20 +56883,20 @@ def search_operational_route_rollup_shard_rows(
                 f"""
                 SELECT layer, key, route_signal, session_id, raw_ref, segment_ref
                 FROM (
-                    SELECT route_terms.layer AS layer,
-                           route_terms.key AS key,
-                           route_terms.route_signal AS route_signal,
-                           COALESCE(documents.session_id, '') AS session_id,
-                           COALESCE(documents.raw_ref, '') AS raw_ref,
-                           COALESCE(documents.segment_ref, '') AS segment_ref,
+                    WITH candidate_route_refs AS (
+                        {candidate_route_refs_sql}
+                    )
+                    SELECT layer AS layer,
+                           key AS key,
+                           route_signal AS route_signal,
+                           session_id AS session_id,
+                           raw_ref AS raw_ref,
+                           segment_ref AS segment_ref,
                            ROW_NUMBER() OVER (
-                               PARTITION BY route_terms.layer, route_terms.key, route_terms.route_signal
-                               ORDER BY documents.session_date DESC, documents.rowid DESC
+                               PARTITION BY layer, key, route_signal
+                               ORDER BY session_date DESC, sort_id DESC
                            ) AS sample_rank
-                    FROM documents
-                    JOIN document_routes ON document_routes.doc_rowid = documents.rowid
-                    JOIN route_terms ON route_terms.id = document_routes.route_id
-                    WHERE {candidate_where}
+                    FROM candidate_route_refs
                 )
                 WHERE sample_rank <= ?
                 """,

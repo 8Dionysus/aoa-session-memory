@@ -97,8 +97,10 @@ Use these first routes when available:
   posture, live scenario corpus, and storage baseline, and still keeps
   `apply_ready=false` until the explicit apply route and after-shrink storage
   comparison exist. If the gate reports a missing/stale rollup, materialize the
-  route-rollup first. Keep unrouted context-tail rows and the monolith raw-text
-  fallback until their replacements are proven.
+  route-rollup first. Post-omission route-rollup must include compact
+  `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
+  omission is a route/read-model regression. Keep unrouted context-tail rows
+  and the monolith raw-text fallback until their replacements are proven.
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with

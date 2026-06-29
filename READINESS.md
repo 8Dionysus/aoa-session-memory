@@ -1974,6 +1974,28 @@ Maintenance gates:
   through the explicit policy followed by before/after storage and recall
   comparison; raw/segment evidence and monolith raw-text fallback remain
   authority.
+  Follow-up regression repair added compact omitted route-ref preservation:
+  route-backed omitted context-tail rows are now stored in
+  `omitted_context_tail_route_refs`, search schema advanced to `14`, and
+  operational route-rollup aggregates both remaining candidate `documents`
+  rows and that compact sidecar. Regression tests:
+  `test_search_index_sessions_applies_explicit_context_tail_omission_policy`
+  now checks the compact sidecar, and
+  `test_search_operational_route_rollup_preserves_omitted_context_tail_refs`
+  proves post-omission rollup refs survive. Live rebuild through
+  `abyss-machine resource launch --class medium --kind indexing` completed in
+  `2153806ms` (`35min55s`, memory peak `4G`, swap `338.2M`), processed `288`
+  sessions, omitted `377579` generated context-tail documents, and wrote
+  `1027653` compact omitted route-ref rows. `search-schema-migrate` upgraded
+  the monolith and all three shards to schema `14`; refreshed
+  `search-operational-route-rollup` produced `53583` rows, `1027653` candidate
+  route postings, current source status, and a `32.8 MiB` read-model. Final
+  live reports `diagnostics/20260629T220331Z__maintenance-status.json` and
+  `diagnostics/20260629T220457Z__search-operational-shrink-gates.json`
+  returned `ok=true`: search, graph, entity registry, and rollup are current;
+  shrink gates pass projection, route refs, agent route lane coverage, literal
+  exact recall, live scenario corpus, storage baseline, and explicit apply
+  route, while still blocking only `storage_before_after_comparison`.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over

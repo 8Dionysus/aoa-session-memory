@@ -17459,11 +17459,24 @@ def test_search_index_sessions_applies_explicit_context_tail_omission_policy(
     conn = module.connect_existing_search_db(db_path)
     try:
         ids = {str(row[0]) for row in conn.execute("SELECT id FROM documents").fetchall()}
+        omitted_rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM omitted_context_tail_route_refs ORDER BY layer, key, raw_ref"
+            ).fetchall()
+        ]
         metadata = module.search_index_metadata(conn)
     finally:
         conn.close()
     assert "candidate-with-route" not in ids
     assert "candidate-without-route" in ids
+    assert len(omitted_rows) == 1
+    assert omitted_rows[0]["doc_id"] == "candidate-with-route"
+    assert omitted_rows[0]["layer"] == "tool"
+    assert omitted_rows[0]["key"] == "exec_command"
+    assert omitted_rows[0]["route_signal"] == module.route_signal_token("tool", "exec_command")
+    assert omitted_rows[0]["raw_ref"] == "raw:line:candidate-with-route"
+    assert omitted_rows[0]["segment_ref"] == "segments/000__initial-to-latest.md"
     assert metadata["search_context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
 
 
@@ -17585,6 +17598,149 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
     assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
     assert "rollup-session" in json.loads(row["session_ids_json"])
+
+
+def test_search_operational_route_rollup_preserves_omitted_context_tail_refs(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    session_label = "2026-06-29__001__omission-rollup"
+
+    documents = [
+        {
+            "id": "candidate-with-route",
+            "doc_type": "event",
+            "session_id": "omission-rollup-session",
+            "session_label": session_label,
+            "session_title": "Omission rollup",
+            "session_date": "2026-06-29",
+            "event_id": "candidate-with-route",
+            "event_type": "CONTEXT_STATE",
+            "usage_role": "context",
+            "route_layers": module.packed_route_values(["tool"]),
+            "route_signals": module.packed_route_values([module.route_signal_token("tool", "exec_command")]),
+            "title": "candidate-with-route",
+            "body": "body candidate-with-route",
+            "raw_ref": "raw:line:candidate-with-route",
+            "segment_ref": "segments/000__initial-to-latest.md",
+            "payload_json": "{}",
+        },
+        {
+            "id": "candidate-without-route",
+            "doc_type": "event",
+            "session_id": "omission-rollup-session",
+            "session_label": session_label,
+            "session_title": "Omission rollup",
+            "session_date": "2026-06-29",
+            "event_id": "candidate-without-route",
+            "event_type": "CONTEXT_STATE",
+            "usage_role": "context",
+            "title": "candidate-without-route",
+            "body": "body candidate-without-route",
+            "raw_ref": "raw:line:candidate-without-route",
+            "segment_ref": "segments/000__initial-to-latest.md",
+            "payload_json": "{}",
+        },
+    ]
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_fingerprint",
+        lambda _record, include_rendered_markdown=False: {
+            "session_id": "omission-rollup-session",
+            "session_label": session_label,
+            "fingerprint": "fingerprint-rollup",
+            "latest_source_mtime": 1.0,
+            "source_path_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "search_documents_for_record",
+        lambda *_args, **_kwargs: (
+            list(documents),
+            {
+                "status": "indexed",
+                "session_id": "omission-rollup-session",
+                "session_label": session_label,
+                "raw_text_status": "skipped_structured_projection",
+                "diagnostics": [],
+            },
+        ),
+    )
+
+    index_payload = module.search_index_sessions(
+        aoa_root=aoa_root,
+        selected_records=[{"session_id": "omission-rollup-session", "session_label": session_label}],
+        rebuild=True,
+        db_path_override=shard_db,
+        refresh_catalog=False,
+        include_entity_registry=False,
+        include_raw_event_text=False,
+        store_raw_text=False,
+        context_tail_omission_policy=module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+    )
+    assert index_payload["ok"] is True
+    assert index_payload["context_tail_omission"]["omitted_document_count"] == 1
+    assert index_payload["context_tail_omission"]["omitted_route_ref_row_count"] == 1
+
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_count": 1,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": shard_key,
+                    "shard_db_path": str(shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": index_payload["document_count"],
+                    "total_with_wal_bytes": shard_db.stat().st_size,
+                    "total_with_wal_human": module.human_size(shard_db.stat().st_size),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    applied = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=True,
+        write_report=True,
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "current"
+    assert applied["totals"]["candidate_context_tail_v1_count"] == 2
+    assert applied["totals"]["candidate_context_tail_with_route_signals_count"] == 1
+    assert applied["totals"]["route_rollup_row_count"] == 1
+    assert applied["totals"]["candidate_route_posting_count"] == 1
+
+    rollup_conn = sqlite3.connect(module.search_operational_route_rollup_db_path(aoa_root))
+    rollup_conn.row_factory = sqlite3.Row
+    row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'tool' AND key = 'exec_command'").fetchone()
+    rollup_conn.close()
+
+    assert row is not None
+    assert row["posting_count"] == 1
+    assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
+    assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
+    assert "omission-rollup-session" in json.loads(row["session_ids_json"])
 
 
 def test_search_operational_route_rollup_default_timeout_is_build_budget() -> None:

@@ -151,6 +151,12 @@ route-ref-backed context-tail event rows from structured shards; it keeps
 agent-event, task-episode, protected context, and unrouted context-tail rows.
 It is not valid with `--full-text`, does not touch raw/segment evidence, and
 does not remove the monolith raw-text fallback.
+Omitted route-backed rows must remain findable through compact refs: the shard
+stores `omitted_context_tail_route_refs`, and operational route-rollup queries
+read that sidecar as well as remaining candidate documents. After this rebuild,
+refresh `search-operational-route-rollup`, then run
+`search-operational-shrink-gates`; an empty route-rollup after omission is a
+regression, not a successful shrink.
 
 When only the generated entity inventory is stale, refresh it without touching
 session documents:

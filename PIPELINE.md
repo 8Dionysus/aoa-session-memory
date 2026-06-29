@@ -420,10 +420,20 @@ with route refs available through the operational route-rollup path. It keeps
 agent-event rows, task-episode rows, protected event-type context, and unrouted
 context-tail rows. It is invalid with `--full-text`; literal/raw recall remains
 behind the monolith fallback or explicitly materialized scoped full-text shards.
+Omitted route-backed rows are not allowed to disappear as navigation evidence:
+structured shards rehome their compact `layer/key/route_signal` plus raw,
+segment, and session refs into `omitted_context_tail_route_refs`, and
+`search-operational-route-rollup` must aggregate both current candidate
+`documents` rows and that compact sidecar. If a post-omission rollup refresh
+returns an empty rollup while omitted route-ref rows exist or should exist,
+treat it as a route/read-model regression and rebuild schema-current structured
+shards from raw/session indexes rather than weakening the gate.
 The report records `context_tail_omission_policy`,
-`context_tail_omission.omitted_document_count`, examples, and authority
-boundaries. Capture before/after storage and recall gates after any live
-rebuild; do not treat the policy flag itself as proof of safe shrinkage.
+`context_tail_omission.omitted_document_count`,
+`context_tail_omission.omitted_route_ref_row_count`, examples, and authority
+boundaries. Capture before/after storage, route-rollup, and recall gates after
+any live rebuild; do not treat the policy flag itself as proof of safe
+shrinkage.
 
 Scoped shard maintenance refreshes `search/catalog.json` from the selected
 records plus existing catalog fallback, rather than forcing a full live
