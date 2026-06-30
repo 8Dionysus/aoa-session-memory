@@ -1988,6 +1988,27 @@ Maintenance gates:
   through the explicit policy followed by before/after storage and recall
   comparison; raw/segment evidence and monolith raw-text fallback remain
   authority.
+  2026-06-30 sticky maintenance repair: `search-shards` now defaults
+  context-tail omission selection to `auto`. Fresh shards resolve to
+  `keep_all_context_tail_v1`, but dirty-only/incremental refresh inherits an
+  existing shard `search_context_tail_omission_policy` from SQLite metadata.
+  Live scoped repair on `month/2026-06` with explicit `route-ref-backed`
+  processed `1` stale/deferred session, indexed `5462` documents, omitted
+  `1071` generated context-tail documents, and stored `2713` omitted route-ref
+  rows in `diagnostics/20260630T023319Z__search-shards.json`. A following
+  ordinary no-policy dirty-only run wrote
+  `diagnostics/20260630T023632Z__search-shards.json` with
+  `requested_context_tail_omission_policy=auto`,
+  `context_tail_omission_policy=route_ref_backed_context_tail_v1`,
+  `context_tail_omission_policy_resolution.source=existing_shard_meta`, and
+  `status=no_dirty_sessions`; this proves routine maintenance no longer
+  silently rolls the shard back to keep-all after a slim rebuild.
+  The follow-up bounded `index-maintenance` catch-up report
+  `diagnostics/20260630T023913Z__index-maintenance.json` returned `ok=true`
+  with `search_shards.status=current`, `deferred_live_session_count=0`, and all
+  three materialized shards (`month/2026-04`, `month/2026-05`,
+  `month/2026-06`) exposing
+  `context_tail_omission_policy=route_ref_backed_context_tail_v1`.
   Follow-up regression repair added compact omitted route-ref preservation:
   route-backed omitted context-tail rows are now stored in
   `omitted_context_tail_route_refs`, search schema advanced to `14`, and

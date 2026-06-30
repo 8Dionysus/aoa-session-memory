@@ -1141,6 +1141,14 @@ action deliberately omits `--full-text`, so
 raw-text recall stays on the monolith fallback unless an operator explicitly
 chooses a heavier shard-level lexical route.
 
+The default context-tail omission policy for `search-shards` is `auto`.
+Fresh structured shards use `keep-all`, but incremental or dirty-only refreshes
+inherit an existing shard `search_context_tail_omission_policy` from SQLite
+metadata. After a guarded route-ref-backed shrink, ordinary maintenance
+therefore preserves the slim generated projection without needing another
+explicit flag. Use `--context-tail-omission-policy keep-all` as the rollback or
+debug route, and `route-ref-backed` as the explicit apply/rebuild route.
+
 When shard freshness is current, or only has deferred live-tail updates, but
 `maintenance-status` still reports `search_projection_combined_large`, treat it
 as structured event/document cardinality pressure, not a SQLite vacuum or
@@ -1230,6 +1238,13 @@ the route-ref-backed context tail has a current replacement navigation surface;
 literal-recall, route-rollup ref, storage, and bundle-parity gates prove an
 explicit apply route. Unrouted context-tail rows stay in search until their own
 literal/raw fallback replacement is proven.
+
+Once a shard is rebuilt with the route-ref-backed policy, later dirty-only
+maintenance should report `requested_context_tail_omission_policy=auto`,
+`context_tail_omission_policy=route_ref_backed_context_tail_v1`, and
+`context_tail_omission_policy_resolution.source=existing_shard_meta`. A
+`no_dirty_sessions` result is still a valid proof state when the command writes
+its diagnostic report.
 
 `search-operational-shrink-gates` is the read-only gate packet for that later
 physical route:

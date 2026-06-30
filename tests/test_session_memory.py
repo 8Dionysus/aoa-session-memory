@@ -18480,6 +18480,156 @@ def test_search_index_sessions_applies_explicit_context_tail_omission_policy(
     assert metadata["search_context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
 
 
+def test_search_shards_auto_context_tail_policy_inherits_existing_shard_meta(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shard = "month/2026-05"
+    shard_db = module.search_shard_db_path(aoa_root, shard)
+    conn = module.init_search_db(shard_db, rebuild=True)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_context_tail_omission_policy", module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    records = [{"session_id": "may-dirty", "session_label": "2026-05-01__001__dirty-session"}]
+    calls: dict[str, Any] = {}
+
+    def fake_records(
+        _aoa_root: Path,
+        *,
+        target: str,
+        since: str | None,
+        until: str | None,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        return list(records)
+
+    def fake_dirty_filter(
+        _aoa_root: Path,
+        selected_records: list[dict[str, Any]],
+        *,
+        shard: str | None = None,
+        include_deferred_live: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return list(selected_records), {
+            "dirty_candidate_count": len(selected_records),
+            "deferred_live_skipped_count": 0,
+            "pre_filter_selected_count": len(selected_records),
+            "dirty_selected_count": len(selected_records),
+            "skipped_current_count": 0,
+        }
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls["context_tail_omission_policy"] = kwargs["context_tail_omission_policy"]
+        selected_records = kwargs["selected_records"]
+        return {
+            "ok": True,
+            "processed_count": len(selected_records),
+            "document_count": len(selected_records),
+            "session_document_count": len(selected_records),
+            "segment_document_count": 0,
+            "event_document_count": 0,
+            "incident_document_count": 0,
+            "entity_registry_document_count": 0,
+            "goal_lifecycle_document_count": 0,
+            "task_episode_document_count": 0,
+            "context_tail_omission_policy": kwargs["context_tail_omission_policy"],
+            "context_tail_omission": {
+                "policy": kwargs["context_tail_omission_policy"],
+                "counts": {},
+                "omitted_document_count": 0,
+                "omitted_route_ref_row_count": 0,
+            },
+            "slow_sessions": [],
+            "slow_session_warning_count": 0,
+            "diagnostics": [],
+        }
+
+    def fake_build_search_catalog(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "current",
+            "catalog_state_basis": "selected_records",
+            "selected_state_key_count": len(kwargs.get("selected_records") or []),
+        }
+
+    monkeypatch.setattr(module, "search_records_for_target", fake_records)
+    monkeypatch.setattr(module, "filter_search_records_to_dirty_shard_sessions", fake_dirty_filter)
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+    monkeypatch.setattr(module, "build_search_catalog", fake_build_search_catalog)
+
+    payload = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard=shard,
+        rebuild_shards=False,
+        dirty_only=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["requested_context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO
+    assert payload["context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+    assert calls["context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+    assert payload["context_tail_omission_policy_resolution"]["source"] == "existing_shard_meta"
+    assert payload["context_tail_omission_policy_resolution"]["shard_policies"][0]["policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+
+
+def test_search_shards_cli_defaults_context_tail_policy_to_auto() -> None:
+    parser = module.build_parser()
+    parsed = parser.parse_args(["search-shards", "all"])
+
+    assert parsed.context_tail_omission_policy == "auto"
+
+
+def test_search_shards_dirty_only_no_dirty_writes_report(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    shard = "month/2026-05"
+    shard_db = module.search_shard_db_path(aoa_root, shard)
+    conn = module.init_search_db(shard_db, rebuild=True)
+    conn.close()
+    records = [{"session_id": "may-current", "session_label": "2026-05-01__001__current-session"}]
+
+    monkeypatch.setattr(
+        module,
+        "search_records_for_target",
+        lambda *_args, **_kwargs: list(records),
+    )
+    monkeypatch.setattr(
+        module,
+        "filter_search_records_to_dirty_shard_sessions",
+        lambda _aoa_root, selected_records, **_kwargs: (
+            [],
+            {
+                "dirty_candidate_count": 0,
+                "deferred_live_skipped_count": 0,
+                "pre_filter_selected_count": len(selected_records),
+                "dirty_selected_count": 0,
+                "skipped_current_count": len(selected_records),
+            },
+        ),
+    )
+
+    payload = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        shard=shard,
+        rebuild_shards=False,
+        dirty_only=True,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "no_dirty_sessions"
+    assert payload["report_json"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
 def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

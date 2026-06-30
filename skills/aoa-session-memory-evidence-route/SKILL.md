@@ -107,6 +107,13 @@ Use these first routes when available:
   `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
   omission is a route/read-model regression. Keep unrouted context-tail rows
   and the monolith raw-text fallback until their replacements are proven.
+  Routine `search-shards --no-rebuild --dirty-only` uses
+  `--context-tail-omission-policy auto` by default: fresh shards resolve to
+  keep-all, but an existing shard rebuilt with route-ref-backed policy is
+  inherited from SQLite metadata. Read
+  `context_tail_omission_policy_resolution` in the packet before assuming a
+  dirty-only refresh is in rollback or slim mode; `no_dirty_sessions` is valid
+  evidence when the command writes a diagnostic report.
   When the gates are ready and only the before/after comparison is missing,
   run `search-operational-shrink-apply --apply --write-report` rather than a
   naked shard rebuild. Its packet should be read as an operator route: preflight

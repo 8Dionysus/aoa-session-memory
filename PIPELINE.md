@@ -400,6 +400,14 @@ Dirty-only selection is cheap-first by catalog `document_count`, so small stale
 rows can be repaired before a known heavy-tail session without hiding the heavy
 session from the remaining packet.
 
+`search-shards` uses `--context-tail-omission-policy auto` by default. Auto is
+a policy-selection route, not an applied omission policy: fresh shards resolve
+to `keep-all`, while incremental and dirty-only runs inherit an existing
+structured shard `search_context_tail_omission_policy` from SQLite metadata.
+This keeps route-ref-backed shrink sticky across routine maintenance without
+forcing that policy onto a fresh install. `keep-all` remains the rollback/debug
+mode, and `route-ref-backed` remains the explicit apply/rebuild mode.
+
 Context-tail omission is an explicit generated-search projection route, not a
 cleanup shortcut. After `search-operational-shrink-gates` passes projection,
 route-rollup, literal, live-corpus, and storage gates, an operator may rebuild

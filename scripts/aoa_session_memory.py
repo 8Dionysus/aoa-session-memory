@@ -125,9 +125,11 @@ SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
 SEARCH_DOCUMENT_STORAGE_PROFILE_FULL = "full_text_hot_slim_preview_v3"
 SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD = "structured_route_slim_preview_v2"
 SEARCH_INDEX_PROFILE = "lean_route_date_refs_v1"
+SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO = "auto"
 SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL = "keep_all_context_tail_v1"
 SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED = "route_ref_backed_context_tail_v1"
 SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES = {
+    "auto": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
     "keep-all": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
     "route-ref-backed": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
 }
@@ -28547,6 +28549,7 @@ def build_search_catalog(
                 "raw_text_query_support": item.get("shard_raw_text_query_support") or "",
                 "storage_profile": item.get("shard_storage_profile") or "",
                 "expected_storage_profile": item.get("expected_shard_storage_profile") or "",
+                "context_tail_omission_policy": item.get("shard_context_tail_omission_policy") or "",
             },
         )
         for target_key, session_key in (
@@ -28554,6 +28557,7 @@ def build_search_catalog(
             ("raw_text_query_support", "shard_raw_text_query_support"),
             ("storage_profile", "shard_storage_profile"),
             ("expected_storage_profile", "expected_shard_storage_profile"),
+            ("context_tail_omission_policy", "shard_context_tail_omission_policy"),
         ):
             if not shard_item.get(target_key) and item.get(session_key):
                 shard_item[target_key] = item.get(session_key)
@@ -28613,6 +28617,7 @@ def build_search_catalog(
         shard_storage_mode = search_projection_storage_mode_from_metadata(shard_metadata) if shard_metadata else ""
         shard_raw_text_query_support = search_raw_text_query_support_from_metadata(shard_metadata) if shard_metadata else ""
         shard_storage_profile = search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_context_tail_omission_policy = search_context_tail_omission_policy_from_metadata(shard_metadata) if shard_metadata else ""
         expected_shard_storage_profile = expected_search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
         shard_storage_profile_current = bool(shard_storage_profile) and shard_storage_profile == expected_shard_storage_profile
         shard_status = "missing"
@@ -28656,6 +28661,7 @@ def build_search_catalog(
             "shard_storage_mode": shard_storage_mode,
             "shard_raw_text_query_support": shard_raw_text_query_support,
             "shard_storage_profile": shard_storage_profile,
+            "shard_context_tail_omission_policy": shard_context_tail_omission_policy,
             "expected_shard_storage_profile": expected_shard_storage_profile,
             "monolith_db_path": str(db_path),
             "monolith_status": monolith_status,
@@ -28710,6 +28716,7 @@ def build_search_catalog(
         shard_storage_mode = search_projection_storage_mode_from_metadata(shard_metadata) if shard_metadata else ""
         shard_raw_text_query_support = search_raw_text_query_support_from_metadata(shard_metadata) if shard_metadata else ""
         shard_storage_profile = search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_context_tail_omission_policy = search_context_tail_omission_policy_from_metadata(shard_metadata) if shard_metadata else ""
         expected_shard_storage_profile = expected_search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
         shard_storage_profile_current = bool(shard_storage_profile) and shard_storage_profile == expected_shard_storage_profile
         for shard_session_state in sorted(
@@ -28756,6 +28763,7 @@ def build_search_catalog(
                 "shard_storage_mode": shard_storage_mode,
                 "shard_raw_text_query_support": shard_raw_text_query_support,
                 "shard_storage_profile": shard_storage_profile,
+                "shard_context_tail_omission_policy": shard_context_tail_omission_policy,
                 "expected_shard_storage_profile": expected_shard_storage_profile,
                 "monolith_db_path": str(db_path),
                 "monolith_status": "missing",
@@ -29438,7 +29446,7 @@ def materialize_search_shards(
     dirty_only: bool = False,
     include_deferred_live: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
-    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -29452,7 +29460,16 @@ def materialize_search_shards(
         "skipped_current_count": 0,
         "deferred_live_skipped_count": 0,
     }
-    effective_context_tail_omission_policy = normalize_search_context_tail_omission_policy(context_tail_omission_policy)
+    requested_context_tail_omission_policy = normalize_search_context_tail_omission_policy(context_tail_omission_policy)
+    policy_resolution = search_context_tail_omission_policy_resolution(
+        aoa_root=aoa_root,
+        requested_policy=requested_context_tail_omission_policy,
+        structured_only=structured_only,
+        shard_keys=[shard] if shard else [],
+    )
+    effective_context_tail_omission_policy = str(
+        policy_resolution.get("resolved_policy") or SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+    )
     if not structured_only and effective_context_tail_omission_policy != SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -29470,7 +29487,9 @@ def materialize_search_shards(
             "rebuild_shards": rebuild_shards,
             "dirty_only": dirty_only,
             "include_deferred_live": include_deferred_live,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -29497,7 +29516,9 @@ def materialize_search_shards(
             "rebuild_shards": rebuild_shards,
             "dirty_only": True,
             "include_deferred_live": include_deferred_live,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
@@ -29520,6 +29541,22 @@ def materialize_search_shards(
         else SEARCH_RAW_TEXT_QUERY_SUPPORT_FULL
     )
     storage_profile = search_document_storage_profile(store_raw_text=not structured_only)
+
+    def maybe_write_search_shards_report(payload: dict[str, Any]) -> dict[str, Any]:
+        if not write_report:
+            return payload
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        report_json, report_md = reserve_diagnostic_report_paths(
+            diagnostics_dir,
+            f"{compact_stamp()}__search-shards",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_shards_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+        return payload
+
     if selected_records is None:
         try:
             record_limit = None if dirty_only and limit is not None and int_value(limit) > 0 and target == "all" else limit
@@ -29541,7 +29578,9 @@ def materialize_search_shards(
                 "shard_storage_mode": shard_storage_mode,
                 "search_fts_storage_mode": shard_fts_storage_mode,
                 "raw_text_query_support": raw_text_query_support,
+                "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
                 "context_tail_omission_policy": effective_context_tail_omission_policy,
+                "context_tail_omission_policy_resolution": policy_resolution,
                 "shard_count": 0,
                 "document_count": 0,
                 "shards": [],
@@ -29556,6 +29595,7 @@ def materialize_search_shards(
             continue
         groups[shard_key].append(record)
     pre_dirty_group_count = sum(len(items) for items in groups.values())
+    pre_dirty_shard_keys = sorted(groups)
     if dirty_only:
         filtered_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         flattened_records = [record for shard_records in groups.values() for record in shard_records]
@@ -29577,6 +29617,17 @@ def materialize_search_shards(
         for record in dirty_records:
             filtered_groups[search_shard_key_for_record(record)].append(record)
         groups = filtered_groups
+    policy_shard_keys = sorted(groups) or ([str(shard)] if shard else pre_dirty_shard_keys)
+    policy_resolution = search_context_tail_omission_policy_resolution(
+        aoa_root=aoa_root,
+        requested_policy=requested_context_tail_omission_policy,
+        structured_only=structured_only,
+        shard_keys=policy_shard_keys,
+    )
+    effective_context_tail_omission_policy = str(
+        policy_resolution.get("resolved_policy") or SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+    )
+    diagnostics.extend(str(item) for item in policy_resolution.get("diagnostics", []) if item)
     selected_records_for_report = [record for shard_records in groups.values() for record in shard_records]
     selected_session_rows = (
         dirty_selection.get("dirty_selected_sessions")
@@ -29584,7 +29635,7 @@ def materialize_search_shards(
         else search_record_route_samples(selected_records_for_report, shard=shard)
     )
     if not groups:
-        return {
+        return maybe_write_search_shards_report({
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_shard_materialization",
             "search_schema_version": SEARCH_SCHEMA_VERSION,
@@ -29608,12 +29659,14 @@ def materialize_search_shards(
             "shard_storage_mode": shard_storage_mode,
             "search_fts_storage_mode": shard_fts_storage_mode,
             "raw_text_query_support": raw_text_query_support,
+            "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "shard_count": 0,
             "document_count": 0,
             "shards": [],
             "diagnostics": [] if dirty_only else ["no sessions selected for shard materialization"],
-        }
+        })
     shard_results: list[dict[str, Any]] = []
     slow_session_rows: list[dict[str, Any]] = []
     remaining_session_rows: list[dict[str, Any]] = []
@@ -29827,7 +29880,9 @@ def materialize_search_shards(
         "shard_storage_mode": shard_storage_mode,
         "search_fts_storage_mode": shard_fts_storage_mode,
         "raw_text_query_support": raw_text_query_support,
+        "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
         "context_tail_omission_policy": effective_context_tail_omission_policy,
+        "context_tail_omission_policy_resolution": policy_resolution,
         "context_tail_omission": {
             "policy": effective_context_tail_omission_policy,
             "counts": dict(sorted(context_tail_omission_counts.items())),
@@ -32324,7 +32379,7 @@ def document_route_entries(route_layers: Any, route_signals: Any, *, doc_type: s
 def normalize_search_context_tail_omission_policy(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
-        return SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+        return SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO
     return SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES.get(text, text)
 
 
@@ -32334,6 +32389,92 @@ def search_context_tail_omission_policy_cli_value(policy: str) -> str:
         if internal_value == normalized:
             return cli_value
     return "keep-all"
+
+
+def search_context_tail_omission_policy_from_metadata(metadata: dict[str, Any]) -> str:
+    policy = normalize_search_context_tail_omission_policy(
+        str(metadata.get("search_context_tail_omission_policy") or "")
+    )
+    if policy in {
+        SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+        SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+    }:
+        return policy
+    return ""
+
+
+def search_context_tail_omission_policy_resolution(
+    *,
+    aoa_root: Path | None,
+    requested_policy: str | None,
+    structured_only: bool,
+    shard_keys: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    requested = normalize_search_context_tail_omission_policy(requested_policy)
+    normalized_shards = sorted({str(item or "").strip() for item in (shard_keys or []) if str(item or "").strip()})
+    if not structured_only:
+        resolved = (
+            SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+            if requested == SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO
+            else requested
+        )
+        return {
+            "requested_policy": requested,
+            "resolved_policy": resolved,
+            "source": "full_text_shards_force_keep_all" if requested == SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO else "explicit",
+            "structured_only": False,
+            "shards_considered": normalized_shards,
+            "shard_policies": [],
+            "diagnostics": [],
+        }
+    if requested != SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO:
+        return {
+            "requested_policy": requested,
+            "resolved_policy": requested,
+            "source": "explicit",
+            "structured_only": True,
+            "shards_considered": normalized_shards,
+            "shard_policies": [],
+            "diagnostics": [],
+        }
+    shard_policies: list[dict[str, Any]] = []
+    if aoa_root is not None:
+        for shard_key in normalized_shards:
+            db_path = search_shard_db_path(aoa_root, shard_key)
+            policy = search_context_tail_omission_policy_from_metadata(search_db_metadata_at_path(db_path))
+            if not policy:
+                continue
+            shard_policies.append(
+                {
+                    "shard": shard_key,
+                    "db_path": str(db_path),
+                    "policy": policy,
+                }
+            )
+    policy_values = {str(item.get("policy") or "") for item in shard_policies}
+    diagnostics: list[str] = []
+    if SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED in policy_values:
+        resolved = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+        source = "existing_shard_meta"
+        if len(policy_values) > 1:
+            source = "mixed_existing_shard_meta_route_ref_backed_preferred"
+            diagnostics.append("context_tail_omission_policy_auto_mixed_existing_shard_meta")
+    elif SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL in policy_values:
+        resolved = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+        source = "existing_shard_meta"
+    else:
+        resolved = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+        source = "auto_default_keep_all_no_existing_shard_policy"
+    return {
+        "requested_policy": requested,
+        "resolved_policy": resolved,
+        "source": source,
+        "structured_only": True,
+        "shards_considered": normalized_shards,
+        "shard_policies": shard_policies,
+        "diagnostics": diagnostics,
+        "truth_status": "generated_search_projection_policy_selection_not_archive_truth",
+    }
 
 
 def search_document_is_context_tail_candidate(doc: dict[str, Any]) -> bool:
@@ -32428,6 +32569,8 @@ def apply_search_context_tail_omission_policy(
     policy: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, str]]]:
     normalized_policy = normalize_search_context_tail_omission_policy(policy)
+    if normalized_policy == SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO:
+        normalized_policy = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
     counts: Counter[str] = Counter()
     kept: list[dict[str, Any]] = []
     omitted_route_ref_rows: list[dict[str, str]] = []
@@ -33658,7 +33801,7 @@ def search_index_sessions(
     include_raw_event_text: bool = True,
     store_raw_text: bool = True,
     projection_storage_mode: str | None = None,
-    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+    context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -33678,8 +33821,16 @@ def search_index_sessions(
     )
     storage_profile = search_document_storage_profile(store_raw_text=store_raw_text)
     requested_context_tail_omission_policy = normalize_search_context_tail_omission_policy(context_tail_omission_policy)
+    policy_resolution = search_context_tail_omission_policy_resolution(
+        aoa_root=aoa_root,
+        requested_policy=requested_context_tail_omission_policy,
+        structured_only=not store_raw_text,
+        shard_keys=[search_shard_key_from_db_path(db_path)] if db_path_override is not None else [],
+    )
     effective_context_tail_omission_policy = (
-        SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL if store_raw_text else requested_context_tail_omission_policy
+        SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL
+        if store_raw_text
+        else str(policy_resolution.get("resolved_policy") or SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL)
     )
     write_db_path = db_path
     temp_db_path: Path | None = None
@@ -33712,6 +33863,7 @@ def search_index_sessions(
             "raw_text_query_support": raw_text_query_support,
             "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "db_path": str(db_path),
             "diagnostics": [str(exc)],
             "sessions": [],
@@ -33734,6 +33886,7 @@ def search_index_sessions(
             "raw_text_query_support": raw_text_query_support,
             "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "db_path": str(db_path),
             "diagnostics": ["no sessions selected"],
             "sessions": [],
@@ -33883,6 +34036,14 @@ def search_index_sessions(
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_context_tail_omission_policy", effective_context_tail_omission_policy),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_requested_context_tail_omission_policy", requested_context_tail_omission_policy),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("search_context_tail_omission_policy_source", str(policy_resolution.get("source") or "")),
         )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
@@ -34150,6 +34311,7 @@ def search_index_sessions(
                 "include_raw_event_text": include_raw_event_text,
                 "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
                 "context_tail_omission_policy": effective_context_tail_omission_policy,
+                "context_tail_omission_policy_resolution": policy_resolution,
                 "context_tail_omission": {
                     "policy": effective_context_tail_omission_policy,
                     "counts": dict(sorted(context_tail_omission_counts.items())),
@@ -34208,6 +34370,7 @@ def search_index_sessions(
             "include_raw_event_text": include_raw_event_text,
             "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
             "context_tail_omission_policy": effective_context_tail_omission_policy,
+            "context_tail_omission_policy_resolution": policy_resolution,
             "context_tail_omission": {
                 "policy": effective_context_tail_omission_policy,
                 "counts": dict(sorted(context_tail_omission_counts.items())),
@@ -34257,6 +34420,7 @@ def search_index_sessions(
         "include_raw_event_text": include_raw_event_text,
         "requested_context_tail_omission_policy": requested_context_tail_omission_policy,
         "context_tail_omission_policy": effective_context_tail_omission_policy,
+        "context_tail_omission_policy_resolution": policy_resolution,
         "context_tail_omission": {
             "policy": effective_context_tail_omission_policy,
             "counts": dict(sorted(context_tail_omission_counts.items())),
@@ -53134,6 +53298,11 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
         "shard_storage_mode": report.get("shard_storage_mode"),
         "search_fts_storage_mode": report.get("search_fts_storage_mode"),
         "raw_text_query_support": report.get("raw_text_query_support"),
+        "requested_context_tail_omission_policy": report.get("requested_context_tail_omission_policy"),
+        "context_tail_omission_policy": report.get("context_tail_omission_policy"),
+        "context_tail_omission_policy_resolution": report.get("context_tail_omission_policy_resolution")
+        if isinstance(report.get("context_tail_omission_policy_resolution"), dict)
+        else {},
         "search_document_storage_profile": report.get("search_document_storage_profile"),
         "search_body_preview_chars": report.get("search_body_preview_chars"),
         "search_route_signals_preview_chars": report.get("search_route_signals_preview_chars"),
@@ -53157,6 +53326,7 @@ def search_shard_materialization_ops_summary(report: dict[str, Any] | None) -> d
                     "documents_per_second",
                     "slow_session_warning_count",
                     "db_path",
+                    "context_tail_omission_policy",
                     "search_document_storage_profile",
                     "search_body_preview_chars",
                     "search_tags_storage_policy",
@@ -53276,6 +53446,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
                 "raw_text_query_support": item.get("raw_text_query_support"),
                 "storage_profile": item.get("storage_profile"),
                 "expected_storage_profile": item.get("expected_storage_profile"),
+                "context_tail_omission_policy": item.get("context_tail_omission_policy"),
                 **maintenance_sqlite_size_brief(size_entry),
             }
         )
@@ -69186,7 +69357,7 @@ def command_search_shards(args: argparse.Namespace) -> int:
             rebuild_shards=not args.no_rebuild,
             dirty_only=bool(getattr(args, "dirty_only", False)),
             include_deferred_live=bool(getattr(args, "include_deferred_live", False)),
-            context_tail_omission_policy=getattr(args, "context_tail_omission_policy", SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL),
+            context_tail_omission_policy=getattr(args, "context_tail_omission_policy", SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO),
         )
 
     payload = run_with_maintenance_lock(
@@ -75423,8 +75594,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_shards.add_argument(
         "--context-tail-omission-policy",
         choices=sorted(SEARCH_CONTEXT_TAIL_OMISSION_POLICY_CLI_VALUES),
-        default="keep-all",
-        help="Explicit generated structured-shard omission policy. route-ref-backed omits only route-ref-backed context-tail rows and keeps raw/segment plus monolith fallback authority.",
+        default="auto",
+        help="Generated structured-shard omission policy. auto inherits an existing shard policy, route-ref-backed omits only route-ref-backed context-tail rows, and keep-all is the explicit rollback/debug mode.",
     )
     search_shards.add_argument("--no-rebuild", action="store_true", help="Incrementally update selected sessions in existing shard DBs instead of rebuilding each shard.")
     search_shards.add_argument("--dirty-only", action="store_true", help="With --no-rebuild, update only catalog-stale sessions in the selected shard(s).")
