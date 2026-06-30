@@ -2396,6 +2396,15 @@ Maintenance gates:
   unit drift. Source `py_compile`, focused resource fallback tests
   (`17 passed`), full source pytest (`416 passed`), and source `validate`
   passed.
+- 2026-06-30 graph queue fallback contract: resource-blocked catchup/backlog/deep
+  graph-drip fallback now uses the generated graph maintenance queue for global
+  runs. If queue items already exist it drains them with `--use-queue` and does
+  not reseed; if the queue is empty it adds `--seed-queue-from-ledger` with a
+  bounded seed limit, then writes queue and ledger freshness state. The
+  fallback report exposes `queue_had_items`, `queue_seed_from_ledger`,
+  `queue_seed_limit`, and `queue_seed_include_deferred_live` so agents can
+  distinguish progress-drip routing from owner evidence. Source `py_compile`
+  and focused resource/graph-drip tests passed (`15 passed`).
 
 ## Probe Notes
 

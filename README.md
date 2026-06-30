@@ -704,17 +704,22 @@ sessions launch targeted `index-maintenance <session> --skip-graph-repair
 --skip-token-accounting`; graph-only deferred live sources launch the
 ledger-seeded `graph-maintenance --use-queue --queue-seed-include-deferred-live`
 route surfaced by `maintenance-status`. Resource-blocked catchup, backlog, and
-deep runs
-fall back to a
-tightly capped probe-class graph drip instead of leaving graph maintenance
-idle. These profiles enable this by default because unattended medium/heavy
-indexing can be capped by the host resource policy. The report keeps the outer
+deep runs fall back to a tightly capped probe-class graph queue drip instead
+of leaving graph maintenance idle. These profiles enable this by default
+because unattended medium/heavy indexing can be capped by the host resource
+policy. For global fallbacks, the wrapper drains an existing generated graph
+maintenance queue with `--use-queue`, or seeds an empty queue from the graph
+source ledger before draining it. The fallback writes queue and ledger
+freshness state so later agents see bounded progress without treating the
+generated queue as evidence authority. The report keeps the outer
 maintenance profile `ok=false`, records `fallback_graph_drip`, and does not
 claim the full catchup/backlog/deep profile succeeded. The default fallback is
 a small progress drip, currently `25` graph sources with a `300s` budget and a `25`
 candidate-pool window; profile graph-drip settings control the batch, budget,
 candidate-pool window, and node/edge refresh caps unless explicit CLI overrides
-are passed. Installed user timers are part of
+are passed. `fallback_graph_drip` records whether the queue already had items,
+whether a ledger seed was used, the seed limit, and whether deferred-live
+sources were included. Installed user timers are part of
 that contract: `maintenance-status` reads their `ExecStart` lines and reports
 `available_with_unit_drift` when an explicit graph-drip override no longer
 matches the profile default. When a read-only MCP environment cannot query the

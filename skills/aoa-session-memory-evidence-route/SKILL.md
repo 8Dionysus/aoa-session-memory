@@ -146,6 +146,16 @@ Use these first routes when available:
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
   compact node, edge, and evidence budgets.
+- graph maintenance pressure: read `maintenance-status` next actions first.
+  For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
+  should be interpreted as bounded generated-graph progress, not completion of
+  the outer maintenance profile. Global fallbacks use the generated graph
+  maintenance queue: drain existing queue items with `--use-queue`, seed from
+  the graph source ledger only when the queue is empty, and keep
+  `queue_had_items`, `queue_seed_from_ledger`, `queue_seed_limit`, and
+  `queue_seed_include_deferred_live` visible in reports. This queue is a
+  generated route/freshness aid; raw, segment, and owner layers remain the
+  evidence authority.
 - live route-quality regression proof: `live-scenario-corpus check` first when
   the question is whether current entity/search/literal/graph consumer routes
   still satisfy reviewed cases. Use `live-scenario-audit` for one-off

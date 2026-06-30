@@ -22372,6 +22372,32 @@ def auto_maintenance_resource_launch(
             diagnostics.append(f"index_drip_fallback_{fallback_status}")
     fallback_graph_drip: dict[str, Any] = {}
     if status == "resource_blocked" and effective_graph_drip_on_block and apply and repair_graph is not False:
+        graph_queue_scope_eligible = (
+            str(target or "all") == "all"
+            and since is None
+            and until is None
+            and limit is None
+        )
+        graph_queue_payload = read_graph_maintenance_queue(aoa_root) if graph_queue_scope_eligible else {}
+        graph_queue_items = (
+            graph_queue_payload.get("items")
+            if isinstance(graph_queue_payload.get("items"), dict)
+            else {}
+        )
+        graph_queue_had_items = bool(graph_queue_items)
+        graph_queue_seed_from_ledger = bool(graph_queue_scope_eligible and not graph_queue_had_items)
+        graph_queue_seed_limit = max(
+            effective_graph_drip_batch_limit * 10,
+            max(1, int_value(effective_graph_drip_candidate_pool_limit, 0)),
+            effective_graph_drip_batch_limit,
+        )
+        graph_queue_seed_include_deferred_live = bool(
+            graph_queue_seed_from_ledger
+            and (
+                str(live_tail_fast_path.get("command_kind") or "") == "graph_queue_maintenance"
+                or str(live_tail_fast_path.get("scope") or "") == "graph_deferred_live_sources"
+            )
+        )
         fallback_command = [
             resource_binary,
             "resource",
@@ -22404,6 +22430,19 @@ def auto_maintenance_resource_launch(
             "--write-report",
             "--write-hash-cache",
         ]
+        if graph_queue_scope_eligible:
+            fallback_command.append("--use-queue")
+            if graph_queue_seed_from_ledger:
+                fallback_command.extend(
+                    [
+                        "--seed-queue-from-ledger",
+                        "--queue-seed-limit",
+                        str(graph_queue_seed_limit),
+                    ]
+                )
+                if graph_queue_seed_include_deferred_live:
+                    fallback_command.append("--queue-seed-include-deferred-live")
+            fallback_command.extend(["--write-queue", "--write-ledger"])
         if effective_graph_drip_max_refresh_nodes is not None and int_value(effective_graph_drip_max_refresh_nodes) > 0:
             fallback_command.extend(["--max-refresh-nodes", str(int_value(effective_graph_drip_max_refresh_nodes))])
         if effective_graph_drip_max_refresh_edges is not None and int_value(effective_graph_drip_max_refresh_edges) > 0:
@@ -22490,6 +22529,13 @@ def auto_maintenance_resource_launch(
             "max_refresh_nodes": effective_graph_drip_max_refresh_nodes,
             "max_refresh_edges": effective_graph_drip_max_refresh_edges,
             "candidate_pool_limit": effective_graph_drip_candidate_pool_limit,
+            "queue_scope_eligible": graph_queue_scope_eligible,
+            "use_queue": graph_queue_scope_eligible,
+            "queue_had_items": graph_queue_had_items,
+            "queue_existing_count": len(graph_queue_items),
+            "queue_seed_from_ledger": graph_queue_seed_from_ledger,
+            "queue_seed_limit": graph_queue_seed_limit if graph_queue_scope_eligible else None,
+            "queue_seed_include_deferred_live": graph_queue_seed_include_deferred_live,
             "returncode": fallback_returncode,
             "elapsed_ms": fallback_elapsed_ms,
             "resource_ok": fallback_payload.get("ok"),

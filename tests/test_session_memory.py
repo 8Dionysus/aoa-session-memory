@@ -16448,6 +16448,14 @@ def test_backlog_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_pa
     assert calls[1][calls[1].index("--batch-limit") + 1] == str(settings["graph_drip_batch_limit"])
     assert calls[1][calls[1].index("--budget-seconds") + 1] == str(float(settings["graph_drip_budget_seconds"]))
     assert calls[1][calls[1].index("--candidate-pool-limit") + 1] == str(settings["graph_drip_candidate_pool_limit"])
+    assert "--use-queue" in calls[1]
+    assert "--seed-queue-from-ledger" in calls[1]
+    assert calls[1][calls[1].index("--queue-seed-limit") + 1] == "250"
+    assert "--write-queue" in calls[1]
+    assert "--write-ledger" in calls[1]
+    assert payload["fallback_graph_drip"]["use_queue"] is True
+    assert payload["fallback_graph_drip"]["queue_had_items"] is False
+    assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is True
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
 
 
@@ -16513,6 +16521,14 @@ def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_pa
     assert calls[1][calls[1].index("--batch-limit") + 1] == str(settings["graph_drip_batch_limit"])
     assert calls[1][calls[1].index("--budget-seconds") + 1] == str(float(settings["graph_drip_budget_seconds"]))
     assert calls[1][calls[1].index("--candidate-pool-limit") + 1] == str(settings["graph_drip_candidate_pool_limit"])
+    assert "--use-queue" in calls[1]
+    assert "--seed-queue-from-ledger" in calls[1]
+    assert calls[1][calls[1].index("--queue-seed-limit") + 1] == "250"
+    assert "--write-queue" in calls[1]
+    assert "--write-ledger" in calls[1]
+    assert payload["fallback_graph_drip"]["use_queue"] is True
+    assert payload["fallback_graph_drip"]["queue_had_items"] is False
+    assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is True
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
 
 
@@ -16709,13 +16725,90 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert payload["fallback_graph_drip"]["ok"] is True
     assert payload["fallback_graph_drip"]["status"] == "completed"
     assert payload["fallback_graph_drip"]["candidate_pool_limit"] == 150
+    assert payload["fallback_graph_drip"]["use_queue"] is True
+    assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is True
+    assert payload["fallback_graph_drip"]["queue_seed_limit"] == 150
     assert "graph-maintenance" in calls[1]
     assert "--batch-limit" in calls[1]
     assert "--candidate-pool-limit" in calls[1]
     assert "150" in calls[1]
+    assert "--use-queue" in calls[1]
+    assert "--seed-queue-from-ledger" in calls[1]
+    assert calls[1][calls[1].index("--queue-seed-limit") + 1] == "150"
+    assert "--write-queue" in calls[1]
+    assert "--write-ledger" in calls[1]
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_graph_drip_fallback_drains_existing_queue_without_reseeding(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    module.write_graph_maintenance_queue(
+        aoa_root,
+        {
+            "generated_at": "2026-06-30T00:00:00-06:00",
+            "items": {
+                "source:queued": {
+                    "source_key": "source:queued",
+                    "status": "dirty",
+                    "session_id": "session-queued",
+                    "queued_at": "2026-06-30T00:00:00-06:00",
+                }
+            },
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {"ok": True, "returncode": 0},
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=True,
+    )
+
+    assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["fallback_graph_drip"]["use_queue"] is True
+    assert payload["fallback_graph_drip"]["queue_had_items"] is True
+    assert payload["fallback_graph_drip"]["queue_existing_count"] == 1
+    assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is False
+    assert "--use-queue" in calls[1]
+    assert "--seed-queue-from-ledger" not in calls[1]
+    assert "--queue-seed-limit" not in calls[1]
+    assert "--write-queue" in calls[1]
+    assert "--write-ledger" in calls[1]
 
 
 def test_graph_drip_fallback_reports_child_lock_conflict_without_status(tmp_path: Path, monkeypatch: Any) -> None:
@@ -16836,6 +16929,11 @@ def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path
     assert payload["fallback_graph_drip"]["candidate_pool_limit"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["graph_drip_candidate_pool_limit"]
     assert calls[0][3:5] == ["--class", "heavy"]
     assert calls[1][3:5] == ["--class", "probe"]
+    assert "--use-queue" in calls[1]
+    assert "--seed-queue-from-ledger" in calls[1]
+    assert calls[1][calls[1].index("--queue-seed-limit") + 1] == "250"
+    assert "--write-queue" in calls[1]
+    assert "--write-ledger" in calls[1]
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
 
 
