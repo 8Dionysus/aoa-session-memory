@@ -80,7 +80,9 @@ Use these first routes when available:
   result is surprising before widening the route. Read `agent_route_summary`
   and `query_route_advice` before trusting the top unfiltered rows. If
   `query_route_advice.status` is `typed_lane_detected`, run its recommended
-  exact layer command before broad fuzzy results. If it is
+  exact layer command before broad fuzzy results; this is especially important
+  for broad human terms such as `decisions`, where path/entity rows can be
+  noisy but the typed layer is `decision_thread`. If it is
   `dedicated_lane_detected`, use the returned dedicated route command first
   (for example `goal-lifecycles` or `agent-responses`). If it is
   `lane_route_detected`, keep the lane/owner boundary visible and use the
@@ -89,6 +91,10 @@ Use these first routes when available:
   validators, decisions, memory surfaces, graphs, evals, scripts, mechanics,
   and agents to lane-specific rollup commands or dedicated first routes such
   as `goal-lifecycles`, `agent-responses`, and graph routes.
+  The materialized rollup aggregates context-tail route refs, omitted compact
+  sidecar refs, and promoted protected agent-route layers (`goal`,
+  `agent_event`, `decision_thread`) while keeping raw/segment refs as the
+  authority handoff.
 - search projection weight, context-tail pressure, or a
   `search_projection_combined_large` warning: use
   `search-operational-shrink-gates --write-report` when the operational

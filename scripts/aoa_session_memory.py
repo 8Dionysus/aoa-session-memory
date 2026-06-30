@@ -201,15 +201,15 @@ SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
     ),
     (
         "goals",
-        (),
+        ("goal",),
         ("goal",),
         "goal_lifecycles_first_then_rollup",
         "Goal lifecycle questions start with goal-lifecycles; rollup helps find surrounding operational signals.",
     ),
     (
         "answers",
-        (),
-        ("answer", "closeout"),
+        ("agent_event",),
+        ("answer", "closeout", "assistant_answer", "assistant_final_closeout"),
         "agent_event_routes_first_then_rollup",
         "Assistant answer/closeout questions start with agent-event routes; rollup helps find surrounding operational signals.",
     ),
@@ -236,8 +236,8 @@ SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
     ),
     (
         "decisions",
-        (),
-        ("decision", "decisions"),
+        ("decision_thread",),
+        ("decision", "decisions", "open_thread", "assumption"),
         "rollup_first_then_owner_authority",
         "Decision-lane evidence in sessions; decision truth remains in the owning repo.",
     ),
@@ -283,6 +283,11 @@ SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
         "rollup_first",
         "Agent route signals and nearby operational evidence.",
     ),
+)
+SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS = (
+    "goal",
+    "agent_event",
+    "decision_thread",
 )
 SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES = ("usage", "result", "outcome", "entrypoint")
 SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE = "context"
@@ -57828,23 +57833,13 @@ def search_operational_route_rollup_shard_rows(
             "diagnostics": diagnostics,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
         }
-    candidate_count = int_value(probe.get("candidate_context_tail_v1_count"))
-    if candidate_count <= 0:
-        return {
-            "ok": True,
-            "status": "no_candidate_tail",
-            "shard": shard,
-            "db_path": str(db_path),
-            "summary": probe,
-            "rows": [],
-            "diagnostics": diagnostics,
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-        }
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path, timeout=min(1.0, max(0.1, float(per_shard_timeout_seconds))))
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
         protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
+        promoted_layer_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS)
+        direct_role_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
         candidate_where = f"""
             documents.doc_type = 'event'
             AND COALESCE(documents.usage_role, '') = ?
@@ -57854,6 +57849,9 @@ def search_operational_route_rollup_shard_rows(
         """
         candidate_params: list[Any] = [
             SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
+            *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
+            *SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS,
+            *SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
         ]
         omitted_union_sql = ""
@@ -57883,6 +57881,26 @@ def search_operational_route_rollup_shard_rows(
             JOIN document_routes ON document_routes.doc_rowid = documents.rowid
             JOIN route_terms ON route_terms.id = document_routes.route_id
             WHERE {candidate_where}
+            UNION ALL
+            SELECT route_terms.layer AS layer,
+                   route_terms.key AS key,
+                   route_terms.route_signal AS route_signal,
+                   COALESCE(documents.session_id, '') AS session_id,
+                   COALESCE(documents.session_date, '') AS session_date,
+                   COALESCE(documents.raw_ref, '') AS raw_ref,
+                   COALESCE(documents.segment_ref, '') AS segment_ref,
+                   printf('%020d', documents.rowid) AS sort_id
+            FROM route_terms
+            JOIN document_routes ON document_routes.route_id = route_terms.id
+            JOIN documents ON documents.rowid = document_routes.doc_rowid
+            WHERE route_terms.layer IN ({promoted_layer_placeholders})
+              AND documents.doc_type = 'event'
+              AND (
+                COALESCE(documents.usage_role, '') IN ({direct_role_placeholders})
+                OR COALESCE(documents.agent_event, '') != ''
+                OR COALESCE(documents.task_episode_id, '') != ''
+                OR COALESCE(documents.event_type, '') IN ({protected_placeholders})
+              )
             {omitted_union_sql}
         """
         aggregate_rows = conn.execute(
@@ -58405,6 +58423,8 @@ def search_operational_route_rollup_lane_matches(
 ) -> bool:
     if layer and layer in layers:
         return True
+    if layers:
+        return False
     haystack = f"{layer} {key} {route_signal}".lower()
     return any(str(term).lower() in haystack for term in terms if str(term))
 
@@ -58540,8 +58560,8 @@ def search_operational_route_rollup_agent_route_summary(
             covered_lane_count += 1
         if status == "covered" and str(preferred_first_route).startswith("rollup_first"):
             direct_rollup_lane_count += 1
-        query = lane_terms[0] if lane_terms and (len(lane_layers) != 1 or lane_id in {"goals", "answers", "decisions", "errors", "hooks"}) else ""
-        exact_layer = lane_layers[0] if len(lane_layers) == 1 and not query else ""
+        query = lane_terms[0] if lane_terms and len(lane_layers) != 1 else ""
+        exact_layer = lane_layers[0] if len(lane_layers) == 1 else ""
         commands = [
             {
                 "route_kind": "search_operational_route_rollup_query",
@@ -58632,12 +58652,20 @@ def search_operational_route_rollup_query_advice(
             {*lane_term_set, *[str(item).lower() for item in lane_layers if str(item)]},
         )
         if query_aliases & lane_aliases:
+            recommended_commands = search_operational_route_rollup_dedicated_lane_commands(
+                lane_id=str(lane_id),
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+            )
+            if recommended_commands and not str(preferred_first_route).startswith("rollup_first"):
+                return {
+                    "status": "dedicated_lane_detected",
+                    "lane_id": str(lane_id),
+                    "preferred_first_route": str(preferred_first_route),
+                    "reason": "query matches an agent route lane with a dedicated first route; use that route before broad rollup results",
+                    "recommended_commands": recommended_commands,
+                }
             if not lane_layer:
-                recommended_commands = search_operational_route_rollup_dedicated_lane_commands(
-                    lane_id=str(lane_id),
-                    workspace_root=workspace_root,
-                    aoa_root=aoa_root,
-                )
                 has_dedicated_commands = bool(recommended_commands)
                 if not has_dedicated_commands:
                     recommended_commands = [
@@ -66416,11 +66444,17 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         agent_route_summary = payload.get("agent_route_summary") if isinstance(payload.get("agent_route_summary"), dict) else {}
         counts = live_scenario_evidence_counts(payload)
         result_count = int_value(payload.get("result_count"), len(payload.get("results") or []))
+        layer_counts = Counter(
+            str(item.get("layer") or "")
+            for item in payload.get("results", [])
+            if isinstance(item, dict) and str(item.get("layer") or "")
+        )
         result.update(
             {
                 "result_count": result_count,
                 "matched_group_count": int_value(totals.get("matched_group_count")),
                 "omitted_group_count": int_value(totals.get("omitted_group_count")),
+                "layer_counts": dict(sorted(layer_counts.items())),
                 "raw_or_segment_ref_present": quality.get("raw_or_segment_ref_present"),
                 "freshness_status": quality.get("freshness_status"),
                 "needs_refresh": quality.get("needs_refresh"),
@@ -66594,6 +66628,8 @@ def live_scenario_audit(
     limit: int = 3,
     literal_probes: list[dict[str, Any]] | None = None,
     entity_usage_probes: list[dict[str, Any]] | None = None,
+    route_rollup_query: str = "aoa-session-memory-mcp",
+    route_rollup_layer: str = "mcp",
     write_report: bool = False,
 ) -> dict[str, Any]:
     allowed_profiles = {
@@ -66765,8 +66801,8 @@ def live_scenario_audit(
                     lambda: session_memory_search_operational_route_rollup_query(
                         workspace_root=aoa_root.parent,
                         aoa_root=aoa_root,
-                        query="aoa-session-memory-mcp",
-                        layer="mcp",
+                        query=route_rollup_query,
+                        layer=route_rollup_layer,
                         limit=max(selected_limit, 3),
                         ref_limit=3,
                     ),
@@ -66809,6 +66845,8 @@ def live_scenario_audit(
             "limit": selected_limit,
             "literal_probe_count": len(literal_probes or []),
             "entity_usage_probe_count": len(entity_usage_probes or []),
+            "route_rollup_query": str(route_rollup_query or ""),
+            "route_rollup_layer": str(route_rollup_layer or ""),
         },
         "quality": quality,
         "scenarios": scenarios,
@@ -67094,6 +67132,8 @@ def live_scenario_corpus_case_check(
         limit=max(1, min(int_value(case.get("limit"), 3), 10)),
         literal_probes=case.get("literal_probes") if isinstance(case.get("literal_probes"), list) else None,
         entity_usage_probes=case.get("entity_usage_probes") if isinstance(case.get("entity_usage_probes"), list) else None,
+        route_rollup_query=str(case.get("route_rollup_query") or "aoa-session-memory-mcp"),
+        route_rollup_layer=str(case.get("route_rollup_layer") or "mcp"),
         write_report=False,
     )
     failures = live_scenario_expectation_failures(audit, expect)
@@ -68063,6 +68103,8 @@ def command_live_scenario_audit(args: argparse.Namespace) -> int:
         sample_size=args.sample_size,
         recent_days=args.recent_days,
         limit=args.limit,
+        route_rollup_query=args.route_rollup_query,
+        route_rollup_layer=args.route_rollup_layer,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -76247,10 +76289,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, route_rollup_query.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)
+    live_scenario.add_argument("--route-rollup-query", default="aoa-session-memory-mcp", help="Query anchor for the route_rollup_query profile.")
+    live_scenario.add_argument("--route-rollup-layer", default="mcp", help="Exact layer for the route_rollup_query profile.")
     live_scenario.add_argument("--write-report", action="store_true")
     live_scenario.set_defaults(func=command_live_scenario_audit)
 

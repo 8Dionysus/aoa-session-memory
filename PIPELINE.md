@@ -432,10 +432,14 @@ Omitted route-backed rows are not allowed to disappear as navigation evidence:
 structured shards rehome their compact `layer/key/route_signal` plus raw,
 segment, and session refs into `omitted_context_tail_route_refs`, and
 `search-operational-route-rollup` must aggregate both current candidate
-`documents` rows and that compact sidecar. If a post-omission rollup refresh
-returns an empty rollup while omitted route-ref rows exist or should exist,
-treat it as a route/read-model regression and rebuild schema-current structured
-shards from raw/session indexes rather than weakening the gate.
+`documents` rows and that compact sidecar. The same read-model also promotes
+protected agent-route layers (`goal`, `agent_event`, and `decision_thread`) so
+goal, answer, and decision navigation remains fast even though those events are
+not context-tail omission candidates. If a post-omission rollup refresh returns
+an empty rollup while omitted route-ref rows or promoted agent-route rows exist
+or should exist, treat it as a route/read-model regression and rebuild
+schema-current structured shards from raw/session indexes rather than weakening
+the gate.
 The report records `context_tail_omission_policy`,
 `context_tail_omission.omitted_document_count`,
 `context_tail_omission.omitted_route_ref_row_count`, examples, and authority

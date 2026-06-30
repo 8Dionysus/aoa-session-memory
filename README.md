@@ -1251,9 +1251,12 @@ exist. This is the route exposed by `maintenance-status` for the current
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with
 route term counts plus bounded raw, segment, and session ref samples for the
-candidate context-tail rows. It is still navigation, not authority, and it does
-not delete or compact event rows; physical search shrinkage must wait until this
-replacement route proves fresh and useful.
+candidate context-tail rows, compact omitted-route sidecars, and promoted
+agent-route layers that are protected from context-tail omission but still need
+fast navigation (`goal`, `agent_event`, and `decision_thread`). It is still
+navigation, not authority, and it does not delete or compact event rows;
+physical search shrinkage must wait until this replacement route proves fresh
+and useful.
 When an existing materialized rollup is stale because exactly one source shard
 changed, use `search-operational-route-rollup --shard <month/YYYY-MM> --apply
 --write-report` to replace only that shard contribution. The scoped route keeps
@@ -1277,7 +1280,10 @@ tools, skills, MCP, hooks, APIs, plugins, goals, answers, errors, tests,
 validators, decisions, memory surfaces, graphs, evals, scripts, mechanics, and
 agents. Use that summary to choose a lane-specific rollup query or a dedicated
 first route such as `goal-lifecycles`, `agent-responses`, or graph routes
-without widening into broad search.
+without widening into broad search. Typed lanes are counted by their route
+layer, not by incidental text matches; if a broad query such as `decisions`
+returns path/entity noise, follow `query_route_advice.recommended_layer` before
+trusting the broad result order.
 
 `maintenance-status --full` surfaces this rollup under
 `operations.search_pressure.operational_route_rollup`. If the rollup is missing

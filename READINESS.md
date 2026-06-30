@@ -2117,6 +2117,31 @@ Maintenance gates:
   `case_count=12`, `passed_count=12`, `failed_count=0`, and
   `actionable_gap_count=0`.
 
+- 2026-06-30 promoted agent-route rollup proof: route-rollup materialization now
+  includes protected `goal`, `agent_event`, and `decision_thread` route layers
+  in addition to context-tail and omitted sidecar refs. The full live rebuild
+  `diagnostics/20260630T020435Z__search-operational-route-rollup.json`
+  returned `ok=true`, `status=current`, `route_rollup_row_count=53847`, and a
+  still-compact `32.9 MiB` DB while adding typed `decision_thread` and
+  `agent_event` navigation. Live `search-operational-route-rollup-query decision
+  --layer decision_thread --limit 5 --ref-limit 3 --write-report` returned
+  `ok=true`, `status=matched`, `result_count=5`, `freshness_status=current`,
+  `raw_or_segment_ref_present=true`, `resamples_shards=false`,
+  `opens_monolith=false`, `uses_fts=false`, and `hydrates_body=false` in
+  `457ms`; the decision lane had `exact_layer_group_count=7` and
+  `term_match_group_count=0`. A broad `decisions` query now returns
+  `query_route_advice.status=typed_lane_detected` with recommended layer
+  `decision_thread`, preventing path/entity decision-document noise from being
+  treated as the lane result. The reviewed live corpus now includes
+  `route_rollup_decision_thread_contract`; live corpus proof
+  `diagnostics/20260630T020743Z__live-scenario-corpus-check.json` returned
+  `case_count=14`, `passed_count=14`, `failed_count=0`, and
+  `actionable_gap_count=0`. Manual operator-style route proof
+  `diagnostics/20260630T021611Z__live-scenario-audit.json` returned
+  `passed_count=1`, `first_useful_packet_ms=375`, `layer_counts` containing only
+  `decision_thread`, raw/segment/session refs, and no monolith/FTS/raw-body
+  hydration.
+
 - 2026-06-29 route-rollup canonical human-anchor proof:
   `search-operational-route-rollup-query aoa-session-memory-mcp --layer mcp
   --limit 3 --ref-limit 1 --write-report` now canonicalizes the human anchor

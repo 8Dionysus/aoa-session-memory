@@ -16874,6 +16874,45 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
                         "segment_refs": ["segments/skill.md"],
                         "session_ids": ["session-skill"],
                     },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "goal",
+                        "key": "goal_inspected",
+                        "route_signal": module.route_signal_token("goal", "goal_inspected"),
+                        "posting_count": 4,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:goal:1"],
+                        "segment_refs": ["segments/goal.md"],
+                        "session_ids": ["session-goal"],
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "agent_event",
+                        "key": "assistant_answer",
+                        "route_signal": module.route_signal_token("agent_event", "assistant_answer"),
+                        "posting_count": 6,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:answer:1"],
+                        "segment_refs": ["segments/answer.md"],
+                        "session_ids": ["session-answer"],
+                    },
+                    {
+                        "shard": "month/2026-06",
+                        "layer": "decision_thread",
+                        "key": "decision",
+                        "route_signal": module.route_signal_token("decision_thread", "decision"),
+                        "posting_count": 7,
+                        "session_count": 1,
+                        "first_session_date": "2026-06-01",
+                        "last_session_date": "2026-06-28",
+                        "raw_refs": ["raw:decision:1"],
+                        "segment_refs": ["segments/decision.md"],
+                        "session_ids": ["session-decision"],
+                    },
                 ],
             },
         ],
@@ -16908,7 +16947,7 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert payload["quality"]["agent_route_summary_status"] == "covered"
     assert payload["quality"]["agent_route_covered_lane_count"] >= 3
     assert payload["totals"]["matched_group_count"] == 1
-    assert payload["totals"]["source_candidate_route_posting_count"] == 26
+    assert payload["totals"]["source_candidate_route_posting_count"] == 43
     assert payload["agent_route_summary"]["status"] == "covered"
     assert payload["agent_route_summary"]["truth_status"] == "generated_search_route_rollup_agent_route_summary_not_archive_truth"
     lanes = {item["id"]: item for item in payload["agent_route_summary"]["lanes"]}
@@ -16920,13 +16959,20 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
     assert lanes["skills"]["top_keys"][0]["layer"] == "skill"
     assert lanes["skills"]["top_keys"][0]["key"] == "aoa_change_protocol"
     assert lanes["skills"]["exact_layer_group_count"] == 1
-    assert lanes["skills"]["term_match_group_count"] == 1
+    assert lanes["skills"]["term_match_group_count"] == 0
     assert lanes["hooks"]["status"] == "covered"
     assert lanes["hooks"]["preferred_first_route"] == "hook_receipts_first_then_rollup"
     assert lanes["errors"]["status"] == "covered"
+    assert lanes["goals"]["status"] == "covered"
     assert lanes["goals"]["preferred_first_route"] == "goal_lifecycles_first_then_rollup"
+    assert lanes["goals"]["top_keys"][0]["layer"] == "goal"
     assert any(command["route_kind"] == "goal_lifecycles" for command in lanes["goals"]["commands"])
+    assert lanes["answers"]["status"] == "covered"
+    assert lanes["answers"]["top_keys"][0]["layer"] == "agent_event"
     assert any(command["route_kind"] == "agent_responses" for command in lanes["answers"]["commands"])
+    assert lanes["decisions"]["status"] == "covered"
+    assert lanes["decisions"]["exact_layer_group_count"] == 1
+    assert lanes["decisions"]["term_match_group_count"] == 0
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
 
@@ -16999,9 +17045,10 @@ def test_search_operational_route_rollup_query_reads_materialized_projection(tmp
         ref_limit=2,
     )
 
-    assert decisions_query["query_route_advice"]["status"] == "lane_route_detected"
     assert decisions_query["query_route_advice"]["lane_id"] == "decisions"
-    assert decisions_query["query_route_advice"]["recommended_commands"][0]["route_kind"] == "search_operational_route_rollup_query"
+    assert decisions_query["query_route_advice"]["status"] == "typed_lane_detected"
+    assert decisions_query["query_route_advice"]["recommended_layer"] == "decision_thread"
+    assert "--layer" in decisions_query["query_route_advice"]["recommended_command"]
 
     human_mcp_key = module.session_memory_search_operational_route_rollup_query(
         workspace_root=workspace,
@@ -18445,7 +18492,9 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
         *,
         usage_role: str,
         route_signal: str = "",
+        route_layer: str = "tool",
         event_type: str = "CONTEXT_STATE",
+        agent_event: str = "",
     ) -> None:
         module.insert_search_document(
             conn,
@@ -18459,7 +18508,8 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
                 "event_id": doc_id,
                 "event_type": event_type,
                 "usage_role": usage_role,
-                "route_layers": module.packed_route_values(["tool"]) if route_signal else "",
+                "agent_event": agent_event,
+                "route_layers": module.packed_route_values([route_layer]) if route_signal else "",
                 "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
                 "title": doc_id,
                 "body": doc_id,
@@ -18478,6 +18528,28 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     )
     insert_event("candidate-without-route", usage_role="context")
     insert_event("usage-doc", usage_role="usage", event_type="TOOL_CALL")
+    insert_event(
+        "decision-doc",
+        usage_role="outcome",
+        route_signal=module.route_signal_token("decision_thread", "decision"),
+        route_layer="decision_thread",
+        event_type="DECISION",
+    )
+    insert_event(
+        "answer-doc",
+        usage_role="outcome",
+        route_signal=module.route_signal_token("agent_event", "assistant_answer"),
+        route_layer="agent_event",
+        event_type="ASSISTANT_MESSAGE",
+        agent_event="assistant_answer",
+    )
+    insert_event(
+        "goal-doc",
+        usage_role="usage",
+        route_signal=module.route_signal_token("goal", "goal_inspected"),
+        route_layer="goal",
+        event_type="TOOL_OUTPUT",
+    )
     conn.commit()
     conn.close()
 
@@ -18500,7 +18572,7 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
                     "shard_db_path": str(shard_db),
                     "materialized": True,
                     "status": "current",
-                    "document_count": 3,
+                    "document_count": 6,
                     "total_with_wal_bytes": shard_db.stat().st_size,
                     "total_with_wal_human": module.human_size(shard_db.stat().st_size),
                 }
@@ -18534,8 +18606,8 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert applied["ok"] is True
     assert applied["status"] == "current"
     assert applied["written"] is True
-    assert applied["totals"]["route_rollup_row_count"] == 1
-    assert applied["totals"]["candidate_route_posting_count"] == 1
+    assert applied["totals"]["route_rollup_row_count"] == 4
+    assert applied["totals"]["candidate_route_posting_count"] == 4
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
     assert not Path(str(target_db) + "-wal").exists()
@@ -18544,6 +18616,9 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     rollup_conn = sqlite3.connect(module.search_operational_route_rollup_db_path(aoa_root))
     rollup_conn.row_factory = sqlite3.Row
     row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'tool' AND key = 'exec_command'").fetchone()
+    decision_row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'decision_thread' AND key = 'decision'").fetchone()
+    answer_row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'agent_event' AND key = 'assistant_answer'").fetchone()
+    goal_row = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'goal' AND key = 'goal_inspected'").fetchone()
     rollup_conn.close()
 
     assert row is not None
@@ -18551,6 +18626,12 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
     assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
     assert "rollup-session" in json.loads(row["session_ids_json"])
+    assert decision_row is not None
+    assert "raw:line:decision-doc" in json.loads(decision_row["raw_refs_json"])
+    assert answer_row is not None
+    assert "raw:line:answer-doc" in json.loads(answer_row["raw_refs_json"])
+    assert goal_row is not None
+    assert "raw:line:goal-doc" in json.loads(goal_row["raw_refs_json"])
 
 
 def test_search_operational_route_rollup_scoped_refresh_replaces_one_shard(tmp_path: Path) -> None:
