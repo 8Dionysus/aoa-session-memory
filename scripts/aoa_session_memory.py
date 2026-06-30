@@ -582,7 +582,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "timeout_sec": 1800,
-        "index_drip_on_block": True,
+        "index_drip_on_block": False,
         "graph_drip_on_block": False,
     },
     "deep": {

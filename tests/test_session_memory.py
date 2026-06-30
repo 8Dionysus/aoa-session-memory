@@ -15475,7 +15475,57 @@ def test_compact_maintenance_child_summary_promotes_nested_rollup_state() -> Non
     assert summary["actions"] == [{"id": "refresh_operational_route_rollup", "status": "applied", "needed": True}]
 
 
-def test_catchup_auto_maintenance_resource_defaults_to_index_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+def test_catchup_auto_maintenance_resource_defaults_to_blocked_without_index_drip_fallback(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_plan_v1",
+                "generated_at": "2026-06-26T00:00:00-06:00",
+                "ok": False,
+                "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {"ok": None, "returncode": None},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        write_report=True,
+        reason="timer_catchup",
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_blocked"
+    assert payload["mutates"] is False
+    assert payload["recommended_exit_code"] == 0
+    assert payload["index_drip_on_block"] is False
+    assert payload["index_drip_on_block_source"] == "profile_default"
+    assert payload["fallback_index_drip"] == {}
+    assert len(calls) == 1
+    assert calls[0][3:5] == ["--class", "medium"]
+    assert payload["diagnostics"] == ["resource_blocked:indexing_unattended_swap_used_pressure"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -15522,6 +15572,7 @@ def test_catchup_auto_maintenance_resource_defaults_to_index_drip_fallback(tmp_p
         apply=True,
         write_report=True,
         reason="timer_catchup",
+        index_drip_on_block=True,
     )
 
     assert payload["ok"] is False
@@ -15529,7 +15580,7 @@ def test_catchup_auto_maintenance_resource_defaults_to_index_drip_fallback(tmp_p
     assert payload["mutates"] is True
     assert payload["recommended_exit_code"] == 0
     assert payload["index_drip_on_block"] is True
-    assert payload["index_drip_on_block_source"] == "profile_default"
+    assert payload["index_drip_on_block_source"] == "explicit"
     assert payload["fallback_index_drip"]["ok"] is True
     assert payload["fallback_index_drip"]["status"] == "completed"
     assert payload["fallback_index_drip"]["repair_limit"] == 12
@@ -15599,6 +15650,7 @@ def test_index_drip_fallback_reports_child_lock_conflict(tmp_path: Path, monkeyp
         profile="catchup",
         apply=True,
         reason="timer_catchup",
+        index_drip_on_block=True,
     )
 
     assert payload["status"] == "resource_blocked_index_drip_failed"
