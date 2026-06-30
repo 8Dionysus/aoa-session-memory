@@ -1102,6 +1102,13 @@ DB. Scoped or incremental `search-index` runs refresh the catalog from selected
 records plus existing catalog state for unaffected sessions, and fall back to a
 full live session-index scan only when that state does not cover the indexed
 rows.
+If an existing shard DB carries a `session_index_state` row that is absent from
+the monolith, the catalog recovers that row as
+`catalog_source=shard_session_index_state_recovery`. This is generated
+navigation recovery, not raw archive truth: the row stays marked with
+`monolith_status=missing`, uses shard document counts, and routes any stale
+state through ordinary shard maintenance rather than pretending the monolith is
+authoritative for that session.
 
 ```bash
 python3 scripts/aoa_session_memory.py search-catalog \

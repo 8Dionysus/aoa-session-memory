@@ -201,6 +201,12 @@ Build the `.aoa` session-memory mechanism end to end:
   sessions now update `search/catalog.json` shard freshness counters without a
   heavy raw/session-index scan, so MCP/agent fast-path defaults do not fall
   back to monolith merely because catalog freshness lagged the SQLite state.
+- Search catalog shard-only recovery keeps generated navigation complete when a
+  monthly shard has a `session_index_state` row that the monolith catalog seed
+  does not. The recovered row stays explicitly marked
+  `catalog_source=shard_session_index_state_recovery` and
+  `monolith_status=missing`; shard freshness and dirty-only maintenance own the
+  repair route, while raw/session indexes remain the evidence authority.
 - Dirty-only shard catch-up keeps live-tail repairs bounded: `search-shards`
   accepts `--dirty-only` only with `--no-rebuild`, selects non-current
   sessions from `search/catalog.json`, skips `deferred_live` rows by default,

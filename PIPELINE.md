@@ -891,6 +891,13 @@ exists, the command uses `search-shards --no-rebuild --dirty-only`; otherwise it
 uses a scoped structured rebuild only when the shard lane is already partially
 materialized. It does not add `--full-text`, because full lexical shard
 materialization is a separate weight/quality tradeoff.
+The search catalog may also recover shard-only `session_index_state` rows from
+existing shard DBs. Recovered rows are compact navigation entries only: they
+carry `catalog_source=shard_session_index_state_recovery`,
+`monolith_status=missing`, shard-derived document counts, and normal freshness
+flags. If such a row is stale, the route is the same bounded
+`refresh_search_shard_structured` action, not a monolith rebuild and not a raw
+archive repair.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.
