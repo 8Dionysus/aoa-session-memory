@@ -28048,6 +28048,26 @@ def search_shard_db_path(aoa_root: Path, shard_key: str) -> Path:
     return aoa_root / SEARCH_ROOT / "shards" / shard_name / SEARCH_DB_NAME
 
 
+def search_shard_key_from_db_path(db_path: Path) -> str:
+    shard_dir = db_path.parent.name
+    match = re.match(r"month_(20\d{2})_([01]\d)$", shard_dir)
+    if match:
+        return f"month/{match.group(1)}-{match.group(2)}"
+    return shard_dir
+
+
+def search_existing_shard_db_paths(aoa_root: Path) -> dict[str, Path]:
+    shards_root = aoa_root / SEARCH_ROOT / "shards"
+    if not shards_root.exists():
+        return {}
+    paths: dict[str, Path] = {}
+    for db_path in sorted(shards_root.glob(f"*/{SEARCH_DB_NAME}")):
+        shard_key = search_shard_key_from_db_path(db_path)
+        if shard_key:
+            paths[shard_key] = db_path
+    return paths
+
+
 def search_catalog_summary(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "path": payload.get("catalog_path"),
@@ -28058,6 +28078,7 @@ def search_catalog_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "shard_strategy": payload.get("shard_strategy"),
         "active_projection": payload.get("active_projection"),
         "catalog_state_basis": payload.get("catalog_state_basis"),
+        "catalog_recovery": payload.get("catalog_recovery") if isinstance(payload.get("catalog_recovery"), dict) else {},
         "generated_at": payload.get("generated_at"),
         "diagnostics": payload.get("diagnostics", []),
     }
@@ -28075,24 +28096,65 @@ def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
         projection_mode_expr = "projection_fingerprint_mode" if "projection_fingerprint_mode" in columns else "'' AS projection_fingerprint_mode"
         rows = conn.execute(
             f"""
-            SELECT session_id, source_fingerprint, search_schema_version,
+            SELECT session_id, session_label, source_fingerprint, search_schema_version,
                    route_signal_classifier_version, document_count,
-                   source_latest_mtime, {projection_mode_expr}
+                   source_latest_mtime, indexed_at, {projection_mode_expr}
             FROM session_index_state
             """
         ).fetchall()
         return {
             str(row["session_id"] or ""): {
+                "session_id": str(row["session_id"] or ""),
+                "session_label": str(row["session_label"] or ""),
                 "source_fingerprint": str(row["source_fingerprint"] or ""),
                 "search_schema_version": str(row["search_schema_version"] or ""),
                 "route_signal_classifier_version": int_value(row["route_signal_classifier_version"]),
                 "document_count": int_value(row["document_count"]),
                 "source_latest_mtime": float(row["source_latest_mtime"] or 0.0),
+                "indexed_at": str(row["indexed_at"] or ""),
                 "projection_fingerprint_mode": str(row["projection_fingerprint_mode"] or ""),
             }
             for row in rows
             if str(row["session_id"] or "")
         }
+    except sqlite3.Error:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def search_session_documents_at_path(db_path: Path) -> dict[str, dict[str, Any]]:
+    if not db_path.exists():
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        if not sqlite_table_exists(conn, "documents"):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT session_id, session_label, session_date, session_title, cwd,
+                   archive_status, raw_sha256
+            FROM documents
+            WHERE doc_type = 'session'
+            """
+        ).fetchall()
+        by_key: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = {
+                "session_id": str(row["session_id"] or ""),
+                "session_label": str(row["session_label"] or ""),
+                "session_date": str(row["session_date"] or ""),
+                "session_title": str(row["session_title"] or ""),
+                "cwd": str(row["cwd"] or ""),
+                "archive_status": str(row["archive_status"] or ""),
+                "raw_sha256": str(row["raw_sha256"] or ""),
+            }
+            for key in (item["session_id"], item["session_label"]):
+                if key:
+                    by_key[key] = item
+        return by_key
     except sqlite3.Error:
         return {}
     finally:
@@ -28402,7 +28464,9 @@ def build_search_catalog(
     sessions: list[dict[str, Any]] = []
     shard_payloads: dict[str, dict[str, Any]] = {}
     shard_state_cache: dict[str, dict[str, dict[str, Any]]] = {}
+    shard_doc_cache: dict[str, dict[str, dict[str, Any]]] = {}
     shard_metadata_cache: dict[str, dict[str, Any]] = {}
+    shard_path_by_key: dict[str, Path] = search_existing_shard_db_paths(aoa_root)
     live_state_by_session: dict[str, dict[str, Any]] = {}
     live_state_basis = "live_session_indexes"
     selected_state_key_count = 0
@@ -28457,6 +28521,50 @@ def build_search_catalog(
                         live_state_by_session[str(key)] = state
         except Exception:
             live_state_basis = "monolith_session_index_state_fallback"
+
+    def append_catalog_session_item(item: dict[str, Any]) -> None:
+        sessions.append(item)
+        shard = str(item.get("shard") or "")
+        shard_path = Path(str(item.get("shard_db_path") or search_shard_db_path(aoa_root, shard)))
+        shard_item = shard_payloads.setdefault(
+            shard,
+            {
+                "shard": shard,
+                "shard_db_path": str(shard_path),
+                "materialized": shard_path.exists(),
+                "session_count": 0,
+                "current_session_count": 0,
+                "stale_session_count": 0,
+                "missing_session_count": 0,
+                "document_count": 0,
+                "freshness_counts": {},
+                "storage_mode": item.get("shard_storage_mode") or "",
+                "raw_text_query_support": item.get("shard_raw_text_query_support") or "",
+                "storage_profile": item.get("shard_storage_profile") or "",
+                "expected_storage_profile": item.get("expected_shard_storage_profile") or "",
+            },
+        )
+        for target_key, session_key in (
+            ("storage_mode", "shard_storage_mode"),
+            ("raw_text_query_support", "shard_raw_text_query_support"),
+            ("storage_profile", "shard_storage_profile"),
+            ("expected_storage_profile", "expected_shard_storage_profile"),
+        ):
+            if not shard_item.get(target_key) and item.get(session_key):
+                shard_item[target_key] = item.get(session_key)
+        shard_item["session_count"] += 1
+        shard_status = str(item.get("shard_status") or "missing")
+        if shard_status == "current":
+            shard_item["current_session_count"] += 1
+        elif shard_status == "missing":
+            shard_item["missing_session_count"] += 1
+        else:
+            shard_item["stale_session_count"] += 1
+        shard_item["document_count"] += int_value(item.get("document_count"))
+        freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+        freshness_status = str(freshness.get("status") or "unverifiable")
+        shard_item["freshness_counts"][freshness_status] = int_value(shard_item["freshness_counts"].get(freshness_status)) + 1
+
     for row in rows:
         session_id = str(row["session_id"] or "")
         session_label = str(row["session_label"] or "")
@@ -28490,6 +28598,7 @@ def build_search_catalog(
         session_date = str(doc.get("session_date") or search_session_date_from_label(session_label))
         shard = search_shard_key_for_session(session_label, session_date)
         shard_path = search_shard_db_path(aoa_root, shard)
+        shard_path_by_key.setdefault(shard, shard_path)
         if str(shard_path) not in shard_state_cache:
             shard_state_cache[str(shard_path)] = search_shard_session_state(shard_path)
         if str(shard_path) not in shard_metadata_cache:
@@ -28576,43 +28685,107 @@ def build_search_catalog(
             "shard_projection_fingerprint_mode": str(shard_session_state.get("projection_fingerprint_mode") or ""),
             "indexed_at": str(row["indexed_at"] or ""),
         }
-        sessions.append(item)
-        shard_item = shard_payloads.setdefault(
-            shard,
-            {
+        append_catalog_session_item(item)
+
+    existing_catalog_keys = {
+        key
+        for session in sessions
+        for key in (str(session.get("session_id") or ""), str(session.get("session_label") or ""))
+        if key
+    }
+    recovered_shard_only_count = 0
+    for shard, shard_path in sorted(shard_path_by_key.items()):
+        if str(shard_path) not in shard_state_cache:
+            shard_state_cache[str(shard_path)] = search_shard_session_state(shard_path)
+        if str(shard_path) not in shard_metadata_cache:
+            shard_metadata_cache[str(shard_path)] = search_db_metadata_at_path(shard_path)
+        if str(shard_path) not in shard_doc_cache:
+            shard_doc_cache[str(shard_path)] = search_session_documents_at_path(shard_path)
+        shard_metadata = shard_metadata_cache[str(shard_path)]
+        shard_storage_mode = search_projection_storage_mode_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_raw_text_query_support = search_raw_text_query_support_from_metadata(shard_metadata) if shard_metadata else ""
+        shard_storage_profile = search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else ""
+        expected_shard_storage_profile = expected_search_document_storage_profile_from_metadata(shard_metadata) if shard_metadata else SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD
+        shard_storage_profile_current = bool(shard_storage_profile) and shard_storage_profile == expected_shard_storage_profile
+        for shard_session_state in sorted(
+            shard_state_cache[str(shard_path)].values(),
+            key=lambda state: (str(state.get("session_label") or ""), str(state.get("session_id") or "")),
+        ):
+            session_id = str(shard_session_state.get("session_id") or "")
+            session_label = str(shard_session_state.get("session_label") or "")
+            if not session_id or session_id in existing_catalog_keys or (session_label and session_label in existing_catalog_keys):
+                continue
+            doc = shard_doc_cache[str(shard_path)].get(session_id) or shard_doc_cache[str(shard_path)].get(session_label) or {}
+            live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
+            expected_fingerprint = str(live_state.get("fingerprint") or shard_session_state.get("source_fingerprint") or "")
+            expected_latest_mtime = float(live_state.get("latest_source_mtime") or shard_session_state.get("source_latest_mtime") or 0.0)
+            expected_search_schema_version = str(SEARCH_SCHEMA_VERSION)
+            expected_route_signal_classifier_version = ROUTE_SIGNAL_CLASSIFIER_VERSION
+            expected_projection_fingerprint_mode = SEARCH_PROJECTION_FINGERPRINT_MODE
+            shard_status = "stale"
+            if (
+                str(shard_session_state.get("source_fingerprint") or "") == expected_fingerprint
+                and str(shard_session_state.get("search_schema_version") or "") == expected_search_schema_version
+                and int_value(shard_session_state.get("route_signal_classifier_version")) == expected_route_signal_classifier_version
+                and str(shard_session_state.get("projection_fingerprint_mode") or "") == expected_projection_fingerprint_mode
+                and shard_storage_profile_current
+            ):
+                shard_status = "current"
+            shard_document_count = int_value(shard_session_state.get("document_count"))
+            session_date = str(doc.get("session_date") or search_session_date_from_label(session_label))
+            freshness_status = "current" if shard_status == "current" else "unverifiable"
+            item = {
+                "session_id": session_id,
+                "session_label": session_label,
+                "session_date": session_date,
+                "session_title": str(doc.get("session_title") or ""),
+                "cwd": str(doc.get("cwd") or ""),
+                "archive_status": str(doc.get("archive_status") or ""),
+                "raw_sha256": str(doc.get("raw_sha256") or ""),
+                "active_projection": SEARCH_ACTIVE_PROJECTION_SHARD,
+                "shard_strategy": SEARCH_SHARD_STRATEGY,
                 "shard": shard,
                 "shard_db_path": str(shard_path),
-                "materialized": shard_path.exists(),
-                "session_count": 0,
-                "current_session_count": 0,
-                "stale_session_count": 0,
-                "missing_session_count": 0,
-                "document_count": 0,
-                "freshness_counts": {},
-                "storage_mode": shard_storage_mode,
-                "raw_text_query_support": shard_raw_text_query_support,
-                "storage_profile": shard_storage_profile,
-                "expected_storage_profile": expected_shard_storage_profile,
-            },
-        )
-        if shard_storage_mode and not shard_item.get("storage_mode"):
-            shard_item["storage_mode"] = shard_storage_mode
-        if shard_raw_text_query_support and not shard_item.get("raw_text_query_support"):
-            shard_item["raw_text_query_support"] = shard_raw_text_query_support
-        if shard_storage_profile and not shard_item.get("storage_profile"):
-            shard_item["storage_profile"] = shard_storage_profile
-        if expected_shard_storage_profile and not shard_item.get("expected_storage_profile"):
-            shard_item["expected_storage_profile"] = expected_shard_storage_profile
-        shard_item["session_count"] += 1
-        if shard_status == "current":
-            shard_item["current_session_count"] += 1
-        elif shard_status == "missing":
-            shard_item["missing_session_count"] += 1
-        else:
-            shard_item["stale_session_count"] += 1
-        shard_item["document_count"] += int_value(item["document_count"])
-        freshness_status = str(item["freshness"].get("status") or "unverifiable")
-        shard_item["freshness_counts"][freshness_status] = int_value(shard_item["freshness_counts"].get(freshness_status)) + 1
+                "shard_materialized": shard_status == "current",
+                "shard_status": shard_status,
+                "shard_storage_mode": shard_storage_mode,
+                "shard_raw_text_query_support": shard_raw_text_query_support,
+                "shard_storage_profile": shard_storage_profile,
+                "expected_shard_storage_profile": expected_shard_storage_profile,
+                "monolith_db_path": str(db_path),
+                "monolith_status": "missing",
+                "catalog_state_basis": f"{live_state_basis}_with_shard_state_recovery",
+                "catalog_source": "shard_session_index_state_recovery",
+                "freshness": {
+                    "status": freshness_status,
+                    "reason": "recovered_from_shard_session_index_state",
+                    "last_checked": "",
+                    "last_indexed_at": str(shard_session_state.get("indexed_at") or ""),
+                    "deferred_live_reason": "",
+                    "updated_at": "",
+                },
+                "schema_versions": {
+                    "search_schema_version": str(shard_session_state.get("search_schema_version") or ""),
+                    "route_signal_classifier_version": int_value(shard_session_state.get("route_signal_classifier_version")),
+                    "projection_fingerprint_mode": str(shard_session_state.get("projection_fingerprint_mode") or ""),
+                    "expected_projection_fingerprint_mode": expected_projection_fingerprint_mode,
+                },
+                "document_count": shard_document_count,
+                "document_count_source": "recovered_shard_session_state",
+                "shard_document_count": shard_document_count,
+                "freshness_document_count": 0,
+                "monolith_document_count": 0,
+                "source_fingerprint": expected_fingerprint,
+                "source_latest_mtime": expected_latest_mtime,
+                "monolith_source_fingerprint": "",
+                "monolith_source_latest_mtime": 0.0,
+                "monolith_projection_fingerprint_mode": "",
+                "shard_projection_fingerprint_mode": str(shard_session_state.get("projection_fingerprint_mode") or ""),
+                "indexed_at": str(shard_session_state.get("indexed_at") or ""),
+            }
+            append_catalog_session_item(item)
+            recovered_shard_only_count += 1
+            existing_catalog_keys.update(key for key in (session_id, session_label) if key)
     shards = sorted(shard_payloads.values(), key=lambda item: str(item.get("shard") or ""))
     for shard in shards:
         shard["materialized"] = int_value(shard.get("session_count")) > 0 and int_value(shard.get("current_session_count")) == int_value(shard.get("session_count"))
@@ -28633,6 +28806,11 @@ def build_search_catalog(
         "search_metadata": metadata,
         "catalog_state_basis": live_state_basis,
         "selected_state_key_count": selected_state_key_count,
+        "catalog_recovery": {
+            "status": "applied" if recovered_shard_only_count else "not_needed",
+            "recovered_shard_only_session_count": recovered_shard_only_count,
+            "truth_status": "generated_catalog_navigation_recovery_not_raw_archive_truth",
+        },
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
         "fallback": {

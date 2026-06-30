@@ -17918,6 +17918,87 @@ def test_search_catalog_prefers_current_shard_document_count_after_omission(tmp_
     assert "shard_document_count_catalog_mismatch:month/2026-06" in summary["diagnostics"]
 
 
+def test_search_catalog_recovers_shard_only_session_rows(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    module.init_search_db(module.search_db_path(aoa_root), rebuild=True).close()
+    session_id = "shard-only-session"
+    session_label = "2026-06-29__003__shard-only"
+    projection_state = {
+        "session_id": session_id,
+        "session_label": session_label,
+        "fingerprint": "shard-only-fingerprint",
+        "latest_source_mtime": 123.0,
+    }
+    shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_conn = module.init_search_db(shard_db, rebuild=True)
+    profile = module.search_document_storage_profile(store_raw_text=False)
+    try:
+        shard_conn.executemany(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            [
+                ("search_body_storage_mode", module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE),
+                ("search_fts_storage_mode", module.SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE),
+                ("search_raw_text_query_support", module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK),
+                ("search_projection_storage_mode", module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE),
+                ("search_document_storage_profile", module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD),
+            ],
+        )
+        module.upsert_search_session_state(
+            shard_conn,
+            projection_state=projection_state,
+            indexed_at="2026-06-29T23:38:36Z",
+            document_count=3,
+        )
+        for index, doc_type in enumerate(("session", "task_episode", "goal_lifecycle")):
+            module.insert_search_document(
+                shard_conn,
+                {
+                    "id": f"shard-only-doc-{index}",
+                    "doc_type": doc_type,
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "session_title": "Shard only",
+                    "session_date": "2026-06-29",
+                    "cwd": "/tmp/shard-only",
+                    "archive_status": "raw_mirrored_index_deferred",
+                    "event_id": f"event-{index}",
+                    "event_type": "CONTEXT_STATE",
+                    "usage_role": "context",
+                    "title": f"doc {index}",
+                    "body": f"doc {index}",
+                    "raw_ref": f"raw:line:{index}",
+                    "segment_ref": "segments/000__initial-to-latest.md",
+                    "raw_sha256": "raw-sha",
+                },
+                store_raw_text=False,
+                storage_profile=profile,
+            )
+        shard_conn.commit()
+    finally:
+        shard_conn.close()
+
+    catalog = module.build_search_catalog(aoa_root, write=True)
+    session = next(item for item in catalog["sessions"] if item["session_id"] == session_id)
+    shard = next(item for item in catalog["shards"] if item["shard"] == "month/2026-06")
+
+    assert catalog["ok"] is True
+    assert catalog["session_count"] == 1
+    assert catalog["catalog_recovery"]["status"] == "applied"
+    assert catalog["catalog_recovery"]["recovered_shard_only_session_count"] == 1
+    assert session["catalog_source"] == "shard_session_index_state_recovery"
+    assert session["monolith_status"] == "missing"
+    assert session["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+    assert session["freshness"]["reason"] == "recovered_from_shard_session_index_state"
+    assert session["document_count"] == 3
+    assert session["document_count_source"] == "recovered_shard_session_state"
+    assert session["session_title"] == "Shard only"
+    assert session["cwd"] == "/tmp/shard-only"
+    assert shard["session_count"] == 1
+    assert shard["current_session_count"] == 1
+    assert shard["document_count"] == 3
+
+
 def test_search_operational_shrink_apply_runs_rebuild_rollup_and_storage_comparison(
     tmp_path: Path,
     monkeypatch: Any,
