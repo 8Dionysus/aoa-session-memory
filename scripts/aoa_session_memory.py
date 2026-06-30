@@ -56576,6 +56576,40 @@ def search_operational_shrink_literal_probe_check(
     }
 
 
+def latest_search_operational_shrink_apply_proof(aoa_root: Path) -> dict[str, Any]:
+    for report in diagnostic_json_payloads(aoa_root, "*__search-operational-shrink-apply.json"):
+        if str(report.get("artifact_type") or "") != "session_memory_search_operational_shrink_apply":
+            continue
+        if not bool(report.get("ok")) or not bool(report.get("apply")):
+            continue
+        if str(report.get("status") or "") not in {"applied", "applied_with_storage_warning"}:
+            continue
+        comparison = report.get("storage_before_after_comparison")
+        if not isinstance(comparison, dict) or not bool(comparison.get("captured")):
+            continue
+        if str(comparison.get("omission_policy") or "") != SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED:
+            continue
+        after = report.get("after") if isinstance(report.get("after"), dict) else {}
+        after_shards = after.get("search_shards") if isinstance(after.get("search_shards"), dict) else {}
+        after_rollup = after.get("operational_route_rollup") if isinstance(after.get("operational_route_rollup"), dict) else {}
+        shard_status = str(after_shards.get("status") or "")
+        rollup_status = str(after_rollup.get("status") or "")
+        if shard_status not in {"current", "current_with_deferred_live_updates"}:
+            continue
+        if rollup_status != "current":
+            continue
+        return {
+            "status": "found",
+            "source": diagnostic_report_source(report),
+            "apply_status": report.get("status"),
+            "comparison": comparison,
+            "after_search_shards_status": shard_status,
+            "after_operational_route_rollup_status": rollup_status,
+            "quality_boundary": "latest shrink-apply report is generated diagnostic evidence; raw and segment refs remain authority",
+        }
+    return {"status": "missing"}
+
+
 def session_memory_search_operational_shrink_gates(
     *,
     workspace_root: Path | str,
@@ -56745,16 +56779,39 @@ def session_memory_search_operational_shrink_gates(
         },
     )
 
-    before_after_gate = search_operational_shrink_gate_packet(
-        gate_id="storage_before_after_comparison",
-        status="blocked",
-        passed=False,
-        summary={
-            "reason": "no physical shrink apply route exists yet; only the before baseline can be captured",
-            "before_search_store_size_human": storage_gate["summary"].get("search_store_size_human"),
-            "after_search_store_size_human": "",
-        },
-    )
+    apply_proof = latest_search_operational_shrink_apply_proof(aoa_root)
+    apply_comparison = apply_proof.get("comparison") if isinstance(apply_proof.get("comparison"), dict) else {}
+    before_after_passed = bool(apply_comparison.get("captured")) and int_value(
+        apply_comparison.get("omitted_document_count")
+    ) > 0
+    if before_after_passed:
+        before_after_summary = {
+            **apply_comparison,
+            "reason": "latest successful shrink-apply report captured before/after storage comparison",
+            "apply_report": apply_proof.get("source"),
+            "apply_status": apply_proof.get("apply_status"),
+            "after_search_shards_status": apply_proof.get("after_search_shards_status"),
+            "after_operational_route_rollup_status": apply_proof.get("after_operational_route_rollup_status"),
+            "quality_boundary": apply_proof.get("quality_boundary"),
+        }
+        before_after_gate = search_operational_shrink_gate_packet(
+            gate_id="storage_before_after_comparison",
+            status=search_operational_shrink_gate_status(passed=True),
+            passed=True,
+            summary=before_after_summary,
+        )
+    else:
+        before_after_gate = search_operational_shrink_gate_packet(
+            gate_id="storage_before_after_comparison",
+            status="blocked",
+            passed=False,
+            summary={
+                "reason": "no successful shrink-apply before/after comparison is available yet",
+                "before_search_store_size_human": storage_gate["summary"].get("search_store_size_human"),
+                "after_search_store_size_human": "",
+                "latest_apply_proof_status": apply_proof.get("status"),
+            },
+        )
     apply_status = str(physical.get("apply_status") or "")
     explicit_operator_route_available = (
         bool(physical.get("operator_rebuild_route_available"))
@@ -56839,6 +56896,7 @@ def session_memory_search_operational_shrink_gates(
             "failed_count": live_corpus.get("failed_count"),
             "actionable_gap_count": live_corpus.get("actionable_gap_count"),
         },
+        "latest_shrink_apply_proof": apply_proof,
         "next_routes": [
             [
                 *session_memory_cli_command(aoa_root),

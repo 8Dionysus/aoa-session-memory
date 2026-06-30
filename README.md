@@ -1260,8 +1260,13 @@ It runs the operational projection plan, materialized route-rollup ref query,
 literal exact-recall probes, a bounded live-scenario corpus check, and a storage
 baseline. A passing gate packet still reports `apply_ready=false` until the
 explicit context-tail omission/apply route and after-shrink storage comparison
-exist. This is the route exposed by `maintenance-status` for the current
-`search_projection_combined_large` warning when the rollup is current.
+exist. After `search-operational-shrink-apply --apply --write-report` has
+captured a successful before/after comparison, the gate packet consumes that
+latest apply diagnostic as generated proof for
+`storage_before_after_comparison`; the packet remains read-only and still does
+not authorize mutation. This is the route exposed by `maintenance-status` for
+the current `search_projection_combined_large` warning when the rollup is
+current.
 
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with

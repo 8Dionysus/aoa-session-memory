@@ -102,8 +102,13 @@ Use these first routes when available:
   `physical_shrink_plan`, checks route-rollup refs/cost, literal exact-recall
   posture, live scenario corpus, and storage baseline, and still keeps
   `apply_ready=false` until the explicit apply route and after-shrink storage
-  comparison exist. If the gate reports a missing/stale rollup, materialize the
-  route-rollup first. Post-omission route-rollup must include compact
+  comparison exist. After a successful `search-operational-shrink-apply`
+  diagnostic exists, the gate packet should expose
+  `latest_shrink_apply_proof.status=found` and pass
+  `storage_before_after_comparison` from that generated before/after proof;
+  it remains read-only evidence, not permission to mutate again. If the gate
+  reports a missing/stale rollup, materialize the route-rollup first.
+  Post-omission route-rollup must include compact
   `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
   omission is a route/read-model regression. Keep unrouted context-tail rows
   and the monolith raw-text fallback until their replacements are proven.

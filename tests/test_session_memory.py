@@ -17709,6 +17709,9 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     }
     assert payload["failed_gate_ids"] == []
     assert payload["blocked_gate_ids"] == ["storage_before_after_comparison"]
+    assert payload["latest_shrink_apply_proof"]["status"] == "missing"
+    before_after_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_before_after_comparison")
+    assert before_after_gate["summary"]["reason"] == "no successful shrink-apply before/after comparison is available yet"
     literal_gate = next(gate for gate in payload["gates"] if gate["id"] == "literal_exact_recall")
     assert literal_gate["summary"]["probe_count"] == len(module.SEARCH_OPERATIONAL_SHRINK_LITERAL_PROBES)
     route_gate = next(gate for gate in payload["gates"] if gate["id"] == "route_rollup_refs")
@@ -17717,6 +17720,191 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     parsed = parser.parse_args(["search-operational-shrink-gates", "--live-scenario-case-limit", "2"])
     assert parsed.func == module.command_search_operational_shrink_gates
     assert parsed.live_scenario_case_limit == 2
+
+
+def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    apply_report = aoa_root / module.DIAGNOSTICS_ROOT / "20260630T000000Z__search-operational-shrink-apply.json"
+    write_json(
+        apply_report,
+        {
+            "artifact_type": "session_memory_search_operational_shrink_apply",
+            "generated_at": "2026-06-30T00:00:00Z",
+            "ok": True,
+            "apply": True,
+            "status": "applied",
+            "storage_before_after_comparison": {
+                "captured": True,
+                "weight_reduced": True,
+                "omission_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "omitted_document_count": 20,
+                "omitted_route_ref_row_count": 40,
+                "shard_db_total_bytes": {
+                    "before": 1000,
+                    "after": 700,
+                    "delta": -300,
+                    "reclaimed_bytes": 300,
+                },
+                "combined_search_projection_total_bytes": {
+                    "before": 6000,
+                    "after": 5700,
+                    "delta": -300,
+                    "reclaimed_bytes": 300,
+                },
+                "document_count": {
+                    "before": 100,
+                    "after": 80,
+                    "delta": -20,
+                },
+                "interpretation": "structured shard bytes decreased",
+            },
+            "after": {
+                "search_shards": {"status": "current"},
+                "operational_route_rollup": {"status": "current"},
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_event_projection_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "candidate_tail_measured",
+            "diagnostics": [],
+            "route_ref_rollup_plan": {"status": "materialized_rollup_ready"},
+            "physical_shrink_plan": {
+                "status": "guarded_plan_ready",
+                "safe_to_apply_physical_compaction": False,
+                "context_tail_candidate_count": 20,
+                "route_ref_backed_omission_candidate_count": 16,
+                "unrouted_keep_candidate_count": 4,
+                "materialized_rollup_status": "current",
+                "apply_status": "operator_rebuild_route_available",
+                "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
+                "operator_rebuild_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "operator_rebuild_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-shards",
+                    "all",
+                    "--context-tail-omission-policy",
+                    "route-ref-backed",
+                    "--write-report",
+                ],
+                "next_implementation_route": "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup_query",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "matched",
+            "result_count": 1,
+            "results": [{"raw_refs": ["raw:line:7"], "segment_refs": ["segments/000__initial-to-latest.md"]}],
+            "totals": {"matched_group_count": 1},
+            "quality": {"raw_or_segment_ref_present": True, "freshness_status": "current"},
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": 3,
+            },
+            "agent_route_summary": {
+                "status": "covered",
+                "covered_lane_count": 13,
+                "missing_lane_count": 0,
+                "direct_rollup_lane_count": 11,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "literal_query_plan",
+        lambda **_kwargs: {
+            "ok": True,
+            "diagnostics": [],
+            "primary_route": {"route_id": "entity_usage_chain"},
+            "literal_route_strategy": {
+                "query_class": "entity_anchor",
+                "primary_route_id": "entity_usage_chain",
+                "uses_structured_first": True,
+                "uses_fts_first": False,
+                "monolith_fallback_first": False,
+                "monolith_is_fallback_only": True,
+                "exact_recall_preserved_by_fallback": True,
+                "fallback_preserves_exact_recall": True,
+                "fallback_route_id": "monolith_raw_text_fallback",
+            },
+            "cost_profile": {
+                "structured_first": True,
+                "uses_fts_first": False,
+                "monolith_fallback_first": False,
+                "exact_recall_preserved_by_fallback": True,
+            },
+            "next_command": "python3 scripts/aoa_session_memory.py usage-chain anchor",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_scenario_corpus_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "case_count": 1,
+            "available_case_count": 13,
+            "passed_count": 1,
+            "failed_count": 0,
+            "actionable_gap_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "storage_audit",
+        lambda **_kwargs: {
+            "ok": True,
+            "deep_dbstat": False,
+            "row_counts": False,
+            "search_store": {
+                "exists": True,
+                "total_with_wal_bytes": 1234,
+                "total_with_wal_human": "1.2 KiB",
+            },
+            "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+        },
+    )
+
+    payload = module.session_memory_search_operational_shrink_gates(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        live_scenario_case_limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "all_gates_passed_but_apply_still_manual"
+    assert payload["failed_gate_ids"] == []
+    assert payload["blocked_gate_ids"] == []
+    assert "storage_before_after_comparison" in payload["passed_gate_ids"]
+    assert payload["latest_shrink_apply_proof"]["status"] == "found"
+    assert payload["latest_shrink_apply_proof"]["source"]["path"] == str(apply_report)
+    before_after_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_before_after_comparison")
+    assert before_after_gate["status"] == "pass"
+    assert before_after_gate["summary"]["apply_report"]["path"] == str(apply_report)
+    assert before_after_gate["summary"]["weight_reduced"] is True
+    assert before_after_gate["summary"]["omitted_document_count"] == 20
+    assert (
+        before_after_gate["summary"]["reason"]
+        == "latest successful shrink-apply report captured before/after storage comparison"
+    )
 
 
 def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup_stale(

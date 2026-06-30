@@ -2073,6 +2073,21 @@ Maintenance gates:
   so future wrapper reports use `applied_with_storage_warning` when the route
   is otherwise good but storage bytes do not shrink; this is a cardinality/ref
   win, not a proven physical weight win.
+  Follow-up guarded apply proof
+  `diagnostics/20260630T033731Z__search-operational-shrink-apply.json`
+  completed the route with `status=applied`, rebuilt `291` sessions, produced
+  `1579290` structured shard documents, omitted `377900` route-ref-backed
+  context-tail documents, and captured a physical generated-search reduction:
+  shard DB bytes `5259296768 -> 5226123264`, combined search projection bytes
+  `17088774144 -> 17055600640`, and search root bytes
+  `17124258884 -> 17090845447`; the monolith stayed unchanged. The read-only
+  gate report `diagnostics/20260630T034830Z__search-operational-shrink-gates.json`
+  now consumes that latest apply diagnostic as
+  `latest_shrink_apply_proof.status=found`, passes
+  `storage_before_after_comparison`, returns `blocked_gate_ids=[]`, and keeps
+  `apply_ready=false` / `safe_to_apply_physical_compaction=false` because the
+  gate is evidence, not an authorization route. The live gate elapsed
+  `171317ms`, so route-cost reduction remains a real follow-up pressure.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over
