@@ -332,7 +332,10 @@ first, then `search-hotset-audit` for the fast shard breakdown by doc type,
 usage role, agent-event class, event type, route term cardinality, and session
 hotspot. If the broad sample returns partial measurements, use its
 `measurement_gap.next_targeted_routes` and rerun `search-hotset-audit --shard
-<key>` for the affected shard before treating the gap as absent. When the
+<key>` for the affected shard before treating the gap as absent. If that
+targeted packet sends the agent deeper, keep the same shard on
+`search-operational-projection-plan --shard <key>`; otherwise `--max-shards 1`
+may select the largest shard instead of the investigated shard. When the
 operational route-rollup is already current, use
 `search-operational-shrink-gates --write-report` as the next warning route:
 it composes the operational projection plan, route-rollup ref query, literal

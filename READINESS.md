@@ -2318,6 +2318,23 @@ Maintenance gates:
   for `search-hotset-audit --shard` and verifies that partial hotset samples
   return a targeted measurement gap route.
 
+- 2026-06-30 targeted hotset to operational projection handoff proof:
+  targeted `search-hotset-audit --shard month/2026-06 --max-shards 1`
+  correctly sampled `month/2026-06`, but the old deeper next route only carried
+  `search-operational-projection-plan --max-shards 1`; live repro showed that
+  command selected the larger `month/2026-05` shard instead. The handoff now
+  preserves shard scope: targeted hotset packets emit
+  `search-operational-projection-plan --shard month/2026-06 --max-shards 1`,
+  and the operational projection command itself accepts `--shard`. Live proof
+  after the fix returned `target_shard=month/2026-06`,
+  `selected_shards[0].shard=month/2026-06`, `event_total=762495`,
+  `candidate_context_tail_v1_count=168527`, and
+  `candidate_context_tail_with_route_signals_count=145859` in
+  `diagnostics/20260630T082129Z__search-operational-projection-plan.json`.
+  Regression coverage now checks parser support, targeted hotset next-route
+  propagation, and operational projection shard selection against a competing
+  larger shard.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

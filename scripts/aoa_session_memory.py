@@ -56144,6 +56144,7 @@ def session_memory_search_hotset_audit(
                 str(workspace_root),
                 "--aoa-root",
                 str(aoa_root),
+                *(["--shard", str(shard)] if shard else []),
                 "--max-shards",
                 str(max(1, int(max_shards))),
                 "--route-rollup-limit",
@@ -58169,11 +58170,13 @@ def session_memory_search_operational_event_projection_plan(
     max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
     per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
     route_rollup_limit: int = SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT,
+    shard: str = "",
     write_report: bool = False,
 ) -> dict[str, Any]:
     selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
         aoa_root,
         max_shards=max_shards,
+        shard=shard,
     )
     shard_results = [
         search_operational_event_projection_probe_shard(
@@ -58331,6 +58334,7 @@ def session_memory_search_operational_event_projection_plan(
         "sample": {
             "selection": "largest_existing_search_shards",
             "max_shards": max(1, int(max_shards)),
+            "target_shard": str(shard or ""),
             "selected_shard_count": len(selected_shards),
             "successful_shard_count": len(successful),
             "per_shard_timeout_seconds": per_shard_timeout_seconds,
@@ -58420,6 +58424,7 @@ def session_memory_search_operational_event_projection_plan(
                 str(workspace_root),
                 "--aoa-root",
                 str(aoa_root),
+                *(["--shard", str(shard)] if shard else []),
                 "--max-shards",
                 str(max(1, int(max_shards))),
                 "--write-report",
@@ -58465,6 +58470,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- mutates: `{payload.get('mutates')}`",
         f"- selected_shards: `{sample.get('selected_shard_count')}`",
         f"- successful_shards: `{sample.get('successful_shard_count')}`",
+        f"- target_shard: `{sample.get('target_shard')}`",
         f"- event_total: `{totals.get('event_total')}`",
         f"- direct_actionable_event_count: `{totals.get('direct_actionable_event_count')}`",
         f"- context_event_count: `{totals.get('context_event_count')}`",
@@ -70175,6 +70181,7 @@ def command_search_operational_projection_plan(args: argparse.Namespace) -> int:
         max_shards=args.max_shards,
         per_shard_timeout_seconds=args.per_shard_timeout,
         route_rollup_limit=args.route_rollup_limit,
+        shard=args.shard,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -76396,6 +76403,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_operational_projection_plan.add_argument("--workspace-root")
     search_operational_projection_plan.add_argument("--aoa-root")
     search_operational_projection_plan.add_argument("--max-shards", type=int, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS)
+    search_operational_projection_plan.add_argument("--shard", default="", help="Sample one search shard such as month/2026-06.")
     search_operational_projection_plan.add_argument("--per-shard-timeout", type=float, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS)
     search_operational_projection_plan.add_argument("--route-rollup-limit", type=int, default=SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT)
     search_operational_projection_plan.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational event projection reports under .aoa/diagnostics.")

@@ -1201,6 +1201,14 @@ python3 scripts/aoa_session_memory.py search-operational-projection-plan \
   --max-shards 3 \
   --write-report
 
+python3 scripts/aoa_session_memory.py search-operational-projection-plan \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --shard month/2026-06 \
+  --max-shards 1 \
+  --route-rollup-limit 0 \
+  --write-report
+
 python3 scripts/aoa_session_memory.py search-operational-route-rollup \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
@@ -1238,7 +1246,10 @@ indexes remain authority.
 operational event projection lane. It samples existing structured shard DBs,
 separates direct usage/result/outcome/entrypoint rows from protected context
 rows, and reports the generic context tail that could only be reduced after
-route refs and raw/segment refs have a replacement projection. The packet also
+route refs and raw/segment refs have a replacement projection. Use
+`--shard <key>` after a targeted hotset packet so the deeper measurement stays
+on the same pressure shard instead of falling back to the largest shard. The
+packet also
 includes a route-ref rollup plan with top candidate route layers/terms, so the
 next design step can preserve navigation fanout before any physical row
 reduction. The full rollup is bounded by `--per-shard-timeout` (default 180s);

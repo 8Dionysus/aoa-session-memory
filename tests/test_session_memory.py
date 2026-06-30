@@ -6716,6 +6716,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--explain"]).explain is True
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-explain"]).explain is False
     assert parser.parse_args(["search-hotset-audit", "--shard", "month/2026-06"]).shard == "month/2026-06"
+    assert (
+        parser.parse_args(["search-operational-projection-plan", "--shard", "month/2026-06"]).shard
+        == "month/2026-06"
+    )
     assert parser.parse_args(["literal-query-plan", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
@@ -17854,6 +17858,90 @@ def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverag
     assert targeted["sample"]["target_shard"] == "month/2026-06"
     assert targeted["sample"]["selected_shard_count"] == 1
     assert targeted["shards"][0]["shard"] == "month/2026-06"
+    targeted_next_commands = [module.shlex.join(command) for command in targeted["next_routes"]]
+    assert any(
+        "search-operational-projection-plan" in command and "--shard month/2026-06" in command
+        for command in targeted_next_commands
+    )
+
+
+def test_search_operational_projection_plan_respects_target_shard(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    candidates = [
+        {"shard": "month/2026-05", "db_path": str(tmp_path / "may.sqlite3"), "document_count": 900},
+        {"shard": "month/2026-06", "db_path": str(tmp_path / "june.sqlite3"), "document_count": 100},
+    ]
+    seen_shards: list[str] = []
+
+    def fake_candidates(_aoa_root: Path, *, max_shards: int, shard: str = "") -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+        seen_shards.append(shard)
+        selected = [item for item in candidates if item["shard"] == shard] if shard else candidates
+        return selected[:max_shards], {"status": "current"}, []
+
+    def fake_probe(**kwargs: Any) -> dict[str, Any]:
+        shard = str(kwargs.get("shard") or "")
+        return {
+            "ok": True,
+            "status": "sampled",
+            "shard": shard,
+            "event_total": 10,
+            "direct_actionable_event_count": 3,
+            "context_event_count": 7,
+            "context_agent_event_count": 1,
+            "context_task_episode_count": 1,
+            "context_protected_event_type_count": 1,
+            "context_route_signal_preview_count": 2,
+            "context_empty_session_act_count": 1,
+            "protected_context_event_count": 3,
+            "candidate_context_tail_v1_count": 4,
+            "candidate_context_tail_with_route_signals_count": 2,
+            "candidate_context_tail_without_route_signals_count": 2,
+            "role_counts": {"context": 7, "usage": 3},
+            "route_ref_rollup": {
+                "status": "skipped",
+                "candidate_route_posting_count": 0,
+                "candidate_route_term_count": 0,
+                "top_route_layers": [],
+                "top_route_terms": [],
+                "elapsed_ms": 0,
+            },
+        }
+
+    monkeypatch.setattr(module, "search_operational_event_projection_shard_candidates", fake_candidates)
+    monkeypatch.setattr(module, "search_operational_event_projection_probe_shard", fake_probe)
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {"status": "missing", "needs_refresh": True, "route_rollup_row_count": 0},
+    )
+
+    unscoped = module.session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        route_rollup_limit=0,
+    )
+    targeted = module.session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        route_rollup_limit=0,
+        shard="month/2026-06",
+    )
+
+    assert seen_shards == ["", "month/2026-06"]
+    assert unscoped["sample"]["target_shard"] == ""
+    assert unscoped["sample"]["selected_shards"][0]["shard"] == "month/2026-05"
+    assert targeted["sample"]["target_shard"] == "month/2026-06"
+    assert targeted["sample"]["selected_shards"][0]["shard"] == "month/2026-06"
+    assert targeted["shards"][0]["shard"] == "month/2026-06"
+    targeted_next_commands = [module.shlex.join(command) for command in targeted["next_routes"]]
+    assert any(
+        "search-operational-projection-plan" in command and "--shard month/2026-06" in command
+        for command in targeted_next_commands
+    )
 
 
 def test_search_operational_projection_plan_samples_candidate_tail_without_mutation(tmp_path: Path) -> None:
