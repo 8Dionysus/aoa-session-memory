@@ -267,8 +267,8 @@ The route order is:
 8. literal phrase/path/command/error/session id: `literal-query-plan`;
 9. topology: `graph-bridge` for "how are X and Y connected?", then compact
    graph routes with explicit node/edge/evidence budgets. The bridge packet
-   keeps side neighborhoods shallow by default so dense anchors such as common
-   tools do not turn the first route into a heavy graph scan.
+   uses the requested bounded depth while keeping dense anchors controlled by
+   node/edge budgets, compact samples, and deferred timeline hydration.
 
 Session-memory packets remain generated navigation and evidence routes. They
 must report freshness, truncation, refs, and next expansion, then hand decision

@@ -3962,7 +3962,11 @@ def entity_registry_tool_key_is_mcp_tool(key: str) -> bool:
 
 def entity_registry_mcp_tool_key(service_key: str, tool_key: str) -> str:
     if service_key:
-        return route_key_slug(f"mcp_{service_key}_{tool_key}", fallback=tool_key, max_chars=120)
+        service_stem = service_key[:-4] if service_key.endswith("_mcp") else service_key
+        tool_suffix = tool_key
+        if service_stem and tool_key.startswith(f"{service_stem}_"):
+            tool_suffix = tool_key[len(service_stem) + 1 :]
+        return route_key_slug(f"{service_key}_{tool_suffix}", fallback=tool_key, max_chars=120)
     return tool_key
 
 
@@ -50693,7 +50697,7 @@ def graph_bridge(
         phase_timings.append({"phase": name, "elapsed_ms": int((time.monotonic() - phase_started) * 1000)})
         return result
 
-    bridge_side_depth = 1
+    bridge_side_depth = selected_max_depth
     bridge_node_limit = max(selected_limit, 4)
     bridge_edge_limit = max(selected_limit * 2, 8)
     source_neighborhood = timed_phase(
@@ -64589,21 +64593,71 @@ def entity_usage_chain_refs(events: list[dict[str, Any]], document_refs: list[di
     return refs[:limit]
 
 
+FIRST_REF_VALUE_KEYS = (
+    ("raw", "raw"),
+    ("raw_ref", "raw"),
+    ("raw_block", "raw_block"),
+    ("segment", "segment"),
+    ("segment_ref", "segment"),
+    ("segment_index", "segment_index"),
+    ("receipt", "receipt"),
+    ("session", "session"),
+    ("session_ref", "session"),
+    ("session_index", "session_index"),
+)
+FIRST_REF_STRONG_KEYS = {"raw", "raw_block", "segment", "segment_index", "receipt"}
+FIRST_REF_KIND_VALUE_KEYS = {
+    "raw_line": "raw",
+    "raw_ref": "raw",
+    "raw_block": "raw_block",
+    "segment_markdown": "segment",
+    "segment_ref": "segment",
+    "segment_index": "segment_index",
+    "receipt": "receipt",
+    "receipt_ref": "receipt",
+    "session_manifest": "session",
+    "session_ref": "session",
+    "session_index": "session_index",
+}
+
+
+def first_ref_payload(values: dict[str, Any]) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for source_key, target_key in FIRST_REF_VALUE_KEYS:
+        value = values.get(source_key)
+        if isinstance(value, str) and value.strip() and not payload.get(target_key):
+            payload[target_key] = value.strip()
+    return payload
+
+
+def first_ref_from_kind_value(kind: str, value: Any) -> dict[str, str]:
+    target_key = FIRST_REF_KIND_VALUE_KEYS.get(route_key_slug(kind, fallback=""))
+    if not target_key or not isinstance(value, str) or not value.strip():
+        return {}
+    return {target_key: value.strip()}
+
+
+def first_ref_has_strong_evidence(first_ref: dict[str, Any]) -> bool:
+    return any(first_ref.get(key) for key in FIRST_REF_STRONG_KEYS)
+
+
+def merge_first_ref_value(first_ref: dict[str, str], key: str, value: Any) -> None:
+    if key and value and not first_ref.get(key):
+        first_ref[key] = str(value)
+
+
 def entity_usage_chain_first_ref(events: list[dict[str, Any]], evidence_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    fallback_ref: dict[str, str] = {}
     for event in events:
         if not isinstance(event, dict):
             continue
         refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
-        first_ref = {
-            "raw": refs.get("raw") or "",
-            "raw_block": refs.get("raw_block") or "",
-            "segment": refs.get("segment") or "",
-            "segment_index": refs.get("segment_index") or "",
-            "session": refs.get("session") or "",
-        }
-        if any(first_ref.values()):
+        first_ref = first_ref_payload(refs)
+        if first_ref_has_strong_evidence(first_ref):
             return first_ref
-    first_ref = {"raw": "", "raw_block": "", "segment": "", "segment_index": "", "session": ""}
+        if first_ref and not fallback_ref:
+            fallback_ref = first_ref
+    first_ref = dict(fallback_ref)
     for item in evidence_refs:
         if not isinstance(item, dict):
             continue
@@ -64611,17 +64665,9 @@ def entity_usage_chain_first_ref(events: list[dict[str, Any]], evidence_refs: li
         value = str(item.get("value") or "")
         if not value:
             continue
-        if kind == "raw_line" and not first_ref["raw"]:
-            first_ref["raw"] = value
-        elif kind == "raw_block" and not first_ref["raw_block"]:
-            first_ref["raw_block"] = value
-        elif kind == "segment_markdown" and not first_ref["segment"]:
-            first_ref["segment"] = value
-        elif kind == "segment_index" and not first_ref["segment_index"]:
-            first_ref["segment_index"] = value
-        elif kind == "session_manifest" and not first_ref["session"]:
-            first_ref["session"] = value
-    return {key: value for key, value in first_ref.items() if value}
+        for key, ref_value in first_ref_from_kind_value(kind, value).items():
+            merge_first_ref_value(first_ref, key, ref_value)
+    return first_ref
 
 
 def entity_usage_chain_command(
@@ -66403,38 +66449,57 @@ def live_scenario_evidence_counts(value: Any) -> dict[str, int]:
 
 
 def live_scenario_first_ref(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        direct = {
-            key: value.get(key)
-            for key in ("raw", "segment", "segment_index", "session", "receipt")
-            if value.get(key)
-        }
-        if direct:
-            return direct
-        refs = value.get("refs")
-        if isinstance(refs, dict) and refs:
-            return {key: refs.get(key) for key in ("raw", "segment", "segment_index", "session", "receipt") if refs.get(key)}
-        for list_key, target_key in (
-            ("raw_refs", "raw"),
-            ("segment_refs", "segment"),
-            ("session_ids", "session"),
-            ("session_refs", "session"),
-        ):
-            values = value.get(list_key)
-            if isinstance(values, list):
-                first = next((ref for ref in values if ref), "")
-                if first:
-                    return {target_key: first}
-        for nested in value.values():
-            found = live_scenario_first_ref(nested)
+    fallback_ref: dict[str, str] = {}
+
+    def consider(candidate: dict[str, Any]) -> dict[str, str]:
+        nonlocal fallback_ref
+        normalized = first_ref_payload(candidate)
+        if not normalized:
+            return {}
+        if first_ref_has_strong_evidence(normalized):
+            return normalized
+        if not fallback_ref:
+            fallback_ref = normalized
+        return {}
+
+    def walk(item: Any) -> dict[str, str]:
+        if isinstance(item, dict):
+            kind_ref = first_ref_from_kind_value(str(item.get("kind") or ""), item.get("value"))
+            found = consider(kind_ref)
             if found:
                 return found
-    elif isinstance(value, list):
-        for nested in value[:20]:
-            found = live_scenario_first_ref(nested)
+            found = consider(item)
             if found:
                 return found
-    return {}
+            refs = item.get("refs")
+            if isinstance(refs, dict):
+                found = consider(refs)
+                if found:
+                    return found
+            for list_key, target_key in (
+                ("raw_refs", "raw"),
+                ("segment_refs", "segment"),
+                ("session_ids", "session"),
+                ("session_refs", "session"),
+            ):
+                values = item.get(list_key)
+                if isinstance(values, list):
+                    first = next((ref for ref in values if ref), "")
+                    found = consider({target_key: first})
+                    if found:
+                        return found
+            for nested in item.values():
+                found = walk(nested)
+                if found:
+                    return found
+        elif isinstance(item, list):
+            for nested in item[:20]:
+                found = walk(nested)
+                if found:
+                    return found
+        return {}
+
+    return walk(value) or fallback_ref
 
 
 def live_scenario_entity_dossier_audit(

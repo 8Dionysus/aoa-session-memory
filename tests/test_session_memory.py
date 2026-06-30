@@ -2340,15 +2340,17 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     indexed = module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
     registry = json.loads((aoa_root / module.ENTITY_REGISTRY_PATH).read_text(encoding="utf-8"))
     entries = {(entry["kind"], entry["canonical_key"]): entry for entry in registry["entries"]}
+    source_tool_key = "aoa_kag_mcp_lookup"
 
     assert indexed["ok"] is True
     assert indexed["entity_registry_document_count"] > 0
     assert entries[("skill", "aoa_live_skill")]["status"] == "active"
     assert entries[("mcp_service", "aoa_kag_mcp")]["status"] == "active"
-    assert entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "active"
+    assert entries[("mcp_tool", source_tool_key)]["status"] == "active"
+    assert "aoa_kag_lookup" in entries[("mcp_tool", source_tool_key)]["aliases"]
     assert any(
         ref.get("source_type") == "abyss_stack_mcp_tool_source"
-        for ref in entries[("mcp_tool", "aoa_kag_lookup")]["source_refs"]
+        for ref in entries[("mcp_tool", source_tool_key)]["source_refs"]
     )
     assert entries[("mcp_tool", "mcp_aoa_kag_mcp_lookup")]["status"] == "observed"
 
@@ -2431,7 +2433,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     stale_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in stale_registry["entries"]}
     assert stale_entries[("skill", "aoa_live_skill")]["status"] == "stale"
     assert stale_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "stale"
-    assert stale_entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "stale"
+    assert stale_entries[("mcp_tool", source_tool_key)]["status"] == "stale"
 
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     (skill_dir / "SKILL.md").unlink()
@@ -2449,7 +2451,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     removed_entries = {(entry["kind"], entry["canonical_key"]): entry for entry in removed_registry["entries"]}
     assert removed_entries[("skill", "aoa_live_skill")]["status"] == "removed"
     assert removed_entries[("mcp_service", "aoa_kag_mcp")]["status"] == "removed"
-    assert removed_entries[("mcp_tool", "aoa_kag_lookup")]["status"] == "removed"
+    assert removed_entries[("mcp_tool", source_tool_key)]["status"] == "removed"
     assert removed_registry["counts_by_status"]["removed"] >= 3
 
     maintenance = module.entity_registry_maintenance_status(aoa_root)
@@ -2515,6 +2517,29 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert budgeted_noop_refresh["ok"] is True
     assert budgeted_noop_refresh["budget_policy"] == "soft_observed_atomic_sync_not_interrupted"
     assert budgeted_noop_refresh["diagnostics"] == []
+
+
+def test_entity_registry_source_mcp_tool_keys_are_service_namespaced(tmp_path: Path) -> None:
+    entries: list[dict[str, Any]] = []
+    for service_name in ("alpha-mcp", "beta-mcp"):
+        service_dir = tmp_path / service_name
+        server_path = service_dir / "src" / service_name.replace("-", "_") / "server.py"
+        server_path.parent.mkdir(parents=True)
+        server_path.write_text(
+            "def build_server():\n"
+            "    @mcp.tool(name=\"lookup\")\n"
+            "    def lookup(query: str = \"\") -> dict:\n"
+            "        return {\"ok\": True, \"query\": query}\n",
+            encoding="utf-8",
+        )
+        entries.extend(module.entity_registry_mcp_tool_entries_from_server(service_dir, server_path))
+
+    by_key = {entry["canonical_key"]: entry for entry in entries}
+
+    assert set(by_key) == {"alpha_mcp_lookup", "beta_mcp_lookup"}
+    assert len({entry["entity_id"] for entry in entries}) == 2
+    assert all("lookup" in entry["aliases"] for entry in entries)
+    assert all("mcp_tool:lookup" in entry["aliases"] for entry in entries)
 
 
 def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
@@ -3890,6 +3915,58 @@ def test_entity_usage_chain_builds_compact_sequence_without_graph_packets(tmp_pa
     assert any(item["kind"] == "raw_line" and item["value"] == "raw:line:10" for item in payload["evidence_refs"])
     assert "source_audit" not in payload
     assert payload["next_expansion"][0]["id"] == "usage_neighborhood"
+
+
+def test_entity_usage_chain_first_ref_skips_manifest_only_until_material_ref() -> None:
+    first_ref = module.entity_usage_chain_first_ref(
+        [
+            {"refs": {"session": "sessions/manifest-only/session.manifest.json"}},
+            {
+                "refs": {
+                    "raw": "raw:line:42",
+                    "segment": "001.md#event-000042",
+                    "session": "sessions/material/session.manifest.json",
+                }
+            },
+        ],
+        [],
+    )
+    fallback_ref = module.entity_usage_chain_first_ref(
+        [{"refs": {"session": "sessions/manifest-only/session.manifest.json"}}],
+        [
+            {"kind": "session_manifest", "value": "sessions/evidence/session.manifest.json"},
+            {"kind": "raw_line", "value": "raw:line:7"},
+            {"kind": "segment_markdown", "value": "001.md#event-000007"},
+        ],
+    )
+
+    assert first_ref["raw"] == "raw:line:42"
+    assert first_ref["segment"] == "001.md#event-000042"
+    assert first_ref["session"] == "sessions/material/session.manifest.json"
+    assert fallback_ref["session"] == "sessions/manifest-only/session.manifest.json"
+    assert fallback_ref["raw"] == "raw:line:7"
+    assert fallback_ref["segment"] == "001.md#event-000007"
+
+
+def test_live_scenario_first_ref_prefers_material_refs_over_manifest_only() -> None:
+    nested_ref = module.live_scenario_first_ref(
+        [
+            {"refs": {"session": "sessions/manifest-only/session.manifest.json"}},
+            {"refs": {"raw": "raw:line:12", "segment": "002.md#event-000012"}},
+        ]
+    )
+    evidence_ref = module.live_scenario_first_ref(
+        {
+            "evidence_refs": [
+                {"kind": "session_manifest", "value": "sessions/evidence/session.manifest.json"},
+                {"kind": "raw_line", "value": "raw:line:13"},
+            ]
+        }
+    )
+
+    assert nested_ref["raw"] == "raw:line:12"
+    assert nested_ref["segment"] == "002.md#event-000012"
+    assert evidence_ref == {"raw": "raw:line:13"}
 
 
 def test_entity_usage_neighborhood_quality_uses_source_audit_consequences(tmp_path: Path, monkeypatch: Any) -> None:
@@ -6943,7 +7020,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert bridge["normalized_entities"]["target"]["kind"] == "tool"
     assert bridge["quality"]["one_short_route"] is True
     assert bridge["quality"]["compact_side_neighborhood"] is True
-    assert bridge["quality"]["side_neighborhood_depth"] == 1
+    assert bridge["quality"]["side_neighborhood_depth"] == 4
     assert bridge["quality"]["side_neighborhood_node_limit"] == 4
     assert bridge["quality"]["side_neighborhood_edge_limit"] == 8
     assert bridge["quality"]["evidence_ref_count"] >= 1
@@ -7078,7 +7155,7 @@ def test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs(
         limit: int = 40,
         edge_limit: int | None = None,
     ) -> dict[str, Any]:
-        calls.append(f"neighborhood:{anchor}:{kind}")
+        calls.append(f"neighborhood:{anchor}:{kind}:depth={depth}")
         session_id = "source" if anchor == "aoa-session-memory-mcp" else "target"
         evidence_ref = ref(10 if session_id == "source" else 20, session_id)
         event_node = {
@@ -7149,12 +7226,17 @@ def test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs(
         max_depth=4,
     )
 
-    assert calls == ["neighborhood:aoa-session-memory-mcp:mcp", "neighborhood:exec_command:tool", "shortest_path"]
+    assert calls == [
+        "neighborhood:aoa-session-memory-mcp:mcp:depth=4",
+        "neighborhood:exec_command:tool:depth=4",
+        "shortest_path",
+    ]
     assert bridge["ok"] is True
     assert bridge["evidence_ref_count"] == 2
     assert bridge["quality"]["raw_or_segment_ref_present"] is True
     assert bridge["quality"]["side_timeline_policy"] == "side_neighborhood_compact_sample"
     assert bridge["quality"]["side_timelines_deferred"] is True
+    assert bridge["quality"]["side_neighborhood_depth"] == 4
     assert bridge["quality"]["source_event_count"] == 1
     assert bridge["quality"]["target_event_count"] == 1
     assert bridge["usage_chain"]["source_events"][0]["refs"]["raw"] == "raw:line:10"

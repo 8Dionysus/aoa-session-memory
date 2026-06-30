@@ -1046,13 +1046,16 @@ Last observed result:
 - 2026-06-27 compact graph-bridge performance proof: the reviewed
   `graph_bridge_refs_contract` corpus case was correct but spent `62.841s`
   expanding the dense `tool:exec_command` side before returning evidence refs.
-  `graph-bridge` now keeps side neighborhoods shallow in the first packet and
-  leaves deeper path search behind the returned `shortest_path` expansion. A
-  direct `graph-bridge aoa-session-memory-mcp exec_command --source-kind mcp
+  That slice kept side neighborhoods shallow in the first packet and left
+  deeper path search behind the returned `shortest_path` expansion. A direct
+  `graph-bridge aoa-session-memory-mcp exec_command --source-kind mcp
   --target-kind tool --limit 4 --max-depth 4` run returned in `3.85s` with
   `evidence_ref_count=8`, raw/segment/session refs, and
-  `compact_side_neighborhood=true`. Re-running `live-scenario-corpus check`
-  kept `graph_bridge_refs_contract` green and reduced the observed
+  `compact_side_neighborhood=true`. The current bridge contract now uses the
+  requested bounded depth while keeping node/edge budgets, compact samples, and
+  deferred timeline hydration as the first-packet cost guard. Re-running
+  `live-scenario-corpus check` kept `graph_bridge_refs_contract` green and
+  reduced the observed
   `graph_bridge` profile to `2.133s` with `raw_ref=16`, `segment_ref=16`, and
   `session_ref=16`.
 - 2026-06-27 broad consumer live-loop proof: `live-scenario-audit --profile
@@ -2356,6 +2359,20 @@ Maintenance gates:
   current, and the follow-up gate
   `diagnostics/20260630T084524Z__search-operational-shrink-gates.json`
   completed in `2094ms` with `storage_baseline.elapsed_ms=0`.
+
+- 2026-06-30 entity/graph evidence-route contract proof: source-discovered
+  MCP tools now use service-namespaced canonical keys without repeating the
+  service stem, so same-name tools from different MCP services remain distinct
+  while keys such as `aoa_kag_mcp_lookup` stay readable. `usage-chain` and
+  live-scenario first-ref extraction now prefer material raw/segment/receipt
+  refs over manifest-only refs, while preserving the manifest as fallback
+  context. `graph-bridge` side neighborhoods now honor the requested bounded
+  `--max-depth` and keep first-packet cost controlled through node/edge budgets,
+  compact samples, deferred timeline hydration, and explicit expansion
+  commands. Focused source and bundle checks covered MCP tool registration,
+  first-ref preference, and graph-bridge behavior; full source and bundle
+  pytest both returned `411 passed`, and `live-scenario-corpus check` returned
+  `14/14` passed with no actionable gaps.
 
 ## Probe Notes
 

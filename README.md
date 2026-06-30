@@ -514,12 +514,14 @@ preview neighborhoods by default.
 strong refs, weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/
 decisions, open questions, and a read-first route.
 `graph-bridge` is the compact first graph route when the question is how two
-operational anchors are connected. It combines shallow side neighborhoods,
-compact side-neighborhood event/ref samples, evidence refs, freshness, noise
-flags, timings, and expansion commands without turning graph output into
-reviewed truth. The default packet intentionally keeps dense anchors cheap;
-open the returned `graph-timeline` or `shortest_path` expansion only when the
-task really needs deeper ordering or a deeper graph path.
+operational anchors are connected. It combines side neighborhoods at the
+requested bounded depth, compact side-neighborhood event/ref samples, evidence
+refs, freshness, noise flags, timings, and expansion commands without turning
+graph output into reviewed truth. The default packet keeps dense anchors cheap
+through node/edge budgets and deferred timeline hydration; lower `--max-depth`
+for a stricter shallow probe, or open the returned `graph-timeline` or
+`shortest_path` expansion when the task needs deeper ordering or a deeper graph
+path.
 `performance-baseline` is route-family aware: `--kind agent_event` measures the
 structured `agent-responses`/agent-event shard route and skips entity
 usage/neighborhood/GraphRAG steps by default. Use explicit graph or GraphRAG
