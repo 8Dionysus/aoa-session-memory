@@ -60477,6 +60477,10 @@ def session_memory_maintenance_next_actions(
         or bool(route_search.get("needs_refresh"))
         or bool(route_atlas.get("needs_refresh"))
     )
+    route_specific_projection_needs = (
+        bool(route_status.get("search_shards_repair_needed"))
+        or bool(route_status.get("operational_route_rollup_repair_needed"))
+    )
     search_reasons = {str(item) for item in search.get("reasons", []) if item}
     search_contract_state_drift = (
         "projection_fingerprint_mode_changed" in search_reasons
@@ -60519,7 +60523,7 @@ def session_memory_maintenance_next_actions(
                 "note": "Refresh generated entity registry snapshot and its search documents together; it does not repair or promote truth.",
             }
         )
-    if route_status.get("needs_index_maintenance") and (route_or_cache_index_needs or not entity_registry_needs):
+    if route_status.get("needs_index_maintenance") and route_or_cache_index_needs:
         actions.append(
             {
                 "id": "repair_index_read_models",
@@ -60527,6 +60531,10 @@ def session_memory_maintenance_next_actions(
                 "command": [*cli, "index-maintenance", "all", *root_args, "--apply", "--skip-token-accounting", "--write-report"],
             }
         )
+    elif route_status.get("needs_index_maintenance") and route_specific_projection_needs:
+        # Search shards and operational route-rollup have narrower next actions
+        # added by the maintenance-status composition layer.
+        pass
     if graph.get("needs_full_rebuild"):
         empty_store = any(reason in graph_diagnostics for reason in ("graph_store_nodes_empty", "graph_store_edges_empty"))
         schema_or_store_version_rebuild = any(
@@ -61240,8 +61248,41 @@ def session_memory_maintenance_status(
         isinstance(action, dict) and action.get("id") == search_projection_next_action.get("id")
         for action in next_actions
     ):
-        if next_actions and isinstance(next_actions[0], dict) and next_actions[0].get("id") == "use_graph_search":
+        search_projection_advisory_only = search_projection_next_action.get("id") == "run_operational_shrink_gates"
+        if search_projection_advisory_only:
+            next_actions.append(search_projection_next_action)
+        elif next_actions and isinstance(next_actions[0], dict) and next_actions[0].get("id") == "use_graph_search":
             next_actions = [search_projection_next_action]
+            recommendation = "run_maintenance"
+            agent_route = session_memory_agent_route_status(
+                recommendation=recommendation,
+                search=search,
+                graph=graph,
+                route=route,
+                live_tail=live_tail,
+            )
+            agent_route["entity_registry_status"] = entity_registry.get("status")
+            agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
+            agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, agent, script, validator, test, eval, git, graph, memory, goal, event class, decision thread, error, receipt, or route entity."
+        elif next_actions and isinstance(next_actions[0], dict) and (
+            next_actions[0].get("id") == "wait_live_catchup"
+            or (
+                next_actions[0].get("id") == "run_live_catchup"
+                and next_actions[0].get("catchup_command_kind") == "graph_queue_maintenance"
+            )
+        ):
+            next_actions = [search_projection_next_action, *next_actions]
+            recommendation = "run_maintenance"
+            agent_route = session_memory_agent_route_status(
+                recommendation=recommendation,
+                search=search,
+                graph=graph,
+                route=route,
+                live_tail=live_tail,
+            )
+            agent_route["entity_registry_status"] = entity_registry.get("status")
+            agent_route["entity_registry_entities"] = entity_registry.get("entity_count")
+            agent_route["entity_registry_route"] = "Use entity-registry/trace-route before broad raw search when the anchor is a skill, MCP, hook, tool, API, agent, script, validator, test, eval, git, graph, memory, goal, event class, decision thread, error, receipt, or route entity."
         else:
             next_actions.append(search_projection_next_action)
     timers_status = session_memory_timer_status() if include_timers else {"status": "not_requested", "timers": [], "diagnostics": []}

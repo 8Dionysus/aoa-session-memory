@@ -932,6 +932,12 @@ when status detects a single source shard mismatch, it exposes an incremental
 command. The scoped command replaces only that shard in the generated rollup
 DB, preserves other shard rows and ref samples, and keeps read-only consumers on
 the previous snapshot until the atomic replace succeeds.
+When route/search/atlas caches are otherwise current, this dedicated rollup
+repair must appear before generic `index-maintenance all` and before graph-only
+live-tail catch-up. A current rollup may still expose
+`search-operational-shrink-gates` as a read-only pressure advisory, but that
+advisory is not a blocking maintenance repair and must not prevent normal
+graph/search use.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.

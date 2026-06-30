@@ -1326,6 +1326,11 @@ cardinality plan.
 a generated read-model repair when search shards are current. This lets
 `auto-maintenance` refresh the rollup through the normal maintenance pipeline
 without giving the rollup authority over raw transcripts or segment evidence.
+When the only stale read-model is this rollup, `maintenance-status` surfaces
+the dedicated rollup repair instead of a broad `index-maintenance all`; graph
+live-tail catch-up remains a separate follow-up. When the rollup is already
+current, the shrink-gate command is an advisory read-only pressure check, not a
+blocking repair.
 
 For MCP and agent fast paths, prefer structured filters such as `--agent-event`,
 `--session-act`, `--route-signal`, `--doc-type`, and date bounds. If a text query

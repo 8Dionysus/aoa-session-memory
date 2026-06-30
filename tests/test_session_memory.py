@@ -15228,6 +15228,275 @@ def test_maintenance_status_surfaces_search_shard_tail_as_agent_action(tmp_path:
     assert compact["next_actions"][0]["raw_text_query_support"] == module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK
 
 
+def test_maintenance_status_prioritizes_rollup_repair_over_generic_index_all(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now = time.time()
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {
+            "ok": True,
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready_with_deferred_live_updates",
+                    "count_mode": "not_counted_hot",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "raw_lexical_policy": {
+                        "mode": module.SEARCH_RAW_LEXICAL_POLICY_MODE,
+                        "effective_max_raw_bytes": module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+                        "unbounded": False,
+                    },
+                    "freshness": {
+                        "status": "current_with_deferred_live_updates",
+                        "actionable_dirty_session_count": 0,
+                        "deferred_live_session_count": 1,
+                        "dirty_session_count": 1,
+                        "missing_freshness_state_count": 0,
+                        "deferred_live_sessions": [
+                            {
+                                "session_id": "live-wait",
+                                "session_label": "2026-06-30__001__live-wait",
+                                "reason": "recent_live_projection_updates_deferred",
+                                "deferred_live_reason": "recent_live_codex_transcript_update",
+                                "source_latest_mtime": now,
+                                "live_transcript_mtime": now,
+                            }
+                        ],
+                        "reasons": ["recent_live_projection_updates_deferred"],
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": False,
+            "source_scan": False,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "search_index": {"needs_refresh": False},
+            "atlas_index": {"needs_refresh": False},
+            "entity_registry": {"needs_maintenance": False},
+            "search_shards_repair_needed": False,
+            "operational_route_rollup_repair_needed": True,
+            "diagnostics": [
+                "index_maintenance_needed",
+                "operational_route_rollup_missing_or_stale",
+                "operational_route_rollup_selected_shards_changed",
+            ],
+            "graph_store": {
+                "status": "current",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "source_count": 3,
+                "source_state": {"source_count": 3, "status_counts": {"clean": 3}},
+                "ledger": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "queue": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "diagnostics": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 3, "diagnostics": []},
+    )
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 1,
+                "graph_actionable_source_count": 0,
+                "graph_dirty_count": 0,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current", "materialized_shard_count": 2},
+            "search_pressure": {
+                "status": "large_projection_stack",
+                "freshness_status": "current",
+                "combined_search_projection_total_human": "15.9 GiB",
+                "document_hotset": {
+                    "status": "latest_materialization_event_hotset",
+                    "document_count": 1_579_290,
+                    "latest_materialization_event_document_count": 1_564_633,
+                },
+                "operational_route_rollup": {
+                    "status": "stale",
+                    "shard_count": 2,
+                    "route_rollup_row_count": 30_257,
+                    "source_mismatch_count": 0,
+                    "incremental_refresh_route": "",
+                },
+            },
+            "warnings": [],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert payload["recommendation"] == "run_maintenance"
+    assert payload["agent_route"]["action"] == "run_maintenance_before_graph_search"
+    assert payload["agent_route"]["maintenance_required"] is True
+    assert payload["agent_route"]["search_projection_action_pending"] is True
+    assert payload["next_actions"][0]["id"] == "materialize_search_operational_route_rollup"
+    assert payload["next_actions"][0]["route_kind"] == "search_operational_route_rollup"
+    assert payload["next_actions"][1]["id"] == "wait_live_catchup"
+    assert payload["next_actions"][1]["live_tail_status"] == "waiting_for_quiet_window"
+    command_text = module.shlex.join(payload["next_actions"][0]["command"])
+    assert "search-operational-route-rollup" in command_text
+    assert "--apply" in command_text
+    assert "index-maintenance all" not in command_text
+    assert all(action.get("id") != "repair_index_read_models" for action in payload["next_actions"])
+    assert payload["exact_next_command"] == command_text
+
+
+def test_maintenance_status_treats_current_rollup_shrink_gate_as_advisory(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {
+            "ok": True,
+            "freshness_mode": "hot",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready",
+                    "count_mode": "not_counted_hot",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "raw_lexical_policy": {
+                        "mode": module.SEARCH_RAW_LEXICAL_POLICY_MODE,
+                        "effective_max_raw_bytes": module.SEARCH_RAW_LEXICAL_DEFAULT_MAX_BYTES,
+                        "unbounded": False,
+                    },
+                    "freshness": {
+                        "status": "current",
+                        "actionable_dirty_session_count": 0,
+                        "deferred_live_session_count": 0,
+                        "dirty_session_count": 0,
+                        "missing_freshness_state_count": 0,
+                        "reasons": [],
+                    },
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": [],
+            "graph_store": {
+                "status": "current",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+                "source_count": 3,
+                "source_state": {"source_count": 3, "status_counts": {"clean": 3}},
+                "ledger": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "queue": {"actionable_count": 0, "deferred_live_source_count": 0},
+                "diagnostics": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {"status": "current", "needs_maintenance": False, "entity_count": 3, "diagnostics": []},
+    )
+    monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 0,
+                "graph_actionable_source_count": 0,
+                "graph_dirty_count": 0,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current", "materialized_shard_count": 3},
+            "search_pressure": {
+                "status": "large_projection_stack",
+                "freshness_status": "current",
+                "combined_search_projection_total_human": "15.9 GiB",
+                "document_hotset": {
+                    "status": "latest_materialization_event_hotset",
+                    "document_count": 1_579_290,
+                    "latest_materialization_event_document_count": 1_564_633,
+                },
+                "operational_route_rollup": {
+                    "status": "current",
+                    "shard_count": 3,
+                    "route_rollup_row_count": 53_794,
+                    "candidate_route_posting_count": 1_533_263,
+                    "source_mismatch_count": 0,
+                },
+            },
+            "warnings": [],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert payload["ok"] is True
+    assert payload["recommendation"] == "use_graph_search"
+    assert payload["agent_route"]["maintenance_required"] is False
+    assert payload["agent_route"]["can_use_graph_search"] is True
+    assert payload["agent_route"]["search_projection_action_pending"] is True
+    assert payload["next_actions"][0]["id"] == "use_graph_search"
+    assert payload["next_actions"][1]["id"] == "run_operational_shrink_gates"
+    assert payload["next_actions"][1]["route_kind"] == "search_operational_shrink_gate_check"
+    assert "search-operational-shrink-gates" in module.shlex.join(payload["next_actions"][1]["command"])
+
+
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

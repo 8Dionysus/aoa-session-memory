@@ -2243,6 +2243,26 @@ Maintenance gates:
   "aoa_session_memory_mcp"]`, `mcp_access.response_compacted=true`, and
   `mcp_access.does_not_materialize_rollup=true`.
 
+- 2026-06-30 maintenance route ordering proof: `maintenance-status --full`
+  no longer lets stale operational route-rollup hide behind generic
+  `index-maintenance all` or graph-only live-tail catch-up. A live stale rollup
+  first exposed `materialize_search_operational_route_rollup`, then after a
+  targeted search live-tail catch-up exposed a scoped
+  `search-operational-route-rollup --shard month/2026-06 --apply
+  --write-report` route. The scoped replacement returned `ok=true`,
+  `status=current`, and `elapsed_ms=88132`; follow-up graph queue live catch-up
+  returned `ok=true`, `selected_count=23`, `remaining_count=0`,
+  `budget_exhausted=false`, and `elapsed_ms=14334`. Final
+  `maintenance-status --full` returned `ok=true`,
+  `recommendation=use_graph_search`, `route_diagnostics=[]`,
+  `rollup_status=current`, `search_deferred=0`, and graph actionable count
+  `0`; `live-scenario-corpus check --write-report` returned `case_count=14`,
+  `passed_count=14`, `failed_count=0`, and `actionable_gap_count=0`.
+  Regression coverage now checks that rollup repair outranks generic
+  `index-maintenance all`, graph-only live catch-up does not hide rollup
+  repair, and current-rollup shrink gates remain read-only advisory actions
+  rather than blocking maintenance.
+
 - 2026-06-28 graph queue aggregate-refresh tail reduction: live graph queue
   reports showed that the remaining interactive cost was dominated by
   `replace_sources` aggregate refresh, especially edge representative payload
