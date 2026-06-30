@@ -173,6 +173,12 @@ reasoning content. When a packet says
 `preview_source=encrypted_reasoning_boundary`, the encrypted content is
 unavailable by design.
 
+Assistant transitions keep handoff and resume separate. Use `--agent-event
+handoff` for explicit next-agent handoff packets and `--agent-event resume` for
+session/context resume packets. The legacy `assistant_handoff_or_resume` filter
+expands to both new classes plus the old class for pre-v3 indexes; do not use
+it when the task needs to distinguish transition meaning.
+
 Use `task-episodes` to reconstruct a bounded task interval with the user
 prompt, plans, tool/action refs, verification refs, errors/blockers, and
 closeout refs. Use `answer-neighborhood` when the answer itself is not enough

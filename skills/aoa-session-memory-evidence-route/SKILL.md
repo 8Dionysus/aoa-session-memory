@@ -186,10 +186,12 @@ If an exact MCP tool is discovered but the call returns `Transport closed`,
 treat it as a Codex/MCP transport reload gate, not as evidence failure and not
 as permission to widen into broad raw search. If the preflight tool itself is
 callable, run `aoa_session_transport_preflight()` first. If direct MCP calls are
-already closed, use the CLI preflight from the `abyss-stack` checkout:
+already closed, use the CLI preflight from the checkout that owns the
+`aoa-session-memory-mcp` service:
 
 ```bash
-cd /home/dionysus/src/abyss-stack
+ABYSS_STACK_ROOT=<path-to-abyss-stack-checkout>
+cd "$ABYSS_STACK_ROOT"
 PYTHONPATH=mcp/services/aoa-session-memory-mcp/src \
   python3 -m aoa_session_memory_mcp.cli transport-preflight
 ```
@@ -197,7 +199,7 @@ PYTHONPATH=mcp/services/aoa-session-memory-mcp/src \
 Then verify the configured stdio plane:
 
 ```bash
-python3 /home/dionysus/src/abyss-stack/mcp/services/aoa-session-memory-mcp/scripts/validate_session_memory_mcp.py
+python3 mcp/services/aoa-session-memory-mcp/scripts/validate_session_memory_mcp.py
 ```
 
 If configured stdio is green but the current Codex session has no fresh

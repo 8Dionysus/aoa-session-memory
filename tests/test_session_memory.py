@@ -717,6 +717,89 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert "explain" not in windows_without_explain["results"][0]
 
 
+def test_agent_event_splits_handoff_resume_and_ignores_external_restart(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-30T00-00-00-agent-transition.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-30T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-transition", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-30T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Продолжай проверку session evidence"}]}},
+            {"timestamp": "2026-06-30T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Перезапускаю Chromium, чтобы расширение перечитало service worker."}]}},
+            {"timestamp": "2026-06-30T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Вижу перезапуск сессии, восстанавливаю контекст и проверяю refs."}]}},
+            {"timestamp": "2026-06-30T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Handoff для следующего агента: продолжить с проверки raw refs."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-transition",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
+    segment_index = json.loads(next((session_dir / "segments").glob("*.index.json")).read_text(encoding="utf-8"))
+    events_by_line = {event["line"]: event for event in segment_index["events"]}
+    external_restart = events_by_line[3]
+    resume = events_by_line[4]
+    handoff = events_by_line[5]
+
+    assert external_restart["facets"]["agent_event"]["class"] == "assistant_answer"
+    assert "transition_kind" not in external_restart["facets"]["agent_event"]
+    assert resume["facets"]["agent_event"]["class"] == "assistant_resume"
+    assert resume["facets"]["agent_event"]["transition_kind"] == "resume"
+    assert handoff["facets"]["agent_event"]["class"] == "assistant_handoff"
+    assert handoff["facets"]["agent_event"]["transition_kind"] == "handoff"
+
+    session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
+    episode = session_index["task_episodes"][0]
+    transition_agent_events = [ref.get("agent_event") for ref in episode["transition_refs"]]
+    assert episode["status"] == "handoff"
+    assert transition_agent_events == ["assistant_resume", "assistant_handoff"]
+
+    module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)
+    handoff_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["handoff"],
+        limit=5,
+    )
+    resume_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["resume"],
+        limit=5,
+    )
+    legacy_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_handoff_or_resume"],
+        limit=5,
+    )
+
+    assert handoff_route["agent_events"] == ["assistant_handoff"]
+    assert handoff_route["result_count"] == 1
+    assert handoff_route["results"][0]["agent_event"] == "assistant_handoff"
+    assert resume_route["agent_events"] == ["assistant_resume"]
+    assert resume_route["result_count"] == 1
+    assert resume_route["results"][0]["agent_event"] == "assistant_resume"
+    assert legacy_route["agent_events"] == [
+        "assistant_handoff",
+        "assistant_resume",
+        "assistant_handoff_or_resume",
+    ]
+    assert legacy_route["requested_agent_events"] == ["assistant_handoff_or_resume"]
+    assert legacy_route["result_count"] == 2
+    assert {item["agent_event"] for item in legacy_route["results"]} == {"assistant_handoff", "assistant_resume"}
+
+
 def test_agent_reasoning_windows_bridge_from_query_matched_agent_answer(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -2028,6 +2111,8 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert first["created_ref"]["raw_ref"] == "raw:line:3"
     assert first["completed_ref"]["raw_ref"] == "raw:line:7"
     assert first["task_episode_ids"] == ["task-0001"]
+    assert "goal_updated" in first["event_kinds"]
+    assert module.graph_route_node_id("goal", "goal_updated") in first["graph_refs"]
     assert "missing_create" not in first["ambiguity_flags"]
     assert second["goal_id"] == "goal-0002"
     assert second["status"] == "blocked"
@@ -2039,6 +2124,8 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert "create_time_from_goal_inspection" in second["ambiguity_flags"]
     assert second["blocked_ref"]["raw_ref"] == "raw:line:12"
     assert second["task_episode_ids"] == ["task-0002"]
+    assert "goal_updated" in second["event_kinds"]
+    assert module.graph_route_node_id("goal", "goal_updated") in second["graph_refs"]
     assert second["state_observations"][0]["refs"]["raw_ref"] == "raw:line:11"
     assert session_index["route_signal_counts"]["goal"]["goal_completed"] == 1
     assert session_index["route_signal_counts"]["goal"]["goal_blocked"] == 1
@@ -2598,6 +2685,136 @@ def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path:
     assert payload["read_mode"] == "generated_snapshot"
     assert payload["entity_count"] == 1
     assert payload["entries"][0]["canonical_key"] == "aoa_session_memory_mcp"
+
+
+def test_entity_registry_query_no_runtime_uses_archived_routes_not_runtime_snapshot(tmp_path: Path, capsys: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-06-27T12:00:00Z",
+            "generated_at_epoch": 1782561600.0,
+            "ok": True,
+            "aoa_root": str(aoa_root),
+            "registry_path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
+            "source_surfaces": ["runtime_skills"],
+            "counts_by_kind": {"skill": 1},
+            "counts_by_status": {"active": 1},
+            "entries": [
+                {
+                    "entity_id": "skill:runtime_only_skill",
+                    "kind": "skill",
+                    "canonical_key": "runtime_only_skill",
+                    "aliases": ["runtime-only-skill"],
+                    "status": "active",
+                    "source_surface": "runtime_skills",
+                }
+            ],
+        },
+    )
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+    conn.execute(
+        "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("skill", "archived_only_skill", "skill:archived_only_skill"),
+    )
+    route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", ("skill:archived_only_skill",)).fetchone()[0]
+    cursor = conn.execute(
+        """
+        INSERT INTO documents(
+          id, doc_type, session_id, session_label, session_date, event_id,
+          event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "event:archived-only:000001",
+            "event",
+            "archived-only",
+            "archived-only",
+            "2026-06-27",
+            "000001",
+            "COMMAND",
+            "tool_call",
+            "usage",
+            "|skill:archived_only_skill|",
+            "raw:line:1",
+            "session.manifest.json",
+            "{}",
+        ),
+    )
+    conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+    conn.commit()
+    conn.close()
+
+    rc = module.command_entity_registry(
+        SimpleNamespace(
+            workspace_root=None,
+            aoa_root=str(aoa_root),
+            lookup="",
+            kind="skill",
+            query="",
+            limit=5,
+            write=False,
+            no_runtime=True,
+            no_unknown=False,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert [entry["canonical_key"] for entry in payload["entries"]] == ["archived_only_skill"]
+    assert payload["entries"][0]["source_surface"] == "archived_route_terms"
+    assert "runtime_skills" not in payload.get("source_surfaces", [])
+
+
+def test_entity_registry_lookup_no_runtime_ignores_runtime_snapshot_entries(tmp_path: Path, capsys: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-06-27T12:00:00Z",
+            "generated_at_epoch": 1782561600.0,
+            "ok": True,
+            "aoa_root": str(aoa_root),
+            "registry_path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
+            "source_surfaces": ["runtime_skills"],
+            "counts_by_kind": {"skill": 1},
+            "counts_by_status": {"active": 1},
+            "entries": [
+                {
+                    "entity_id": "skill:runtime_only_skill",
+                    "kind": "skill",
+                    "canonical_key": "runtime_only_skill",
+                    "aliases": ["runtime-only-skill"],
+                    "status": "active",
+                    "source_surface": "runtime_skills",
+                }
+            ],
+        },
+    )
+
+    rc = module.command_entity_registry(
+        SimpleNamespace(
+            workspace_root=None,
+            aoa_root=str(aoa_root),
+            lookup="runtime-only-skill",
+            kind="skill",
+            query="",
+            limit=5,
+            write=False,
+            no_runtime=True,
+            no_unknown=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["match_count"] == 0
+    assert payload["entries"] == []
 
 
 def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Path) -> None:
@@ -4991,6 +5208,22 @@ def test_live_scenario_result_accepts_entity_usage_ref_counts() -> None:
     assert result["evidence_ref_counts"]["raw_ref"] >= 1
     assert result["first_ref"]["raw"] == "raw:line:1"
     assert "no_raw_or_segment_refs_detected" not in result.get("quality_flags", [])
+
+
+def test_live_scenario_result_preserves_failed_entity_usage_payload_without_samples() -> None:
+    result = module.live_scenario_result(
+        "entity_usage",
+        {
+            "ok": False,
+            "quality": {"sample_count": 0, "passed_count": 0, "warn_count": 0, "failed_count": 0},
+            "samples": [],
+            "diagnostics": ["search_index_missing"],
+        },
+        elapsed_ms=1,
+    )
+
+    assert result["status"] == "failed"
+    assert result["ok"] is False
 
 
 def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> None:

@@ -278,7 +278,7 @@ owning repository, eval layer, skill bundle, or reviewed memory surface.
 ## Agent Event And Task Episode Route
 
 Agent answers, progress updates, reasoning boundaries, closeouts, blockers,
-handoffs, and verification reports are generated navigation classes under
+handoffs, resumes, and verification reports are generated navigation classes under
 `facets.agent_event`. They are not reviewed truth and they do not expose hidden
 reasoning content. A reasoning item is indexed as a boundary/context event with
 refs and neighbors; interpretation belongs to a later reviewed layer.
@@ -307,6 +307,12 @@ python3 scripts/aoa_session_memory.py answer-neighborhood --session latest --lim
 python3 scripts/aoa_session_memory.py agent-event-audit all \
   --order longest --min-events 1000 --limit 5 --probe-routes --write-report
 ```
+
+Handoff and resume are distinct transition classes in schema v3:
+`assistant_handoff` marks explicit next-agent handoff, while
+`assistant_resume` marks session or context rehydration/resume. The legacy
+`assistant_handoff_or_resume` route remains a compatibility filter and expands
+to both new classes plus any old indexed class.
 
 `task-episodes` defaults to `--order recent` so an agent lands on the live tail
 of a long session first. Use `--order chronological` when replaying a session

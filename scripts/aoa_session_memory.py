@@ -87,7 +87,7 @@ RAW_BLOCK_STORAGE_MODE_PLAIN = "plain_raw_jsonl_v1"
 RAW_BLOCK_STORAGE_MODE_GZIP = "compressed_gzip_v1"
 CONVERSATION_ACT_SCHEMA_VERSION = 1
 SESSION_ACT_SCHEMA_VERSION = 1
-AGENT_EVENT_SCHEMA_VERSION = 2
+AGENT_EVENT_SCHEMA_VERSION = 3
 TASK_EPISODE_SCHEMA_VERSION = 2
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 GOAL_LIFECYCLE_SCHEMA_VERSION = 2
@@ -4935,6 +4935,8 @@ def build_entity_registry(
 
 
 def load_entity_registry(aoa_root: Path, *, include_runtime: bool = True) -> dict[str, Any]:
+    if not include_runtime:
+        return build_entity_registry(aoa_root=aoa_root, write=False, include_runtime=False)
     path = aoa_root / ENTITY_REGISTRY_PATH
     payload = read_json(path, {}) if path.exists() else {}
     if isinstance(payload, dict) and payload.get("artifact_type") == "entity_registry_snapshot":
@@ -4990,8 +4992,8 @@ def filter_entity_registry_snapshot(
     }
 
 
-def entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    payload = load_entity_registry(aoa_root)
+def entity_registry_entry_index(aoa_root: Path, *, include_runtime: bool = True) -> dict[tuple[str, str], dict[str, Any]]:
+    payload = load_entity_registry(aoa_root, include_runtime=include_runtime)
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
     index: dict[tuple[str, str], dict[str, Any]] = {}
     for entry in entries:
@@ -5008,8 +5010,8 @@ def entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[st
     return index
 
 
-def cached_entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    root_key = str(aoa_root.resolve())
+def cached_entity_registry_entry_index(aoa_root: Path, *, include_runtime: bool = True) -> dict[tuple[str, str], dict[str, Any]]:
+    root_key = f"{aoa_root.resolve()}|include_runtime={include_runtime}"
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     try:
         mtime = registry_path.stat().st_mtime if registry_path.exists() else 0.0
@@ -5018,7 +5020,7 @@ def cached_entity_registry_entry_index(aoa_root: Path) -> dict[tuple[str, str], 
     cached = ENTITY_REGISTRY_INDEX_CACHE.get(root_key)
     if cached and cached[0] == mtime:
         return cached[1]
-    index = entity_registry_entry_index(aoa_root)
+    index = entity_registry_entry_index(aoa_root, include_runtime=include_runtime)
     ENTITY_REGISTRY_INDEX_CACHE[root_key] = (mtime, index)
     return index
 
@@ -5029,10 +5031,11 @@ def entity_registry_lookup(
     anchor: str,
     kind: str = "auto",
     include_unknown: bool = True,
+    include_runtime: bool = True,
 ) -> dict[str, Any]:
     normalized_kind = route_key_slug(kind, fallback="auto")
     aliases = trace_anchor_aliases(anchor)
-    index = entity_registry_entry_index(aoa_root)
+    index = entity_registry_entry_index(aoa_root, include_runtime=include_runtime)
     if normalized_kind == "mcp":
         search_kinds = ["mcp_service"]
     elif normalized_kind in {"auto", "all"}:
@@ -5841,6 +5844,80 @@ def looks_like_final_closeout(text: str) -> bool:
     return True
 
 
+def classify_assistant_handoff_resume_signal(text: str) -> tuple[str, str]:
+    if not text:
+        return "", ""
+    handoff_markers = [
+        "handoff",
+        "handoff summary",
+        "next agent",
+        "следующему агент",
+        "следующего агент",
+        "для следующего агент",
+        "передаю следующ",
+        "передача следующ",
+        "продолжить с",
+    ]
+    if text_has_any(text, handoff_markers):
+        return "assistant_handoff", "handoff"
+
+    resume_context_markers = [
+        ".aoa",
+        "agent",
+        "codex",
+        "compaction",
+        "context",
+        "goal",
+        "session",
+        "thread",
+        "агент",
+        "компак",
+        "контекст",
+        "сесс",
+        "цель",
+    ]
+    explicit_resume_markers = [
+        "rehydrate",
+        "resume from",
+        "resume session",
+        "resuming from",
+        "session resume",
+        "восстанавливаю контекст",
+        "перезапустил эту сессию",
+        "перезапустил сессию",
+        "перезагрузил эту сессию",
+        "перезагрузил сессию",
+        "после перезапуска сесс",
+        "после перезагрузки сесс",
+        "сессия перезапущ",
+    ]
+    if text_has_any(text, explicit_resume_markers):
+        return "assistant_resume", "resume"
+
+    restart_markers = ["restart", "перезапуск", "перезапуст", "перезагруз"]
+    external_restart_markers = [
+        "browser",
+        "chrome",
+        "chromium",
+        "container",
+        "daemon",
+        "extension",
+        "mcp host",
+        "podman",
+        "service worker",
+        "smoke",
+        "браузер",
+        "профил",
+    ]
+    if (
+        text_has_any(text, restart_markers)
+        and text_has_any(text, resume_context_markers)
+        and not text_has_any(text, external_restart_markers)
+    ):
+        return "assistant_resume", "resume"
+    return "", ""
+
+
 def classify_agent_event(
     event_type: str,
     source_type: str,
@@ -5868,6 +5945,7 @@ def classify_agent_event(
     canonical = True
     visibility = "public"
     content_status = "public_text"
+    transition_kind = ""
     if is_stream_assistant_message:
         source_lane = "event_msg_stream"
         canonical = False
@@ -5894,8 +5972,9 @@ def classify_agent_event(
         or event_type == "DEAD_BRANCH"
     ):
         agent_class = "assistant_blocker_report"
-    elif text_has_any(semantic_lower, ["handoff", "resume", "rehydrate", "перезапуск", "перезапуст", "следующему агент", "продолжить с"]):
-        agent_class = "assistant_handoff_or_resume"
+    elif (transition_signal := classify_assistant_handoff_resume_signal(semantic_lower))[0]:
+        transition_class, transition_kind = transition_signal
+        agent_class = transition_class
     elif text_has_any(semantic_lower, ["ты прав", "я не понял", "исправляю", "ошибся", "ошибка с моей стороны"]):
         agent_class = "assistant_correction_ack"
     elif conversation_kind == "assistant_verification_report":
@@ -5913,7 +5992,7 @@ def classify_agent_event(
         flags.append("progress_marker_overridden")
     if is_reasoning and semantic_lower:
         flags.append("reasoning_text_present_raw_only")
-    return {
+    payload = {
         "schema_version": AGENT_EVENT_SCHEMA_VERSION,
         "class": agent_class,
         "role": agent_class,
@@ -5929,6 +6008,9 @@ def classify_agent_event(
         "confidence": "high" if canonical else "medium",
         "ambiguity_flags": flags,
     }
+    if transition_kind:
+        payload["transition_kind"] = transition_kind
+    return payload
 
 
 def classify_command_or_tool_act(event_type: str, facets: dict[str, Any], tags: set[str]) -> tuple[str, str, str]:
@@ -8235,9 +8317,9 @@ class TaskEpisodeBuilder:
         elif agent_class == "assistant_blocker_report":
             append_task_episode_ref(self.current, "blocker_refs", event, self.segments)
             self.current["status"] = "blocked"
-        elif agent_class in {"assistant_handoff_or_resume", "assistant_correction_ack"}:
+        elif agent_class in {"assistant_handoff", "assistant_resume", "assistant_handoff_or_resume", "assistant_correction_ack"}:
             append_task_episode_ref(self.current, "transition_refs", event, self.segments)
-            if agent_class == "assistant_handoff_or_resume" and self.current.get("status") == "open":
+            if agent_class in {"assistant_handoff", "assistant_handoff_or_resume"} and self.current.get("status") == "open":
                 self.current["status"] = "handoff"
         elif agent_class == "assistant_answer":
             append_task_episode_ref(self.current, "answer_refs", event, self.segments)
@@ -8473,13 +8555,28 @@ def new_goal_lifecycle(
     }
 
 
+def goal_lifecycle_event_kinds(event: dict[str, Any]) -> list[str]:
+    kinds = [str(event.get("kind") or "")]
+    route_signals = event.get("route_signals")
+    if isinstance(route_signals, list):
+        for signal in route_signals:
+            if isinstance(signal, str):
+                layer, _, key = signal.partition(":")
+                if layer == "goal":
+                    kinds.append(key)
+            elif isinstance(signal, dict) and str(signal.get("layer") or "") == "goal":
+                kinds.append(str(signal.get("key") or ""))
+    return unique_preserving_order(kinds)
+
+
 def append_goal_lifecycle_event(lifecycle: dict[str, Any], event: dict[str, Any]) -> None:
     events = lifecycle.setdefault("events", [])
     if isinstance(events, list):
         events.append(event)
     lifecycle["event_count"] = int_value(lifecycle.get("event_count"), 0) + 1
     kind = str(event.get("kind") or "")
-    lifecycle["event_kinds"] = unique_preserving_order([*lifecycle.get("event_kinds", []), kind])
+    event_kinds = goal_lifecycle_event_kinds(event)
+    lifecycle["event_kinds"] = unique_preserving_order([*lifecycle.get("event_kinds", []), *event_kinds])
     lifecycle["event_ids"] = unique_preserving_order([*lifecycle.get("event_ids", []), event.get("event_id")])
     task_episode_id = str(event.get("task_episode_id") or "")
     lifecycle["task_episode_ids"] = unique_preserving_order([*lifecycle.get("task_episode_ids", []), task_episode_id])
@@ -8490,7 +8587,7 @@ def append_goal_lifecycle_event(lifecycle: dict[str, Any], event: dict[str, Any]
         [
             *lifecycle.get("graph_refs", []),
             refs.get("graph_event_node"),
-            graph_route_node_id("goal", kind) if kind else "",
+            *(graph_route_node_id("goal", event_kind) for event_kind in event_kinds),
         ]
     )
     if not lifecycle.get("first_ref"):
@@ -36005,9 +36102,16 @@ AGENT_RESPONSE_ROUTE_CLASSES = [
     "assistant_final_closeout",
     "assistant_verification_report",
     "assistant_blocker_report",
+    "assistant_handoff",
+    "assistant_resume",
     "assistant_handoff_or_resume",
     "assistant_correction_ack",
 ]
+
+AGENT_EVENT_ROUTE_ALIAS_GROUPS = {
+    "handoff_or_resume": ["assistant_handoff", "assistant_resume", "assistant_handoff_or_resume"],
+    "assistant_handoff_or_resume": ["assistant_handoff", "assistant_resume", "assistant_handoff_or_resume"],
+}
 
 AGENT_EVENT_ROUTE_ALIASES = {
     "answer": "assistant_answer",
@@ -36043,8 +36147,10 @@ AGENT_EVENT_ROUTE_ALIASES = {
     "blocker": "assistant_blocker_report",
     "blocked": "assistant_blocker_report",
     "assistant_blocker_report": "assistant_blocker_report",
-    "handoff": "assistant_handoff_or_resume",
-    "resume": "assistant_handoff_or_resume",
+    "handoff": "assistant_handoff",
+    "assistant_handoff": "assistant_handoff",
+    "resume": "assistant_resume",
+    "assistant_resume": "assistant_resume",
     "assistant_handoff_or_resume": "assistant_handoff_or_resume",
     "correction": "assistant_correction_ack",
     "correction_ack": "assistant_correction_ack",
@@ -36054,19 +36160,27 @@ AGENT_EVENT_ROUTE_ALIASES = {
 }
 
 
-def normalize_agent_event_route_class(value: str | None) -> str:
+def normalize_agent_event_route_class_values(value: str | None) -> list[str]:
     slug = route_key_slug(value or "", fallback="")
     if not slug:
-        return ""
-    return AGENT_EVENT_ROUTE_ALIASES.get(slug, slug)
+        return []
+    grouped = AGENT_EVENT_ROUTE_ALIAS_GROUPS.get(slug)
+    if grouped:
+        return list(grouped)
+    return [AGENT_EVENT_ROUTE_ALIASES.get(slug, slug)]
+
+
+def normalize_agent_event_route_class(value: str | None) -> str:
+    values = normalize_agent_event_route_class_values(value)
+    return values[0] if values else ""
 
 
 def normalize_agent_event_route_classes(values: list[str] | None, *, default: list[str]) -> list[str]:
     classes: list[str] = []
     for item in values or []:
-        normalized = normalize_agent_event_route_class(item)
-        if normalized and normalized not in classes:
-            classes.append(normalized)
+        for normalized in normalize_agent_event_route_class_values(item):
+            if normalized and normalized not in classes:
+                classes.append(normalized)
     return classes or list(default)
 
 
@@ -70566,6 +70680,7 @@ def command_entity_registry(args: argparse.Namespace) -> int:
             anchor=args.lookup,
             kind=args.kind,
             include_unknown=not args.no_unknown,
+            include_runtime=not args.no_runtime,
         )
     elif not args.write:
         payload = filter_entity_registry_snapshot(

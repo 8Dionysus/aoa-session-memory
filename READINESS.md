@@ -38,7 +38,10 @@ Build the `.aoa` session-memory mechanism end to end:
   `agent-progress-updates`, `agent-reasoning-windows`, `task-episodes`, and
   `answer-neighborhood`; structured list routes without text query expose
   `cost_profile` and skip raw preview/body hydration/FTS; agent-event routes
-  can use the monthly shard catalog with `--use-shards`
+  can use the monthly shard catalog with `--use-shards`; agent-event schema v3
+  separates `assistant_handoff` from `assistant_resume` while keeping
+  `assistant_handoff_or_resume` as a legacy compatibility filter for older
+  indexes
 - Agent event classification audit: `agent-event-audit` over real sessions,
   including longest-session selection, route probes, bounded raw event-shape
   samples, weak spots, and diagnostics without promoting generated classes to
