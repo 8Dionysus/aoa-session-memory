@@ -703,14 +703,15 @@ packet when the quiet window is ready instead of starting broad
 sessions launch targeted `index-maintenance <session> --skip-graph-repair
 --skip-token-accounting`; graph-only deferred live sources launch the
 ledger-seeded `graph-maintenance --use-queue --queue-seed-include-deferred-live`
-route surfaced by `maintenance-status`. Resource-blocked backlog and deep runs
+route surfaced by `maintenance-status`. Resource-blocked catchup, backlog, and
+deep runs
 fall back to a
 tightly capped probe-class graph drip instead of leaving graph maintenance
-idle. Both profiles enable this by default because unattended medium/heavy
+idle. These profiles enable this by default because unattended medium/heavy
 indexing can be capped by the host resource policy. The report keeps the outer
 maintenance profile `ok=false`, records `fallback_graph_drip`, and does not
-claim the full backlog/deep profile succeeded. The default fallback is a small
-progress drip, currently `25` graph sources with a `300s` budget and a `25`
+claim the full catchup/backlog/deep profile succeeded. The default fallback is
+a small progress drip, currently `25` graph sources with a `300s` budget and a `25`
 candidate-pool window; profile graph-drip settings control the batch, budget,
 candidate-pool window, and node/edge refresh caps unless explicit CLI overrides
 are passed. Installed user timers are part of

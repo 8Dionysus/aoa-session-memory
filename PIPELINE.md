@@ -897,17 +897,17 @@ the quiet window, the child command is the targeted
 route, not broad `auto-maintenance catchup all`. This keeps timer catch-up from
 turning a single live-tail repair into bulk archive selection or token-ledger
 backfill.
-For backlog and deep resource-blocked runs, graph drip is the safe fallback
-route: both profiles enable it by default because unattended medium/heavy
-indexing can be capped by host resource policy. If the requested
+For catchup, backlog, and deep resource-blocked runs, graph drip is the safe
+fallback route: these profiles enable it by default because unattended
+medium/heavy indexing can be capped by host resource policy. If the requested
 auto-maintenance launch is blocked by host pressure, the wrapper may run a
 capped probe-class `graph-maintenance` batch, record `fallback_graph_drip`, and
 still keep the outer report `ok=false` so agents do not mistake partial graph
-progress for a completed backlog/deep profile. The default fallback is a small
-progress drip, currently `25` graph sources with a `300s` budget and a `25`
-candidate-pool window; profile graph-drip settings control the fallback batch,
-budget, candidate-pool window, and node/edge refresh caps unless explicit CLI
-overrides are passed. Installed user timer
+progress for a completed catchup/backlog/deep profile. The default fallback is
+a small progress drip, currently `25` graph sources with a `300s` budget and a
+`25` candidate-pool window; profile graph-drip settings control the fallback
+batch, budget, candidate-pool window, and node/edge refresh caps unless
+explicit CLI overrides are passed. Installed user timer
 units must either inherit those profile defaults or carry matching explicit
 overrides; `maintenance-status` audits their `ExecStart` lines and reports
 unit drift before agents trust the automatic graph-drip route. If MCP cannot

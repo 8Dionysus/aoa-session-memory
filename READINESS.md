@@ -2377,6 +2377,26 @@ Maintenance gates:
   pytest both returned `411 passed`, and `live-scenario-corpus check` returned
   `14/14` passed with no actionable gaps.
 
+- 2026-06-30 catchup graph-drip fallback proof: live graph catch-up exposed
+  that the `catchup` resource profile could be blocked by host resource
+  pressure (`indexing_unattended_swap_used_pressure` and
+  `memory_hot_blocks_unattended_medium`) without doing graph progress, leaving
+  the mandatory auto-update path dependent on later backlog/deep timers. The
+  `catchup` profile now enables the same bounded probe-class graph-drip
+  fallback contract as backlog/deep while keeping the outer resource report
+  `ok=false`, so agents can see resource pressure and partial graph progress
+  separately. Live proof:
+  `diagnostics/20260630T204721Z__auto-maintenance-resource-catchup.json`
+  returned `status=resource_blocked_graph_drip_completed`, `mutates=true`,
+  `graph_drip_on_block_source=profile_default`, and
+  `fallback_graph_drip.status=completed` with `batch_limit=25`,
+  `budget_seconds=300`, `candidate_pool_limit=25`, and no fallback
+  diagnostics. `maintenance-status` now reports the installed catchup unit
+  contract as `expected_graph_drip_on_block=true`, `status=current`, with no
+  unit drift. Source `py_compile`, focused resource fallback tests
+  (`17 passed`), full source pytest (`416 passed`), and source `validate`
+  passed.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

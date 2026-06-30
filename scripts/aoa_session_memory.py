@@ -583,7 +583,13 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_kind": "indexing",
         "timeout_sec": 1800,
         "index_drip_on_block": False,
-        "graph_drip_on_block": False,
+        "graph_drip_on_block": True,
+        "graph_drip_batch_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
+        "graph_drip_budget_seconds": 300,
+        "graph_drip_refresh_chunk_size": GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+        "graph_drip_max_refresh_nodes": 60000,
+        "graph_drip_max_refresh_edges": 180000,
+        "graph_drip_candidate_pool_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT,
     },
     "deep": {
         "since_days": None,
@@ -814,7 +820,7 @@ PORTABLE_BUNDLE_ITEMS = [
     "skills",
     "tests",
 ]
-PORTABLE_COPY_IGNORE = {".git", ".pytest_cache", "__pycache__"}
+PORTABLE_COPY_IGNORE = {".git", ".pytest_cache", "__pycache__", "artifact.verify.json"}
 PORTABLE_EXPORT_FORCE_PRESERVE_ITEMS = {".git", "kag"}
 
 ROUTE_SIGNAL_LAYER_TO_AXIS = {

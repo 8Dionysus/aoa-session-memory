@@ -16195,7 +16195,7 @@ def test_compact_maintenance_child_summary_promotes_nested_rollup_state() -> Non
     assert summary["actions"] == [{"id": "refresh_operational_route_rollup", "status": "applied", "needed": True}]
 
 
-def test_catchup_auto_maintenance_resource_defaults_to_blocked_without_index_drip_fallback(
+def test_catchup_auto_maintenance_resource_can_disable_profile_graph_drip(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -16227,6 +16227,7 @@ def test_catchup_auto_maintenance_resource_defaults_to_blocked_without_index_dri
         apply=True,
         write_report=True,
         reason="timer_catchup",
+        graph_drip_on_block=False,
     )
 
     assert payload["ok"] is False
@@ -16236,6 +16237,9 @@ def test_catchup_auto_maintenance_resource_defaults_to_blocked_without_index_dri
     assert payload["index_drip_on_block"] is False
     assert payload["index_drip_on_block_source"] == "profile_default"
     assert payload["fallback_index_drip"] == {}
+    assert payload["graph_drip_on_block"] is False
+    assert payload["graph_drip_on_block_source"] == "explicit"
+    assert payload["fallback_graph_drip"] == {}
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "medium"]
     assert payload["diagnostics"] == ["resource_blocked:indexing_unattended_swap_used_pressure"]
@@ -16428,6 +16432,71 @@ def test_backlog_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_pa
     )
 
     settings = module.AUTO_MAINTENANCE_PROFILES["backlog"]
+    assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["graph_drip_on_block"] is True
+    assert payload["graph_drip_on_block_source"] == "profile_default"
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"]["batch_limit"] == settings["graph_drip_batch_limit"]
+    assert payload["fallback_graph_drip"]["budget_seconds"] == settings["graph_drip_budget_seconds"]
+    assert payload["fallback_graph_drip"]["refresh_chunk_size"] == settings["graph_drip_refresh_chunk_size"]
+    assert payload["fallback_graph_drip"]["max_refresh_nodes"] == settings["graph_drip_max_refresh_nodes"]
+    assert payload["fallback_graph_drip"]["max_refresh_edges"] == settings["graph_drip_max_refresh_edges"]
+    assert payload["fallback_graph_drip"]["candidate_pool_limit"] == settings["graph_drip_candidate_pool_limit"]
+    assert calls[0][3:5] == ["--class", "medium"]
+    assert calls[1][3:5] == ["--class", "probe"]
+    assert "graph-maintenance" in calls[1]
+    assert calls[1][calls[1].index("--batch-limit") + 1] == str(settings["graph_drip_batch_limit"])
+    assert calls[1][calls[1].index("--budget-seconds") + 1] == str(float(settings["graph_drip_budget_seconds"]))
+    assert calls[1][calls[1].index("--candidate-pool-limit") + 1] == str(settings["graph_drip_candidate_pool_limit"])
+    assert "graph_drip_fallback_completed" in payload["diagnostics"]
+
+
+def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "generated_at": "2026-06-30T00:00:00-06:00",
+                    "ok": False,
+                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+                    "denied_reasons": [],
+                    "request": {"class": "medium", "kind": "indexing"},
+                    "execution": {"ok": None, "returncode": None},
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "generated_at": "2026-06-30T00:00:10-06:00",
+                    "ok": True,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "request": {"class": "probe", "kind": "indexing"},
+                    "execution": {"ok": True, "returncode": 0},
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        write_report=True,
+        reason="timer_catchup",
+    )
+
+    settings = module.AUTO_MAINTENANCE_PROFILES["catchup"]
     assert payload["status"] == "resource_blocked_graph_drip_completed"
     assert payload["graph_drip_on_block"] is True
     assert payload["graph_drip_on_block_source"] == "profile_default"
@@ -27691,6 +27760,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
     assert (aoa_root / "manifests" / "AGENTS.md").exists()
     assert (aoa_root / "manifests" / "artifact_bundles" / "portable_bundle.bundle.json").exists()
+    assert not (aoa_root / "manifests" / "artifact_bundles" / "artifact.verify.json").exists()
     assert (aoa_root / "sessions" / "AGENTS.md").exists()
     assert (aoa_root / "skills" / "AGENTS.md").exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
