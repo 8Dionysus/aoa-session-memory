@@ -55743,12 +55743,14 @@ def session_memory_search_hotset_audit(
     max_shards: int = SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS,
     per_shard_timeout_seconds: float = SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS,
     top_limit: int = SEARCH_HOTSET_AUDIT_TOP_LIMIT,
+    shard: str = "",
     write_report: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
         aoa_root,
         max_shards=max_shards,
+        shard=shard,
     )
     projection_plan = session_memory_search_projection_plan(
         workspace_root=workspace_root,
@@ -55781,6 +55783,75 @@ def session_memory_search_hotset_audit(
     partial_agent_event_coverage_shard_count = sum(
         1 for item in successful if str(item.get("agent_event_coverage_measurement_mode") or "exact") != "exact"
     )
+    partial_shards: list[dict[str, Any]] = []
+    for item in successful:
+        partial_modes = []
+        if str(item.get("hotset_count_measurement_mode") or "exact") != "exact":
+            partial_modes.append("hotset_counts")
+        if str(item.get("context_tail_measurement_mode") or "exact") != "exact":
+            partial_modes.append("context_tail")
+        if str(item.get("agent_event_coverage_measurement_mode") or "exact") != "exact":
+            partial_modes.append("agent_event_coverage")
+        if partial_modes:
+            partial_shards.append(
+                {
+                    "shard": item.get("shard"),
+                    "status": item.get("status"),
+                    "partial_modes": partial_modes,
+                    "document_count": int_value(item.get("document_count")),
+                    "event_document_count": int_value(item.get("event_document_count")),
+                    "elapsed_ms": int_value(item.get("elapsed_ms")),
+                    "diagnostics": [
+                        str(diag)
+                        for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+                        if diag
+                    ][:6],
+                }
+            )
+    failed_shards = [
+        {
+            "shard": item.get("shard"),
+            "status": item.get("status"),
+            "diagnostics": [
+                str(diag)
+                for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+                if diag
+            ][:6],
+        }
+        for item in failed
+    ]
+    followup_timeout = max(float(per_shard_timeout_seconds) * 2.0, float(per_shard_timeout_seconds) + 5.0)
+
+    def targeted_hotset_command(shard_key: str) -> list[str]:
+        return [
+            *session_memory_cli_command(aoa_root),
+            "search-hotset-audit",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--shard",
+            shard_key,
+            "--max-shards",
+            "1",
+            "--per-shard-timeout",
+            str(round(followup_timeout, 3)),
+            "--top-limit",
+            str(max(1, int(top_limit))),
+            "--write-report",
+        ]
+
+    targeted_followup_routes = [
+        targeted_hotset_command(str(item.get("shard") or ""))
+        for item in partial_shards + failed_shards
+        if item.get("shard")
+    ][: max(1, int(max_shards))]
+    if failed_shards:
+        measurement_gap_status = "failed_shard_sample"
+    elif partial_shards:
+        measurement_gap_status = "partial_shard_sample"
+    else:
+        measurement_gap_status = "none"
     sample_quality_status = "not_sampled"
     if successful:
         if failed or partial_hotset_count_shard_count or partial_context_tail_shard_count or partial_agent_event_coverage_shard_count:
@@ -55933,6 +56004,7 @@ def session_memory_search_hotset_audit(
         "sample": {
             "selection": "largest_existing_search_shards",
             "max_shards": max(1, int(max_shards)),
+            "target_shard": str(shard or ""),
             "selected_shard_count": len(selected_shards),
             "successful_shard_count": len(successful),
             "failed_shard_count": len(failed),
@@ -55954,6 +56026,19 @@ def session_memory_search_hotset_audit(
                 "lower_bound" if partial_agent_event_coverage_shard_count else "exact"
             ),
             "boundary": "partial hotset counts are route pressure evidence, not proof that gaps are absent",
+        },
+        "measurement_gap": {
+            "status": measurement_gap_status,
+            "needs_targeted_followup": bool(targeted_followup_routes),
+            "partial_shard_count": len(partial_shards),
+            "failed_shard_count": len(failed_shards),
+            "partial_shards": partial_shards,
+            "failed_shards": failed_shards,
+            "next_route": "run_targeted_hotset_audit_for_partial_or_failed_shards"
+            if targeted_followup_routes
+            else "none",
+            "next_targeted_routes": targeted_followup_routes,
+            "quality_boundary": "targeted follow-up only improves measurement confidence; it does not mutate search, raw, graph, or route-rollup truth",
         },
         "cost_profile": {
             "route_kind": "search_hotset_audit",
@@ -56041,6 +56126,7 @@ def session_memory_search_hotset_audit(
         "pressure_focus": pressure_focus,
         "shards": shard_results,
         "next_routes": [
+            *targeted_followup_routes,
             [
                 *session_memory_cli_command(aoa_root),
                 "search-operational-route-rollup-query",
@@ -56102,6 +56188,7 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     sample_quality = payload.get("sample_quality") if isinstance(payload.get("sample_quality"), dict) else {}
+    measurement_gap = payload.get("measurement_gap") if isinstance(payload.get("measurement_gap"), dict) else {}
     projection = payload.get("projection_context") if isinstance(payload.get("projection_context"), dict) else {}
     agent_event_coverage = payload.get("agent_event_coverage") if isinstance(payload.get("agent_event_coverage"), dict) else {}
     lines = [
@@ -56113,7 +56200,9 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         f"- selected_shards: `{sample.get('selected_shard_count')}`",
         f"- successful_shards: `{sample.get('successful_shard_count')}`",
         f"- failed_shards: `{sample.get('failed_shard_count')}`",
+        f"- target_shard: `{sample.get('target_shard')}`",
         f"- sample_quality: `{sample_quality.get('status')}` hotset_precision=`{sample_quality.get('hotset_count_precision')}` context_tail_precision=`{sample_quality.get('context_tail_count_precision')}` agent_event_precision=`{sample_quality.get('agent_event_coverage_count_precision')}`",
+        f"- measurement_gap: `{measurement_gap.get('status')}` targeted_followup=`{measurement_gap.get('needs_targeted_followup')}`",
         f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
         f"- projection_status: `{projection.get('status')}` freshness=`{projection.get('freshness_status')}` actionability=`{projection.get('actionability')}`",
         f"- documents: `{totals.get('document_count')}` events=`{totals.get('event_document_count')}` ratio=`{totals.get('event_document_ratio')}`",
@@ -56128,6 +56217,21 @@ def search_hotset_audit_markdown(payload: dict[str, Any]) -> str:
         for item in pressure_focus:
             if isinstance(item, dict):
                 lines.append(f"- `{item.get('id')}`: `{item.get('status')}` count=`{item.get('count', '')}` - {item.get('reason')}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Measurement Gap", ""])
+    if measurement_gap:
+        lines.append(f"- status: `{measurement_gap.get('status')}`")
+        lines.append(f"- partial_shard_count: `{measurement_gap.get('partial_shard_count')}`")
+        lines.append(f"- failed_shard_count: `{measurement_gap.get('failed_shard_count')}`")
+        lines.append(f"- next_route: `{measurement_gap.get('next_route')}`")
+        routes = measurement_gap.get("next_targeted_routes") if isinstance(measurement_gap.get("next_targeted_routes"), list) else []
+        if routes:
+            for command in routes:
+                if isinstance(command, list):
+                    lines.append(f"- `{shlex.join(str(part) for part in command)}`")
+        else:
+            lines.append("- none")
     else:
         lines.append("- none")
     lines.extend(["", "## Agent Event Coverage", ""])
@@ -70054,6 +70158,7 @@ def command_search_hotset_audit(args: argparse.Namespace) -> int:
         max_shards=args.max_shards,
         per_shard_timeout_seconds=args.per_shard_timeout,
         top_limit=args.top_limit,
+        shard=args.shard,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -76277,6 +76382,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_hotset_audit.add_argument("--workspace-root")
     search_hotset_audit.add_argument("--aoa-root")
     search_hotset_audit.add_argument("--max-shards", type=int, default=SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS)
+    search_hotset_audit.add_argument("--shard", default="", help="Measure one search shard such as month/2026-06.")
     search_hotset_audit.add_argument("--per-shard-timeout", type=float, default=SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS)
     search_hotset_audit.add_argument("--top-limit", type=int, default=SEARCH_HOTSET_AUDIT_TOP_LIMIT)
     search_hotset_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search hotset audit reports under .aoa/diagnostics.")

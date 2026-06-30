@@ -1187,6 +1187,14 @@ python3 scripts/aoa_session_memory.py search-hotset-audit \
   --max-shards 3 \
   --write-report
 
+python3 scripts/aoa_session_memory.py search-hotset-audit \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --shard month/2026-06 \
+  --max-shards 1 \
+  --per-shard-timeout 30 \
+  --write-report
+
 python3 scripts/aoa_session_memory.py search-operational-projection-plan \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
@@ -1214,7 +1222,12 @@ structured shard DBs with a per-shard timeout, opens no monolith, uses no FTS,
 and reports doc types, usage roles, agent-event classes, event types, route
 term cardinality, scoped agent-event coverage, and session hotspots. Use it
 when an agent needs to answer "what is heavy and where?" before choosing a
-deeper route. `agent_event` coverage is intentionally scoped to
+deeper route. If a broad sample is partial, read `measurement_gap` before
+guessing: it returns the partial/failed shard list and targeted
+`search-hotset-audit --shard <key>` follow-up commands with a larger timeout.
+That targeted route improves measurement confidence only; it does not mutate
+search, raw, graph, or route-rollup truth. `agent_event` coverage is
+intentionally scoped to
 assistant/reasoning/agent-state events; command, tool, output, and operational
 rows without `agent_event` route through `usage_role`, `event_type`,
 `session_act`, and route signals instead of becoming blanket classification

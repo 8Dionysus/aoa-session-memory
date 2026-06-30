@@ -2295,6 +2295,29 @@ Maintenance gates:
   bundle `doctor` returned `ok=true` with the expected installed user-skill
   symlink still pointing at the live `.aoa` source rather than the Git mirror.
 
+- 2026-06-30 targeted search-hotset measurement proof: the broad
+  `search-hotset-audit --max-shards 3 --top-limit 12 --write-report` route
+  returned `ok=true` and `status=hotset_partially_measured` because optional
+  breakdown queries on the largest shards hit bounded timeout guards. The
+  packet now exposes `measurement_gap` and targeted
+  `search-hotset-audit --shard <key>` follow-up commands instead of leaving
+  the agent with a non-operational warning. Live targeted proof on
+  `month/2026-05` returned `ok=true`, `status=hotset_measured`,
+  `sample_quality.status=exact_sample`, `document_count=698009`,
+  `event_document_count=692076`, and no monolith/FTS/raw opening in `3554ms`.
+  Targeted proof on `month/2026-06` also returned exact counts while the shard
+  remained `current_with_deferred_live_updates` due to a quiet-window live
+  tail, which is a freshness boundary rather than a broken stable archive. The
+  operational projection report
+  `diagnostics/20260630T075423Z__search-operational-projection-plan.json`
+  measured `candidate_context_tail_v1_count=471084` across the sampled shards,
+  with `377900` of those carrying route signals and
+  `candidate_route_posting_count=1028878`. This confirms the next weight work
+  belongs to compact operational-event/read-model design, not blind SQLite
+  vacuum or monolith deletion. Regression coverage now checks parser support
+  for `search-hotset-audit --shard` and verifies that partial hotset samples
+  return a targeted measurement gap route.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

@@ -6715,6 +6715,7 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-shards"]).use_shards is False
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--explain"]).explain is True
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-explain"]).explain is False
+    assert parser.parse_args(["search-hotset-audit", "--shard", "month/2026-06"]).shard == "month/2026-06"
     assert parser.parse_args(["literal-query-plan", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
     assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
@@ -17751,7 +17752,11 @@ def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverag
     monkeypatch.setattr(
         module,
         "search_operational_event_projection_shard_candidates",
-        lambda _aoa_root, *, max_shards: (selected[:max_shards], {"status": "current"}, []),
+        lambda _aoa_root, *, max_shards, shard="": (
+            [item for item in selected if item["shard"] == shard][:max_shards] if shard else selected[:max_shards],
+            {"status": "current"},
+            [],
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -17819,15 +17824,36 @@ def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverag
     assert audit["status"] == "hotset_partially_measured"
     assert audit["sample"]["successful_shard_count"] == 2
     assert audit["sample"]["failed_shard_count"] == 0
+    assert audit["sample"]["target_shard"] == ""
     assert audit["sample_quality"]["status"] == "partial_sample"
     assert audit["sample_quality"]["partial_agent_event_coverage_shard_count"] == 1
     assert audit["sample_quality"]["agent_event_coverage_count_precision"] == "lower_bound"
+    assert audit["measurement_gap"]["status"] == "partial_shard_sample"
+    assert audit["measurement_gap"]["needs_targeted_followup"] is True
+    assert audit["measurement_gap"]["partial_shard_count"] == 1
+    assert audit["measurement_gap"]["partial_shards"][0]["shard"] == "month/2026-06"
+    targeted_commands = [module.shlex.join(command) for command in audit["measurement_gap"]["next_targeted_routes"]]
+    assert any("--shard month/2026-06" in command for command in targeted_commands)
+    assert audit["next_routes"][0] == audit["measurement_gap"]["next_targeted_routes"][0]
     assert audit["totals"]["measurement_modes"]["agent_event_coverage"] == "partial_timeout_budget"
     assert audit["agent_event_coverage"]["status"] == "partial_unknown"
     assert audit["agent_event_coverage"]["count_precision"] == "lower_bound"
     pressure_ids = {item["id"] for item in audit["pressure_focus"]}
     assert "agent_event_coverage_partial" in pressure_ids
     assert "agent_event_classification_gap" not in pressure_ids
+
+    targeted = module.session_memory_search_hotset_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=2,
+        top_limit=8,
+        shard="month/2026-06",
+        write_report=False,
+    )
+
+    assert targeted["sample"]["target_shard"] == "month/2026-06"
+    assert targeted["sample"]["selected_shard_count"] == 1
+    assert targeted["shards"][0]["shard"] == "month/2026-06"
 
 
 def test_search_operational_projection_plan_samples_candidate_tail_without_mutation(tmp_path: Path) -> None:
