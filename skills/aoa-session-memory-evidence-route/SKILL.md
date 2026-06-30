@@ -106,8 +106,12 @@ Use these first routes when available:
   diagnostic exists, the gate packet should expose
   `latest_shrink_apply_proof.status=found` and pass
   `storage_before_after_comparison` from that generated before/after proof;
-  it remains read-only evidence, not permission to mutate again. If the gate
-  reports a missing/stale rollup, materialize the route-rollup first.
+  its projection packet should show `projection_plan_source=latest_shrink_apply_proof`
+  and `cost_profile.resamples_shards=false`. Use the explicit heavy
+  `search-operational-projection-plan --write-report` route only when a fresh
+  shard sample or fresh unrouted-tail count is needed. The gate remains
+  read-only evidence, not permission to mutate again. If the gate reports a
+  missing/stale rollup, materialize the route-rollup first.
   Post-omission route-rollup must include compact
   `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
   omission is a route/read-model regression. Keep unrouted context-tail rows

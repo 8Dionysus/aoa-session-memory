@@ -17762,6 +17762,8 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     assert payload["failed_gate_ids"] == []
     assert payload["blocked_gate_ids"] == ["storage_before_after_comparison"]
     assert payload["latest_shrink_apply_proof"]["status"] == "missing"
+    assert payload["projection_plan"]["projection_plan_source"] == "fresh_shard_sample"
+    assert any(item["phase"] == "projection_plan" for item in payload["phase_timings"])
     before_after_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_before_after_comparison")
     assert before_after_gate["summary"]["reason"] == "no successful shrink-apply before/after comparison is available yet"
     literal_gate = next(gate for gate in payload["gates"] if gate["id"] == "literal_exact_recall")
@@ -17821,35 +17823,29 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
         },
     )
 
+    def fail_projection_plan(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("post-apply shrink gates must not resample heavy projection shards")
+
+    monkeypatch.setattr(module, "session_memory_search_operational_event_projection_plan", fail_projection_plan)
     monkeypatch.setattr(
         module,
-        "session_memory_search_operational_event_projection_plan",
+        "session_memory_operational_route_rollup_status",
         lambda **_kwargs: {
-            "ok": True,
-            "status": "candidate_tail_measured",
+            "status": "current",
+            "needs_refresh": False,
+            "size_human": "32.9 MiB",
+            "generated_at": "2026-06-30T00:00:00Z",
+            "shard_count": 3,
+            "route_rollup_row_count": 12,
+            "candidate_route_posting_count": 40,
+            "sampled_raw_term_count": 12,
+            "sampled_segment_term_count": 12,
+            "source_mismatch_count": 0,
+            "refresh_command": ["python3", "scripts/aoa_session_memory.py", "search-operational-route-rollup"],
+            "query_command": ["python3", "scripts/aoa_session_memory.py", "search-operational-route-rollup-query"],
+            "quality_boundary": "generated route-rollup is navigation only",
+            "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
             "diagnostics": [],
-            "route_ref_rollup_plan": {"status": "materialized_rollup_ready"},
-            "physical_shrink_plan": {
-                "status": "guarded_plan_ready",
-                "safe_to_apply_physical_compaction": False,
-                "context_tail_candidate_count": 20,
-                "route_ref_backed_omission_candidate_count": 16,
-                "unrouted_keep_candidate_count": 4,
-                "materialized_rollup_status": "current",
-                "apply_status": "operator_rebuild_route_available",
-                "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
-                "operator_rebuild_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
-                "operator_rebuild_command": [
-                    "python3",
-                    "scripts/aoa_session_memory.py",
-                    "search-shards",
-                    "all",
-                    "--context-tail-omission-policy",
-                    "route-ref-backed",
-                    "--write-report",
-                ],
-                "next_implementation_route": "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates",
-            },
         },
     )
     monkeypatch.setattr(
@@ -17948,6 +17944,16 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
     assert "storage_before_after_comparison" in payload["passed_gate_ids"]
     assert payload["latest_shrink_apply_proof"]["status"] == "found"
     assert payload["latest_shrink_apply_proof"]["source"]["path"] == str(apply_report)
+    assert payload["projection_plan"]["projection_plan_source"] == "latest_shrink_apply_proof"
+    assert payload["projection_plan"]["status"] == "post_apply_proof_current"
+    assert payload["projection_plan"]["cost_profile"]["resamples_shards"] is False
+    assert any(
+        item["phase"] == "projection_plan" and item["source"] == "latest_shrink_apply_proof"
+        for item in payload["phase_timings"]
+    )
+    projection_gate = next(gate for gate in payload["gates"] if gate["id"] == "projection_guard")
+    assert projection_gate["summary"]["context_tail_candidate_count"] == 20
+    assert projection_gate["summary"]["unrouted_keep_candidate_count"] is None
     before_after_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_before_after_comparison")
     assert before_after_gate["status"] == "pass"
     assert before_after_gate["summary"]["apply_report"]["path"] == str(apply_report)
@@ -17957,6 +17963,62 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
         before_after_gate["summary"]["reason"]
         == "latest successful shrink-apply report captured before/after storage comparison"
     )
+
+
+def test_search_operational_shrink_apply_proof_projection_blocks_stale_rollup(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    apply_report = aoa_root / module.DIAGNOSTICS_ROOT / "20260630T000000Z__search-operational-shrink-apply.json"
+    write_json(
+        apply_report,
+        {
+            "artifact_type": "session_memory_search_operational_shrink_apply",
+            "generated_at": "2026-06-30T00:00:00Z",
+            "ok": True,
+            "apply": True,
+            "status": "applied",
+            "storage_before_after_comparison": {
+                "captured": True,
+                "omission_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "omitted_document_count": 20,
+                "omitted_route_ref_row_count": 40,
+            },
+            "after": {
+                "search_shards": {"status": "current"},
+                "operational_route_rollup": {"status": "current"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "stale",
+            "needs_refresh": True,
+            "source_mismatch_count": 1,
+            "route_rollup_row_count": 12,
+            "candidate_route_posting_count": 40,
+            "refresh_command": ["python3", "scripts/aoa_session_memory.py", "search-operational-route-rollup"],
+            "diagnostics": ["operational_route_rollup_source_shards_changed"],
+        },
+    )
+
+    proof = module.latest_search_operational_shrink_apply_proof(aoa_root)
+    plan = module.search_operational_shrink_projection_plan_from_apply_proof(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply_proof=proof,
+    )
+
+    assert plan["projection_plan_source"] == "latest_shrink_apply_proof"
+    assert plan["status"] == "post_apply_proof_rollup_blocked"
+    assert plan["route_ref_rollup_plan"]["replacement_read_model_status"] == "missing_or_stale"
+    assert plan["physical_shrink_plan"]["status"] == "blocked_missing_materialized_rollup"
+    assert plan["physical_shrink_plan"]["apply_status"] == "operator_rebuild_route_available_but_blocked"
+    assert "post_apply_projection_rollup_not_current:stale" in plan["diagnostics"]
 
 
 def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup_stale(

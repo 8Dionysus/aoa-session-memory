@@ -431,10 +431,13 @@ debugging primitive or rollback/rebuild component.
 After a successful wrapper run, `search-operational-shrink-gates` consumes the
 latest successful shrink-apply diagnostic as generated proof for
 `storage_before_after_comparison`. That makes the read-only gate state reflect
-the completed before/after evidence, but it still reports `apply_ready=false`
-and does not authorize another mutation. The diagnostic remains navigation
-evidence; raw transcripts, segment refs, and generated shard rebuildability
-remain the authority and recovery boundary.
+the completed before/after evidence without resampling heavy shard projections:
+the post-apply fast path combines the latest apply diagnostic with the current
+materialized route-rollup status, then leaves the fresh heavy shard sample to
+the explicit `search-operational-projection-plan` route. The gate still reports
+`apply_ready=false` and does not authorize another mutation. The diagnostic
+remains navigation evidence; raw transcripts, segment refs, and generated
+shard rebuildability remain the authority and recovery boundary.
 
 This policy omits only generated structured-shard event rows that are
 route-ref-backed context tail: `doc_type=event`, `usage_role=context`, no

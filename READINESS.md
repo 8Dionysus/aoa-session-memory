@@ -2087,7 +2087,19 @@ Maintenance gates:
   `storage_before_after_comparison`, returns `blocked_gate_ids=[]`, and keeps
   `apply_ready=false` / `safe_to_apply_physical_compaction=false` because the
   gate is evidence, not an authorization route. The live gate elapsed
-  `171317ms`, so route-cost reduction remains a real follow-up pressure.
+  `171317ms`, making route-cost reduction the next pressure. The follow-up
+  fast-path proof
+  `diagnostics/20260630T040758Z__search-operational-shrink-gates.json` keeps
+  the same gate result (`ok=true`, `blocked_gate_ids=[]`,
+  `storage_before_after_comparison=pass`) but uses
+  `projection_plan_source=latest_shrink_apply_proof` with
+  `cost_profile.resamples_shards=false`. The live elapsed time dropped to
+  `6078ms`; phase timings show `projection_plan=211ms`,
+  `route_rollup_query=862ms`, `literal_exact_recall=451ms`,
+  `live_scenario_corpus=874ms`, and `storage_baseline=3552ms`. Fresh heavy
+  shard sampling remains available through `search-operational-projection-plan`
+  when an agent needs new unrouted-tail counts rather than the latest apply
+  proof.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over

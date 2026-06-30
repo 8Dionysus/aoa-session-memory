@@ -56610,6 +56610,250 @@ def latest_search_operational_shrink_apply_proof(aoa_root: Path) -> dict[str, An
     return {"status": "missing"}
 
 
+def search_operational_shrink_projection_plan_from_apply_proof(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    apply_proof: dict[str, Any],
+) -> dict[str, Any]:
+    started = time.monotonic()
+    comparison = apply_proof.get("comparison") if isinstance(apply_proof.get("comparison"), dict) else {}
+    current_rollup = session_memory_operational_route_rollup_status(aoa_root=aoa_root)
+    rollup_status = str(current_rollup.get("status") or "")
+    materialized_rollup_ready = (
+        rollup_status == "current"
+        and not bool(current_rollup.get("needs_refresh"))
+        and int_value(current_rollup.get("source_mismatch_count")) == 0
+        and int_value(current_rollup.get("route_rollup_row_count")) > 0
+    )
+    omitted_document_count = int_value(comparison.get("omitted_document_count"))
+    omitted_route_ref_row_count = int_value(comparison.get("omitted_route_ref_row_count"))
+    physical_status = "guarded_plan_ready" if materialized_rollup_ready else "blocked_missing_materialized_rollup"
+    apply_status = (
+        "operator_rebuild_route_available"
+        if physical_status == "guarded_plan_ready"
+        else "operator_rebuild_route_available_but_blocked"
+    )
+    operator_rebuild_command = [
+        *session_memory_cli_command(aoa_root),
+        "search-shards",
+        "all",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--context-tail-omission-policy",
+        "route-ref-backed",
+        "--write-report",
+    ]
+    materialized_rollup_summary = {
+        key: current_rollup.get(key)
+        for key in (
+            "status",
+            "needs_refresh",
+            "size_human",
+            "generated_at",
+            "shard_count",
+            "route_rollup_row_count",
+            "candidate_route_posting_count",
+            "sampled_raw_term_count",
+            "sampled_segment_term_count",
+            "source_mismatch_count",
+            "query_command",
+            "refresh_command",
+            "incremental_refresh_route",
+            "incremental_refresh_command",
+            "exact_incremental_refresh_command",
+            "quality_boundary",
+            "truth_status",
+        )
+        if key in current_rollup
+    }
+    diagnostics = []
+    if isinstance(current_rollup.get("diagnostics"), list):
+        diagnostics.extend(str(item) for item in current_rollup.get("diagnostics", []) if item)
+    if not materialized_rollup_ready:
+        diagnostics.append(f"post_apply_projection_rollup_not_current:{rollup_status or 'unknown'}")
+    physical_shrink_plan = {
+        "schema_version": 1,
+        "id": "guarded_context_tail_physical_shrink_v1",
+        "status": physical_status,
+        "mutates": False,
+        "safe_to_apply": False,
+        "safe_to_apply_physical_compaction": False,
+        "apply_status": apply_status,
+        "operator_rebuild_route_available": omitted_document_count > 0,
+        "blocked_reason": ""
+        if materialized_rollup_ready
+        else "materialized operational route-rollup is missing, stale, or source-mismatched",
+        "operator_rebuild_route_kind": "structured_shard_context_tail_omission_policy",
+        "operator_rebuild_command": operator_rebuild_command if omitted_document_count > 0 else [],
+        "operator_rebuild_policy": SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+        "operator_rebuild_policy_cli_value": "route-ref-backed",
+        "proof_mode": "latest_shrink_apply_diagnostic",
+        "proof_source": apply_proof.get("source"),
+        "candidate_selector": (
+            "post-apply proof uses previously captured route-ref-backed context-tail omission counts; "
+            "run search-operational-projection-plan for a fresh heavy shard sample"
+        ),
+        "route_ref_backed_candidate_selector": "omitted_document_count from latest shrink-apply storage comparison",
+        "unrouted_tail_selector": "not measured in fast post-apply gate; run search-operational-projection-plan for fresh unrouted counts",
+        "protected_selectors": [
+            "agent_event!=''",
+            "task_episode_id!=''",
+            "event_type IN protected_context_event_types",
+        ],
+        "context_tail_candidate_count": omitted_document_count,
+        "route_ref_backed_omission_candidate_count": omitted_document_count,
+        "unrouted_keep_candidate_count": None,
+        "route_ref_coverage_ratio": None,
+        "sampled_candidate_route_posting_count": omitted_route_ref_row_count,
+        "materialized_rollup_status": rollup_status,
+        "materialized_rollup_ready": materialized_rollup_ready,
+        "materialized_route_rollup_row_count": int_value(current_rollup.get("route_rollup_row_count")),
+        "materialized_candidate_route_posting_count": int_value(current_rollup.get("candidate_route_posting_count")),
+        "required_invariants": [
+            "latest shrink-apply diagnostic captured before/after generated-search storage comparison",
+            "materialized operational route-rollup status is current",
+            "materialized operational route-rollup source_mismatch_count is 0",
+            "monolith/raw-text fallback remains available until exact recall replacement is proven",
+            "raw transcripts and segment indexes remain the authority layer",
+        ],
+        "required_verification_gates": [
+            "live_scenario_corpus_check",
+            "search_operational_route_rollup_query_refs_check",
+            "literal_query_plan_exact_recall_check",
+            "storage_audit_before_after",
+            "bundle_parity_validation",
+        ],
+        "next_implementation_route": (
+            "use_latest_shrink_apply_proof_for_read_only_gate_or_run_search_operational_projection_plan_for_fresh_sample"
+            if materialized_rollup_ready
+            else "refresh_operational_route_rollup_then_recheck_shrink_gates"
+        ),
+        "rollback_route": "rebuild structured search shards from raw/session indexes; do not repair by deleting raw evidence",
+        "mutation_boundary": "read-only fast gate packet; no search/raw/graph/session mutation is performed here",
+        "authority_boundary": "latest apply diagnostic and rollup are navigation proof; raw and segment refs remain authority",
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_event_projection_plan",
+        "generated_at": utc_now(),
+        "mutates": False,
+        "ok": omitted_document_count > 0 and bool(comparison.get("captured")),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "status": "post_apply_proof_current" if materialized_rollup_ready else "post_apply_proof_rollup_blocked",
+        "catalog_status": "not_resampled",
+        "projection_plan_source": "latest_shrink_apply_proof",
+        "latest_shrink_apply_proof": {
+            "status": apply_proof.get("status"),
+            "source": apply_proof.get("source"),
+            "apply_status": apply_proof.get("apply_status"),
+            "after_search_shards_status": apply_proof.get("after_search_shards_status"),
+            "after_operational_route_rollup_status": apply_proof.get("after_operational_route_rollup_status"),
+        },
+        "sample": {
+            "selection": "latest_shrink_apply_proof_without_shard_resample",
+            "selected_shard_count": 0,
+            "successful_shard_count": 0,
+            "fresh_sample_available": False,
+            "fresh_sample_command": [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--write-report",
+            ],
+        },
+        "totals": {
+            "candidate_context_tail_v1_count": omitted_document_count,
+            "candidate_context_tail_with_route_signals_count": omitted_document_count,
+            "candidate_context_tail_without_route_signals_count": None,
+            "replacement_route_refs_required": omitted_document_count > 0,
+            "candidate_route_posting_count": omitted_route_ref_row_count,
+            "candidate_route_term_count_sum": int_value(current_rollup.get("route_rollup_row_count")),
+            "source": "latest_shrink_apply_storage_comparison",
+        },
+        "route_ref_rollup_plan": {
+            "status": "materialized_rollup_ready" if materialized_rollup_ready else "needs_route_ref_rollup",
+            "replacement_read_model_status": "ready" if materialized_rollup_ready else "missing_or_stale",
+            "materialized_rollup": materialized_rollup_summary,
+            "sampled_shard_status_counts": {},
+            "candidate_route_posting_count": int_value(current_rollup.get("candidate_route_posting_count"))
+            if materialized_rollup_ready
+            else omitted_route_ref_row_count,
+            "sampled_candidate_route_posting_count": omitted_route_ref_row_count,
+            "materialized_candidate_route_posting_count": int_value(current_rollup.get("candidate_route_posting_count")),
+            "materialized_route_rollup_row_count": int_value(current_rollup.get("route_rollup_row_count")),
+            "candidate_route_term_count_sum": int_value(current_rollup.get("route_rollup_row_count")),
+            "sampled_route_rollup_elapsed_ms": 0,
+            "top_route_layers": [],
+            "top_route_terms": [],
+            "recommended_rollup_grain": [
+                "shard",
+                "route_layer",
+                "route_key",
+                "session_id",
+                "segment_ref_sample",
+                "raw_ref_sample",
+            ],
+            "replacement_rule": "route filters should hit rollup rows first, then expand to raw/segment refs only when exact evidence is needed",
+            "authority_boundary": "rollup rows are navigation summaries; raw transcripts and segment indexes remain authority",
+        },
+        "projection_candidate": {
+            "id": "compact_operational_event_projection_v1",
+            "candidate_predicate": "post_apply_proof_from_latest_shrink_apply_storage_comparison",
+            "candidate_tail_count": omitted_document_count,
+            "candidate_tail_with_route_signals_count": omitted_document_count,
+            "replacement_route_refs_required": omitted_document_count > 0,
+            "replacement_route_ready": materialized_rollup_ready,
+            "replacement_route_kind": "operational_route_rollup" if materialized_rollup_ready else "",
+            "candidate_route_posting_count": omitted_route_ref_row_count,
+            "physical_shrink_plan_status": physical_shrink_plan["status"],
+            "route_ref_backed_omission_candidate_count": physical_shrink_plan[
+                "route_ref_backed_omission_candidate_count"
+            ],
+            "unrouted_keep_candidate_count": physical_shrink_plan["unrouted_keep_candidate_count"],
+            "safe_to_apply_physical_compaction": physical_shrink_plan["safe_to_apply_physical_compaction"],
+            "next_design_route": "use_operational_route_rollup_before_opening_heavy_projection_sample",
+        },
+        "physical_shrink_plan": physical_shrink_plan,
+        "shards": [],
+        "stop_lines": [
+            "do_not_replace_raw_or_segment_refs_with_projection_counts",
+            "do_not_treat_latest_apply_diagnostic_as_archive_truth",
+            "run_search_operational_projection_plan_when_fresh_unrouted_counts_are_needed",
+        ],
+        "next_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-projection-plan",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--write-report",
+            ],
+            current_rollup.get("refresh_command") if current_rollup.get("needs_refresh") else None,
+        ],
+        "cost_profile": {
+            "uses_latest_apply_diagnostic": True,
+            "uses_materialized_route_rollup_status": True,
+            "resamples_shards": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+        },
+        "diagnostics": [item for item in diagnostics if item],
+        "quality_boundary": "latest apply proof is generated diagnostic navigation; raw transcripts, segment indexes, and rebuild routes remain authority",
+        "truth_status": "read_only_post_apply_projection_gate_not_archive_truth",
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+
+
 def session_memory_search_operational_shrink_gates(
     *,
     workspace_root: Path | str,
@@ -56624,13 +56868,40 @@ def session_memory_search_operational_shrink_gates(
 ) -> dict[str, Any]:
     started = time.monotonic()
     diagnostics: list[str] = []
-    projection_plan = session_memory_search_operational_event_projection_plan(
-        workspace_root=workspace_root,
-        aoa_root=aoa_root,
-        max_shards=max_shards,
-        per_shard_timeout_seconds=per_shard_timeout_seconds,
-        route_rollup_limit=route_rollup_limit,
-        write_report=False,
+    phase_timings: list[dict[str, Any]] = []
+
+    def record_phase(phase: str, phase_started: float, **extra: Any) -> None:
+        phase_timings.append({"phase": phase, "elapsed_ms": int((time.monotonic() - phase_started) * 1000), **extra})
+
+    phase_started = time.monotonic()
+    apply_proof = latest_search_operational_shrink_apply_proof(aoa_root)
+    apply_comparison = apply_proof.get("comparison") if isinstance(apply_proof.get("comparison"), dict) else {}
+    apply_proof_usable = bool(apply_comparison.get("captured")) and int_value(
+        apply_comparison.get("omitted_document_count")
+    ) > 0
+    record_phase("latest_shrink_apply_proof", phase_started, status=apply_proof.get("status"))
+
+    phase_started = time.monotonic()
+    if apply_proof_usable:
+        projection_plan = search_operational_shrink_projection_plan_from_apply_proof(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            apply_proof=apply_proof,
+        )
+    else:
+        projection_plan = session_memory_search_operational_event_projection_plan(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            max_shards=max_shards,
+            per_shard_timeout_seconds=per_shard_timeout_seconds,
+            route_rollup_limit=route_rollup_limit,
+            write_report=False,
+        )
+    record_phase(
+        "projection_plan",
+        phase_started,
+        source=projection_plan.get("projection_plan_source") or "fresh_shard_sample",
+        status=projection_plan.get("status"),
     )
     diagnostics.extend(
         str(item)
@@ -56657,6 +56928,7 @@ def session_memory_search_operational_shrink_gates(
         diagnostics=list(projection_plan.get("diagnostics") or []) if isinstance(projection_plan.get("diagnostics"), list) else [],
     )
 
+    phase_started = time.monotonic()
     route_query = session_memory_search_operational_route_rollup_query(
         workspace_root=workspace_root,
         aoa_root=aoa_root,
@@ -56664,6 +56936,7 @@ def session_memory_search_operational_shrink_gates(
         ref_limit=3,
         write_report=False,
     )
+    record_phase("route_rollup_query", phase_started, status=route_query.get("status"))
     route_quality = route_query.get("quality") if isinstance(route_query.get("quality"), dict) else {}
     route_cost = route_query.get("cost_profile") if isinstance(route_query.get("cost_profile"), dict) else {}
     route_passed = bool(route_query.get("ok")) and bool(route_quality.get("raw_or_segment_ref_present")) and bool(
@@ -56710,6 +56983,7 @@ def session_memory_search_operational_shrink_gates(
         },
     )
 
+    phase_started = time.monotonic()
     literal_probes = [
         search_operational_shrink_literal_probe_check(
             aoa_root=aoa_root,
@@ -56719,6 +56993,7 @@ def session_memory_search_operational_shrink_gates(
         )
         for probe in SEARCH_OPERATIONAL_SHRINK_LITERAL_PROBES
     ]
+    record_phase("literal_exact_recall", phase_started, probe_count=len(literal_probes))
     literal_passed = bool(literal_probes) and all(bool(item.get("passed")) for item in literal_probes)
     literal_gate = search_operational_shrink_gate_packet(
         gate_id="literal_exact_recall",
@@ -56738,11 +57013,13 @@ def session_memory_search_operational_shrink_gates(
         ],
     )
 
+    phase_started = time.monotonic()
     live_corpus = live_scenario_corpus_check(
         aoa_root=aoa_root,
         case_limit=max(1, int_value(live_scenario_case_limit, 1)),
         write_report=False,
     )
+    record_phase("live_scenario_corpus", phase_started, status="passed" if live_corpus.get("ok") else "failed")
     live_passed = bool(live_corpus.get("ok")) and int_value(live_corpus.get("failed_count")) == 0
     live_gate = search_operational_shrink_gate_packet(
         gate_id="live_scenario_corpus",
@@ -56758,7 +57035,9 @@ def session_memory_search_operational_shrink_gates(
         diagnostics=list(live_corpus.get("diagnostics") or []) if isinstance(live_corpus.get("diagnostics"), list) else [],
     )
 
+    phase_started = time.monotonic()
     storage = storage_audit(aoa_root=aoa_root, deep_dbstat=False, row_counts=False, write_report=False)
+    record_phase("storage_baseline", phase_started, status="passed" if storage.get("ok") else "failed")
     search_store = storage.get("search_store") if isinstance(storage.get("search_store"), dict) else {}
     storage_passed = bool(storage.get("ok")) and bool(search_store.get("exists"))
     storage_gate = search_operational_shrink_gate_packet(
@@ -56779,8 +57058,6 @@ def session_memory_search_operational_shrink_gates(
         },
     )
 
-    apply_proof = latest_search_operational_shrink_apply_proof(aoa_root)
-    apply_comparison = apply_proof.get("comparison") if isinstance(apply_proof.get("comparison"), dict) else {}
     before_after_passed = bool(apply_comparison.get("captured")) and int_value(
         apply_comparison.get("omitted_document_count")
     ) > 0
@@ -56879,6 +57156,8 @@ def session_memory_search_operational_shrink_gates(
         "gates": gates,
         "projection_plan": {
             "status": projection_plan.get("status"),
+            "projection_plan_source": projection_plan.get("projection_plan_source") or "fresh_shard_sample",
+            "cost_profile": projection_plan.get("cost_profile"),
             "route_ref_rollup_plan": projection_plan.get("route_ref_rollup_plan"),
             "physical_shrink_plan": physical,
             "report_json": projection_plan.get("report_json", ""),
@@ -56940,6 +57219,7 @@ def session_memory_search_operational_shrink_gates(
             "raw_and_segment_refs_remain_authority",
         ],
         "diagnostics": diagnostics,
+        "phase_timings": phase_timings,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "quality_boundary": "gate packets prove route readiness only; they do not authorize generated search row deletion or owner-layer claims",
         "truth_status": "read_only_gate_check_for_future_generated_search_shrink_not_archive_truth",
@@ -56989,6 +57269,17 @@ def search_operational_shrink_gates_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "## Stop Lines", ""])
     for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
         lines.append(f"- `{item}`")
+    phase_timings = payload.get("phase_timings") if isinstance(payload.get("phase_timings"), list) else []
+    if phase_timings:
+        lines.extend(["", "## Phase Timings", "", "| phase | elapsed_ms | detail |", "| --- | ---: | --- |"])
+        for item in phase_timings:
+            if not isinstance(item, dict):
+                continue
+            detail = {key: value for key, value in item.items() if key not in {"phase", "elapsed_ms"}}
+            lines.append(
+                f"| `{item.get('phase')}` | `{item.get('elapsed_ms')}` | "
+                f"{markdown_cell(json.dumps(detail, ensure_ascii=False, sort_keys=True))} |"
+            )
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
     lines.extend(["", "## Diagnostics", ""])
     if diagnostics:

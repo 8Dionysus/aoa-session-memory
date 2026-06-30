@@ -1263,10 +1263,13 @@ explicit context-tail omission/apply route and after-shrink storage comparison
 exist. After `search-operational-shrink-apply --apply --write-report` has
 captured a successful before/after comparison, the gate packet consumes that
 latest apply diagnostic as generated proof for
-`storage_before_after_comparison`; the packet remains read-only and still does
-not authorize mutation. This is the route exposed by `maintenance-status` for
-the current `search_projection_combined_large` warning when the rollup is
-current.
+`storage_before_after_comparison` and uses the current materialized
+route-rollup status instead of resampling heavy shard projections. The packet
+remains read-only and still does not authorize mutation; run
+`search-operational-projection-plan --write-report` when a fresh heavy shard
+sample or fresh unrouted-tail count is needed. This is the route exposed by
+`maintenance-status` for the current `search_projection_combined_large` warning
+when the rollup is current.
 
 `search-operational-route-rollup` is the generated replacement projection for
 that next step. It materializes `search/operational-route-rollup.sqlite3` with
