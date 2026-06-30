@@ -658,6 +658,42 @@
           }
         ]
       }
+    },
+    {
+      "id": "maintenance_status_next_action_contract",
+      "profiles": [
+        "maintenance_status"
+      ],
+      "seed": "corpus-maintenance-status-next-action",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 1,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-06-30",
+        "note": "Maintenance status must stay a read-only route packet that exposes typed next actions and an exact next command; corpus checks route guidance, not repair success."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "profile_expectations": [
+          {
+            "profile": "maintenance_status",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_next_action_count": 1,
+            "min_route_lane_count": 1,
+            "require_exact_next_command": true,
+            "require_maintenance_packet_no_mutation": true,
+            "require_graph_queue_action_when_queued": true,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
     }
   ],
   "diagnostics": []

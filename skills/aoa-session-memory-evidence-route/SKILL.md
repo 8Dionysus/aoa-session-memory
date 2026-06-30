@@ -160,7 +160,9 @@ Use these first routes when available:
   the question is whether current entity/search/literal/graph consumer routes
   still satisfy reviewed cases. Use `live-scenario-audit` for one-off
   diagnostics; use the corpus check when the result should be treated as a
-  regression gate.
+  regression gate. The corpus includes `maintenance_status` as a read-only
+  route-guidance profile: it proves typed next actions and exact next commands,
+  not that the maintenance repair itself has completed.
 
 ## MCP Preference
 

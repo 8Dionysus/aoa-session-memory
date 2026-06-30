@@ -5354,6 +5354,146 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
     assert scenario["opens_monolith"] is False
 
 
+def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_maintenance_status(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["workspace_root"] == workspace
+        assert kwargs["aoa_root"] == aoa_root
+        assert kwargs["include_timers"] is False
+        return {
+            "ok": False,
+            "mutates": False,
+            "recommendation": "run_maintenance",
+            "agent_route": {
+                "action": "run_maintenance_before_graph_search",
+                "maintenance_required": True,
+                "can_use_graph_search": True,
+            },
+            "search": {"status": "current", "actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+            "graph": {
+                "status": "dirty",
+                "actionable_count": 225,
+                "queued_count": 25,
+                "deferred_live_source_count": 0,
+            },
+            "entity_registry": {"status": "current", "entity_count": 42},
+            "next_actions": [
+                {
+                    "id": "repair_graph_queue_drip",
+                    "reason": "mixed_or_medium_backlog",
+                    "command": [
+                        "python3",
+                        "scripts/aoa_session_memory.py",
+                        "graph-maintenance",
+                        "all",
+                        "--use-queue",
+                        "--apply",
+                    ],
+                },
+                {
+                    "id": "run_operational_shrink_gates",
+                    "route_kind": "search_operational_shrink_gate_check",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "search-operational-shrink-gates"],
+                },
+            ],
+            "exact_next_command": "python3 scripts/aoa_session_memory.py graph-maintenance all --use-queue --apply",
+        }
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["maintenance_status"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["scenario_count"] == 1
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "maintenance_status"
+    assert scenario["status"] == "passed"
+    assert scenario["status_packet_ok"] is False
+    assert scenario["mutates"] is False
+    assert scenario["recommendation"] == "run_maintenance"
+    assert scenario["next_action_count"] == 2
+    assert scenario["graph_next_action_count"] == 1
+    assert scenario["search_next_action_count"] == 1
+    assert scenario["route_lane_count"] == 2
+    assert scenario["graph_queue_action_present"] is True
+    assert scenario["graph_queued_count"] == 25
+
+
+def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() -> None:
+    failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "maintenance_status",
+            "status": "passed",
+            "mutates": False,
+            "exact_next_command_present": True,
+            "next_action_count": 2,
+            "next_action_ids": ["repair_graph_queue_drip", "run_operational_shrink_gates"],
+            "next_action_lane_counts": {"graph": 1, "search_projection": 1},
+            "graph_next_action_count": 1,
+            "search_next_action_count": 1,
+            "route_lane_count": 2,
+            "graph_queued_count": 25,
+            "graph_queue_action_present": True,
+        },
+        {
+            "profile": "maintenance_status",
+            "allowed_statuses": ["passed"],
+            "min_next_action_count": 1,
+            "min_graph_next_action_count": 1,
+            "min_search_next_action_count": 1,
+            "min_route_lane_count": 2,
+            "require_exact_next_command": True,
+            "require_maintenance_packet_no_mutation": True,
+            "require_graph_queue_action_when_queued": True,
+            "required_next_action_ids": ["repair_graph_queue_drip"],
+            "required_next_action_lanes": ["graph"],
+        },
+    )
+
+    assert failures == []
+
+    failing = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "maintenance_status",
+            "status": "passed",
+            "mutates": True,
+            "exact_next_command_present": False,
+            "next_action_count": 0,
+            "next_action_ids": [],
+            "next_action_lane_counts": {},
+            "graph_next_action_count": 0,
+            "route_lane_count": 0,
+            "graph_queued_count": 4,
+            "graph_queue_action_present": False,
+        },
+        {
+            "profile": "maintenance_status",
+            "allowed_statuses": ["passed"],
+            "min_next_action_count": 1,
+            "min_graph_next_action_count": 1,
+            "min_route_lane_count": 1,
+            "require_exact_next_command": True,
+            "require_maintenance_packet_no_mutation": True,
+            "require_graph_queue_action_when_queued": True,
+            "required_next_action_lanes": ["graph"],
+        },
+    )
+
+    assert "maintenance_status:next_action_count:0<1" in failing
+    assert "maintenance_status:exact_next_command_present:False" in failing
+    assert "maintenance_status:mutates:True" in failing
+    assert "maintenance_status:graph_queue_action_missing_for_queued_count:4" in failing
+    assert "maintenance_status:missing_next_action_lane:graph" in failing
+
+
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
     result = module.live_scenario_result(
         "entity_usage",

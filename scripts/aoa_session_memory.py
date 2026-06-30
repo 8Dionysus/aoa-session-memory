@@ -67672,9 +67672,43 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 quality_flags.append(f"route_rollup_query_{key}")
         if ok and quality_flags:
             result["status"] = "warn"
+    elif profile == "maintenance_status":
+        next_action_lane_counts = payload.get("next_action_lane_counts") if isinstance(payload.get("next_action_lane_counts"), dict) else {}
+        result.update(
+            {
+                "status_packet_ok": payload.get("status_packet_ok"),
+                "mutates": payload.get("mutates"),
+                "recommendation": payload.get("recommendation"),
+                "agent_route_action": payload.get("agent_route_action"),
+                "maintenance_required": payload.get("maintenance_required"),
+                "can_use_graph_search": payload.get("can_use_graph_search"),
+                "exact_next_command_present": payload.get("exact_next_command_present"),
+                "next_action_count": int_value(payload.get("next_action_count")),
+                "next_action_ids": payload.get("next_action_ids"),
+                "next_action_lane_counts": next_action_lane_counts,
+                "graph_next_action_count": int_value(payload.get("graph_next_action_count")),
+                "search_next_action_count": int_value(payload.get("search_next_action_count")),
+                "entity_registry_next_action_count": int_value(payload.get("entity_registry_next_action_count")),
+                "live_tail_next_action_count": int_value(payload.get("live_tail_next_action_count")),
+                "route_lane_count": int_value(payload.get("route_lane_count")),
+                "graph_queue_action_present": payload.get("graph_queue_action_present"),
+                "search_status": payload.get("search_status"),
+                "graph_status": payload.get("graph_status"),
+                "entity_registry_status": payload.get("entity_registry_status"),
+                "search_actionable_dirty_session_count": payload.get("search_actionable_dirty_session_count"),
+                "search_deferred_live_session_count": payload.get("search_deferred_live_session_count"),
+                "graph_actionable_count": payload.get("graph_actionable_count"),
+                "graph_queued_count": payload.get("graph_queued_count"),
+                "graph_deferred_live_source_count": payload.get("graph_deferred_live_source_count"),
+                "entity_count": payload.get("entity_count"),
+            }
+        )
+        if ok and not payload.get("exact_next_command_present"):
+            result["status"] = "warn"
+            result.setdefault("quality_flags", []).append("maintenance_status_missing_exact_next_command")
     if not ok:
         result["status"] = "failed"
-    if not counts and profile not in {"literal_planner", "entity_registry_lookup"}:
+    if not counts and profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status"}:
         result.setdefault("quality_flags", []).append("no_raw_or_segment_refs_detected")
         if result["status"] == "passed":
             result["status"] = "warn"
@@ -67737,6 +67771,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
     if profile == "route_rollup_query":
         return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
+    if profile == "maintenance_status":
+        return "Run maintenance-status --no-timers, inspect next_actions and exact_next_command, then run only the typed maintenance route it names."
     if first_ref:
         return "Open the first raw/segment/receipt ref, then rerun this live-scenario profile with --write-report."
     return "Rerun this live-scenario profile with --write-report and inspect diagnostics before treating it as proof."
@@ -67829,6 +67865,7 @@ def live_scenario_audit(
         "graph_neighborhood",
         "graph_bridge",
         "route_rollup_query",
+        "maintenance_status",
     }
     default_profiles = [
         "entity_registry_lookup",
@@ -67994,6 +68031,16 @@ def live_scenario_audit(
                     ),
                 )
             )
+        elif profile == "maintenance_status":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: live_scenario_maintenance_status_audit(
+                        workspace_root=aoa_root.parent,
+                        aoa_root=aoa_root,
+                    ),
+                )
+            )
 
     status_counts = Counter(str(item.get("status") or "unknown") for item in scenarios)
     actionable_gaps = live_scenario_actionable_gaps(scenarios)
@@ -68129,12 +68176,146 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "opens_monolith": scenario.get("opens_monolith"),
             "uses_fts": scenario.get("uses_fts"),
             "hydrates_body": scenario.get("hydrates_body"),
+            "status_packet_ok": scenario.get("status_packet_ok"),
+            "recommendation": scenario.get("recommendation"),
+            "agent_route_action": scenario.get("agent_route_action"),
+            "maintenance_required": scenario.get("maintenance_required"),
+            "can_use_graph_search": scenario.get("can_use_graph_search"),
+            "exact_next_command_present": scenario.get("exact_next_command_present"),
+            "next_action_count": scenario.get("next_action_count"),
+            "next_action_ids": scenario.get("next_action_ids"),
+            "next_action_lane_counts": scenario.get("next_action_lane_counts"),
+            "graph_next_action_count": scenario.get("graph_next_action_count"),
+            "search_next_action_count": scenario.get("search_next_action_count"),
+            "entity_registry_next_action_count": scenario.get("entity_registry_next_action_count"),
+            "live_tail_next_action_count": scenario.get("live_tail_next_action_count"),
+            "route_lane_count": scenario.get("route_lane_count"),
+            "graph_queue_action_present": scenario.get("graph_queue_action_present"),
+            "search_status": scenario.get("search_status"),
+            "graph_status": scenario.get("graph_status"),
+            "entity_registry_status": scenario.get("entity_registry_status"),
+            "search_actionable_dirty_session_count": scenario.get("search_actionable_dirty_session_count"),
+            "search_deferred_live_session_count": scenario.get("search_deferred_live_session_count"),
+            "graph_actionable_count": scenario.get("graph_actionable_count"),
+            "graph_queued_count": scenario.get("graph_queued_count"),
+            "graph_deferred_live_source_count": scenario.get("graph_deferred_live_source_count"),
+            "entity_count": scenario.get("entity_count"),
         }
         profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
     return {
         "ok": audit.get("ok"),
         "quality": audit.get("quality"),
         "profiles": profiles,
+    }
+
+
+def maintenance_next_action_lane(action: dict[str, Any]) -> str:
+    action_id = route_key_slug(str(action.get("id") or ""), fallback="")
+    route_kind = route_key_slug(str(action.get("route_kind") or ""), fallback="")
+    command = " ".join(str(item) for item in action.get("command", []) if item) if isinstance(action.get("command"), list) else ""
+    command_key = route_key_slug(command, fallback="")
+    if action_id.startswith("repair_graph") or "graph" in route_kind or "graph_maintenance" in command_key:
+        return "graph"
+    if action_id in {"run_live_catchup", "wait_live_catchup"} or "catchup" in route_kind:
+        return "live_tail"
+    if action_id.startswith("entity_registry") or "entity_registry" in route_kind or "entity_registry" in command_key:
+        return "entity_registry"
+    if action_id.startswith("refresh_search_shard") or "search_shard" in route_kind:
+        return "search_shard"
+    if "rollup" in action_id or "rollup" in route_kind or "route_rollup" in command_key:
+        return "route_rollup"
+    if "shrink" in action_id or "shrink" in route_kind or "shrink" in command_key:
+        return "search_projection"
+    if action_id == "use_graph_search":
+        return "use_graph_search"
+    if "search" in action_id or "search" in route_kind or "search" in command_key or "index_maintenance" in command_key:
+        return "search"
+    if action_id == "install_or_bootstrap_runtime":
+        return "install"
+    return "other"
+
+
+def live_scenario_maintenance_status_audit(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    packet = session_memory_maintenance_status(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+    next_actions = [item for item in packet.get("next_actions", []) if isinstance(item, dict)] if isinstance(packet.get("next_actions"), list) else []
+    next_action_ids = [str(item.get("id") or "") for item in next_actions if item.get("id")]
+    lane_counts = Counter(maintenance_next_action_lane(item) for item in next_actions)
+    graph = packet.get("graph") if isinstance(packet.get("graph"), dict) else {}
+    search = packet.get("search") if isinstance(packet.get("search"), dict) else {}
+    entity_registry = packet.get("entity_registry") if isinstance(packet.get("entity_registry"), dict) else {}
+    agent_route = packet.get("agent_route") if isinstance(packet.get("agent_route"), dict) else {}
+    exact_next_command = str(packet.get("exact_next_command") or "")
+    graph_queue_action_present = any(
+        maintenance_next_action_lane(item) == "graph"
+        and (
+            "queue" in route_key_slug(str(item.get("id") or ""), fallback="")
+            or " --use-queue " in f" {shlex.join(item.get('command', [])) if isinstance(item.get('command'), list) else ''} "
+        )
+        for item in next_actions
+    )
+    diagnostics: list[str] = []
+    if packet.get("mutates") is not False:
+        diagnostics.append("maintenance_status_packet_mutates")
+    if not isinstance(packet.get("agent_route"), dict) or not agent_route:
+        diagnostics.append("maintenance_status_missing_agent_route")
+    if not next_actions:
+        diagnostics.append("maintenance_status_missing_next_actions")
+    if not exact_next_command and next_actions:
+        diagnostics.append("maintenance_status_missing_exact_next_command")
+    if not isinstance(packet.get("search"), dict):
+        diagnostics.append("maintenance_status_missing_search_lane")
+    if not isinstance(packet.get("graph"), dict):
+        diagnostics.append("maintenance_status_missing_graph_lane")
+    if not isinstance(packet.get("entity_registry"), dict):
+        diagnostics.append("maintenance_status_missing_entity_registry_lane")
+    if int_value(graph.get("queued_count")) > 0 and not graph_queue_action_present:
+        diagnostics.append("maintenance_status_graph_queue_without_queue_next_action")
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_maintenance_status_scenario_audit",
+        "generated_at": utc_now(),
+        "ok": not diagnostics,
+        "mutates": False,
+        "truth_status": "maintenance_status_live_route_contract_not_memory_truth",
+        "status_packet_ok": packet.get("ok"),
+        "recommendation": packet.get("recommendation"),
+        "agent_route_action": agent_route.get("action"),
+        "maintenance_required": agent_route.get("maintenance_required"),
+        "can_use_graph_search": agent_route.get("can_use_graph_search"),
+        "exact_next_command_present": bool(exact_next_command),
+        "next_action_count": len(next_actions),
+        "next_action_ids": next_action_ids,
+        "next_action_lane_counts": dict(sorted(lane_counts.items())),
+        "graph_next_action_count": lane_counts.get("graph", 0),
+        "search_next_action_count": lane_counts.get("search", 0) + lane_counts.get("search_shard", 0) + lane_counts.get("route_rollup", 0) + lane_counts.get("search_projection", 0),
+        "entity_registry_next_action_count": lane_counts.get("entity_registry", 0),
+        "live_tail_next_action_count": lane_counts.get("live_tail", 0),
+        "route_lane_count": len([lane for lane, count in lane_counts.items() if count > 0]),
+        "graph_queue_action_present": graph_queue_action_present,
+        "search_status": search.get("status"),
+        "graph_status": graph.get("status"),
+        "entity_registry_status": entity_registry.get("status"),
+        "search_actionable_dirty_session_count": search.get("actionable_dirty_session_count"),
+        "search_deferred_live_session_count": search.get("deferred_live_session_count"),
+        "graph_actionable_count": graph.get("actionable_count"),
+        "graph_queued_count": graph.get("queued_count"),
+        "graph_deferred_live_source_count": graph.get("deferred_live_source_count"),
+        "entity_count": entity_registry.get("entity_count"),
+        "elapsed_ms": elapsed_ms,
+        "diagnostics": diagnostics,
+        "first_ref": {},
+        "next_route": "Run the first maintenance-status next action only if it is an explicit operator/maintenance route; MCP consumers should keep this packet read-only.",
+        "authority_boundary": "maintenance-status is generated route guidance; raw/session evidence and owner layers remain authoritative.",
     }
 
 
@@ -68268,6 +68449,36 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
             required_value = str(required)
             if int_value(observed_counts.get(required_value)) <= 0:
                 failures.append(f"{profile}:missing_{label}:{required_value}")
+    for expectation_key, scenario_key in (
+        ("min_next_action_count", "next_action_count"),
+        ("min_graph_next_action_count", "graph_next_action_count"),
+        ("min_search_next_action_count", "search_next_action_count"),
+        ("min_entity_registry_next_action_count", "entity_registry_next_action_count"),
+        ("min_live_tail_next_action_count", "live_tail_next_action_count"),
+        ("min_route_lane_count", "route_lane_count"),
+        ("min_graph_queued_count", "graph_queued_count"),
+    ):
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(scenario.get(scenario_key)) < minimum:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    if expectation.get("require_exact_next_command") is True and scenario.get("exact_next_command_present") is not True:
+        failures.append(f"{profile}:exact_next_command_present:{scenario.get('exact_next_command_present')}")
+    if expectation.get("require_maintenance_packet_no_mutation") is True and scenario.get("mutates") is not False:
+        failures.append(f"{profile}:mutates:{scenario.get('mutates')}")
+    if (
+        expectation.get("require_graph_queue_action_when_queued") is True
+        and int_value(scenario.get("graph_queued_count")) > 0
+        and scenario.get("graph_queue_action_present") is not True
+    ):
+        failures.append(f"{profile}:graph_queue_action_missing_for_queued_count:{scenario.get('graph_queued_count')}")
+    next_action_ids = {str(item) for item in scenario.get("next_action_ids", []) if item} if isinstance(scenario.get("next_action_ids"), list) else set()
+    for action_id in expectation.get("required_next_action_ids", []) if isinstance(expectation.get("required_next_action_ids"), list) else []:
+        if str(action_id) not in next_action_ids:
+            failures.append(f"{profile}:missing_next_action_id:{action_id}")
+    next_action_lane_counts = scenario.get("next_action_lane_counts") if isinstance(scenario.get("next_action_lane_counts"), dict) else {}
+    for lane in expectation.get("required_next_action_lanes", []) if isinstance(expectation.get("required_next_action_lanes"), list) else []:
+        if int_value(next_action_lane_counts.get(str(lane))) <= 0:
+            failures.append(f"{profile}:missing_next_action_lane:{lane}")
     return failures
 
 

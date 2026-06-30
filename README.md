@@ -511,7 +511,9 @@ keeps warnings as `actionable_gaps`, so allowed warning states still leave a
 precise next route instead of becoming silent green. The corpus includes the
 `route_rollup_query` profile so the fast materialized route-rollup consumer path
 is checked for refs, freshness, and no shard/monolith/FTS/raw-hydration
-expansion.
+expansion. It also includes the `maintenance_status` profile so route-quality
+gates verify the read-only maintenance packet exposes typed next actions and an
+exact next command without treating maintenance guidance as evidence truth.
 `usage-chain` builds the hot consumer packet for one stable anchor: direct
 usage events, result/consequence events, refs, freshness, noise flags, and
 next expansion commands without opening GraphRAG, graph neighborhood, or raw

@@ -2405,6 +2405,20 @@ Maintenance gates:
   `queue_seed_limit`, and `queue_seed_include_deferred_live` so agents can
   distinguish progress-drip routing from owner evidence. Source `py_compile`
   and focused resource/graph-drip tests passed (`15 passed`).
+- 2026-06-30 maintenance-status corpus profile: the live scenario corpus now
+  includes `maintenance_status_next_action_contract`, backed by a new
+  read-only `maintenance_status` profile. It checks that `maintenance-status`
+  exposes typed next actions, lane counts, graph queue action presence when a
+  queue exists, and an exact next command without mutating or treating route
+  guidance as evidence truth. Live proof:
+  `diagnostics/20260630T221605Z__live-scenario-audit.json` returned
+  `profile=maintenance_status`, `status=passed`,
+  `next_action_ids=[repair_graph_queue_drip, run_operational_shrink_gates]`,
+  `graph_queued_count=200`, `graph_queue_action_present=true`,
+  `exact_next_command_present=true`; full corpus report
+  `diagnostics/20260630T221736Z__live-scenario-corpus-check.json` returned
+  `case_count=15`, `passed_count=15`, `failed_count=0`,
+  `actionable_gap_count=0`.
 
 ## Probe Notes
 
