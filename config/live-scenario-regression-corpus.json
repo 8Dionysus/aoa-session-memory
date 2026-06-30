@@ -437,6 +437,19 @@
             "min_result_count": 1,
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
+            "min_work_chain_linked_count": 1,
+            "min_work_chain_episode_count": 1,
+            "min_work_chain_goal_event_ref_count": 1,
+            "min_work_chain_answer_ref_count": 1,
+            "required_work_chain_next_routes": [
+              "task-episodes",
+              "answer-neighborhood",
+              "agent-reasoning-windows"
+            ],
+            "require_work_chain_no_search": true,
+            "require_work_chain_no_graph": true,
+            "require_work_chain_no_raw_open": true,
+            "require_work_chain_no_body_hydration": true,
             "max_elapsed_ms": 30000
           }
         ]

@@ -36948,6 +36948,156 @@ def compact_task_episode(episode: dict[str, Any], *, session_label: str, session
     }
 
 
+def compact_episode_ref_samples(
+    episode: dict[str, Any],
+    bucket: str,
+    *,
+    limit: int = 3,
+    prefer_canonical: bool = False,
+) -> list[dict[str, Any]]:
+    refs = episode.get(bucket) if isinstance(episode.get(bucket), list) else []
+    candidates = [item for item in refs if isinstance(item, dict)]
+    if prefer_canonical:
+        canonical = [item for item in candidates if str(item.get("source_type") or "") == "response_item"]
+        if canonical:
+            candidates = [*canonical, *[item for item in candidates if str(item.get("source_type") or "") != "response_item"]]
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = str(item.get("event_id") or item.get("raw_ref") or item.get("segment_ref") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        selected.append(item)
+        if len(selected) >= max(1, limit):
+            break
+    return selected
+
+
+def goal_lifecycle_work_chain(
+    lifecycle: dict[str, Any],
+    *,
+    task_episodes: list[dict[str, Any]],
+    session_label: str,
+    session_id: str,
+    aoa_root: Path,
+) -> dict[str, Any]:
+    task_episode_ids = [
+        str(item)
+        for item in lifecycle.get("task_episode_ids", [])
+        if item
+    ] if isinstance(lifecycle.get("task_episode_ids"), list) else []
+    task_by_id = {
+        str(item.get("episode_id") or ""): item
+        for item in task_episodes
+        if isinstance(item, dict) and item.get("episode_id")
+    }
+    goal_events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
+    episodes: list[dict[str, Any]] = []
+    missing_episode_ids: list[str] = []
+    for task_episode_id in task_episode_ids[:5]:
+        episode = task_by_id.get(task_episode_id)
+        if not episode:
+            missing_episode_ids.append(task_episode_id)
+            continue
+        compact = compact_task_episode(episode, session_label=session_label, session_id=session_id)
+        goal_event_refs = [
+            event.get("refs")
+            for event in goal_events
+            if isinstance(event, dict)
+            and str(event.get("task_episode_id") or "") == task_episode_id
+            and isinstance(event.get("refs"), dict)
+        ]
+        episodes.append(
+            {
+                "episode_id": task_episode_id,
+                "status": compact.get("status"),
+                "verification_state": compact.get("verification_state"),
+                "failure_state": compact.get("failure_state"),
+                "counts": compact.get("counts", {}),
+                "event_range": compact.get("event_range", {}),
+                "start_user_ref": compact.get("start_user_ref", {}),
+                "goal_event_refs": goal_event_refs[:4],
+                "reasoning_boundary_refs": compact_episode_ref_samples(episode, "reasoning_refs", limit=2),
+                "answer_refs": compact_episode_ref_samples(episode, "answer_refs", limit=3, prefer_canonical=True),
+                "progress_refs": compact_episode_ref_samples(episode, "progress_refs", limit=2, prefer_canonical=True),
+                "verification_refs": compact_episode_ref_samples(episode, "verification_refs", limit=3),
+                "closeout_refs": compact_episode_ref_samples(episode, "closeout_refs", limit=2, prefer_canonical=True),
+                "error_refs": compact_episode_ref_samples(episode, "error_refs", limit=3),
+                "next_expansion": [
+                    {
+                        "route": "task-episodes",
+                        "reason": "inspect the generated task interval that contains this goal event",
+                        "command": [
+                            *session_memory_cli_command(aoa_root),
+                            "task-episodes",
+                            session_label,
+                            "--aoa-root",
+                            str(aoa_root),
+                            "--task-episode-id",
+                            task_episode_id,
+                            "--limit",
+                            "1",
+                        ],
+                    },
+                    {
+                        "route": "answer-neighborhood",
+                        "reason": "inspect answer/progress/verification/closeout context around this task interval",
+                        "command": [
+                            *session_memory_cli_command(aoa_root),
+                            "answer-neighborhood",
+                            "--aoa-root",
+                            str(aoa_root),
+                            "--session",
+                            session_label,
+                            "--task-episode-id",
+                            task_episode_id,
+                            "--limit",
+                            "5",
+                            "--use-shards",
+                        ],
+                    },
+                    {
+                        "route": "agent-reasoning-windows",
+                        "reason": "inspect reasoning-boundary refs without treating them as hidden reasoning content",
+                        "command": [
+                            *session_memory_cli_command(aoa_root),
+                            "agent-reasoning-windows",
+                            "--aoa-root",
+                            str(aoa_root),
+                            "--session",
+                            session_label,
+                            "--task-episode-id",
+                            task_episode_id,
+                            "--limit",
+                            "5",
+                            "--use-shards",
+                        ],
+                    },
+                ],
+            }
+        )
+    status = "linked_task_episodes" if episodes else ("task_episode_refs_missing" if missing_episode_ids else "no_task_episode_refs")
+    return {
+        "schema_version": 1,
+        "status": status,
+        "source": "session_index_goal_lifecycle_task_episode_bridge",
+        "task_episode_ids": task_episode_ids,
+        "linked_episode_count": len(episodes),
+        "missing_task_episode_ids": missing_episode_ids,
+        "episodes": episodes,
+        "cost_profile": {
+            "reads_session_index": True,
+            "uses_search": False,
+            "uses_graph": False,
+            "opens_raw": False,
+            "hydrates_body": False,
+        },
+        "authority_boundary": "work_chain is generated navigation from session.index; raw and segment refs remain authority",
+    }
+
+
 def task_episode_route_search(
     *,
     aoa_root: Path,
@@ -37031,7 +37181,14 @@ def task_episode_route_search(
     }
 
 
-def compact_goal_lifecycle(lifecycle: dict[str, Any], *, session_label: str, session_id: str) -> dict[str, Any]:
+def compact_goal_lifecycle(
+    lifecycle: dict[str, Any],
+    *,
+    session_label: str,
+    session_id: str,
+    aoa_root: Path,
+    task_episodes: list[dict[str, Any]],
+) -> dict[str, Any]:
     events = lifecycle.get("events") if isinstance(lifecycle.get("events"), list) else []
     return {
         "schema_version": GOAL_LIFECYCLE_SCHEMA_VERSION,
@@ -37066,6 +37223,13 @@ def compact_goal_lifecycle(lifecycle: dict[str, Any], *, session_label: str, ses
         "raw_refs": lifecycle.get("raw_refs", []),
         "segment_refs": lifecycle.get("segment_refs", []),
         "sample_events": events[:8],
+        "work_chain": goal_lifecycle_work_chain(
+            lifecycle,
+            task_episodes=task_episodes,
+            session_label=session_label,
+            session_id=session_id,
+            aoa_root=aoa_root,
+        ),
         "truth_level": "generated_goal_lifecycle_navigation_not_reviewed_truth",
     }
 
@@ -37113,12 +37277,19 @@ def goal_lifecycle_route_search(
         session_label = str(display.get("label") or record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
         lifecycles = index.get("goal_lifecycles", []) if isinstance(index.get("goal_lifecycles"), list) else []
+        task_episodes = index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []
         lifecycle_items = list(reversed(lifecycles)) if order == "recent" else list(lifecycles)
         for item in lifecycle_items:
             if not isinstance(item, dict):
                 continue
             selected_count += 1
-            compact = compact_goal_lifecycle(item, session_label=session_label, session_id=session_id)
+            compact = compact_goal_lifecycle(
+                item,
+                session_label=session_label,
+                session_id=session_id,
+                aoa_root=aoa_root,
+                task_episodes=task_episodes,
+            )
             if goal_id and str(compact.get("goal_id") or "") != goal_id:
                 continue
             if status and str(compact.get("status") or "") != status:
@@ -37153,7 +37324,7 @@ def goal_lifecycle_route_search(
         "results": results,
         "provider": provider_summary,
         "diagnostics": [],
-        "next_route": "Use refs, graph_refs, raw_refs, and segment_refs for authority; lifecycle packets are generated navigation.",
+        "next_route": "Use work_chain next_expansion for task/answer context, then refs, graph_refs, raw_refs, and segment_refs for authority; lifecycle packets are generated navigation.",
     }
 
 
@@ -66893,7 +67064,64 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         if ok and total == 0:
             result["status"] = "warn"
             result["quality_flags"] = ["route_ok_no_recent_hook_errors"]
-    elif profile in {"goal_lifecycle", "agent_closeout"}:
+    elif profile == "goal_lifecycle":
+        result["result_count"] = int_value(payload.get("result_count"), len(payload.get("results") or []))
+        work_chain_linked_count = 0
+        work_chain_episode_count = 0
+        work_chain_goal_event_ref_count = 0
+        work_chain_answer_ref_count = 0
+        work_chain_closeout_ref_count = 0
+        work_chain_next_route_counts: Counter[str] = Counter()
+        work_chain_uses_search = False
+        work_chain_uses_graph = False
+        work_chain_opens_raw = False
+        work_chain_hydrates_body = False
+        for lifecycle in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+            if not isinstance(lifecycle, dict):
+                continue
+            work_chain = lifecycle.get("work_chain") if isinstance(lifecycle.get("work_chain"), dict) else {}
+            if work_chain.get("status") == "linked_task_episodes":
+                work_chain_linked_count += 1
+            cost_profile = work_chain.get("cost_profile") if isinstance(work_chain.get("cost_profile"), dict) else {}
+            work_chain_uses_search = work_chain_uses_search or bool(cost_profile.get("uses_search"))
+            work_chain_uses_graph = work_chain_uses_graph or bool(cost_profile.get("uses_graph"))
+            work_chain_opens_raw = work_chain_opens_raw or bool(cost_profile.get("opens_raw"))
+            work_chain_hydrates_body = work_chain_hydrates_body or bool(cost_profile.get("hydrates_body"))
+            for episode in work_chain.get("episodes", []) if isinstance(work_chain.get("episodes"), list) else []:
+                if not isinstance(episode, dict):
+                    continue
+                work_chain_episode_count += 1
+                work_chain_goal_event_ref_count += len(episode.get("goal_event_refs") if isinstance(episode.get("goal_event_refs"), list) else [])
+                work_chain_answer_ref_count += len(episode.get("answer_refs") if isinstance(episode.get("answer_refs"), list) else [])
+                work_chain_closeout_ref_count += len(episode.get("closeout_refs") if isinstance(episode.get("closeout_refs"), list) else [])
+                for route in episode.get("next_expansion", []) if isinstance(episode.get("next_expansion"), list) else []:
+                    if isinstance(route, dict) and route.get("route"):
+                        work_chain_next_route_counts[str(route["route"])] += 1
+        result.update(
+            {
+                "work_chain_linked_count": work_chain_linked_count,
+                "work_chain_episode_count": work_chain_episode_count,
+                "work_chain_goal_event_ref_count": work_chain_goal_event_ref_count,
+                "work_chain_answer_ref_count": work_chain_answer_ref_count,
+                "work_chain_closeout_ref_count": work_chain_closeout_ref_count,
+                "work_chain_next_route_counts": dict(sorted(work_chain_next_route_counts.items())),
+                "work_chain_uses_search": work_chain_uses_search,
+                "work_chain_uses_graph": work_chain_uses_graph,
+                "work_chain_opens_raw": work_chain_opens_raw,
+                "work_chain_hydrates_body": work_chain_hydrates_body,
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if result["result_count"] and not work_chain_linked_count:
+            quality_flags.append("goal_lifecycle_work_chain_missing")
+        for route_name in ("task-episodes", "answer-neighborhood", "agent-reasoning-windows"):
+            if work_chain_next_route_counts.get(route_name, 0) <= 0:
+                quality_flags.append(f"goal_lifecycle_missing_next_route:{route_name}")
+        if ok and result["result_count"] == 0:
+            result["status"] = "warn"
+        elif ok and quality_flags:
+            result["status"] = "warn"
+    elif profile == "agent_closeout":
         result["result_count"] = int_value(payload.get("result_count"), len(payload.get("results") or []))
         if ok and result["result_count"] == 0:
             result["status"] = "warn"
@@ -67437,6 +67665,16 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "non_usage_evidence_sample_count": scenario.get("non_usage_evidence_sample_count"),
             "raw_or_segment_ref_sample_count": scenario.get("raw_or_segment_ref_sample_count"),
             "result_count": scenario.get("result_count"),
+            "work_chain_linked_count": scenario.get("work_chain_linked_count"),
+            "work_chain_episode_count": scenario.get("work_chain_episode_count"),
+            "work_chain_goal_event_ref_count": scenario.get("work_chain_goal_event_ref_count"),
+            "work_chain_answer_ref_count": scenario.get("work_chain_answer_ref_count"),
+            "work_chain_closeout_ref_count": scenario.get("work_chain_closeout_ref_count"),
+            "work_chain_next_route_counts": scenario.get("work_chain_next_route_counts"),
+            "work_chain_uses_search": scenario.get("work_chain_uses_search"),
+            "work_chain_uses_graph": scenario.get("work_chain_uses_graph"),
+            "work_chain_opens_raw": scenario.get("work_chain_opens_raw"),
+            "work_chain_hydrates_body": scenario.get("work_chain_hydrates_body"),
             "total_receipt_count": scenario.get("total_receipt_count"),
             "returned_receipt_count": scenario.get("returned_receipt_count"),
             "node_count": scenario.get("node_count"),
@@ -67482,10 +67720,31 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_returned_receipt_count", "returned_receipt_count"),
         ("min_node_count", "node_count"),
         ("min_edge_count", "edge_count"),
+        ("min_work_chain_linked_count", "work_chain_linked_count"),
+        ("min_work_chain_episode_count", "work_chain_episode_count"),
+        ("min_work_chain_goal_event_ref_count", "work_chain_goal_event_ref_count"),
+        ("min_work_chain_answer_ref_count", "work_chain_answer_ref_count"),
+        ("min_work_chain_closeout_ref_count", "work_chain_closeout_ref_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
             failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    work_chain_next_route_counts = (
+        scenario.get("work_chain_next_route_counts")
+        if isinstance(scenario.get("work_chain_next_route_counts"), dict)
+        else {}
+    )
+    for route_name in expectation.get("required_work_chain_next_routes", []) if isinstance(expectation.get("required_work_chain_next_routes"), list) else []:
+        if int_value(work_chain_next_route_counts.get(str(route_name))) <= 0:
+            failures.append(f"{profile}:missing_work_chain_next_route:{route_name}")
+    for expectation_key, scenario_key in (
+        ("require_work_chain_no_search", "work_chain_uses_search"),
+        ("require_work_chain_no_graph", "work_chain_uses_graph"),
+        ("require_work_chain_no_raw_open", "work_chain_opens_raw"),
+        ("require_work_chain_no_body_hydration", "work_chain_hydrates_body"),
+    ):
+        if expectation.get(expectation_key) is True and scenario.get(scenario_key) is not False:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}")
     max_elapsed_ms = expectation.get("max_elapsed_ms")
     if max_elapsed_ms is not None and int_value(scenario.get("elapsed_ms")) > int_value(max_elapsed_ms):
         failures.append(f"{profile}:elapsed_ms:{scenario.get('elapsed_ms')}>{int_value(max_elapsed_ms)}")

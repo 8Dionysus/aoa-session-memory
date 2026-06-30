@@ -763,6 +763,21 @@ Last observed result:
   `portable_sqlite` ready, search schema `13`, route-index presence, and
   `freshness.status=current`; compact scenario output no longer drops provider
   freshness before MCP sees it.
+- 2026-06-30 goal work-chain route proof: live
+  `goal-lifecycles all --event-kind goal_completed --limit 1` returns
+  `work_chain.status=linked_task_episodes` with `linked_episode_count=1`,
+  `goal_event_ref.raw_ref=raw:line:28113`, canonical
+  `answer_ref.raw_ref=raw:line:27276`, and next routes for `task-episodes`,
+  `answer-neighborhood`, and `agent-reasoning-windows`. Its cost profile keeps
+  `reads_session_index=true`, `uses_search=false`, `uses_graph=false`,
+  `opens_raw=false`, and `hydrates_body=false`, so goal-to-work navigation is a
+  compact bridge rather than a hidden raw/search expansion. The focused live
+  scenario report `diagnostics/20260630T043402Z__live-scenario-audit.json`
+  passed with `work_chain_linked_count=3`, `work_chain_episode_count=7`,
+  `work_chain_answer_ref_count=18`, `elapsed_ms=210`, and no actionable gaps.
+  The reviewed live scenario corpus report
+  `diagnostics/20260630T043434Z__live-scenario-corpus-check.json` passed
+  `14/14` cases with `actionable_gap_count=0`.
 - 2026-06-26 entity usage compact-harvest proof: a live
   `aoa_session_entity_usage_audit` MCP call for
   `aoa-session-memory-evidence-route` with `limit=2` /
@@ -1432,6 +1447,7 @@ Stress-pass evidence:
 | Segment indexes classify universal session events by facets and relationships | event taxonomy config, segment index schema, reindex report, universal facet regression tests |
 | Agent answers, progress updates, closeouts, blockers, handoffs, verification reports, and reasoning boundaries are searchable without treating generated classes as reviewed truth | `facets.agent_event`, `by_agent_event`, `agent_event_counts`, `agent-responses`, `agent-closeouts`, `agent-progress-updates`, `agent-reasoning-windows`, agent-event regression test |
 | Task intervals can be inspected as generated navigation packets with raw/segment refs | `task_episodes`, `task_episode_counts`, `task-episodes`, `answer-neighborhood`, task-episode regression test |
+| Goal lifecycles bridge into the surrounding task and answer route without raw/search expansion | `goal_lifecycles`, `goal-lifecycles`, `work_chain`, `task_episodes`, `answer-neighborhood`, goal lifecycle regression test |
 | Segment and session indexes expose operational route signals for the 22-layer map | `facets.route_signals`, `by_route_layer`, `by_route_signal`, `route_signal_counts`, route-signal regression tests |
 | Stable AoA skill and MCP service names route agents through canonical map axes | `entity:aoa_memo_writeback`, `entity:aoa_memo_mcp`, `mcp:aoa_memo_mcp`, `maps/by-entity/INDEX.md`, `maps/by-mcp/INDEX.md`, route-signal regression tests |
 | Agents can start from a named operational anchor instead of hand-picking a map axis | `trace-route`, `resolve-anchor`, route-trace regression test, 2026-05-26 live route-trace reports |

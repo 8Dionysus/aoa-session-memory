@@ -184,7 +184,12 @@ preserves `get_goal` / `update_goal` after a compaction or resume boundary, the
 packet may recover `objective`, `status`, and created/updated timestamps from
 the linked goal tool output as `observed_goal` and `state_observations`. That is
 still evidence routing: keep `missing_create` visible unless a real
-`create_goal` raw event exists.
+`create_goal` raw event exists. Each lifecycle packet also carries a compact
+`work_chain` built from generated `task_episodes`: linked task intervals,
+goal-event refs, answer/progress/verification/error/closeout samples, and exact
+next expansion commands for `task-episodes`, `answer-neighborhood`, and
+`agent-reasoning-windows`. This is a navigation bridge only; raw and segment
+refs remain the authority.
 
 The MCP surface may expose these routes through read-only tools such as
 `aoa_session_search` filters (`agent_event`, `doc_type=task_episode`) or

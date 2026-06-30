@@ -345,6 +345,11 @@ When a lifecycle starts after a compaction/resume boundary and the archive has
 may fill `observed_goal`, `state_observations`, and `objective_source` from the
 tool output. This improves route usefulness without inventing a creation ref:
 `missing_create` remains the honest boundary flag.
+The same lifecycle packet now includes a compact `work_chain` from
+`task_episodes`: linked task intervals, goal-event refs, canonical
+answer/progress samples, verification/error/closeout refs, and exact expansion
+commands. That bridge is the cheap first move for "goal -> what happened in the
+work" questions; use the returned refs before opening raw transcript material.
 
 `agent-event-audit --order longest` is the Stage-1 classification route for
 real long sessions. It records selected sessions, generated shape counts,

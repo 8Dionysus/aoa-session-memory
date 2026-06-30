@@ -50,10 +50,13 @@ Use these first routes when available:
   source buckets or before/after evidence.
 - hook health or recent hook errors: `hook-receipts` first, then
   `entity-dossier` or `entity-usage-audit` for surrounding session evidence.
-- goal lifecycle: `goal-lifecycles` first, then task or answer routes by refs.
-  Treat `observed_goal` / `state_observations` from `get_goal` output as
-  observed state evidence, not as proof that a `create_goal` raw event exists;
-  keep `missing_create` visible when present.
+- goal lifecycle: `goal-lifecycles` first. Read its `work_chain` before
+  manually jumping to task or answer routes: it links generated task intervals,
+  goal-event refs, answer/progress/verification/error/closeout samples, and
+  exact next expansion commands. Treat `observed_goal` /
+  `state_observations` from `get_goal` output as observed state evidence, not
+  as proof that a `create_goal` raw event exists; keep `missing_create` visible
+  when present.
 - agent answers, closeouts, progress, or reasoning boundaries:
   `agent-responses`, `agent-closeouts`, `agent-progress-updates`,
   `agent-reasoning-windows`, or `answer-neighborhood`.

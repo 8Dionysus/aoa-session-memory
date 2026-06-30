@@ -1977,6 +1977,15 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
                 "type": "response_item",
                 "payload": {"type": "function_call", "name": "update_goal", "call_id": "call-block-goal", "arguments": json.dumps({"status": "blocked"})},
             },
+            {
+                "timestamp": "2026-06-18T00:00:12Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Готово. Завершено: blocked goal recorded."}],
+                },
+            },
         ],
     )
 
@@ -2038,6 +2047,23 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert lifecycle_route["ok"] is True
     assert lifecycle_route["results"][0]["goal_id"] == "goal-0001"
     assert lifecycle_route["results"][0]["refs"]["completed"]["raw_ref"] == "raw:line:7"
+    assert lifecycle_route["results"][0]["work_chain"]["status"] == "linked_task_episodes"
+    first_work_episode = lifecycle_route["results"][0]["work_chain"]["episodes"][0]
+    assert first_work_episode["episode_id"] == "task-0001"
+    assert first_work_episode["goal_event_refs"][0]["raw_ref"] == "raw:line:3"
+    assert {route["route"] for route in first_work_episode["next_expansion"]} == {
+        "task-episodes",
+        "answer-neighborhood",
+        "agent-reasoning-windows",
+    }
+    assert first_work_episode["next_expansion"][0]["command"][-4:] == ["--task-episode-id", "task-0001", "--limit", "1"]
+    assert lifecycle_route["results"][0]["work_chain"]["cost_profile"] == {
+        "reads_session_index": True,
+        "uses_search": False,
+        "uses_graph": False,
+        "opens_raw": False,
+        "hydrates_body": False,
+    }
     assert lifecycle_route["provider"]["selected_provider"] == "portable_sqlite"
     assert lifecycle_route["provider"]["response_compacted"] is True
     assert "portable_sqlite" in lifecycle_route["provider"]["providers"]
@@ -2047,6 +2073,10 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert blocked_route["results"][0]["objective_source"] == "goal_tool_output"
     assert blocked_route["results"][0]["observed_goal"]["createdAt"] == 1780000000
     assert blocked_route["results"][0]["state_observations"][0]["refs"]["raw_ref"] == "raw:line:11"
+    blocked_work_episode = blocked_route["results"][0]["work_chain"]["episodes"][0]
+    assert blocked_work_episode["episode_id"] == "task-0002"
+    assert blocked_work_episode["closeout_refs"][0]["raw_ref"] == "raw:line:13"
+    assert blocked_work_episode["closeout_refs"][0]["source_type"] == "response_item"
 
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
@@ -4626,7 +4656,36 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
         }
 
     def fake_goals(**_kwargs: Any) -> dict[str, Any]:
-        return {"ok": True, "result_count": 1, "results": [{"refs": {"raw": "raw:line:2"}}]}
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [
+                {
+                    "refs": {"raw": "raw:line:2"},
+                    "work_chain": {
+                        "status": "linked_task_episodes",
+                        "cost_profile": {
+                            "uses_search": False,
+                            "uses_graph": False,
+                            "opens_raw": False,
+                            "hydrates_body": False,
+                        },
+                        "episodes": [
+                            {
+                                "episode_id": "task-0001",
+                                "goal_event_refs": [{"raw_ref": "raw:line:2"}],
+                                "answer_refs": [{"raw_ref": "raw:line:3"}],
+                                "next_expansion": [
+                                    {"route": "task-episodes"},
+                                    {"route": "answer-neighborhood"},
+                                    {"route": "agent-reasoning-windows"},
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
 
     def fake_closeouts(**_kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "result_count": 1, "results": [{"refs": {"segment_index": "segment.index.json"}}]}
@@ -5617,6 +5676,47 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_neighborhood:edge_count:0<1" in graph_failures
     assert "graph_neighborhood:evidence_ref_count:0<1" in graph_failures
 
+    goal_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "goal_lifecycle",
+            "status": "passed",
+            "result_count": 1,
+            "work_chain_linked_count": 0,
+            "work_chain_episode_count": 1,
+            "work_chain_goal_event_ref_count": 0,
+            "work_chain_answer_ref_count": 0,
+            "work_chain_next_route_counts": {"task-episodes": 1},
+            "work_chain_uses_search": False,
+            "work_chain_uses_graph": True,
+            "work_chain_opens_raw": False,
+            "work_chain_hydrates_body": False,
+        },
+        {
+            "profile": "goal_lifecycle",
+            "min_work_chain_linked_count": 1,
+            "min_work_chain_episode_count": 1,
+            "min_work_chain_goal_event_ref_count": 1,
+            "min_work_chain_answer_ref_count": 1,
+            "required_work_chain_next_routes": [
+                "task-episodes",
+                "answer-neighborhood",
+                "agent-reasoning-windows",
+            ],
+            "require_work_chain_no_search": True,
+            "require_work_chain_no_graph": True,
+            "require_work_chain_no_raw_open": True,
+            "require_work_chain_no_body_hydration": True,
+        },
+    )
+
+    assert "goal_lifecycle:work_chain_linked_count:0<1" in goal_failures
+    assert "goal_lifecycle:work_chain_goal_event_ref_count:0<1" in goal_failures
+    assert "goal_lifecycle:work_chain_answer_ref_count:0<1" in goal_failures
+    assert "goal_lifecycle:missing_work_chain_next_route:answer-neighborhood" in goal_failures
+    assert "goal_lifecycle:missing_work_chain_next_route:agent-reasoning-windows" in goal_failures
+    assert "goal_lifecycle:work_chain_uses_graph:True" in goal_failures
+    assert not any("work_chain_uses_search" in item for item in goal_failures)
+
     literal_failures = module.live_scenario_profile_expectation_failures(
         {
             "profile": "literal_planner",
@@ -5731,6 +5831,15 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
                     "profile": "goal_lifecycle",
                     "status": "passed",
                     "result_count": 3,
+                    "work_chain_linked_count": 2,
+                    "work_chain_episode_count": 2,
+                    "work_chain_goal_event_ref_count": 2,
+                    "work_chain_answer_ref_count": 1,
+                    "work_chain_next_route_counts": {
+                        "task-episodes": 2,
+                        "answer-neighborhood": 2,
+                    },
+                    "work_chain_uses_search": False,
                 },
                 {
                     "profile": "graph_neighborhood",
@@ -5750,6 +5859,10 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     assert profiles["hook_failure"]["total_receipt_count"] == 2
     assert profiles["hook_failure"]["returned_receipt_count"] == 1
     assert profiles["goal_lifecycle"]["result_count"] == 3
+    assert profiles["goal_lifecycle"]["work_chain_linked_count"] == 2
+    assert profiles["goal_lifecycle"]["work_chain_answer_ref_count"] == 1
+    assert profiles["goal_lifecycle"]["work_chain_next_route_counts"]["answer-neighborhood"] == 2
+    assert profiles["goal_lifecycle"]["work_chain_uses_search"] is False
     assert profiles["graph_neighborhood"]["node_count"] == 4
     assert profiles["graph_neighborhood"]["edge_count"] == 12
 
