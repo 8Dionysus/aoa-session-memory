@@ -6534,6 +6534,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query="как агент использовал aoa-session-memory-mcp и к чему это привело",
         doc_type="event",
     )
+    noisy_concrete_mcp_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди как aoa-session-memory-mcp возвращал Transport closed",
+        doc_type="event",
+    )
     overlapping_exact_skill_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="aoa-session-memory-evidence-route",
@@ -6809,6 +6814,19 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
     assert concrete_mcp_literal_plan["broad_entity_class"] == {}
     assert concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
+    assert noisy_concrete_mcp_literal_plan["query_shape"]["primary"] == "entity_anchor"
+    assert noisy_concrete_mcp_literal_plan["route_anchor"] == "aoa_session_memory_mcp"
+    assert noisy_concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
+    assert noisy_concrete_mcp_literal_plan["route_anchor_kind"] == "mcp"
+    assert noisy_concrete_mcp_literal_plan["broad_entity_class"] == {}
+    assert noisy_concrete_mcp_literal_plan["query_shape"]["suppressed_broad_entity_class"]["layer"] == "mcp"
+    assert noisy_concrete_mcp_literal_plan["embedded_entity_anchor"]["registry_kind"] == "mcp_service"
+    assert noisy_concrete_mcp_literal_plan["embedded_entity_anchor"]["match_relation"] == "embedded"
+    assert noisy_concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
+    assert noisy_concrete_mcp_literal_plan["cost_profile"]["structured_first"] is True
+    assert noisy_concrete_mcp_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert noisy_concrete_mcp_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+    assert "usage-chain aoa_session_memory_mcp" in noisy_concrete_mcp_literal_plan["next_command"]
     assert overlapping_exact_skill_literal_plan["query_shape"]["primary"] == "entity_anchor"
     assert overlapping_exact_skill_literal_plan["route_anchor"] == "aoa_session_memory_evidence_route"
     assert overlapping_exact_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"

@@ -1492,6 +1492,9 @@ When a longer human phrase embeds a registered operational entity, such as
 `как агент использовал aoa-decision`, the planner routes first through the
 registry entity anchor (`aoa_decision`, `skill`) and keeps the original phrase
 as the exact raw-text fallback.
+If the same phrase also contains broad inventory words such as `найди` and a
+class term such as `MCP`, the concrete embedded entity still wins; the broad
+class is kept only as a suppressed diagnostic on that plan.
 Broad class questions such as `какие skills есть в системе` or
 `найди все MCP которые агент использовал` are classified separately from
 concrete anchors. The planner starts with typed registry/inventory routes, adds

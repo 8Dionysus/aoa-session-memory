@@ -855,6 +855,17 @@ Last observed result:
   `ok=true`, `sample_count=5`, `failed_count=0`, and primary routes
   `command_structured_search`, `entity_inventory`, `entity_usage_chain`,
   `route_signal_structured_search`, and `session_rehydrate`.
+- 2026-06-30 noisy literal embedded-entity precedence proof:
+  `literal-query-plan 'найди как aoa-session-memory-mcp возвращал Transport
+  closed'` now suppresses the broad `MCP` class diagnostic, resolves
+  `route_anchor=aoa_session_memory_mcp`,
+  `route_anchor_source=embedded_entity_registry`,
+  `route_anchor_kind=mcp`, `match_relation=embedded`, and keeps
+  `entity_usage_chain` as the first route with monolith fallback not first.
+  Control query `найди все MCP которые агент использовал и ошибки рядом`
+  remains a broad `entity_class` inventory route. The live scenario corpus
+  returned `ok=true`, `case_count=14`, `passed_count=14`, `failed_count=0`,
+  and `actionable_gap_count=0`.
 - 2026-06-29 scoped full-text literal strategy proof: the planner now nests
   `scoped_full_text_strategy` inside `literal_route_strategy`. A live read-only
   scoped query for `hook timed out` over `2026-06-01..2026-06-30` kept

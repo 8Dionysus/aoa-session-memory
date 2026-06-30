@@ -71,7 +71,10 @@ Use these first routes when available:
   command to run, and which scoped query to repeat afterward. For commands, use
   the planner's command anchor for structured routes and preserve the full
   command text for exact recall. For exact session ids, use the planner's
-  rehydrate/session search route before global literal fallback.
+  rehydrate/session search route before global literal fallback. If a noisy
+  human phrase contains both broad class words and a concrete registered
+  operational entity, follow the concrete entity route first; broad class
+  inventory is only first when no concrete embedded entity wins.
 - operational route-rollup navigation: when `maintenance-status`,
   `literal-query-plan`, or another route packet says
   `use_operational_route_rollup_projection`, use

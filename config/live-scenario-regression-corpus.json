@@ -141,6 +141,16 @@
           "expected_route_anchor_kind": "mcp",
           "expected_route_anchor_source": "embedded_entity_registry",
           "expected_match_relation": "boundary"
+        },
+        {
+          "name": "mcp_transport_closed_noisy_human_phrase_keeps_entity_anchor",
+          "query": "найди как aoa-session-memory-mcp возвращал Transport closed",
+          "expected_shape": "entity_anchor",
+          "expected_primary_route": "entity_usage_chain",
+          "expected_route_anchor": "aoa_session_memory_mcp",
+          "expected_route_anchor_kind": "mcp",
+          "expected_route_anchor_source": "embedded_entity_registry",
+          "expected_match_relation": "embedded"
         }
       ],
       "review": {

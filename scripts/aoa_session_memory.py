@@ -38407,7 +38407,8 @@ def literal_query_embedded_entity_anchor(
             kind_score = 100 - LITERAL_QUERY_EMBEDDED_ENTITY_KIND_PRIORITY.get(registry_kind, 90)
             source_score = 1 if raw_value == key else 0
             signal_score = min(int_value(entry.get("signal_count")), 1000)
-            score = (relation_score, status_score, len(match_key), source_score, kind_score, signal_score)
+            exact_score = 1 if match_relation == "exact" else 0
+            score = (exact_score, kind_score, len(match_key), relation_score, status_score, source_score, signal_score)
             candidates.append(
                 (
                     score,
@@ -38808,7 +38809,6 @@ def literal_query_plan(
         text
         and not command_anchor
         and shape_primary not in protected_primary_shapes
-        and shape_primary != LITERAL_QUERY_KIND_ENTITY_CLASS
         and (shape_primary != LITERAL_QUERY_KIND_ERROR_TEXT or error_text_can_use_embedded_entity)
     ):
         embedded_entity_anchor = literal_query_embedded_entity_anchor(
@@ -38819,6 +38819,8 @@ def literal_query_plan(
         embedded_anchor = str(embedded_entity_anchor.get("anchor") or "").strip()
         embedded_kind = normalize_trace_route_kind(str(embedded_entity_anchor.get("kind") or ""))
         if embedded_anchor and embedded_kind in TRACE_ROUTE_KINDS:
+            suppressed_broad_entity_class = broad_entity_class if broad_entity_class else {}
+            broad_entity_class = {}
             route_anchor_text = embedded_anchor
             route_anchor_kind = embedded_kind
             route_anchor_source = "embedded_entity_registry"
@@ -38831,6 +38833,8 @@ def literal_query_plan(
                 "signals": signals,
                 "embedded_entity_anchor": embedded_entity_anchor,
             }
+            if suppressed_broad_entity_class:
+                shape["suppressed_broad_entity_class"] = suppressed_broad_entity_class
     diagnostics = trace_identity_diagnostics(route_anchor_text, kind=route_anchor_kind) if route_anchor_text else []
     route_candidates = trace_route_lookup_candidates(
         trace_route_candidates(route_anchor_text, kind=route_anchor_kind),
