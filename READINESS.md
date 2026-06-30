@@ -2335,6 +2335,28 @@ Maintenance gates:
   propagation, and operational projection shard selection against a competing
   larger shard.
 
+- 2026-06-30 shrink-gate storage baseline fast-path proof:
+  `search-operational-shrink-gates --max-shards 3 --write-report` now uses a
+  lightweight generated-search storage baseline instead of running the full
+  `storage-audit` inside the interactive gate. The live proof in
+  `diagnostics/20260630T084130Z__search-operational-shrink-gates.json`
+  returned `ok=true`, `status=all_gates_passed_but_apply_still_manual`,
+  `failed_gate_ids=[]`, `blocked_gate_ids=[]`, with storage gate
+  `source=light_search_storage_baseline`, `full_storage_audit=false`,
+  `scans_sessions_breakdown=false`, and `storage_baseline.elapsed_ms=1`.
+  Total gate time dropped from the immediately previous live report's
+  `elapsed_ms=9924` / `storage_baseline=7582ms` to `elapsed_ms=3119`, while
+  `projection_guard`, `route_rollup_refs`, `literal_exact_recall`,
+  `live_scenario_corpus`, `storage_before_after_comparison`, and
+  `explicit_apply_route` still passed. Full storage recommendations remain an
+  explicit expansion route through `storage-audit --write-report`; raw and
+  segment refs remain authority. After the live catch-up and scoped
+  `month/2026-06` route-rollup refresh, `maintenance-status` returned
+  `recommendation=use_graph_search`, `live_tail.status=none`, search/rollup
+  current, and the follow-up gate
+  `diagnostics/20260630T084524Z__search-operational-shrink-gates.json`
+  completed in `2094ms` with `storage_baseline.elapsed_ms=0`.
+
 ## Probe Notes
 
 Two live `codex exec` probes confirmed that `SessionStart`, `UserPromptSubmit`,

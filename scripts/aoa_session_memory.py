@@ -3960,6 +3960,12 @@ def entity_registry_tool_key_is_mcp_tool(key: str) -> bool:
     return normalized.startswith("mcp__") or bool(re.match(r"^mcp_[a-z0-9_]+_mcp_[a-z0-9_]+$", normalized))
 
 
+def entity_registry_mcp_tool_key(service_key: str, tool_key: str) -> str:
+    if service_key:
+        return route_key_slug(f"mcp_{service_key}_{tool_key}", fallback=tool_key, max_chars=120)
+    return tool_key
+
+
 def entity_registry_status_rank(status: str) -> int:
     order = {"active": 0, "stale": 1, "removed": 2, "observed": 3, "unknown": 4}
     return order.get(str(status or ""), 9)
@@ -4230,12 +4236,13 @@ def entity_registry_mcp_tool_entries_from_server(service_dir: Path, server_path:
             ),
             "",
         )
-        tool_key = route_key_slug(tool_name, fallback="", max_chars=120)
-        if not tool_key:
+        bare_tool_key = route_key_slug(tool_name, fallback="", max_chars=120)
+        if not bare_tool_key:
             continue
-        aliases = [tool_name, f"mcp_tool:{tool_name}"]
+        tool_key = entity_registry_mcp_tool_key(service_key, bare_tool_key)
+        aliases = [tool_name, bare_tool_key, f"mcp_tool:{tool_name}", f"mcp_tool:{bare_tool_key}"]
         if service_key:
-            aliases.extend([f"{service_key}:{tool_name}", service_dir.name])
+            aliases.extend([f"{service_key}:{tool_name}", f"{service_key}:{bare_tool_key}", service_dir.name])
         entries.append(
             entity_registry_make_entry(
                 kind="mcp_tool",
@@ -56798,6 +56805,44 @@ def search_operational_shrink_gate_packet(
     }
 
 
+def search_operational_shrink_storage_baseline(aoa_root: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    search_path = search_db_path(aoa_root)
+    search_root = aoa_root / SEARCH_ROOT
+    search_store = sqlite_storage_stats(search_path, deep=False, row_counts=False)
+    search_root_entry = storage_size_entry(search_root, label="search")
+    return {
+        "schema_version": 1,
+        "artifact_type": "session_memory_search_operational_shrink_storage_baseline",
+        "generated_at": utc_now(),
+        "ok": bool(search_store.get("exists")),
+        "mutates": False,
+        "aoa_root": str(aoa_root),
+        "source": "light_search_storage_baseline",
+        "deep_dbstat": False,
+        "row_counts": False,
+        "search_store": search_store,
+        "top_level": [search_root_entry],
+        "cost_profile": {
+            "opens_graph_store": False,
+            "scans_sessions_breakdown": False,
+            "runs_recommendation_audit": False,
+            "full_storage_audit": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+        "next_expansion_command": [
+            *session_memory_cli_command(aoa_root),
+            "storage-audit",
+            "--aoa-root",
+            str(aoa_root),
+            "--write-report",
+        ],
+        "quality_boundary": "light baseline is a shrink-gate cost check; use storage-audit for full storage recommendations",
+        "truth_status": "generated_light_storage_gate_not_full_storage_audit",
+        "diagnostics": list(search_store.get("diagnostics") or []) if isinstance(search_store.get("diagnostics"), list) else [],
+    }
+
+
 def search_operational_shrink_literal_probe_check(
     *,
     aoa_root: Path,
@@ -57316,15 +57361,17 @@ def session_memory_search_operational_shrink_gates(
     )
 
     phase_started = time.monotonic()
-    storage = storage_audit(aoa_root=aoa_root, deep_dbstat=False, row_counts=False, write_report=False)
+    storage = search_operational_shrink_storage_baseline(aoa_root)
     record_phase("storage_baseline", phase_started, status="passed" if storage.get("ok") else "failed")
     search_store = storage.get("search_store") if isinstance(storage.get("search_store"), dict) else {}
+    storage_cost = storage.get("cost_profile") if isinstance(storage.get("cost_profile"), dict) else {}
     storage_passed = bool(storage.get("ok")) and bool(search_store.get("exists"))
     storage_gate = search_operational_shrink_gate_packet(
         gate_id="storage_baseline",
         status=search_operational_shrink_gate_status(passed=storage_passed),
         passed=storage_passed,
         summary={
+            "source": storage.get("source"),
             "search_store_size_human": search_store.get("total_with_wal_human") or search_store.get("size_human"),
             "search_store_size_bytes": search_store.get("total_with_wal_bytes") or search_store.get("size_bytes"),
             "search_root_size_human": next(
@@ -57335,7 +57382,12 @@ def session_memory_search_operational_shrink_gates(
             else "",
             "deep_dbstat": storage.get("deep_dbstat"),
             "row_counts": storage.get("row_counts"),
+            "full_storage_audit": storage_cost.get("full_storage_audit"),
+            "scans_sessions_breakdown": storage_cost.get("scans_sessions_breakdown"),
+            "elapsed_ms": storage_cost.get("elapsed_ms"),
+            "next_expansion_command": storage.get("next_expansion_command"),
         },
+        diagnostics=list(storage.get("diagnostics") or []) if isinstance(storage.get("diagnostics"), list) else [],
     )
 
     before_after_passed = bool(apply_comparison.get("captured")) and int_value(

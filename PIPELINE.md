@@ -449,6 +449,10 @@ the explicit `search-operational-projection-plan` route. The gate still reports
 `apply_ready=false` and does not authorize another mutation. The diagnostic
 remains navigation evidence; raw transcripts, segment refs, and generated
 shard rebuildability remain the authority and recovery boundary.
+The gate's storage baseline is intentionally lightweight: it checks the
+generated search SQLite store and search root for the interactive gate, and
+points to `storage-audit --write-report` for full storage recommendations,
+session breakdowns, graph checks, or deeper operator accounting.
 
 This policy omits only generated structured-shard event rows that are
 route-ref-backed context tail: `doc_type=event`, `usage_role=context`, no

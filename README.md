@@ -1286,15 +1286,19 @@ python3 scripts/aoa_session_memory.py search-operational-shrink-gates \
 ```
 
 It runs the operational projection plan, materialized route-rollup ref query,
-literal exact-recall probes, a bounded live-scenario corpus check, and a storage
-baseline. A passing gate packet still reports `apply_ready=false` until the
-explicit context-tail omission/apply route and after-shrink storage comparison
-exist. After `search-operational-shrink-apply --apply --write-report` has
+literal exact-recall probes, a bounded live-scenario corpus check, and a
+lightweight search-storage baseline. The baseline checks the generated search
+store and search root only; use the packet's `storage-audit` expansion command
+when full storage recommendations or session/graph breakdowns are needed. A
+passing gate packet still reports `apply_ready=false` until the explicit
+context-tail omission/apply route and after-shrink storage comparison exist.
+After `search-operational-shrink-apply --apply --write-report` has
 captured a successful before/after comparison, the gate packet consumes that
 latest apply diagnostic as generated proof for
 `storage_before_after_comparison` and uses the current materialized
-route-rollup status instead of resampling heavy shard projections. The packet
-remains read-only and still does not authorize mutation; run
+route-rollup status instead of resampling heavy shard projections or running
+the full storage audit. The packet remains read-only and still does not
+authorize mutation; run
 `search-operational-projection-plan --write-report` when a fresh heavy shard
 sample or fresh unrouted-tail count is needed. This is the route exposed by
 `maintenance-status` for the current `search_projection_combined_large` warning

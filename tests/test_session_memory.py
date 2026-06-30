@@ -18237,9 +18237,10 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     )
     monkeypatch.setattr(
         module,
-        "storage_audit",
-        lambda **_kwargs: {
+        "search_operational_shrink_storage_baseline",
+        lambda *_args, **_kwargs: {
             "ok": True,
+            "source": "light_search_storage_baseline",
             "deep_dbstat": False,
             "row_counts": False,
             "search_store": {
@@ -18248,7 +18249,21 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
                 "total_with_wal_human": "1.2 KiB",
             },
             "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+            "cost_profile": {
+                "full_storage_audit": False,
+                "scans_sessions_breakdown": False,
+                "elapsed_ms": 2,
+            },
+            "next_expansion_command": ["python3", "scripts/aoa_session_memory.py", "storage-audit"],
+            "diagnostics": [],
         },
+    )
+    monkeypatch.setattr(
+        module,
+        "storage_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shrink gate must use light storage baseline, not full storage_audit")
+        ),
     )
 
     payload = module.session_memory_search_operational_shrink_gates(
@@ -18284,6 +18299,10 @@ def test_search_operational_shrink_gates_block_apply_until_before_after_comparis
     assert literal_gate["summary"]["probe_count"] == len(module.SEARCH_OPERATIONAL_SHRINK_LITERAL_PROBES)
     route_gate = next(gate for gate in payload["gates"] if gate["id"] == "route_rollup_refs")
     assert route_gate["evidence_refs"][:2] == ["raw:line:7", "segments/000__initial-to-latest.md"]
+    storage_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_baseline")
+    assert storage_gate["summary"]["source"] == "light_search_storage_baseline"
+    assert storage_gate["summary"]["full_storage_audit"] is False
+    assert storage_gate["summary"]["scans_sessions_breakdown"] is False
     parser = module.build_parser()
     parsed = parser.parse_args(["search-operational-shrink-gates", "--live-scenario-case-limit", "2"])
     assert parsed.func == module.command_search_operational_shrink_gates
@@ -18430,9 +18449,10 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
     )
     monkeypatch.setattr(
         module,
-        "storage_audit",
-        lambda **_kwargs: {
+        "search_operational_shrink_storage_baseline",
+        lambda *_args, **_kwargs: {
             "ok": True,
+            "source": "light_search_storage_baseline",
             "deep_dbstat": False,
             "row_counts": False,
             "search_store": {
@@ -18441,6 +18461,13 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
                 "total_with_wal_human": "1.2 KiB",
             },
             "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+            "cost_profile": {
+                "full_storage_audit": False,
+                "scans_sessions_breakdown": False,
+                "elapsed_ms": 2,
+            },
+            "next_expansion_command": ["python3", "scripts/aoa_session_memory.py", "storage-audit"],
+            "diagnostics": [],
         },
     )
 
@@ -18477,6 +18504,9 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
         before_after_gate["summary"]["reason"]
         == "latest successful shrink-apply report captured before/after storage comparison"
     )
+    storage_gate = next(gate for gate in payload["gates"] if gate["id"] == "storage_baseline")
+    assert storage_gate["summary"]["source"] == "light_search_storage_baseline"
+    assert storage_gate["summary"]["full_storage_audit"] is False
 
 
 def test_search_operational_shrink_apply_proof_projection_blocks_stale_rollup(
@@ -18643,9 +18673,10 @@ def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup
     )
     monkeypatch.setattr(
         module,
-        "storage_audit",
-        lambda **_kwargs: {
+        "search_operational_shrink_storage_baseline",
+        lambda *_args, **_kwargs: {
             "ok": True,
+            "source": "light_search_storage_baseline",
             "deep_dbstat": False,
             "row_counts": False,
             "search_store": {
@@ -18654,6 +18685,13 @@ def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup
                 "total_with_wal_human": "1.2 KiB",
             },
             "top_level": [{"label": "search", "size_human": "2.0 KiB"}],
+            "cost_profile": {
+                "full_storage_audit": False,
+                "scans_sessions_breakdown": False,
+                "elapsed_ms": 2,
+            },
+            "next_expansion_command": ["python3", "scripts/aoa_session_memory.py", "storage-audit"],
+            "diagnostics": [],
         },
     )
 
