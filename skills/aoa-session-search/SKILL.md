@@ -135,28 +135,37 @@ catchup all` must wrap the targeted live-tail `index-maintenance <session>
 of broadening one deferred live session into full catch-up.
 
 When `search-operational-shrink-gates` reports `explicit_apply_route=pass` but
-still blocks on `storage_before_after_comparison`, the explicit generated
-structured-shard route is:
+still blocks on `storage_before_after_comparison`, use the guarded operator
+wrapper first:
 
 ```bash
-python3 scripts/aoa_session_memory.py search-shards all \
+python3 scripts/aoa_session_memory.py search-operational-shrink-apply \
   --workspace-root /srv/AbyssOS \
   --aoa-root /srv/AbyssOS/.aoa \
-  --context-tail-omission-policy route-ref-backed \
+  --apply \
   --write-report
 ```
 
-Use it only as an operator rebuild route after the shrink gates. It omits only
-route-ref-backed context-tail event rows from structured shards; it keeps
-agent-event, task-episode, protected context, and unrouted context-tail rows.
-It is not valid with `--full-text`, does not touch raw/segment evidence, and
-does not remove the monolith raw-text fallback.
+This route preflights the shrink gates, captures before/after storage
+snapshots, rebuilds structured shards with route-ref-backed context-tail
+omission, refreshes `search-operational-route-rollup`, runs a route-rollup ref
+query, and runs the live scenario corpus. Use the lower-level
+`search-shards all --context-tail-omission-policy route-ref-backed` command
+only as the explicit rebuild primitive when debugging the wrapper.
+
+The rebuild omits only route-ref-backed context-tail event rows from
+structured shards; it keeps agent-event, task-episode, protected context, and
+unrouted context-tail rows. It is not valid with `--full-text`, does not touch
+raw/segment evidence, and does not remove the monolith raw-text fallback.
 Omitted route-backed rows must remain findable through compact refs: the shard
 stores `omitted_context_tail_route_refs`, and operational route-rollup queries
 read that sidecar as well as remaining candidate documents. After this rebuild,
-refresh `search-operational-route-rollup`, then run
-`search-operational-shrink-gates`; an empty route-rollup after omission is a
-regression, not a successful shrink.
+the wrapper should report either `applied` or
+`applied_with_storage_warning`. The latter is acceptable only when document
+cardinality and refs improved but SQLite/page allocation or sidecar overhead
+did not reduce physical bytes. Read `storage_before_after_comparison`,
+`document_count_source`, and diagnostics before claiming a weight win.
+An empty route-rollup after omission is a regression, not a successful shrink.
 If shrink gates report `projection_guard=blocked` only because the operational
 route-rollup is stale or source-mismatched, do not describe the apply route as
 missing. Run the generated maintenance lane first:

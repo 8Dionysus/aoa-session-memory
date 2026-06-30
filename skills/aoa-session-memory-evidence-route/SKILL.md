@@ -101,6 +101,14 @@ Use these first routes when available:
   `omitted_context_tail_route_refs` rows; an empty rollup after route-backed
   omission is a route/read-model regression. Keep unrouted context-tail rows
   and the monolith raw-text fallback until their replacements are proven.
+  When the gates are ready and only the before/after comparison is missing,
+  run `search-operational-shrink-apply --apply --write-report` rather than a
+  naked shard rebuild. Its packet should be read as an operator route: preflight
+  gates, structured shard rebuild, route-rollup refresh, route-rollup ref
+  query, live scenario corpus, and storage before/after comparison. Status
+  `applied_with_storage_warning` means the generated document cardinality and
+  refs improved but physical bytes did not shrink; do not report that as a
+  storage weight win without naming the warning.
   If stale/source-mismatched rollup is the only projection blocker, prefer
   `auto-maintenance-resource hot all --apply --skip-graph-repair --write-report`
   before re-running shrink gates; this route should refresh the rollup from
@@ -176,6 +184,7 @@ python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind 
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py search-operational-route-rollup-query "<query>" --layer <layer> --limit 12 --ref-limit 3
+python3 scripts/aoa_session_memory.py search-operational-shrink-apply --apply --write-report
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
 python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1

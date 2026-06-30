@@ -403,15 +403,23 @@ session from the remaining packet.
 Context-tail omission is an explicit generated-search projection route, not a
 cleanup shortcut. After `search-operational-shrink-gates` passes projection,
 route-rollup, literal, live-corpus, and storage gates, an operator may rebuild
-structured shards with:
+structured shards through the guarded wrapper:
 
 ```bash
-python3 scripts/aoa_session_memory.py search-shards all \
+python3 scripts/aoa_session_memory.py search-operational-shrink-apply \
   --workspace-root /srv/AbyssOS \
   --aoa-root /srv/AbyssOS/.aoa \
-  --context-tail-omission-policy route-ref-backed \
+  --apply \
   --write-report
 ```
+
+The wrapper is the normal apply route. It runs the gate preflight, captures a
+before snapshot, calls the lower-level structured
+`search-shards --context-tail-omission-policy route-ref-backed` rebuild,
+refreshes `search-operational-route-rollup`, verifies a compact rollup query,
+runs the live scenario corpus, captures the after snapshot, and writes the
+storage before/after comparison. Use the lower-level shard command only as a
+debugging primitive or rollback/rebuild component.
 
 This policy omits only generated structured-shard event rows that are
 route-ref-backed context tail: `doc_type=event`, `usage_role=context`, no
@@ -433,7 +441,13 @@ The report records `context_tail_omission_policy`,
 `context_tail_omission.omitted_route_ref_row_count`, examples, and authority
 boundaries. Capture before/after storage, route-rollup, and recall gates after
 any live rebuild; do not treat the policy flag itself as proof of safe
-shrinkage.
+shrinkage. `applied_with_storage_warning` is a successful route apply with an
+honest storage caveat: generated document cardinality and refs may improve even
+when physical SQLite bytes do not decrease because page allocation, indexes, or
+the omitted-ref sidecar consume the reclaimed space. Storage/read-model
+snapshots should report physical shard document counts from existing shard DBs
+when available and keep `document_count_source` visible; catalog mismatches are
+navigation drift to repair, not raw archive failure.
 
 Scoped shard maintenance refreshes `search/catalog.json` from the selected
 records plus existing catalog fallback, rather than forcing a full live

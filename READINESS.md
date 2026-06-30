@@ -2011,6 +2011,33 @@ Maintenance gates:
   rollup `current`, `needs_refresh=false`, and the next shrink-gate report
   returned `ok=true`, `status=blocked_before_apply`, with all quality gates
   passing and only `storage_before_after_comparison` blocked.
+  Follow-up guarded apply route added
+  `search-operational-shrink-apply`: it runs the shrink-gate preflight,
+  structured shard omission rebuild, route-rollup refresh, rollup ref query,
+  live scenario corpus, and before/after storage comparison in one operator
+  packet. Live apply
+  `diagnostics/20260629T235453Z__search-operational-shrink-apply.json`
+  completed in `2199188ms`, rebuilt `290` sessions, produced `1579266`
+  structured shard documents, omitted `377900` route-ref-backed generated
+  context-tail documents, and wrote `1028878` compact omitted route-ref rows.
+  The refreshed rollup stayed current with `53721` rows and `1028878`
+  candidate route postings; route-rollup query and one-case live scenario
+  corpus both passed without opening monolith, FTS, or body hydration. The
+  first comparison exposed a measurement bug: catalog counts still reflected
+  stale monolith/freshness document counts even though shard DBs had the new
+  post-omission counts. The repair makes current/existing shard DB counts the
+  physical-cardinality source for shard projection summaries, records
+  `document_count_source`, preserves monolith/freshness counts separately, and
+  leaves catalog mismatches visible as diagnostics such as
+  `shard_document_count_catalog_mismatch:month/2026-06`. Live verification
+  after `search-catalog --refresh --write-report` shows snapshot
+  `search_shards.document_count=1579266`,
+  `status=current_with_deferred_live_updates`, April/May matching catalog and
+  DB counts, and June counted from the existing shard DB while one deferred-live
+  catalog row remains stale. Physical bytes did not decrease after the rebuild,
+  so future wrapper reports use `applied_with_storage_warning` when the route
+  is otherwise good but storage bytes do not shrink; this is a cardinality/ref
+  win, not a proven physical weight win.
 
 - 2026-06-28 operational route-rollup query proof:
   `search-operational-route-rollup-query` is now the fast consumer route over
