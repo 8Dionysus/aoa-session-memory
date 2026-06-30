@@ -17750,6 +17750,428 @@ def test_search_operational_shrink_gates_keep_explicit_route_visible_when_rollup
     assert apply_gate["summary"]["next_implementation_route"] == "refresh_operational_route_rollup_then_recheck_shrink_gates"
 
 
+def test_search_operational_shrink_apply_dry_run_reports_ready(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        module,
+        "search_operational_storage_snapshot",
+        lambda _aoa_root: {
+            "search_shards": {
+                "shard_db_total_bytes": 1000,
+                "combined_search_projection_total_bytes": 6000,
+                "document_count": 100,
+            },
+            "search_root": {"size_bytes": 8000},
+            "operational_route_rollup": {"status": "current"},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_shrink_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "blocked_before_apply",
+            "passed_gate_ids": ["projection_guard", "explicit_apply_route"],
+            "failed_gate_ids": [],
+            "blocked_gate_ids": ["storage_before_after_comparison"],
+            "elapsed_ms": 7,
+            "gates": [
+                {"id": "projection_guard", "passed": True, "status": "pass"},
+                {"id": "explicit_apply_route", "passed": True, "status": "pass"},
+                {"id": "storage_before_after_comparison", "passed": False, "status": "blocked"},
+            ],
+        },
+    )
+
+    payload = module.session_memory_search_operational_shrink_apply(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=False,
+        live_scenario_case_limit=2,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "ready_for_apply"
+    assert payload["mutates"] is False
+    assert payload["preflight"]["ready"] is True
+    assert "search-operational-shrink-apply" in payload["exact_apply_command"]
+    assert "--apply" in payload["exact_apply_command"]
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+    parser = module.build_parser()
+    parsed = parser.parse_args(["search-operational-shrink-apply", "--apply", "--skip-post-gates"])
+    assert parsed.func == module.command_search_operational_shrink_apply
+    assert parsed.apply is True
+    assert parsed.skip_post_gates is True
+
+
+def test_search_catalog_prefers_current_shard_document_count_after_omission(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_id = "catalog-omission-session"
+    session_label = "2026-06-29__001__catalog-omission"
+    projection_state = {
+        "session_id": session_id,
+        "session_label": session_label,
+        "fingerprint": "fingerprint-omission",
+        "latest_source_mtime": 42.0,
+    }
+    now = "2026-06-29T12:00:00Z"
+
+    monolith_conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+    try:
+        module.upsert_search_session_state(
+            monolith_conn,
+            projection_state=projection_state,
+            indexed_at=now,
+            document_count=6,
+        )
+        monolith_conn.commit()
+    finally:
+        monolith_conn.close()
+
+    shard_db = module.search_shard_db_path(aoa_root, "month/2026-06")
+    shard_conn = module.init_search_db(shard_db, rebuild=True)
+    profile = module.search_document_storage_profile(store_raw_text=False)
+    try:
+        shard_conn.executemany(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            [
+                ("search_body_storage_mode", module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE),
+                ("search_fts_storage_mode", module.SEARCH_STRUCTURED_SHARD_FTS_STORAGE_MODE),
+                ("search_raw_text_query_support", module.SEARCH_RAW_TEXT_QUERY_SUPPORT_MONOLITH_FALLBACK),
+                ("search_projection_storage_mode", module.SEARCH_STRUCTURED_SHARD_BODY_STORAGE_MODE),
+                ("search_document_storage_profile", module.SEARCH_DOCUMENT_STORAGE_PROFILE_STRUCTURED_SHARD),
+            ],
+        )
+        module.upsert_search_session_state(
+            shard_conn,
+            projection_state=projection_state,
+            indexed_at=now,
+            document_count=4,
+        )
+        for index in range(4):
+            module.insert_search_document(
+                shard_conn,
+                {
+                    "id": f"catalog-omission-doc-{index}",
+                    "doc_type": "event",
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "session_title": "Catalog omission",
+                    "session_date": "2026-06-29",
+                    "event_id": f"event-{index}",
+                    "event_type": "CONTEXT_STATE",
+                    "usage_role": "context",
+                    "title": f"doc {index}",
+                    "body": f"doc {index}",
+                    "raw_ref": f"raw:line:{index}",
+                    "segment_ref": "segments/000__initial-to-latest.md",
+                },
+                store_raw_text=False,
+                storage_profile=profile,
+            )
+        shard_conn.commit()
+    finally:
+        shard_conn.close()
+
+    catalog = module.build_search_catalog(aoa_root, write=True)
+    session = next(item for item in catalog["sessions"] if item["session_id"] == session_id)
+    shard = next(item for item in catalog["shards"] if item["shard"] == "month/2026-06")
+
+    assert session["shard_status"] == "current"
+    assert session["document_count"] == 4
+    assert session["document_count_source"] == "current_shard_session_state"
+    assert session["shard_document_count"] == 4
+    assert session["freshness_document_count"] == 6
+    assert session["monolith_document_count"] == 6
+    assert shard["document_count"] == 4
+
+    sync = module.sync_search_catalog_freshness_from_state(aoa_root)
+    synced_catalog = module.read_search_catalog(aoa_root)
+    synced_session = next(item for item in synced_catalog["sessions"] if item["session_id"] == session_id)
+    assert sync["ok"] is True
+    assert synced_session["document_count"] == 4
+    assert synced_session["document_count_source"] == "current_shard_session_state"
+
+    stale_catalog = dict(synced_catalog)
+    stale_catalog["sessions"] = [dict(item) for item in synced_catalog["sessions"]]
+    stale_catalog["shards"] = [dict(item) for item in synced_catalog["shards"]]
+    stale_catalog["sessions"][0]["document_count"] = 6
+    stale_catalog["sessions"][0]["document_count_source"] = "stale_catalog"
+    stale_catalog["shards"][0]["document_count"] = 6
+    module.write_json(module.search_catalog_path(aoa_root), stale_catalog)
+
+    summary = module.session_memory_search_shard_projection_summary(aoa_root)
+    assert summary["document_count"] == 4
+    assert summary["largest_shards"][0]["document_count"] == 4
+    assert summary["largest_shards"][0]["catalog_document_count"] == 6
+    assert summary["largest_shards"][0]["document_count_source"] == "current_shard_documents_table"
+    assert "shard_document_count_catalog_mismatch:month/2026-06" in summary["diagnostics"]
+
+
+def test_search_operational_shrink_apply_runs_rebuild_rollup_and_storage_comparison(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    snapshots = [
+        {
+            "search_shards": {
+                "status": "current",
+                "shard_db_total_bytes": 1000,
+                "combined_search_projection_total_bytes": 6000,
+                "monolith_db_total_bytes": 5000,
+                "document_count": 100,
+            },
+            "search_root": {"size_bytes": 8000},
+            "operational_route_rollup": {"status": "current"},
+        },
+        {
+            "search_shards": {
+                "status": "current",
+                "shard_db_total_bytes": 700,
+                "combined_search_projection_total_bytes": 5700,
+                "monolith_db_total_bytes": 5000,
+                "document_count": 80,
+            },
+            "search_root": {"size_bytes": 7600},
+            "operational_route_rollup": {"status": "current"},
+        },
+    ]
+
+    def fake_snapshot(_aoa_root: Path) -> dict[str, Any]:
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(module, "search_operational_storage_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_shrink_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "blocked_before_apply",
+            "passed_gate_ids": ["projection_guard", "explicit_apply_route"],
+            "failed_gate_ids": [],
+            "blocked_gate_ids": ["storage_before_after_comparison"],
+            "elapsed_ms": 7,
+            "gates": [
+                {"id": "projection_guard", "passed": True, "status": "pass"},
+                {"id": "explicit_apply_route", "passed": True, "status": "pass"},
+                {"id": "storage_before_after_comparison", "passed": False, "status": "blocked"},
+            ],
+        },
+    )
+
+    def fake_materialize_search_shards(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["context_tail_omission_policy"] == module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED
+        assert kwargs["structured_only"] is True
+        assert kwargs["rebuild_shards"] is True
+        return {
+            "ok": True,
+            "status": "current",
+            "target": "all",
+            "selected_count": 2,
+            "processed_count": 2,
+            "document_count": 80,
+            "document_counts": {"event": 78},
+            "event_document_count": 78,
+            "context_tail_omission_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+            "context_tail_omission": {
+                "policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "omitted_document_count": 20,
+                "omitted_route_ref_row_count": 40,
+                "counts": {"omitted_document_count": 20, "omitted_route_ref_row_count": 40},
+            },
+            "report_json": str(aoa_root / "diagnostics" / "search-shards.json"),
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "materialize_search_shards", fake_materialize_search_shards)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "current",
+            "mutates": True,
+            "written": True,
+            "totals": {"route_rollup_row_count": 12, "candidate_route_posting_count": 40},
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup_query",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "matched",
+            "result_count": 3,
+            "quality": {"raw_or_segment_ref_present": True, "freshness_status": "current"},
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": 5,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_scenario_corpus_check",
+        lambda **_kwargs: {
+            "ok": True,
+            "case_count": 1,
+            "passed_count": 1,
+            "failed_count": 0,
+            "actionable_gap_count": 0,
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.session_memory_search_operational_shrink_apply(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        post_check_gates=False,
+        write_report=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "applied"
+    assert payload["mutates"] is True
+    comparison = payload["storage_before_after_comparison"]
+    assert comparison["captured"] is True
+    assert comparison["weight_reduced"] is True
+    assert comparison["shard_db_total_bytes"]["reclaimed_bytes"] == 300
+    assert comparison["search_root_size_bytes"]["reclaimed_bytes"] == 400
+    assert comparison["document_count"]["delta"] == -20
+    assert comparison["omitted_document_count"] == 20
+    assert comparison["omitted_route_ref_row_count"] == 40
+    assert payload["failed_gate_ids"] == []
+    assert payload["blocked_gate_ids"] == []
+    assert {gate["id"] for gate in payload["quality_gates"]} >= {
+        "structured_shard_rebuild",
+        "route_rollup_refresh",
+        "storage_before_after_comparison",
+        "route_rollup_refs",
+        "live_scenario_corpus",
+    }
+    assert Path(payload["report_json"]).exists()
+    assert Path(payload["report_markdown"]).exists()
+
+
+def test_search_operational_shrink_apply_marks_storage_warning_when_bytes_do_not_shrink(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    snapshots = [
+        {
+            "search_shards": {
+                "status": "current",
+                "shard_db_total_bytes": 1000,
+                "combined_search_projection_total_bytes": 6000,
+                "monolith_db_total_bytes": 5000,
+                "document_count": 100,
+            },
+            "search_root": {"size_bytes": 8000},
+            "operational_route_rollup": {"status": "current"},
+        },
+        {
+            "search_shards": {
+                "status": "current",
+                "shard_db_total_bytes": 1200,
+                "combined_search_projection_total_bytes": 6200,
+                "monolith_db_total_bytes": 5000,
+                "document_count": 80,
+            },
+            "search_root": {"size_bytes": 8200},
+            "operational_route_rollup": {"status": "current"},
+        },
+    ]
+
+    monkeypatch.setattr(module, "search_operational_storage_snapshot", lambda _aoa_root: snapshots.pop(0))
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_shrink_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "passed_gate_ids": ["projection_guard", "explicit_apply_route"],
+            "failed_gate_ids": [],
+            "blocked_gate_ids": ["storage_before_after_comparison"],
+            "gates": [
+                {"id": "projection_guard", "passed": True, "status": "pass"},
+                {"id": "explicit_apply_route", "passed": True, "status": "pass"},
+                {"id": "storage_before_after_comparison", "passed": False, "status": "blocked"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "materialize_search_shards",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "current",
+            "document_count": 80,
+            "context_tail_omission_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+            "context_tail_omission": {
+                "policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "omitted_document_count": 20,
+                "omitted_route_ref_row_count": 40,
+                "counts": {"omitted_document_count": 20, "omitted_route_ref_row_count": 40},
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup",
+        lambda **_kwargs: {"ok": True, "status": "current", "totals": {"route_rollup_row_count": 1, "candidate_route_posting_count": 40}},
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_operational_route_rollup_query",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "matched",
+            "quality": {"raw_or_segment_ref_present": True, "freshness_status": "current"},
+            "cost_profile": {"uses_materialized_route_rollup": True, "opens_monolith": False, "uses_fts": False, "hydrates_body": False},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_scenario_corpus_check",
+        lambda **_kwargs: {"ok": True, "case_count": 1, "passed_count": 1, "failed_count": 0, "actionable_gap_count": 0},
+    )
+
+    payload = module.session_memory_search_operational_shrink_apply(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        post_check_gates=False,
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "applied_with_storage_warning"
+    assert payload["storage_before_after_comparison"]["weight_reduced"] is False
+    assert payload["storage_before_after_comparison"]["document_count"]["delta"] == -20
+    assert "storage_weight_not_reduced_after_rebuild" in payload["diagnostics"]
+
+
 def test_search_index_sessions_applies_explicit_context_tail_omission_policy(
     tmp_path: Path,
     monkeypatch: Any,

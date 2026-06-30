@@ -28100,6 +28100,23 @@ def search_shard_session_state(db_path: Path) -> dict[str, dict[str, Any]]:
             conn.close()
 
 
+def search_db_document_count_at_path(db_path: Path) -> int | None:
+    if not db_path.exists():
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        if not sqlite_table_exists(conn, "documents"):
+            return None
+        row = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def search_raw_text_query_support_from_metadata(metadata: dict[str, Any]) -> str:
     support = str(metadata.get("search_raw_text_query_support") or "").strip()
     if support:
@@ -28496,6 +28513,18 @@ def build_search_catalog(
                 and shard_storage_profile_current
             ):
                 shard_status = "current"
+        monolith_document_count = int_value(row["document_count"])
+        freshness_document_count = int_value(freshness.get("document_count"), monolith_document_count)
+        shard_document_count = int_value(shard_session_state.get("document_count"))
+        if shard_status == "current" and shard_document_count > 0:
+            catalog_document_count = shard_document_count
+            document_count_source = "current_shard_session_state"
+        elif freshness_document_count > 0:
+            catalog_document_count = freshness_document_count
+            document_count_source = "monolith_freshness_state"
+        else:
+            catalog_document_count = monolith_document_count
+            document_count_source = "monolith_session_index_state"
         item = {
             "session_id": session_id,
             "session_label": session_label,
@@ -28534,7 +28563,11 @@ def build_search_catalog(
                 "projection_fingerprint_mode": str(freshness.get("projection_fingerprint_mode") or row["projection_fingerprint_mode"] or ""),
                 "expected_projection_fingerprint_mode": expected_projection_fingerprint_mode,
             },
-            "document_count": int_value(freshness.get("document_count"), int_value(row["document_count"])),
+            "document_count": catalog_document_count,
+            "document_count_source": document_count_source,
+            "shard_document_count": shard_document_count,
+            "freshness_document_count": freshness_document_count,
+            "monolith_document_count": monolith_document_count,
             "source_fingerprint": expected_fingerprint,
             "source_latest_mtime": expected_latest_mtime,
             "monolith_source_fingerprint": str(row["source_fingerprint"] or ""),
@@ -28756,6 +28789,7 @@ def sync_search_catalog_freshness_from_state(
         for key in (state.get("session_id"), state.get("session_label")):
             if key:
                 state_by_key[str(key)] = state
+    shard_state_cache: dict[str, dict[str, dict[str, Any]]] = {}
     updated = 0
     updated_keys: list[str] = []
     for session in sessions:
@@ -28780,6 +28814,10 @@ def sync_search_catalog_freshness_from_state(
             session.get("source_fingerprint"),
             session.get("source_latest_mtime"),
             session.get("document_count"),
+            session.get("document_count_source"),
+            session.get("shard_document_count"),
+            session.get("freshness_document_count"),
+            session.get("monolith_document_count"),
             session.get("shard_status"),
             session.get("shard_materialized"),
         )
@@ -28788,8 +28826,10 @@ def sync_search_catalog_freshness_from_state(
             session["source_fingerprint"] = str(state.get("source_fingerprint") or "")
         if state.get("source_latest_mtime") is not None:
             session["source_latest_mtime"] = float(state.get("source_latest_mtime") or 0.0)
-        if int_value(state.get("document_count")) > 0:
-            session["document_count"] = int_value(state.get("document_count"))
+        state_document_count = int_value(state.get("document_count"))
+        if state_document_count > 0:
+            session["freshness_document_count"] = state_document_count
+            session["monolith_document_count"] = state_document_count
         schema_versions = session.get("schema_versions") if isinstance(session.get("schema_versions"), dict) else {}
         schema_versions["search_schema_version"] = str(state.get("search_schema_version") or schema_versions.get("search_schema_version") or "")
         schema_versions["route_signal_classifier_version"] = int_value(
@@ -28804,11 +28844,35 @@ def sync_search_catalog_freshness_from_state(
         if freshness["status"] == "deferred_live" or freshness["status"] not in {"current", ""}:
             session["shard_status"] = "stale"
             session["shard_materialized"] = False
+        shard_document_count = int_value(session.get("shard_document_count"))
+        shard_path_value = str(session.get("shard_db_path") or "")
+        if not shard_path_value:
+            shard_key = str(session.get("shard") or "")
+            if shard_key:
+                shard_path_value = str(search_shard_db_path(aoa_root, shard_key))
+        if shard_path_value and str(session.get("shard_status") or "") == "current":
+            shard_path = Path(shard_path_value)
+            if str(shard_path) not in shard_state_cache:
+                shard_state_cache[str(shard_path)] = search_shard_session_state(shard_path)
+            shard_state = shard_state_cache[str(shard_path)].get(str(session.get("session_id") or ""), {})
+            if int_value(shard_state.get("document_count")) > 0:
+                shard_document_count = int_value(shard_state.get("document_count"))
+                session["shard_document_count"] = shard_document_count
+        if str(session.get("shard_status") or "") == "current" and shard_document_count > 0:
+            session["document_count"] = shard_document_count
+            session["document_count_source"] = "current_shard_session_state"
+        elif state_document_count > 0:
+            session["document_count"] = state_document_count
+            session["document_count_source"] = "monolith_freshness_state"
         after = (
             session.get("freshness"),
             session.get("source_fingerprint"),
             session.get("source_latest_mtime"),
             session.get("document_count"),
+            session.get("document_count_source"),
+            session.get("shard_document_count"),
+            session.get("freshness_document_count"),
+            session.get("monolith_document_count"),
             session.get("shard_status"),
             session.get("shard_materialized"),
         )
@@ -52977,6 +53041,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
     stale_session_count = 0
     missing_session_count = 0
     deferred_live_session_count = 0
+    diagnostics: list[str] = []
     for raw_item in shards:
         if not isinstance(raw_item, dict):
             continue
@@ -52990,9 +53055,23 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         total_bytes = int_value(size_entry.get("total_with_wal_bytes"), int_value(size_entry.get("size_bytes")))
         total_shard_bytes += total_bytes
         status = str(item.get("status") or ("current" if item.get("materialized") else "missing"))
+        catalog_document_count = int_value(item.get("document_count"))
+        document_count = catalog_document_count
+        document_count_source = str(item.get("document_count_source") or "catalog")
+        if db_path.exists():
+            actual_document_count = search_db_document_count_at_path(db_path)
+            if actual_document_count is not None:
+                document_count = int_value(actual_document_count)
+                document_count_source = (
+                    "current_shard_documents_table"
+                    if status == "current"
+                    else "existing_shard_documents_table"
+                )
+                if document_count != catalog_document_count:
+                    diagnostics.append(f"shard_document_count_catalog_mismatch:{shard_key}")
         status_counts[status] += 1
         total_session_count += int_value(item.get("session_count"))
-        total_document_count += int_value(item.get("document_count"))
+        total_document_count += document_count
         current_session_count += int_value(item.get("current_session_count"))
         stale_session_count += int_value(item.get("stale_session_count"))
         missing_session_count += int_value(item.get("missing_session_count"))
@@ -53007,7 +53086,9 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
                 "stale_session_count": item.get("stale_session_count"),
                 "missing_session_count": item.get("missing_session_count"),
                 "deferred_live_session_count": item_deferred_live_count,
-                "document_count": item.get("document_count"),
+                "document_count": document_count,
+                "catalog_document_count": catalog_document_count,
+                "document_count_source": document_count_source,
                 "storage_mode": item.get("storage_mode"),
                 "raw_text_query_support": item.get("raw_text_query_support"),
                 "storage_profile": item.get("storage_profile"),
@@ -53105,6 +53186,7 @@ def session_memory_search_shard_projection_summary(aoa_root: Path) -> dict[str, 
         "raw_text_query_route": "structured shards use monolith fallback for raw-text queries unless materialized with --full-text",
         "exact_refresh_command": f"python3 scripts/aoa_session_memory.py search-catalog --aoa-root {aoa_root} --refresh",
         "exact_materialize_command": f"python3 scripts/aoa_session_memory.py search-shards all --aoa-root {aoa_root} --write-report",
+        "diagnostics": diagnostics,
         "truth_status": "generated_search_catalog_and_shard_files_are_navigation_not_raw_archive_truth",
     }
 
@@ -56474,6 +56556,598 @@ def search_operational_shrink_gates_markdown(payload: dict[str, Any]) -> str:
         lines.append("- none")
     lines.append("")
     return "\n".join(lines)
+
+
+def search_operational_shrink_apply_command(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    live_scenario_case_limit: int = 1,
+    write_report: bool = True,
+) -> list[str]:
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-shrink-apply",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--live-scenario-case-limit",
+        str(max(1, int_value(live_scenario_case_limit, 1))),
+        "--apply",
+    ]
+    if write_report:
+        command.append("--write-report")
+    return command
+
+
+def search_operational_storage_snapshot(aoa_root: Path) -> dict[str, Any]:
+    storage = storage_audit(aoa_root=aoa_root, deep_dbstat=False, row_counts=False, write_report=False)
+    search_store = storage.get("search_store") if isinstance(storage.get("search_store"), dict) else {}
+    search_root = next(
+        (item for item in storage.get("top_level", []) if isinstance(item, dict) and item.get("label") == "search"),
+        {},
+    ) if isinstance(storage.get("top_level"), list) else {}
+    search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    operational_rollup = session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards,
+    )
+    diagnostics: list[str] = []
+    if isinstance(storage.get("diagnostics"), list):
+        diagnostics.extend(str(item) for item in storage.get("diagnostics", []) if item)
+    if isinstance(search_shards.get("diagnostics"), list):
+        diagnostics.extend(str(item) for item in search_shards.get("diagnostics", []) if item)
+    if isinstance(operational_rollup.get("diagnostics"), list):
+        diagnostics.extend(str(item) for item in operational_rollup.get("diagnostics", []) if item)
+    return {
+        "schema_version": 1,
+        "generated_at": utc_now(),
+        "storage_ok": bool(storage.get("ok")),
+        "search_store": {
+            key: search_store.get(key)
+            for key in (
+                "exists",
+                "path",
+                "size_bytes",
+                "size_human",
+                "total_with_wal_bytes",
+                "total_with_wal_human",
+            )
+            if key in search_store
+        },
+        "search_root": {
+            key: search_root.get(key)
+            for key in ("path", "size_bytes", "size_human")
+            if key in search_root
+        },
+        "search_shards": {
+            key: search_shards.get(key)
+            for key in (
+                "status",
+                "catalog_status",
+                "shard_strategy",
+                "active_projection",
+                "session_count",
+                "shard_count",
+                "materialized_shard_count",
+                "current_shard_count",
+                "stale_shard_count",
+                "missing_shard_count",
+                "noncurrent_shard_count",
+                "actionable_noncurrent_shard_count",
+                "deferred_live_session_count",
+                "document_count",
+                "shard_db_total_bytes",
+                "shard_db_total_human",
+                "monolith_db_total_bytes",
+                "monolith_db_total_human",
+                "combined_search_projection_total_bytes",
+                "combined_search_projection_total_human",
+                "raw_text_query_route",
+                "truth_status",
+            )
+            if key in search_shards
+        },
+        "largest_shards": [
+            {
+                key: item.get(key)
+                for key in (
+                    "shard",
+                    "status",
+                    "materialized",
+                    "session_count",
+                    "document_count",
+                    "size_bytes",
+                    "size_human",
+                    "total_with_wal_bytes",
+                    "total_with_wal_human",
+                    "storage_profile",
+                    "raw_text_query_support",
+                )
+                if key in item
+            }
+            for item in (search_shards.get("largest_shards") or [])[:8]
+            if isinstance(item, dict)
+        ],
+        "operational_route_rollup": {
+            key: operational_rollup.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "size_bytes",
+                "size_human",
+                "route_rollup_row_count",
+                "candidate_route_posting_count",
+                "sampled_raw_term_count",
+                "sampled_segment_term_count",
+                "source_mismatch_count",
+                "truth_status",
+            )
+            if key in operational_rollup
+        },
+        "diagnostics": diagnostics,
+        "truth_status": "generated_storage_projection_snapshot_not_archive_truth",
+    }
+
+
+def search_operational_snapshot_int(snapshot: dict[str, Any], section: str, key: str) -> int:
+    part = snapshot.get(section) if isinstance(snapshot.get(section), dict) else {}
+    return int_value(part.get(key))
+
+
+def search_operational_storage_comparison(
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    rebuild: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rebuild = rebuild if isinstance(rebuild, dict) else {}
+    omission = rebuild.get("context_tail_omission") if isinstance(rebuild.get("context_tail_omission"), dict) else {}
+    counts = omission.get("counts") if isinstance(omission.get("counts"), dict) else {}
+
+    def metric(section: str, key: str) -> dict[str, Any]:
+        before_value = search_operational_snapshot_int(before, section, key)
+        after_value = search_operational_snapshot_int(after, section, key)
+        delta = after_value - before_value
+        return {
+            "before": before_value,
+            "after": after_value,
+            "delta": delta,
+            "reclaimed_bytes": max(0, -delta) if key.endswith("_bytes") else None,
+        }
+
+    shard_bytes = metric("search_shards", "shard_db_total_bytes")
+    combined_bytes = metric("search_shards", "combined_search_projection_total_bytes")
+    monolith_bytes = metric("search_shards", "monolith_db_total_bytes")
+    search_root_bytes = metric("search_root", "size_bytes")
+    document_count = metric("search_shards", "document_count")
+    omitted_document_count = int_value(omission.get("omitted_document_count"), int_value(counts.get("omitted_document_count")))
+    omitted_route_ref_row_count = int_value(
+        omission.get("omitted_route_ref_row_count"),
+        int_value(counts.get("omitted_route_ref_row_count")),
+    )
+    captured = bool(before) and bool(after)
+    reduced_bytes = shard_bytes["delta"] < 0 or combined_bytes["delta"] < 0 or search_root_bytes["delta"] < 0
+    return {
+        "schema_version": 1,
+        "status": "captured" if captured else "missing",
+        "captured": captured,
+        "weight_reduced": bool(reduced_bytes),
+        "shard_db_total_bytes": shard_bytes,
+        "combined_search_projection_total_bytes": combined_bytes,
+        "monolith_db_total_bytes": monolith_bytes,
+        "search_root_size_bytes": search_root_bytes,
+        "document_count": document_count,
+        "omitted_document_count": omitted_document_count,
+        "omitted_route_ref_row_count": omitted_route_ref_row_count,
+        "omission_policy": omission.get("policy") or rebuild.get("context_tail_omission_policy"),
+        "interpretation": (
+            "structured shard bytes decreased"
+            if reduced_bytes
+            else "before/after was captured but SQLite/page allocation did not show byte reclaim"
+        ),
+        "quality_boundary": "comparison covers generated search projections only; raw transcripts and segment refs remain authority",
+    }
+
+
+def search_operational_shrink_apply_preflight(payload: dict[str, Any]) -> dict[str, Any]:
+    gates = payload.get("gates") if isinstance(payload.get("gates"), list) else []
+    by_id = {str(gate.get("id") or ""): gate for gate in gates if isinstance(gate, dict)}
+    failed_gate_ids = [str(item) for item in payload.get("failed_gate_ids", []) if item] if isinstance(payload.get("failed_gate_ids"), list) else []
+    blocked_gate_ids = [str(item) for item in payload.get("blocked_gate_ids", []) if item] if isinstance(payload.get("blocked_gate_ids"), list) else []
+    allowed_blocked = {"storage_before_after_comparison"}
+    projection_passed = bool((by_id.get("projection_guard") or {}).get("passed"))
+    explicit_route_passed = bool((by_id.get("explicit_apply_route") or {}).get("passed"))
+    only_expected_blockers = set(blocked_gate_ids).issubset(allowed_blocked)
+    ready = bool(payload.get("ok")) and not failed_gate_ids and only_expected_blockers and projection_passed and explicit_route_passed
+    diagnostics: list[str] = []
+    if failed_gate_ids:
+        diagnostics.append(f"preflight_failed_gates:{','.join(failed_gate_ids)}")
+    if not only_expected_blockers:
+        diagnostics.append(f"preflight_unexpected_blocked_gates:{','.join(blocked_gate_ids)}")
+    if not projection_passed:
+        diagnostics.append("preflight_projection_guard_not_passed")
+    if not explicit_route_passed:
+        diagnostics.append("preflight_explicit_apply_route_not_passed")
+    return {
+        "ready": ready,
+        "status": "ready_for_apply" if ready else "blocked_by_preflight_gates",
+        "failed_gate_ids": failed_gate_ids,
+        "blocked_gate_ids": blocked_gate_ids,
+        "diagnostics": diagnostics,
+    }
+
+
+def search_operational_shrink_apply_markdown(payload: dict[str, Any]) -> str:
+    comparison = payload.get("storage_before_after_comparison") if isinstance(payload.get("storage_before_after_comparison"), dict) else {}
+    rebuild = payload.get("rebuild") if isinstance(payload.get("rebuild"), dict) else {}
+    rollup = payload.get("rollup_refresh") if isinstance(payload.get("rollup_refresh"), dict) else {}
+    lines = [
+        "# Search Operational Shrink Apply",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- apply: `{payload.get('apply')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- elapsed_ms: `{payload.get('elapsed_ms')}`",
+        f"- preflight_status: `{(payload.get('preflight') or {}).get('status') if isinstance(payload.get('preflight'), dict) else ''}`",
+        f"- rebuild_status: `{rebuild.get('status')}`",
+        f"- rollup_status: `{rollup.get('status')}`",
+        f"- comparison_status: `{comparison.get('status')}`",
+        f"- weight_reduced: `{comparison.get('weight_reduced')}`",
+        f"- omitted_document_count: `{comparison.get('omitted_document_count')}`",
+        f"- omitted_route_ref_row_count: `{comparison.get('omitted_route_ref_row_count')}`",
+        "",
+        "## Storage Before/After",
+        "",
+        f"- shard_db_total_bytes: `{comparison.get('shard_db_total_bytes')}`",
+        f"- combined_search_projection_total_bytes: `{comparison.get('combined_search_projection_total_bytes')}`",
+        f"- search_root_size_bytes: `{comparison.get('search_root_size_bytes')}`",
+        f"- document_count: `{comparison.get('document_count')}`",
+        "",
+        "## Quality Gates",
+        "",
+        "| gate | status | passed | summary |",
+        "| --- | --- | --- | --- |",
+    ]
+    for gate in payload.get("quality_gates", []) if isinstance(payload.get("quality_gates"), list) else []:
+        if not isinstance(gate, dict):
+            continue
+        lines.append(
+            "| `{}` | `{}` | `{}` | {} |".format(
+                gate.get("id"),
+                gate.get("status"),
+                gate.get("passed"),
+                markdown_cell(json.dumps(gate.get("summary", {}), ensure_ascii=False, sort_keys=True)),
+            )
+        )
+    lines.extend(["", "## Stop Lines", ""])
+    for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
+        lines.append(f"- `{item}`")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend(["", "## Diagnostics", ""])
+    if diagnostics:
+        lines.extend(f"- {item}" for item in diagnostics)
+    else:
+        lines.append("- none")
+    return "\n".join(lines) + "\n"
+
+
+def session_memory_search_operational_shrink_apply(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    apply: bool = False,
+    max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
+    per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+    route_rollup_limit: int = SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT,
+    live_scenario_case_limit: int = 1,
+    literal_probe_max_shards: int = 24,
+    literal_query_timeout_ms: int = SEARCH_FTS_QUERY_TIMEOUT_MS,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
+    post_check_gates: bool = True,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    workspace = Path(workspace_root)
+    before_snapshot = search_operational_storage_snapshot(aoa_root)
+    preflight_gates = session_memory_search_operational_shrink_gates(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=max_shards,
+        per_shard_timeout_seconds=per_shard_timeout_seconds,
+        route_rollup_limit=route_rollup_limit,
+        live_scenario_case_limit=live_scenario_case_limit,
+        literal_probe_max_shards=literal_probe_max_shards,
+        literal_query_timeout_ms=literal_query_timeout_ms,
+        write_report=False,
+    )
+    preflight = search_operational_shrink_apply_preflight(preflight_gates)
+    exact_apply_command = search_operational_shrink_apply_command(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        live_scenario_case_limit=live_scenario_case_limit,
+        write_report=True,
+    )
+    diagnostics = list(preflight.get("diagnostics") or []) if isinstance(preflight.get("diagnostics"), list) else []
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_shrink_apply",
+        "generated_at": utc_now(),
+        "ok": bool(preflight.get("ready")) and not apply,
+        "status": "ready_for_apply" if preflight.get("ready") else "blocked_by_preflight_gates",
+        "apply": apply,
+        "mutates": False,
+        "workspace_root": str(workspace),
+        "aoa_root": str(aoa_root),
+        "preflight": preflight,
+        "preflight_gates": {
+            "status": preflight_gates.get("status"),
+            "ok": preflight_gates.get("ok"),
+            "passed_gate_ids": preflight_gates.get("passed_gate_ids"),
+            "failed_gate_ids": preflight_gates.get("failed_gate_ids"),
+            "blocked_gate_ids": preflight_gates.get("blocked_gate_ids"),
+            "elapsed_ms": preflight_gates.get("elapsed_ms"),
+        },
+        "before": before_snapshot,
+        "after": {},
+        "rebuild": {},
+        "rollup_refresh": {},
+        "route_rollup_query": {},
+        "live_scenario_corpus": {},
+        "post_apply_gates": {},
+        "storage_before_after_comparison": {},
+        "quality_gates": [],
+        "exact_apply_command": shlex.join(exact_apply_command),
+        "rollback_route": "rebuild structured search shards with --context-tail-omission-policy keep-all, then refresh search-operational-route-rollup",
+        "stop_lines": [
+            "do_not_delete_raw_or_segment_evidence",
+            "do_not_remove_monolith_raw_text_fallback",
+            "do_not_omit_unrouted_context_tail_rows",
+            "do_not_treat_generated_projection_shrink_as_reviewed_truth",
+        ],
+        "diagnostics": diagnostics,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "truth_status": "generated_search_projection_operator_route_not_archive_truth",
+    }
+    if not preflight.get("ready") or not apply:
+        if write_report:
+            report_json, report_md = reserve_diagnostic_report_paths(
+                aoa_root / DIAGNOSTICS_ROOT,
+                f"{compact_stamp()}__search-operational-shrink-apply",
+            )
+            write_json(report_json, payload)
+            write_markdown(report_md, search_operational_shrink_apply_markdown(payload))
+            payload["report_json"] = str(report_json)
+            payload["report_markdown"] = str(report_md)
+        return payload
+
+    rebuild = materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        max_raw_bytes=None,
+        use_default_raw_lexical_budget=True,
+        write_report=True,
+        budget_seconds=budget_seconds,
+        progress_every=progress_every,
+        structured_only=True,
+        rebuild_shards=True,
+        context_tail_omission_policy=SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+    )
+    payload["mutates"] = True
+    payload["rebuild"] = {
+        key: rebuild.get(key)
+        for key in (
+            "ok",
+            "status",
+            "target",
+            "selected_count",
+            "processed_count",
+            "budget_exhausted",
+            "elapsed_ms",
+            "documents_per_second",
+            "shard_count",
+            "document_count",
+            "document_counts",
+            "event_document_count",
+            "context_tail_omission_policy",
+            "context_tail_omission",
+            "report_json",
+            "report_markdown",
+            "diagnostics",
+        )
+        if key in rebuild
+    }
+    if not rebuild.get("ok"):
+        after_snapshot = search_operational_storage_snapshot(aoa_root)
+        payload["after"] = after_snapshot
+        payload["storage_before_after_comparison"] = search_operational_storage_comparison(
+            before=before_snapshot,
+            after=after_snapshot,
+            rebuild=rebuild,
+        )
+        payload["ok"] = False
+        payload["status"] = "rebuild_failed"
+        payload["diagnostics"] = sorted(set([*payload["diagnostics"], *[str(item) for item in rebuild.get("diagnostics", []) if item]]))
+        payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        if write_report:
+            report_json, report_md = reserve_diagnostic_report_paths(
+                aoa_root / DIAGNOSTICS_ROOT,
+                f"{compact_stamp()}__search-operational-shrink-apply",
+            )
+            write_json(report_json, payload)
+            write_markdown(report_md, search_operational_shrink_apply_markdown(payload))
+            payload["report_json"] = str(report_json)
+            payload["report_markdown"] = str(report_md)
+        return payload
+
+    rollup = session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=max_shards,
+        per_shard_timeout_seconds=per_shard_timeout_seconds,
+        apply=True,
+        write_report=True,
+    )
+    payload["rollup_refresh"] = {
+        key: rollup.get(key)
+        for key in (
+            "ok",
+            "status",
+            "mutates",
+            "written",
+            "elapsed_ms",
+            "totals",
+            "report_json",
+            "report_markdown",
+            "diagnostics",
+        )
+        if key in rollup
+    }
+    after_snapshot = search_operational_storage_snapshot(aoa_root)
+    payload["after"] = after_snapshot
+    comparison = search_operational_storage_comparison(before=before_snapshot, after=after_snapshot, rebuild=rebuild)
+    payload["storage_before_after_comparison"] = comparison
+    route_query = session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=12,
+        ref_limit=3,
+        write_report=False,
+    )
+    route_quality = route_query.get("quality") if isinstance(route_query.get("quality"), dict) else {}
+    route_cost = route_query.get("cost_profile") if isinstance(route_query.get("cost_profile"), dict) else {}
+    payload["route_rollup_query"] = {
+        "ok": route_query.get("ok"),
+        "status": route_query.get("status"),
+        "quality": route_quality,
+        "cost_profile": route_cost,
+        "result_count": route_query.get("result_count"),
+    }
+    live_corpus = live_scenario_corpus_check(
+        aoa_root=aoa_root,
+        case_limit=max(1, int_value(live_scenario_case_limit, 1)),
+        write_report=False,
+    )
+    payload["live_scenario_corpus"] = {
+        "ok": live_corpus.get("ok"),
+        "case_count": live_corpus.get("case_count"),
+        "passed_count": live_corpus.get("passed_count"),
+        "failed_count": live_corpus.get("failed_count"),
+        "actionable_gap_count": live_corpus.get("actionable_gap_count"),
+        "diagnostics": live_corpus.get("diagnostics", []) if isinstance(live_corpus.get("diagnostics"), list) else [],
+    }
+    post_gates: dict[str, Any] = {}
+    if post_check_gates:
+        post_payload = session_memory_search_operational_shrink_gates(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            max_shards=max_shards,
+            per_shard_timeout_seconds=per_shard_timeout_seconds,
+            route_rollup_limit=route_rollup_limit,
+            live_scenario_case_limit=live_scenario_case_limit,
+            literal_probe_max_shards=literal_probe_max_shards,
+            literal_query_timeout_ms=literal_query_timeout_ms,
+            write_report=True,
+        )
+        post_gates = {
+            "ok": post_payload.get("ok"),
+            "status": post_payload.get("status"),
+            "passed_gate_ids": post_payload.get("passed_gate_ids"),
+            "failed_gate_ids": post_payload.get("failed_gate_ids"),
+            "blocked_gate_ids": post_payload.get("blocked_gate_ids"),
+            "report_json": post_payload.get("report_json"),
+            "report_markdown": post_payload.get("report_markdown"),
+            "elapsed_ms": post_payload.get("elapsed_ms"),
+        }
+    payload["post_apply_gates"] = post_gates
+    route_query_passed = bool(route_query.get("ok")) and bool(route_quality.get("raw_or_segment_ref_present")) and bool(
+        route_cost.get("uses_materialized_route_rollup")
+    ) and not bool(route_cost.get("opens_monolith")) and not bool(route_cost.get("uses_fts")) and not bool(route_cost.get("hydrates_body"))
+    live_passed = bool(live_corpus.get("ok")) and int_value(live_corpus.get("failed_count")) == 0
+    rollup_passed = bool(rollup.get("ok")) and str(rollup.get("status") or "") == "current"
+    comparison_passed = bool(comparison.get("captured")) and int_value(comparison.get("omitted_document_count")) > 0
+    payload["quality_gates"] = [
+        search_operational_shrink_gate_packet(
+            gate_id="structured_shard_rebuild",
+            status=search_operational_shrink_gate_status(passed=bool(rebuild.get("ok"))),
+            passed=bool(rebuild.get("ok")),
+            summary={
+                "status": rebuild.get("status"),
+                "document_count": rebuild.get("document_count"),
+                "omitted_document_count": comparison.get("omitted_document_count"),
+                "omitted_route_ref_row_count": comparison.get("omitted_route_ref_row_count"),
+            },
+        ),
+        search_operational_shrink_gate_packet(
+            gate_id="route_rollup_refresh",
+            status=search_operational_shrink_gate_status(passed=rollup_passed),
+            passed=rollup_passed,
+            summary={
+                "status": rollup.get("status"),
+                "route_rollup_row_count": (rollup.get("totals") or {}).get("route_rollup_row_count")
+                if isinstance(rollup.get("totals"), dict)
+                else None,
+                "candidate_route_posting_count": (rollup.get("totals") or {}).get("candidate_route_posting_count")
+                if isinstance(rollup.get("totals"), dict)
+                else None,
+            },
+            diagnostics=list(rollup.get("diagnostics") or []) if isinstance(rollup.get("diagnostics"), list) else [],
+        ),
+        search_operational_shrink_gate_packet(
+            gate_id="storage_before_after_comparison",
+            status=search_operational_shrink_gate_status(passed=comparison_passed, blocked=not comparison_passed),
+            passed=comparison_passed,
+            summary=comparison,
+        ),
+        search_operational_shrink_gate_packet(
+            gate_id="route_rollup_refs",
+            status=search_operational_shrink_gate_status(passed=route_query_passed),
+            passed=route_query_passed,
+            summary={
+                "status": route_query.get("status"),
+                "raw_or_segment_ref_present": route_quality.get("raw_or_segment_ref_present"),
+                "freshness_status": route_quality.get("freshness_status"),
+                "opens_monolith": route_cost.get("opens_monolith"),
+                "uses_fts": route_cost.get("uses_fts"),
+                "hydrates_body": route_cost.get("hydrates_body"),
+                "elapsed_ms": route_cost.get("elapsed_ms"),
+            },
+            diagnostics=list(route_query.get("diagnostics") or []) if isinstance(route_query.get("diagnostics"), list) else [],
+        ),
+        search_operational_shrink_gate_packet(
+            gate_id="live_scenario_corpus",
+            status=search_operational_shrink_gate_status(passed=live_passed),
+            passed=live_passed,
+            summary=payload["live_scenario_corpus"],
+            diagnostics=payload["live_scenario_corpus"].get("diagnostics", []),
+        ),
+    ]
+    failed_gate_ids = [gate["id"] for gate in payload["quality_gates"] if gate.get("status") == "fail"]
+    blocked_gate_ids = [gate["id"] for gate in payload["quality_gates"] if gate.get("status") == "blocked"]
+    payload["ok"] = not failed_gate_ids and not blocked_gate_ids
+    payload["failed_gate_ids"] = failed_gate_ids
+    payload["blocked_gate_ids"] = blocked_gate_ids
+    if not comparison.get("weight_reduced"):
+        payload["diagnostics"].append("storage_weight_not_reduced_after_rebuild")
+    payload["status"] = (
+        "applied_with_storage_warning"
+        if payload["ok"] and not comparison.get("weight_reduced")
+        else ("applied" if payload["ok"] else "applied_with_quality_gaps")
+    )
+    payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-operational-shrink-apply",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_operational_shrink_apply_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
 
 
 def session_memory_search_operational_event_projection_plan(
@@ -68289,6 +68963,50 @@ def command_search_operational_shrink_gates(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_search_operational_shrink_apply(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+
+    def run_shrink_apply() -> dict[str, Any]:
+        return session_memory_search_operational_shrink_apply(
+            workspace_root=workspace,
+            aoa_root=root,
+            apply=args.apply,
+            max_shards=args.max_shards,
+            per_shard_timeout_seconds=args.per_shard_timeout,
+            route_rollup_limit=args.route_rollup_limit,
+            live_scenario_case_limit=args.live_scenario_case_limit,
+            literal_probe_max_shards=args.literal_probe_max_shards,
+            literal_query_timeout_ms=args.literal_query_timeout_ms,
+            budget_seconds=args.budget_seconds,
+            progress_every=args.progress_every,
+            post_check_gates=not args.skip_post_gates,
+            write_report=args.write_report,
+        )
+
+    payload = run_with_maintenance_lock(
+        root,
+        run_shrink_apply,
+        owner_job="search-operational-shrink-apply",
+        mode="manual-bulk" if args.apply else "probe",
+        target="all",
+        reason="operator_requested" if args.apply else "operator_probe",
+        touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, search=True, entity_registry=False),
+        budget_seconds=args.budget_seconds,
+    )
+    if args.full:
+        stdout_payload = payload
+    else:
+        stdout_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"before", "after", "preflight_gates"}
+        }
+    print(json.dumps(stdout_payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_search(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -74453,6 +75171,27 @@ def build_parser() -> argparse.ArgumentParser:
     search_operational_shrink_gates.add_argument("--literal-query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS)
     search_operational_shrink_gates.add_argument("--write-report", action="store_true", help="Write JSON and Markdown shrink gate reports under .aoa/diagnostics.")
     search_operational_shrink_gates.set_defaults(func=command_search_operational_shrink_gates)
+
+    search_operational_shrink_apply = sub.add_parser(
+        "search-operational-shrink-apply",
+        aliases=["search-context-tail-shrink-apply", "search-shrink-apply"],
+        help="Run the explicit generated structured-shard context-tail omission rebuild with before/after storage proof.",
+    )
+    search_operational_shrink_apply.add_argument("--workspace-root")
+    search_operational_shrink_apply.add_argument("--aoa-root")
+    search_operational_shrink_apply.add_argument("--apply", action="store_true", help="Mutate generated structured shards and refresh the operational route-rollup. Without this flag the command is a preflight packet.")
+    search_operational_shrink_apply.add_argument("--max-shards", type=int, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS)
+    search_operational_shrink_apply.add_argument("--per-shard-timeout", type=float, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS)
+    search_operational_shrink_apply.add_argument("--route-rollup-limit", type=int, default=SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT)
+    search_operational_shrink_apply.add_argument("--live-scenario-case-limit", type=int, default=1)
+    search_operational_shrink_apply.add_argument("--literal-probe-max-shards", type=int, default=24)
+    search_operational_shrink_apply.add_argument("--literal-query-timeout-ms", type=int, default=SEARCH_FTS_QUERY_TIMEOUT_MS)
+    search_operational_shrink_apply.add_argument("--budget-seconds", type=float, help="Stop after the current shard if the guarded rebuild exceeds this wall-clock budget.")
+    search_operational_shrink_apply.add_argument("--progress-every", type=int, default=0, help="Emit shard rebuild JSON heartbeat progress to stderr every N indexed sessions.")
+    search_operational_shrink_apply.add_argument("--skip-post-gates", action="store_true", help="Skip the expensive post-apply shrink-gates rerun; before/after, rollup query, and live corpus still run.")
+    search_operational_shrink_apply.add_argument("--write-report", action="store_true", help="Write JSON and Markdown shrink-apply reports under .aoa/diagnostics.")
+    search_operational_shrink_apply.add_argument("--full", action="store_true", help="Print complete before/after storage snapshots.")
+    search_operational_shrink_apply.set_defaults(func=command_search_operational_shrink_apply)
 
     search = sub.add_parser(
         "search",
