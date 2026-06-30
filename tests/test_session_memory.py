@@ -16547,6 +16547,72 @@ def test_search_projection_next_action_requires_current_large_projection(tmp_pat
     assert "--write-report" in command_text
     assert action["document_count"] == 1_888_501
 
+    scoped_action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure={
+            **search_pressure,
+            "operational_route_rollup": {
+                "status": "stale",
+                "route_rollup_row_count": 43_630,
+                "source_mismatch_count": 1,
+                "incremental_refresh_route": "scoped_shard_replace",
+                "incremental_refresh_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-operational-route-rollup",
+                    "--workspace-root",
+                    str(workspace),
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--shard",
+                    "month/2026-06",
+                    "--apply",
+                    "--write-report",
+                ],
+            },
+        },
+        search_shards={"status": "current"},
+    )
+    assert scoped_action is not None
+    assert scoped_action["route_kind"] == "search_operational_route_rollup_scoped_shard_replace"
+    scoped_command_text = module.shlex.join(scoped_action["command"])
+    assert "--shard month/2026-06" in scoped_command_text
+    assert scoped_action["route_rollup_source_mismatch_count"] == 1
+
+    full_rebuild_action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure={
+            **search_pressure,
+            "operational_route_rollup": {
+                "status": "stale",
+                "route_rollup_row_count": 43_630,
+                "shard_count": 3,
+                "source_mismatch_count": 2,
+                "incremental_refresh_route": "full_rebuild",
+                "incremental_refresh_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "search-operational-route-rollup",
+                    "--workspace-root",
+                    str(workspace),
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--apply",
+                    "--write-report",
+                ],
+            },
+        },
+        search_shards={"status": "current"},
+    )
+    assert full_rebuild_action is not None
+    assert full_rebuild_action["route_kind"] == "search_operational_route_rollup"
+    full_rebuild_command_text = module.shlex.join(full_rebuild_action["command"])
+    assert "--apply" in full_rebuild_command_text
+    assert "--shard" not in full_rebuild_command_text
+    assert full_rebuild_action["route_rollup_incremental_refresh_route"] == "full_rebuild"
+
     ready_action = module.session_memory_search_projection_next_action(
         workspace_root=workspace,
         aoa_root=aoa_root,
@@ -18485,6 +18551,149 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
     assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
     assert "rollup-session" in json.loads(row["session_ids_json"])
+
+
+def test_search_operational_route_rollup_scoped_refresh_replaces_one_shard(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_a = module.search_shard_db_path(aoa_root, "month/2026-05")
+    shard_b = module.search_shard_db_path(aoa_root, "month/2026-06")
+
+    def build_shard(shard_db: Path, session_id: str, session_date: str, rows: list[tuple[str, str, str]]) -> None:
+        conn = module.init_search_db(shard_db, rebuild=True)
+        try:
+            for doc_id, layer, key in rows:
+                route_signal = module.route_signal_token(layer, key)
+                module.insert_search_document(
+                    conn,
+                    {
+                        "id": doc_id,
+                        "doc_type": "event",
+                        "session_id": session_id,
+                        "session_label": f"{session_date}__001__{session_id}",
+                        "session_title": session_id,
+                        "session_date": session_date,
+                        "event_id": doc_id,
+                        "event_type": "CONTEXT_STATE",
+                        "usage_role": "context",
+                        "route_layers": module.packed_route_values([layer]),
+                        "route_signals": module.packed_route_values([route_signal]),
+                        "title": doc_id,
+                        "body": doc_id,
+                        "raw_ref": f"raw:line:{doc_id}",
+                        "segment_ref": "segments/000__initial-to-latest.md",
+                        "payload_json": "{}",
+                    },
+                    store_raw_text=False,
+                    storage_profile=module.search_document_storage_profile(store_raw_text=False),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    build_shard(shard_a, "rollup-a", "2026-05-01", [("a-tool", "tool", "exec_command")])
+    build_shard(shard_b, "rollup-b", "2026-06-01", [("b-tool-old", "tool", "apply_patch")])
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shards": [
+                {
+                    "shard": "month/2026-05",
+                    "shard_db_path": str(shard_a),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 1,
+                    "total_with_wal_bytes": shard_a.stat().st_size,
+                },
+                {
+                    "shard": "month/2026-06",
+                    "shard_db_path": str(shard_b),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 1,
+                    "total_with_wal_bytes": shard_b.stat().st_size,
+                },
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    full = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=2,
+        apply=True,
+    )
+    assert full["ok"] is True
+    assert full["write_result"]["update_mode"] == "full_rebuild"
+    assert full["totals"]["route_rollup_row_count"] == 2
+
+    build_shard(
+        shard_b,
+        "rollup-b",
+        "2026-06-01",
+        [
+            ("b-tool-new", "tool", "exec_command"),
+            ("b-skill-new", "skill", "aoa_change_protocol"),
+        ],
+    )
+
+    stale = module.session_memory_operational_route_rollup_status(
+        aoa_root=aoa_root,
+        search_shards={
+            "status": "current",
+            "largest_shards": [
+                {"shard": "month/2026-05", "status": "current"},
+                {"shard": "month/2026-06", "status": "current"},
+            ],
+        },
+    )
+    assert stale["status"] == "stale"
+    assert stale["incremental_refresh_route"] == "scoped_shard_replace"
+    assert "--shard" in stale["exact_incremental_refresh_command"]
+
+    scoped = module.session_memory_search_operational_route_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=2,
+        shard="month/2026-06",
+        apply=True,
+    )
+    assert scoped["ok"] is True
+    assert scoped["update_mode"] == "scoped_shard_replace"
+    assert scoped["write_result"]["update_mode"] == "scoped_shard_replace"
+    assert scoped["sample"]["selected_shard_count"] == 1
+    assert scoped["sample"]["selected_shards"][0]["shard"] == "month/2026-06"
+
+    query = module.session_memory_search_operational_route_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        layer="tool",
+        key="exec_command",
+        limit=5,
+        ref_limit=5,
+    )
+    assert query["ok"] is True
+    assert query["results"][0]["posting_count"] == 2
+    assert set(query["results"][0]["source_shards"]) == {"month/2026-05", "month/2026-06"}
+    assert "raw:line:a-tool" in query["results"][0]["raw_refs"]
+    assert "raw:line:b-tool-new" in query["results"][0]["raw_refs"]
+
+    rollup_conn = sqlite3.connect(module.search_operational_route_rollup_db_path(aoa_root))
+    rollup_conn.row_factory = sqlite3.Row
+    try:
+        shards = [dict(row) for row in rollup_conn.execute("SELECT shard FROM shards ORDER BY shard")]
+        old = rollup_conn.execute("SELECT * FROM route_rollups WHERE key = 'apply_patch'").fetchone()
+        skill = rollup_conn.execute("SELECT * FROM route_rollups WHERE layer = 'skill' AND key = 'aoa_change_protocol'").fetchone()
+    finally:
+        rollup_conn.close()
+    assert [row["shard"] for row in shards] == ["month/2026-05", "month/2026-06"]
+    assert old is None
+    assert skill is not None
 
 
 def test_search_operational_route_rollup_preserves_omitted_context_tail_refs(
