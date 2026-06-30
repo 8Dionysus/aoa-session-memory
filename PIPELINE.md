@@ -898,6 +898,13 @@ carry `catalog_source=shard_session_index_state_recovery`,
 flags. If such a row is stale, the route is the same bounded
 `refresh_search_shard_structured` action, not a monolith rebuild and not a raw
 archive repair.
+Operational route-rollup refresh follows the same bounded repair principle. A
+missing or invalid rollup uses full `search-operational-route-rollup --apply`;
+when status detects a single source shard mismatch, it exposes an incremental
+`search-operational-route-rollup --shard <shard> --apply --write-report`
+command. The scoped command replaces only that shard in the generated rollup
+DB, preserves other shard rows and ref samples, and keeps read-only consumers on
+the previous snapshot until the atomic replace succeeds.
 
 Use `index-maintenance --skip-graph-repair` when a live investigation needs
 fresh route/search/atlas caches without paying the graph-store repair cost.

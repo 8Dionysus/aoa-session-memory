@@ -1254,6 +1254,12 @@ route term counts plus bounded raw, segment, and session ref samples for the
 candidate context-tail rows. It is still navigation, not authority, and it does
 not delete or compact event rows; physical search shrinkage must wait until this
 replacement route proves fresh and useful.
+When an existing materialized rollup is stale because exactly one source shard
+changed, use `search-operational-route-rollup --shard <month/YYYY-MM> --apply
+--write-report` to replace only that shard contribution. The scoped route keeps
+the other shard rows and route refs, writes through the same generated DB, and
+stays a navigation repair; full materialization remains the route for missing,
+invalid, or multi-shard rollup drift.
 
 `search-operational-route-rollup-query` is the consumer route for the current
 materialized rollup. It opens only `search/operational-route-rollup.sqlite3`,
@@ -1276,8 +1282,9 @@ without widening into broad search.
 `maintenance-status --full` surfaces this rollup under
 `operations.search_pressure.operational_route_rollup`. If the rollup is missing
 or stale, the search projection next-action routes to
-`search-operational-route-rollup --apply --write-report`; once it is current,
-the next-action becomes `use_operational_route_rollup_projection` and points to
+`search-operational-route-rollup --apply --write-report`, or to the scoped
+`--shard` form when a single source shard changed; once it is current, the
+next-action becomes `use_operational_route_rollup_projection` and points to
 `search-operational-route-rollup-query` instead of repeating sampling or the
 cardinality plan.
 

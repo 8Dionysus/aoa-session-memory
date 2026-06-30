@@ -207,6 +207,14 @@ Build the `.aoa` session-memory mechanism end to end:
   `catalog_source=shard_session_index_state_recovery` and
   `monolith_status=missing`; shard freshness and dirty-only maintenance own the
   repair route, while raw/session indexes remain the evidence authority.
+- Operational route-rollup now has a scoped shard replacement lane: when one
+  source shard changes, `maintenance-status` can surface
+  `search-operational-route-rollup --shard <shard> --apply --write-report`
+  instead of a full rollup rebuild. Live proof on `month/2026-06` replaced one
+  shard in `8586ms` with `update_mode=scoped_shard_replace`, kept all `3`
+  rollup shards, and left the combined rollup current with `53774` rows and
+  `1030518` candidate route postings; the preceding full refresh over the same
+  three shards took `217486ms`.
 - Dirty-only shard catch-up keeps live-tail repairs bounded: `search-shards`
   accepts `--dirty-only` only with `--no-rebuild`, selects non-current
   sessions from `search/catalog.json`, skips `deferred_live` rows by default,
