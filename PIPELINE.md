@@ -104,6 +104,8 @@ Behavior:
 - records the hook event
 - does not full-sync by default
 - full-syncs only when `AOA_SESSION_MEMORY_FULL_PROMPT_SYNC=1`
+- keeps the optional `abyss-machine typing` bridge off by default; enable it
+  explicitly with `AOA_SESSION_MEMORY_TYPING_BRIDGE=1`
 
 Reason: prompt hooks should not become a heavy tax on every turn.
 
@@ -1912,6 +1914,19 @@ python3 scripts/aoa_session_memory.py doctor \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa \
   --check-live-hooks
+```
+
+The default `doctor` is a fast filesystem and metadata route for large live
+archives. It verifies required files, manifests, registry counts, generated
+surface presence, hook config, and optional Codex grounding without parsing
+every event in every segment index. When the task is to audit segment-index
+event payloads themselves, run the explicit deep route:
+
+```bash
+python3 scripts/aoa_session_memory.py doctor \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --deep-segment-indexes
 ```
 
 Check the local Codex grounding:

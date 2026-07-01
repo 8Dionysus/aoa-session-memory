@@ -83,6 +83,10 @@ python3 .aoa/scripts/aoa_session_memory.py codex-compact-probe \
   once the transcript is over `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES`.
 - UserPromptSubmit records the hook event by default, but does not run the full
   transcript sync unless `AOA_SESSION_MEMORY_FULL_PROMPT_SYNC=1` is set.
+- UserPromptSubmit does not call the optional `abyss-machine typing` bridge by
+  default. Set `AOA_SESSION_MEMORY_TYPING_BRIDGE=1` to enable it, with
+  `AOA_SESSION_MEMORY_TYPING_BRIDGE_TIMEOUT_SEC` bounded to the foreground hook
+  timeout budget.
 - PreCompact, PostCompact, and large Stop hooks return only schema-valid Codex
   protocol fields and must not block the active lifecycle by default.
 - Deferred lifecycle work is automatically queued under

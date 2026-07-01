@@ -181,11 +181,43 @@ def run_doctor_payload(workspace: Path, root: Path) -> tuple[int, dict[str, Any]
         check_user_skill=False,
         check_installable_user_skills=False,
         check_codex_grounding=False,
+        deep_segment_indexes=False,
     )
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         code = module.command_doctor(args)
     return code, json.loads(out.getvalue())
+
+
+def complete_doctor_segment_fixture(root: Path, *, event: dict[str, Any] | None = None) -> tuple[Path, Path]:
+    registry = module.read_json(root / module.REGISTRY_NAME, {})
+    session_dir = Path(registry["sessions"][0]["path"])
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    segment = manifest["segments"][0]
+    raw_block = segment["raw_block"]
+    markdown_path = Path(segment["markdown"])
+    index_path = Path(segment["index"])
+    raw_block_path = Path(raw_block["path"])
+    markdown_path.write_text("# Segment\n\n<a id=\"event-000001\"></a>\n", encoding="utf-8")
+    raw_block_path.write_text("{}\n", encoding="utf-8")
+    module.write_json(
+        index_path,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "segment_id": segment["segment_id"],
+            "events": [
+                event
+                if event is not None
+                else {
+                    "event_id": "000001",
+                    "type": "COMMAND",
+                    "raw_ref": "raw:line:1",
+                    "md_anchor": "event-000001",
+                }
+            ],
+        },
+    )
+    return session_dir, index_path
 
 
 def test_doctor_defers_generated_segment_gaps_for_recent_live_tail(tmp_path: Path) -> None:
@@ -215,6 +247,60 @@ def test_doctor_keeps_quiet_generated_segment_gaps_actionable(tmp_path: Path) ->
     assert payload["deferred_live_problem_count"] == 0
     assert any("missing segment markdown" in item for item in payload["problems"])
     assert any("missing segment index" in item for item in payload["problems"])
+
+
+def test_doctor_default_skips_deep_segment_index_event_parse(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(tmp_path, recent_live=False)
+    _session_dir, index_path = complete_doctor_segment_fixture(root)
+    original_read_json = module.read_json
+
+    def guarded_read_json(path: Path, default: Any = None) -> Any:
+        if Path(path) == index_path:
+            raise AssertionError("default doctor must not parse segment index event payloads")
+        return original_read_json(path, default)
+
+    monkeypatch.setattr(module, "read_json", guarded_read_json)
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["segment_index_check"]["mode"] == "metadata_only"
+    assert payload["segment_index_check"]["event_validation_skipped_index_count"] == 1
+    assert payload["segment_index_check"]["deep_route"]
+
+
+def test_doctor_deep_segment_indexes_validates_event_records(tmp_path: Path) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(tmp_path, recent_live=False)
+    complete_doctor_segment_fixture(
+        root,
+        event={
+            "event_id": "000001",
+            "type": "NOT_A_REAL_EVENT_TYPE",
+            "raw_ref": "",
+            "md_anchor": "",
+        },
+    )
+    args = SimpleNamespace(
+        workspace_root=str(workspace),
+        aoa_root=str(root),
+        check_live_hooks=False,
+        check_user_skill=False,
+        check_installable_user_skills=False,
+        check_codex_grounding=False,
+        deep_segment_indexes=True,
+    )
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = module.command_doctor(args)
+    payload = json.loads(out.getvalue())
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["segment_index_check"]["mode"] == "deep_event_validation"
+    assert payload["segment_index_check"]["event_validation_count"] == 1
+    assert any("invalid event type NOT_A_REAL_EVENT_TYPE" in item for item in payload["problems"])
+    assert any("event missing raw_ref or md_anchor" in item for item in payload["problems"])
 
 
 def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
@@ -27114,6 +27200,44 @@ def test_user_prompt_submit_is_light_by_default(tmp_path: Path, monkeypatch) -> 
     assert not (session_dir / "session.manifest.json").exists()
 
 
+def test_user_prompt_submit_typing_bridge_is_opt_in(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-session-typing-disabled.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": "session-typing-disabled"}},
+        ],
+    )
+
+    def fail_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("typing bridge should stay off on the foreground hook path by default")
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/abyss-machine" if name == "abyss-machine" else None)
+    monkeypatch.setattr(module.subprocess, "run", fail_run)
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC", raising=False)
+    monkeypatch.delenv("AOA_SESSION_MEMORY_TYPING_BRIDGE", raising=False)
+
+    receipt = module.handle_hook_event(
+        "UserPromptSubmit",
+        {
+            "session_id": "session-typing-disabled",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "do not call typing bridge by default",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    assert "typing_prompt_bridge_disabled" in receipt["actions"]
+    assert "prompt_hook_light_recorded" in receipt["actions"]
+    assert receipt["typing_bridge"] == {"ok": True, "status": "disabled", "adapter": "codex_user_prompt_submit"}
+
+
 def test_user_prompt_submit_mirrors_prompt_to_typing_bridge(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -27149,6 +27273,7 @@ def test_user_prompt_submit_mirrors_prompt_to_typing_bridge(tmp_path: Path, monk
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/abyss-machine" if name == "abyss-machine" else None)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC", raising=False)
+    monkeypatch.setenv("AOA_SESSION_MEMORY_TYPING_BRIDGE", "1")
 
     receipt = module.handle_hook_event(
         "UserPromptSubmit",

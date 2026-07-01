@@ -23,13 +23,17 @@ it does not replace `audit`.
 
 ## Procedure
 
-Run the narrow filesystem doctor first:
+Run the narrow filesystem and metadata doctor first:
 
 ```bash
 python3 scripts/aoa_session_memory.py doctor \
   --workspace-root /srv/AbyssOS \
   --aoa-root /srv/AbyssOS/.aoa
 ```
+
+The default route is intentionally fast on large live archives. It checks
+required surfaces, manifests, registry and generated-surface presence without
+parsing every event in every segment index.
 
 When live hooks and Codex grounding matter, run:
 
@@ -42,9 +46,20 @@ python3 scripts/aoa_session_memory.py doctor \
   --check-codex-grounding
 ```
 
+When the task is specifically to validate event payloads inside segment index
+files, use the explicit deep route:
+
+```bash
+python3 scripts/aoa_session_memory.py doctor \
+  --workspace-root /srv/AbyssOS \
+  --aoa-root /srv/AbyssOS/.aoa \
+  --deep-segment-indexes
+```
+
 ## Verification
 
-- `ready=true`
+- `ok=true`
+- `status=current` or an explicitly deferred live-tail status
 - no `problems`
 - warnings are reported, not hidden
 - if live checks were requested, hook and grounding subreports are green

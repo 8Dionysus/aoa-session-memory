@@ -26616,7 +26616,7 @@ def write_raw_unavailable_incident(
     }
 
 
-def hook_user_prompt_typing_bridge(event: dict[str, Any], *, timeout_sec: float = 3.0) -> dict[str, Any]:
+def hook_user_prompt_typing_bridge(event: dict[str, Any], *, timeout_sec: float | None = None) -> dict[str, Any]:
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return {
@@ -26624,12 +26624,18 @@ def hook_user_prompt_typing_bridge(event: dict[str, Any], *, timeout_sec: float 
             "status": "skipped_no_prompt",
             "adapter": "codex_user_prompt_submit",
         }
-    if os.environ.get("AOA_SESSION_MEMORY_TYPING_BRIDGE", "1") in {"0", "false", "False", "no"}:
+    if os.environ.get("AOA_SESSION_MEMORY_TYPING_BRIDGE", "0").strip().casefold() not in {"1", "true", "yes", "on"}:
         return {
             "ok": True,
             "status": "disabled",
             "adapter": "codex_user_prompt_submit",
         }
+    if timeout_sec is None:
+        raw_timeout = os.environ.get("AOA_SESSION_MEMORY_TYPING_BRIDGE_TIMEOUT_SEC", "0.75").strip()
+        try:
+            timeout_sec = max(0.05, min(float(raw_timeout), 3.0))
+        except ValueError:
+            timeout_sec = 0.75
     executable = shutil.which("abyss-machine")
     if not executable:
         return {
@@ -75910,6 +75916,9 @@ def command_doctor(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     deferred_live_problems: list[str] = []
     deferred_live_problem_sessions: dict[str, dict[str, Any]] = {}
+    deep_segment_indexes = bool(getattr(args, "deep_segment_indexes", False))
+    segment_index_event_validation_count = 0
+    segment_index_event_validation_skipped_count = 0
     doctor_now_ts = time.time()
     doctor_quiet_seconds = GRAPH_HOT_LIVE_DEFER_SECONDS
     doctor_live_state_cache: dict[str, dict[str, Any]] = {}
@@ -76139,11 +76148,15 @@ def command_doctor(args: argparse.Namespace) -> int:
                 if not idx_path.exists():
                     add_generated_session_problem(f"missing segment index: {idx_path}", session_path, manifest_payload, item)
                     continue
+                if not deep_segment_indexes:
+                    segment_index_event_validation_skipped_count += 1
+                    continue
                 segment_index = read_json(idx_path, {})
                 if not isinstance(segment_index, dict):
                     problems.append(f"invalid segment index json: {idx_path}")
                     continue
                 for event in segment_index.get("events", []) if isinstance(segment_index.get("events"), list) else []:
+                    segment_index_event_validation_count += 1
                     if not isinstance(event, dict):
                         problems.append(f"invalid event index record: {idx_path}")
                         continue
@@ -76188,6 +76201,17 @@ def command_doctor(args: argparse.Namespace) -> int:
         "archive_dir_count": len(archive_dirs),
         "session_dir_count": len(session_dirs),
         "hook_only_dir_count": len(hook_only_dirs),
+        "segment_index_check": {
+            "mode": "deep_event_validation" if deep_segment_indexes else "metadata_only",
+            "event_validation_count": segment_index_event_validation_count,
+            "event_validation_skipped_index_count": segment_index_event_validation_skipped_count,
+            "deep_route": (
+                "doctor --deep-segment-indexes --workspace-root "
+                f"{workspace_root} --aoa-root {root}"
+            )
+            if not deep_segment_indexes and segment_index_event_validation_skipped_count
+            else "",
+        },
         "user_skill": user_skill_state,
         "installable_user_skills": installable_user_skills,
         "problems": problems,
@@ -77942,6 +77966,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--check-user-skill", action="store_true", help="Also require the current user's global .aoa router skill to point at this install.")
     doctor.add_argument("--check-installable-user-skills", action="store_true", help="Also require every approved current-user .aoa session-memory skill to point at this install.")
     doctor.add_argument("--check-codex-grounding", action="store_true", help="Also require local Codex version/config/hook marker grounding to pass.")
+    doctor.add_argument(
+        "--deep-segment-indexes",
+        action="store_true",
+        help="Parse every segment index and validate event records; default doctor stays metadata-only for large live archives.",
+    )
     doctor.set_defaults(func=command_doctor)
     return parser
 
