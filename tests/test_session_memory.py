@@ -2632,6 +2632,15 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert unknown_lookup["agent_route_packet"]["status"] == "unknown"
     assert unknown_lookup["entries"][0]["kind"] == "mcp_service"
 
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    runtime_rollup_snapshot = json.loads(registry_path.read_text(encoding="utf-8"))
+    runtime_observed = next(entry for entry in runtime_rollup_snapshot["entries"] if entry["status"] == "observed")
+    runtime_observed["source_surface"] = "operational_route_rollup"
+    for ref in runtime_observed.get("source_refs", []):
+        if isinstance(ref, dict):
+            ref["source_type"] = "operational_route_rollup"
+    module.write_json(registry_path, runtime_rollup_snapshot)
+
     lookup_scenario = module.live_scenario_entity_registry_lookup_audit(
         aoa_root=aoa_root,
         seed="entity-registry-lookup-fixture",
@@ -5823,13 +5832,14 @@ def test_live_scenario_audit_routes_graph_high_fanout_replacement_profile(tmp_pa
         assert kwargs["aoa_root"] == aoa_root
         assert kwargs["anchor"] == "aoa-session-memory-mcp"
         assert kwargs["kind"] == "mcp"
-        assert kwargs["limit"] == 4
-        assert kwargs["per_route_limit"] == 12
-        assert kwargs["sample_limit"] == 4
+        assert kwargs["limit"] == 1
+        assert kwargs["per_route_limit"] == 4
+        assert kwargs["sample_limit"] == 1
         return {
             "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
             "ok": True,
             "mutates": False,
+            "kind": "mcp",
             "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
             "replacement_scope": "anchor_sample",
             "usage_chain": {"usage_event_count": 4, "raw_or_segment_ref_count": 4},
@@ -5856,12 +5866,88 @@ def test_live_scenario_audit_routes_graph_high_fanout_replacement_profile(tmp_pa
     scenario = audit["scenarios"][0]
     assert scenario["profile"] == "graph_high_fanout_replacement"
     assert scenario["status"] == "passed"
+    assert scenario["sample_count"] == 1
+    assert scenario["anchor_count"] == 1
+    assert scenario["kind_counts"] == {"mcp": 1}
     assert scenario["target_projection"] == module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
     assert scenario["replacement_proof_ok"] is True
     assert scenario["usage_event_count"] == 4
     assert scenario["graph_event_edge_checked_count"] == 4
     assert scenario["graph_event_edge_match_count"] == 4
     assert scenario["event_edge_count"] == 42
+    assert scenario["session_aggregate_edge_count"] == 3
+    assert scenario["replacement_prune_apply_ready"] is False
+
+
+def test_live_scenario_audit_routes_graph_replacement_probes(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[tuple[str, str, int, int, int]] = []
+
+    def fake_replacement_proof(**kwargs: Any) -> dict[str, Any]:
+        calls.append(
+            (
+                kwargs["anchor"],
+                kwargs["kind"],
+                kwargs["limit"],
+                kwargs["per_route_limit"],
+                kwargs["sample_limit"],
+            )
+        )
+        return {
+            "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
+            "ok": True,
+            "mutates": False,
+            "kind": kwargs["kind"],
+            "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            "replacement_scope": "anchor_sample",
+            "usage_chain": {"usage_event_count": 1, "raw_or_segment_ref_count": 1},
+            "graph_sample": {
+                "event_edge_count": 10,
+                "session_aggregate_edge_count": 1,
+                "anchor_sample_reduction_ratio": 0.9,
+            },
+            "edge_match": {"checked_count": 1, "matched_count": 1, "missing_count": 0},
+            "proof_gate_summary": {"failed_core_gate_count": 0, "not_proven_gate_count": 1},
+            "prune_gate": {"status": "blocked_anchor_sample_only", "apply_ready": False},
+        }
+
+    monkeypatch.setattr(module, "graph_entity_usage_replacement_proof", fake_replacement_proof)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["graph_high_fanout_replacement"],
+        sample_size=1,
+        limit=1,
+        graph_replacement_probes=[
+            {"name": "tool_exec", "anchor": "exec_command", "kind": "tool", "limit": 1},
+            {"name": "skill_decision", "anchor": "aoa-decision", "kind": "skill", "sample_limit": 1},
+            {"name": "mcp_memory", "anchor": "aoa-session-memory-mcp", "kind": "mcp"},
+        ],
+    )
+
+    assert audit["ok"] is True
+    assert calls == [
+        ("exec_command", "tool", 1, 4, 1),
+        ("aoa-decision", "skill", 1, 4, 1),
+        ("aoa-session-memory-mcp", "mcp", 1, 4, 1),
+    ]
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "graph_high_fanout_replacement"
+    assert scenario["status"] == "passed"
+    assert scenario["sample_count"] == 3
+    assert scenario["anchor_count"] == 3
+    assert scenario["anchor_counts"] == {
+        "aoa-decision": 1,
+        "aoa-session-memory-mcp": 1,
+        "exec_command": 1,
+    }
+    assert scenario["kind_counts"] == {"mcp": 1, "skill": 1, "tool": 1}
+    assert scenario["replacement_scope"] == "multi_anchor_sample"
+    assert scenario["usage_event_count"] == 3
+    assert scenario["graph_event_edge_checked_count"] == 3
+    assert scenario["graph_event_edge_match_count"] == 3
+    assert scenario["event_edge_count"] == 30
     assert scenario["session_aggregate_edge_count"] == 3
     assert scenario["replacement_prune_apply_ready"] is False
 
@@ -6050,6 +6136,11 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
             "session_aggregate_edge_count": 3,
             "proof_failed_core_gate_count": 0,
             "replacement_prune_apply_ready": False,
+            "anchor_count": 3,
+            "anchor_counts": {"exec_command": 1, "aoa-decision": 1, "aoa-session-memory-mcp": 1},
+            "kind_counts": {"tool": 1, "skill": 1, "mcp": 1},
+            "target_projection_match_count": 3,
+            "max_sample_elapsed_ms": 800,
         },
         {
             "profile": "graph_high_fanout_replacement",
@@ -6064,6 +6155,11 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
             "min_graph_replacement_edge_match_count": 1,
             "min_graph_replacement_event_edge_count": 2,
             "min_graph_replacement_session_aggregate_edge_count": 1,
+            "min_graph_replacement_anchor_count": 3,
+            "min_graph_replacement_target_projection_match_count": 3,
+            "required_graph_replacement_anchors": ["exec_command", "aoa-decision", "aoa-session-memory-mcp"],
+            "required_graph_replacement_kinds": ["tool", "skill", "mcp"],
+            "max_graph_replacement_sample_elapsed_ms": 1000,
         },
     )
 
@@ -6083,6 +6179,11 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
             "session_aggregate_edge_count": 0,
             "proof_failed_core_gate_count": 2,
             "replacement_prune_apply_ready": True,
+            "anchor_count": 1,
+            "anchor_counts": {"exec_command": 1},
+            "kind_counts": {"tool": 1},
+            "target_projection_match_count": 1,
+            "max_sample_elapsed_ms": 1200,
         },
         {
             "profile": "graph_high_fanout_replacement",
@@ -6097,6 +6198,11 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
             "min_graph_replacement_edge_match_count": 1,
             "min_graph_replacement_event_edge_count": 2,
             "min_graph_replacement_session_aggregate_edge_count": 1,
+            "min_graph_replacement_anchor_count": 3,
+            "min_graph_replacement_target_projection_match_count": 3,
+            "required_graph_replacement_anchors": ["exec_command", "aoa-decision", "aoa-session-memory-mcp"],
+            "required_graph_replacement_kinds": ["tool", "skill", "mcp"],
+            "max_graph_replacement_sample_elapsed_ms": 1000,
         },
     )
 
@@ -6110,6 +6216,11 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
     assert "graph_high_fanout_replacement:graph_event_edge_match_count:0<1" in failing
     assert "graph_high_fanout_replacement:event_edge_count:1<2" in failing
     assert "graph_high_fanout_replacement:session_aggregate_edge_count:0<1" in failing
+    assert "graph_high_fanout_replacement:anchor_count:1<3" in failing
+    assert "graph_high_fanout_replacement:target_projection_match_count:1<3" in failing
+    assert "graph_high_fanout_replacement:missing_graph_replacement_anchor:aoa-decision" in failing
+    assert "graph_high_fanout_replacement:missing_graph_replacement_kind:skill" in failing
+    assert "graph_high_fanout_replacement:max_sample_elapsed_ms:1200>1000" in failing
 
 
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
@@ -6419,6 +6530,28 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                         ],
                     },
                 },
+                {
+                    "id": "graph_replacement_probe_contract",
+                    "profiles": ["graph_high_fanout_replacement"],
+                    "limit": 1,
+                    "graph_replacement_probes": [
+                        {"name": "exec_tool", "anchor": "exec_command", "kind": "tool"},
+                        {"name": "decision_skill", "anchor": "aoa-decision", "kind": "skill"},
+                    ],
+                    "expect": {
+                        "max_failed_count": 0,
+                        "profile_expectations": [
+                            {
+                                "profile": "graph_high_fanout_replacement",
+                                "allowed_statuses": ["passed"],
+                                "min_sample_count": 2,
+                                "min_graph_replacement_anchor_count": 2,
+                                "required_graph_replacement_anchors": ["exec_command", "aoa-decision"],
+                                "required_graph_replacement_kinds": ["tool", "skill"],
+                            }
+                        ],
+                    },
+                },
             ],
         },
     )
@@ -6453,6 +6586,32 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
                         "route_anchor_kind_counts": {"skill": 1},
                         "route_anchor_source_counts": {"embedded_entity_registry": 1},
                         "match_relation_counts": {"exact": 1},
+                    }
+                ],
+                "actionable_gaps": [],
+            }
+        if profiles == ["graph_high_fanout_replacement"]:
+            graph_replacement_probes = kwargs.get("graph_replacement_probes") or []
+            assert [item["anchor"] for item in graph_replacement_probes] == ["exec_command", "aoa-decision"]
+            return {
+                "ok": True,
+                "profiles": profiles,
+                "quality": {
+                    "scenario_count": 1,
+                    "passed_count": 1,
+                    "warn_count": 0,
+                    "failed_count": 0,
+                    "actionable_gap_count": 0,
+                    "raw_or_segment_ref_scenario_count": 0,
+                },
+                "scenarios": [
+                    {
+                        "profile": "graph_high_fanout_replacement",
+                        "status": "passed",
+                        "sample_count": 2,
+                        "anchor_count": 2,
+                        "anchor_counts": {"aoa-decision": 1, "exec_command": 1},
+                        "kind_counts": {"skill": 1, "tool": 1},
                     }
                 ],
                 "actionable_gaps": [],
@@ -6502,7 +6661,7 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
 
     assert payload["artifact_type"] == "session_memory_live_scenario_regression_check"
     assert payload["ok"] is True
-    assert payload["case_count"] == 2
+    assert payload["case_count"] == 3
     assert payload["failed_count"] == 0
     assert payload["actionable_gap_count"] == 1
     assert payload["actionable_gaps"][0]["case_id"] == "entity_usage_refs_contract"
@@ -6901,7 +7060,7 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     observed = module.live_scenario_compact_observed(
         {
             "ok": True,
-            "quality": {"scenario_count": 4},
+            "quality": {"scenario_count": 5},
             "scenarios": [
                 {
                     "profile": "entity_registry_lookup",
@@ -6939,6 +7098,17 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
                     "edge_count": 12,
                     "evidence_ref_count": 7,
                 },
+                {
+                    "profile": "graph_high_fanout_replacement",
+                    "status": "passed",
+                    "sample_count": 3,
+                    "anchor_count": 3,
+                    "anchor_counts": {"aoa-decision": 1, "aoa-session-memory-mcp": 1, "exec_command": 1},
+                    "kind_counts": {"mcp": 1, "skill": 1, "tool": 1},
+                    "target_projection_match_count": 3,
+                    "replacement_prune_open_count": 0,
+                    "max_sample_elapsed_ms": 900,
+                },
             ],
         }
     )
@@ -6956,6 +7126,11 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     assert profiles["goal_lifecycle"]["work_chain_uses_search"] is False
     assert profiles["graph_neighborhood"]["node_count"] == 4
     assert profiles["graph_neighborhood"]["edge_count"] == 12
+    assert profiles["graph_high_fanout_replacement"]["anchor_count"] == 3
+    assert profiles["graph_high_fanout_replacement"]["kind_counts"]["tool"] == 1
+    assert profiles["graph_high_fanout_replacement"]["target_projection_match_count"] == 3
+    assert profiles["graph_high_fanout_replacement"]["replacement_prune_open_count"] == 0
+    assert profiles["graph_high_fanout_replacement"]["max_sample_elapsed_ms"] == 900
 
 
 def test_trace_route_supports_agent_event_kind() -> None:

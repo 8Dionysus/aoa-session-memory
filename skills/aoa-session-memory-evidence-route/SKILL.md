@@ -160,7 +160,10 @@ Use these first routes when available:
   For `event_mentions_registered_entity`, use
   `graph-entity-usage-replacement-proof <anchor> --kind <kind>` to prove one
   dense anchor against `usage-chain` refs and graph edge samples before any
-  wider replacement or pruning plan.
+  wider replacement or pruning plan. When several dense operational anchors
+  matter, run the `graph_high_fanout_replacement` live-scenario corpus case
+  with reviewed `graph_replacement_probes`; it should cover tool/MCP/skill
+  anchors together while keeping `prune_gate.apply_ready=false`.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
   the outer maintenance profile. Global fallbacks use the generated graph

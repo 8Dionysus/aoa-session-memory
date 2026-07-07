@@ -746,7 +746,49 @@
       "seed": "corpus-graph-entity-usage-replacement-proof",
       "sample_size": 1,
       "recent_days": 7,
-      "limit": 4,
+      "limit": 1,
+      "graph_replacement_probes": [
+        {
+          "name": "dense_tool_exec_command",
+          "anchor": "exec_command",
+          "kind": "tool",
+          "limit": 1,
+          "per_route_limit": 4,
+          "sample_limit": 1
+        },
+        {
+          "name": "dense_tool_apply_patch",
+          "anchor": "apply_patch",
+          "kind": "tool",
+          "limit": 1,
+          "per_route_limit": 4,
+          "sample_limit": 1
+        },
+        {
+          "name": "mcp_aoa_session_memory",
+          "anchor": "aoa-session-memory-mcp",
+          "kind": "mcp",
+          "limit": 1,
+          "per_route_limit": 4,
+          "sample_limit": 1
+        },
+        {
+          "name": "skill_aoa_session_memory_evidence_route",
+          "anchor": "aoa-session-memory-evidence-route",
+          "kind": "skill",
+          "limit": 1,
+          "per_route_limit": 4,
+          "sample_limit": 1
+        },
+        {
+          "name": "skill_aoa_decision",
+          "anchor": "aoa-decision",
+          "kind": "skill",
+          "limit": 1,
+          "per_route_limit": 4,
+          "sample_limit": 1
+        }
+      ],
       "review": {
         "status": "reviewed",
         "reviewer": "source_config",
@@ -769,11 +811,27 @@
             "require_graph_replacement_prune_gate_closed": true,
             "require_graph_replacement_no_missing_event_edges": true,
             "require_graph_replacement_no_failed_core_gates": true,
-            "min_graph_replacement_usage_event_count": 1,
-            "min_graph_replacement_edge_checked_count": 1,
-            "min_graph_replacement_edge_match_count": 1,
+            "min_sample_count": 5,
+            "min_graph_replacement_anchor_count": 5,
+            "min_graph_replacement_target_projection_match_count": 5,
+            "required_graph_replacement_anchors": [
+              "exec_command",
+              "apply_patch",
+              "aoa-session-memory-mcp",
+              "aoa-session-memory-evidence-route",
+              "aoa-decision"
+            ],
+            "required_graph_replacement_kinds": [
+              "tool",
+              "mcp",
+              "skill"
+            ],
+            "min_graph_replacement_usage_event_count": 5,
+            "min_graph_replacement_edge_checked_count": 5,
+            "min_graph_replacement_edge_match_count": 5,
             "min_graph_replacement_event_edge_count": 1,
             "min_graph_replacement_session_aggregate_edge_count": 1,
+            "max_graph_replacement_sample_elapsed_ms": 30000,
             "max_elapsed_ms": 30000
           }
         ]

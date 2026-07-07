@@ -408,6 +408,9 @@ GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT = 64
 GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE = "event_mentions_registered_entity"
 GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE = "session_has_registered_entity"
 GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION = "entity_usage_rollup_by_anchor_session_segment"
+GRAPH_ENTITY_USAGE_REPLACEMENT_DEFAULT_PROBES = (
+    {"name": "mcp_aoa_session_memory", "anchor": "aoa-session-memory-mcp", "kind": "mcp"},
+)
 GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
     "raw_or_segment_refs_preserved",
     "freshness_current_or_stale_flag_visible",
@@ -51094,6 +51097,228 @@ def graph_entity_usage_replacement_proof(
     return payload
 
 
+def normalize_graph_replacement_probes(
+    probes: list[dict[str, Any]] | None,
+    *,
+    limit: int,
+    per_route_limit: int,
+    consequence_window: int,
+    sample_limit: int,
+) -> list[dict[str, Any]]:
+    source = probes if probes else list(GRAPH_ENTITY_USAGE_REPLACEMENT_DEFAULT_PROBES)
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, probe in enumerate(source):
+        if not isinstance(probe, dict):
+            continue
+        anchor = str(probe.get("anchor") or probe.get("query") or "").strip()
+        if not anchor:
+            continue
+        raw_kind = str(probe.get("kind") or "auto")
+        normalized_kind = normalize_trace_route_kind(raw_kind)
+        if normalized_kind not in TRACE_ROUTE_KINDS:
+            normalized_kind = "auto"
+        key = (anchor, normalized_kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "name": str(probe.get("name") or route_key_slug(anchor, fallback=f"probe_{index}", max_chars=80)),
+                "anchor": anchor,
+                "kind": normalized_kind,
+                "limit": max(1, min(int_value(probe.get("limit"), limit), 20)),
+                "per_route_limit": max(1, min(int_value(probe.get("per_route_limit"), per_route_limit), 80)),
+                "consequence_window": max(0, min(int_value(probe.get("consequence_window"), consequence_window), 40)),
+                "sample_limit": max(1, min(int_value(probe.get("sample_limit"), sample_limit), 40)),
+            }
+        )
+    return normalized
+
+
+def graph_replacement_probe_summary(
+    *,
+    probe: dict[str, Any],
+    proof: dict[str, Any],
+    elapsed_ms: int,
+) -> dict[str, Any]:
+    usage_chain = proof.get("usage_chain") if isinstance(proof.get("usage_chain"), dict) else {}
+    graph_sample = proof.get("graph_sample") if isinstance(proof.get("graph_sample"), dict) else {}
+    edge_match = proof.get("edge_match") if isinstance(proof.get("edge_match"), dict) else {}
+    proof_summary = proof.get("proof_gate_summary") if isinstance(proof.get("proof_gate_summary"), dict) else {}
+    prune_gate = proof.get("prune_gate") if isinstance(proof.get("prune_gate"), dict) else {}
+    diagnostics = [str(item) for item in proof.get("diagnostics", []) if item] if isinstance(proof.get("diagnostics"), list) else []
+    failed_core_gate_count = int_value(proof_summary.get("failed_core_gate_count"))
+    missing_edge_count = int_value(edge_match.get("missing_count"))
+    usage_event_count = int_value(usage_chain.get("usage_event_count"))
+    checked_count = int_value(edge_match.get("checked_count"))
+    target_projection = str(proof.get("target_projection") or "")
+    quality_flags: list[str] = []
+    if not proof.get("ok"):
+        quality_flags.append("graph_replacement_probe_not_ok")
+    if usage_event_count <= 0:
+        quality_flags.append("graph_replacement_probe_no_usage_events")
+    if checked_count <= 0:
+        quality_flags.append("graph_replacement_probe_no_checked_event_edges")
+    if missing_edge_count > 0:
+        quality_flags.append("graph_replacement_probe_missing_event_edges")
+    if failed_core_gate_count > 0:
+        quality_flags.append("graph_replacement_probe_failed_core_gates")
+    if prune_gate.get("apply_ready") is not False:
+        quality_flags.append("graph_replacement_probe_prune_gate_not_closed")
+    if target_projection != GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION:
+        quality_flags.append("graph_replacement_probe_target_projection_mismatch")
+    if diagnostics:
+        quality_flags.append("graph_replacement_probe_diagnostics_present")
+    status = "failed" if quality_flags else "passed"
+    return {
+        "name": probe.get("name"),
+        "anchor": probe.get("anchor"),
+        "kind": proof.get("kind") or probe.get("kind"),
+        "status": status,
+        "ok": not quality_flags,
+        "elapsed_ms": elapsed_ms,
+        "target_projection": target_projection,
+        "replacement_scope": proof.get("replacement_scope"),
+        "usage_event_count": usage_event_count,
+        "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
+        "graph_event_edge_checked_count": checked_count,
+        "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
+        "graph_event_edge_missing_count": missing_edge_count,
+        "event_edge_count": int_value(graph_sample.get("event_edge_count")),
+        "session_aggregate_edge_count": int_value(graph_sample.get("session_aggregate_edge_count")),
+        "anchor_sample_reduction_ratio": graph_sample.get("anchor_sample_reduction_ratio"),
+        "proof_failed_core_gate_count": failed_core_gate_count,
+        "proof_not_proven_gate_count": int_value(proof_summary.get("not_proven_gate_count")),
+        "replacement_prune_apply_ready": prune_gate.get("apply_ready"),
+        "replacement_prune_gate_status": prune_gate.get("status"),
+        "first_ref": usage_chain.get("first_ref") if isinstance(usage_chain.get("first_ref"), dict) else {},
+        "quality_flags": quality_flags,
+    }
+
+
+def graph_high_fanout_replacement_scenario_audit(
+    *,
+    aoa_root: Path,
+    probes: list[dict[str, Any]] | None = None,
+    limit: int = 1,
+    per_route_limit: int = 4,
+    consequence_window: int = 4,
+    sample_limit: int = 1,
+    provider: str = "portable_sqlite",
+) -> dict[str, Any]:
+    started = time.monotonic()
+    selected_limit = max(1, min(int_value(limit, 1), 20))
+    selected_per_route_limit = max(selected_limit, min(int_value(per_route_limit, 4), 80))
+    selected_sample_limit = max(1, min(int_value(sample_limit, 1), 40))
+    selected_consequence_window = max(0, min(int_value(consequence_window, 4), 40))
+    normalized_probes = normalize_graph_replacement_probes(
+        probes,
+        limit=selected_limit,
+        per_route_limit=selected_per_route_limit,
+        consequence_window=selected_consequence_window,
+        sample_limit=selected_sample_limit,
+    )
+    samples: list[dict[str, Any]] = []
+    for probe in normalized_probes:
+        probe_started = time.monotonic()
+        try:
+            proof = graph_entity_usage_replacement_proof(
+                aoa_root=aoa_root,
+                anchor=str(probe["anchor"]),
+                kind=str(probe["kind"]),
+                limit=int_value(probe.get("limit"), selected_limit),
+                per_route_limit=int_value(probe.get("per_route_limit"), selected_per_route_limit),
+                consequence_window=int_value(probe.get("consequence_window"), selected_consequence_window),
+                sample_limit=int_value(probe.get("sample_limit"), selected_sample_limit),
+                provider=provider,
+                write_report=False,
+            )
+            elapsed_ms = int((time.monotonic() - probe_started) * 1000)
+            samples.append(graph_replacement_probe_summary(probe=probe, proof=proof, elapsed_ms=elapsed_ms))
+        except Exception as exc:  # pragma: no cover - defensive route packet
+            samples.append(
+                {
+                    "name": probe.get("name"),
+                    "anchor": probe.get("anchor"),
+                    "kind": probe.get("kind"),
+                    "status": "failed",
+                    "ok": False,
+                    "elapsed_ms": int((time.monotonic() - probe_started) * 1000),
+                    "error": str(exc)[:500],
+                    "quality_flags": ["graph_replacement_probe_exception"],
+                }
+            )
+    status_counts = Counter(str(sample.get("status") or "unknown") for sample in samples)
+    kind_counts = Counter(str(sample.get("kind") or "unknown") for sample in samples if sample.get("kind"))
+    anchor_counts = Counter(str(sample.get("anchor") or "") for sample in samples if sample.get("anchor"))
+    quality = {
+        "sample_count": len(samples),
+        "passed_count": status_counts.get("passed", 0),
+        "warn_count": status_counts.get("warn", 0),
+        "failed_count": status_counts.get("failed", 0),
+        "kind_counts": dict(sorted(kind_counts.items())),
+        "anchor_count": len(anchor_counts),
+        "anchor_counts": dict(sorted(anchor_counts.items())),
+        "usage_event_count": sum(int_value(sample.get("usage_event_count")) for sample in samples),
+        "raw_or_segment_ref_count": sum(int_value(sample.get("raw_or_segment_ref_count")) for sample in samples),
+        "graph_event_edge_checked_count": sum(int_value(sample.get("graph_event_edge_checked_count")) for sample in samples),
+        "graph_event_edge_match_count": sum(int_value(sample.get("graph_event_edge_match_count")) for sample in samples),
+        "graph_event_edge_missing_count": sum(int_value(sample.get("graph_event_edge_missing_count")) for sample in samples),
+        "event_edge_count": sum(int_value(sample.get("event_edge_count")) for sample in samples),
+        "session_aggregate_edge_count": sum(int_value(sample.get("session_aggregate_edge_count")) for sample in samples),
+        "proof_failed_core_gate_count": sum(int_value(sample.get("proof_failed_core_gate_count")) for sample in samples),
+        "proof_not_proven_gate_count": sum(int_value(sample.get("proof_not_proven_gate_count")) for sample in samples),
+        "replacement_prune_open_count": sum(1 for sample in samples if sample.get("replacement_prune_apply_ready") is not False),
+        "target_projection_match_count": sum(
+            1
+            for sample in samples
+            if sample.get("target_projection") == GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
+        ),
+        "max_sample_elapsed_ms": max((int_value(sample.get("elapsed_ms")) for sample in samples), default=0),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    first_ref = next(
+        (
+            sample.get("first_ref")
+            for sample in samples
+            if isinstance(sample.get("first_ref"), dict) and sample.get("first_ref")
+        ),
+        {},
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_high_fanout_replacement_scenario_audit",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(samples) and quality["failed_count"] == 0,
+        "mutates": False,
+        "truth_status": "multi_anchor_graph_replacement_live_scenario_not_prune_permission",
+        "target_projection": GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
+        if samples and quality["target_projection_match_count"] == len(samples)
+        else "",
+        "replacement_scope": "multi_anchor_sample" if len(samples) > 1 else "anchor_sample",
+        "samples": samples,
+        "quality": quality,
+        "first_ref": first_ref,
+        "prune_gate": {
+            "status": "blocked_multi_anchor_sample_only",
+            "apply_ready": False,
+            "can_prune_now": False,
+            "reason": "multi-anchor replacement proof is still read-only route evidence and not an archive-wide prune permission",
+            "required_before_apply": [
+                "materialized_replacement_projection",
+                "global_before_after_cardinality_comparison",
+                "freshness_current_after_rebuild",
+                "operator_reviewed_mutation_boundary",
+            ],
+            "mutation_boundary": "read_only_scenario_packet_no_graph_rows_are_deleted_or_rebuilt",
+        },
+        "next_route": "materialize the entity-usage rollup only after this corpus stays green and a separate before/after storage comparison proves equal-or-better recall",
+        "authority_boundary": "scenario audit is generated route evidence; raw/segment refs and owner source surfaces remain stronger",
+    }
+
+
 def graph_node_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(node.get("id")): node for node in graph.get("nodes", []) if isinstance(node, dict) and node.get("id")}
 
@@ -69956,7 +70181,7 @@ def live_scenario_entity_registry_lookup_audit(
             for entry in entries
             if str(entry.get("status") or "") == "observed"
             and entry_anchor(entry)
-            and str(entry.get("source_surface") or "") == "archived_route_terms"
+            and str(entry.get("source_surface") or "") in {"archived_route_terms", "operational_route_rollup"}
             and entry_source_ref_count(entry) > 0
         ),
         None,
@@ -70574,30 +70799,66 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             result["status"] = "warn"
             result.setdefault("quality_flags", []).append("maintenance_status_missing_exact_next_command")
     elif profile == "graph_high_fanout_replacement":
-        usage_chain = payload.get("usage_chain") if isinstance(payload.get("usage_chain"), dict) else {}
-        graph_sample = payload.get("graph_sample") if isinstance(payload.get("graph_sample"), dict) else {}
-        edge_match = payload.get("edge_match") if isinstance(payload.get("edge_match"), dict) else {}
-        proof_summary = payload.get("proof_gate_summary") if isinstance(payload.get("proof_gate_summary"), dict) else {}
-        prune_gate = payload.get("prune_gate") if isinstance(payload.get("prune_gate"), dict) else {}
-        result.update(
-            {
-                "target_projection": payload.get("target_projection"),
-                "replacement_scope": payload.get("replacement_scope"),
-                "replacement_proof_ok": payload.get("ok"),
-                "usage_event_count": int_value(usage_chain.get("usage_event_count")),
-                "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
-                "graph_event_edge_checked_count": int_value(edge_match.get("checked_count")),
-                "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
-                "graph_event_edge_missing_count": int_value(edge_match.get("missing_count")),
-                "event_edge_count": int_value(graph_sample.get("event_edge_count")),
-                "session_aggregate_edge_count": int_value(graph_sample.get("session_aggregate_edge_count")),
-                "anchor_sample_reduction_ratio": graph_sample.get("anchor_sample_reduction_ratio"),
-                "proof_failed_core_gate_count": int_value(proof_summary.get("failed_core_gate_count")),
-                "proof_not_proven_gate_count": int_value(proof_summary.get("not_proven_gate_count")),
-                "replacement_prune_apply_ready": prune_gate.get("apply_ready"),
-                "replacement_prune_gate_status": prune_gate.get("status"),
-            }
-        )
+        if payload.get("artifact_type") == "session_memory_graph_high_fanout_replacement_scenario_audit":
+            quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+            prune_gate = payload.get("prune_gate") if isinstance(payload.get("prune_gate"), dict) else {}
+            result.update(
+                {
+                    "sample_count": int_value(quality.get("sample_count")),
+                    "passed_count": int_value(quality.get("passed_count")),
+                    "warn_count": int_value(quality.get("warn_count")),
+                    "failed_count": int_value(quality.get("failed_count")),
+                    "kind_counts": quality.get("kind_counts"),
+                    "anchor_count": int_value(quality.get("anchor_count")),
+                    "anchor_counts": quality.get("anchor_counts"),
+                    "target_projection": payload.get("target_projection"),
+                    "replacement_scope": payload.get("replacement_scope"),
+                    "replacement_proof_ok": payload.get("ok"),
+                    "usage_event_count": int_value(quality.get("usage_event_count")),
+                    "raw_or_segment_ref_count": int_value(quality.get("raw_or_segment_ref_count")),
+                    "graph_event_edge_checked_count": int_value(quality.get("graph_event_edge_checked_count")),
+                    "graph_event_edge_match_count": int_value(quality.get("graph_event_edge_match_count")),
+                    "graph_event_edge_missing_count": int_value(quality.get("graph_event_edge_missing_count")),
+                    "event_edge_count": int_value(quality.get("event_edge_count")),
+                    "session_aggregate_edge_count": int_value(quality.get("session_aggregate_edge_count")),
+                    "proof_failed_core_gate_count": int_value(quality.get("proof_failed_core_gate_count")),
+                    "proof_not_proven_gate_count": int_value(quality.get("proof_not_proven_gate_count")),
+                    "replacement_prune_open_count": int_value(quality.get("replacement_prune_open_count")),
+                    "target_projection_match_count": int_value(quality.get("target_projection_match_count")),
+                    "max_sample_elapsed_ms": int_value(quality.get("max_sample_elapsed_ms")),
+                    "replacement_prune_apply_ready": False
+                    if int_value(quality.get("replacement_prune_open_count")) == 0
+                    else True,
+                    "replacement_prune_gate_status": prune_gate.get("status"),
+                    "warning_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"warn"}),
+                    "failed_samples": live_scenario_compact_samples(payload, profile=profile, statuses={"failed"}),
+                }
+            )
+        else:
+            usage_chain = payload.get("usage_chain") if isinstance(payload.get("usage_chain"), dict) else {}
+            graph_sample = payload.get("graph_sample") if isinstance(payload.get("graph_sample"), dict) else {}
+            edge_match = payload.get("edge_match") if isinstance(payload.get("edge_match"), dict) else {}
+            proof_summary = payload.get("proof_gate_summary") if isinstance(payload.get("proof_gate_summary"), dict) else {}
+            prune_gate = payload.get("prune_gate") if isinstance(payload.get("prune_gate"), dict) else {}
+            result.update(
+                {
+                    "target_projection": payload.get("target_projection"),
+                    "replacement_scope": payload.get("replacement_scope"),
+                    "replacement_proof_ok": payload.get("ok"),
+                    "usage_event_count": int_value(usage_chain.get("usage_event_count")),
+                    "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
+                    "graph_event_edge_checked_count": int_value(edge_match.get("checked_count")),
+                    "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
+                    "graph_event_edge_missing_count": int_value(edge_match.get("missing_count")),
+                    "event_edge_count": int_value(graph_sample.get("event_edge_count")),
+                    "session_aggregate_edge_count": int_value(graph_sample.get("session_aggregate_edge_count")),
+                    "anchor_sample_reduction_ratio": graph_sample.get("anchor_sample_reduction_ratio"),
+                    "proof_failed_core_gate_count": int_value(proof_summary.get("failed_core_gate_count")),
+                    "proof_not_proven_gate_count": int_value(proof_summary.get("not_proven_gate_count")),
+                    "replacement_prune_apply_ready": prune_gate.get("apply_ready"),
+                    "replacement_prune_gate_status": prune_gate.get("status"),
+                }
+            )
         quality_flags = result.setdefault("quality_flags", [])
         if result["usage_event_count"] <= 0:
             quality_flags.append("graph_replacement_no_usage_events")
@@ -70607,7 +70868,7 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             quality_flags.append("graph_replacement_missing_event_edges")
         if result["proof_failed_core_gate_count"] > 0:
             quality_flags.append("graph_replacement_failed_core_gates")
-        if prune_gate.get("apply_ready") is not False:
+        if result.get("replacement_prune_apply_ready") is not False:
             quality_flags.append("graph_replacement_prune_gate_not_closed")
         if ok and quality_flags:
             result["status"] = "warn"
@@ -70757,6 +71018,7 @@ def live_scenario_audit(
     limit: int = 3,
     literal_probes: list[dict[str, Any]] | None = None,
     entity_usage_probes: list[dict[str, Any]] | None = None,
+    graph_replacement_probes: list[dict[str, Any]] | None = None,
     route_rollup_query: str = "aoa-session-memory-mcp",
     route_rollup_layer: str = "mcp",
     write_report: bool = False,
@@ -70942,14 +71204,13 @@ def live_scenario_audit(
             scenarios.append(
                 run(
                     profile,
-                    lambda: graph_entity_usage_replacement_proof(
+                    lambda: graph_high_fanout_replacement_scenario_audit(
                         aoa_root=aoa_root,
-                        anchor="aoa-session-memory-mcp",
-                        kind="mcp",
-                        limit=max(selected_limit, 4),
-                        per_route_limit=max(selected_limit * 3, 12),
+                        probes=graph_replacement_probes,
+                        limit=selected_limit,
+                        per_route_limit=max(selected_limit * 4, 4),
                         consequence_window=4,
-                        sample_limit=max(selected_limit, 4),
+                        sample_limit=selected_limit,
                     ),
                 )
             )
@@ -71014,6 +71275,7 @@ def live_scenario_audit(
             "limit": selected_limit,
             "literal_probe_count": len(literal_probes or []),
             "entity_usage_probe_count": len(entity_usage_probes or []),
+            "graph_replacement_probe_count": len(graph_replacement_probes or []),
             "route_rollup_query": str(route_rollup_query or ""),
             "route_rollup_layer": str(route_rollup_layer or ""),
         },
@@ -71162,6 +71424,11 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "anchor_sample_reduction_ratio": scenario.get("anchor_sample_reduction_ratio"),
             "proof_failed_core_gate_count": scenario.get("proof_failed_core_gate_count"),
             "proof_not_proven_gate_count": scenario.get("proof_not_proven_gate_count"),
+            "anchor_count": scenario.get("anchor_count"),
+            "anchor_counts": scenario.get("anchor_counts"),
+            "replacement_prune_open_count": scenario.get("replacement_prune_open_count"),
+            "target_projection_match_count": scenario.get("target_projection_match_count"),
+            "max_sample_elapsed_ms": scenario.get("max_sample_elapsed_ms"),
             "replacement_prune_apply_ready": scenario.get("replacement_prune_apply_ready"),
             "replacement_prune_gate_status": scenario.get("replacement_prune_gate_status"),
             "entity_count": scenario.get("entity_count"),
@@ -71473,10 +71740,28 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_graph_replacement_edge_match_count", "graph_event_edge_match_count"),
         ("min_graph_replacement_event_edge_count", "event_edge_count"),
         ("min_graph_replacement_session_aggregate_edge_count", "session_aggregate_edge_count"),
+        ("min_graph_replacement_anchor_count", "anchor_count"),
+        ("min_graph_replacement_target_projection_match_count", "target_projection_match_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
             failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    max_graph_replacement_sample_elapsed_ms = expectation.get("max_graph_replacement_sample_elapsed_ms")
+    if (
+        max_graph_replacement_sample_elapsed_ms is not None
+        and int_value(scenario.get("max_sample_elapsed_ms")) > int_value(max_graph_replacement_sample_elapsed_ms)
+    ):
+        failures.append(
+            f"{profile}:max_sample_elapsed_ms:{scenario.get('max_sample_elapsed_ms')}>{int_value(max_graph_replacement_sample_elapsed_ms)}"
+        )
+    graph_replacement_anchor_counts = scenario.get("anchor_counts") if isinstance(scenario.get("anchor_counts"), dict) else {}
+    for anchor in expectation.get("required_graph_replacement_anchors", []) if isinstance(expectation.get("required_graph_replacement_anchors"), list) else []:
+        if int_value(graph_replacement_anchor_counts.get(str(anchor))) <= 0:
+            failures.append(f"{profile}:missing_graph_replacement_anchor:{anchor}")
+    graph_replacement_kind_counts = scenario.get("kind_counts") if isinstance(scenario.get("kind_counts"), dict) else {}
+    for kind in expectation.get("required_graph_replacement_kinds", []) if isinstance(expectation.get("required_graph_replacement_kinds"), list) else []:
+        if int_value(graph_replacement_kind_counts.get(str(kind))) <= 0:
+            failures.append(f"{profile}:missing_graph_replacement_kind:{kind}")
     if expectation.get("require_exact_next_command") is True and scenario.get("exact_next_command_present") is not True:
         failures.append(f"{profile}:exact_next_command_present:{scenario.get('exact_next_command_present')}")
     if expectation.get("require_maintenance_packet_no_mutation") is True and scenario.get("mutates") is not False:
@@ -71627,6 +71912,7 @@ def live_scenario_corpus_case_check(
         limit=max(1, min(int_value(case.get("limit"), 3), 10)),
         literal_probes=case.get("literal_probes") if isinstance(case.get("literal_probes"), list) else None,
         entity_usage_probes=case.get("entity_usage_probes") if isinstance(case.get("entity_usage_probes"), list) else None,
+        graph_replacement_probes=case.get("graph_replacement_probes") if isinstance(case.get("graph_replacement_probes"), list) else None,
         route_rollup_query=str(case.get("route_rollup_query") or "aoa-session-memory-mcp"),
         route_rollup_layer=str(case.get("route_rollup_layer") or "mcp"),
         write_report=False,

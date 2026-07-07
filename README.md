@@ -790,6 +790,10 @@ python3 scripts/aoa_session_memory.py graph-entity-usage-replacement-proof \
 This packet checks `usage-chain` refs against
 `event_mentions_registered_entity` graph edges and keeps
 `prune_gate.apply_ready=false`; it is route evidence, not permission to prune.
+The `graph_high_fanout_replacement` live-scenario profile can also take
+reviewed `graph_replacement_probes` from the regression corpus, so dense
+tool/MCP/skill anchors are checked together with bounded per-anchor proof
+limits before any wider projection work.
 
 ## Storage Audit
 
