@@ -101,6 +101,15 @@ Use these first routes when available:
   sidecar refs, and promoted protected agent-route layers (`goal`,
   `agent_event`, `decision_thread`) while keeping raw/segment refs as the
   authority handoff.
+- direct operational-event rollup navigation: use
+  `search-operational-direct-event-rollup-query` when the question is about a
+  broad event class or operational motion such as result events, command
+  outputs, verification events, errors, tool outputs, or session acts. This
+  route reads the materialized direct-event rollup only; it must not rebuild
+  maintenance, resample shards, open the monolith, use FTS, or hydrate raw
+  body text. Treat it as compact navigation over event classes, not behavior
+  proof. For “how was this entity used and what happened after,” expand
+  through `usage-chain <anchor> --kind <kind>` and then raw/segment refs.
 - search projection weight, context-tail pressure, or a
   `search_projection_combined_large` warning: use
   `search-operational-shrink-gates --write-report` when the operational
@@ -214,6 +223,8 @@ query is fuzzy:
 - projection/readiness status: `aoa_session_projection_status`
 - operational route-rollup projection:
   `aoa_session_route_rollup_query`
+- direct operational-event rollup projection:
+  `aoa_session_direct_event_rollup_query`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
 - reviewed live quality regression gate:
   `aoa_session_live_scenario_corpus_check`
@@ -260,6 +271,7 @@ python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py projection-status
 python3 scripts/aoa_session_memory.py search-operational-route-rollup-query "<query>" --layer <layer> --limit 12 --ref-limit 3
+python3 scripts/aoa_session_memory.py search-operational-direct-event-rollup-query --usage-role result --limit 12 --ref-limit 3
 python3 scripts/aoa_session_memory.py search-operational-shrink-apply --apply --write-report
 python3 scripts/aoa_session_memory.py graph-high-fanout-policy --limit 12
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
