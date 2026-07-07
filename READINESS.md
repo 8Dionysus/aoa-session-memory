@@ -2419,6 +2419,19 @@ Maintenance gates:
   `diagnostics/20260630T221736Z__live-scenario-corpus-check.json` returned
   `case_count=15`, `passed_count=15`, `failed_count=0`,
   `actionable_gap_count=0`.
+- 2026-07-07 maintenance-status live-tail queue correction: live graph queue
+  backlog can be present while all immediate graph catch-up is still blocked
+  by the quiet-window rule for deferred live sources. In that state
+  `maintenance-status` now keeps the immediate `exact_next_command` on
+  `maintenance-status --no-timers`, exposes
+  `next_actions[0].id=wait_live_catchup`, and carries the graph queue catch-up
+  command only as `catchup_command_after_quiet_window`. Live proof:
+  `/tmp/aoa-maintenance-final.json` returned
+  `recommendation=wait_live_catchup`, `live_tail.status=waiting_for_quiet_window`,
+  `catchup_command_kind=graph_queue_maintenance`, and
+  `exact_next_command=maintenance-status --no-timers`; the full live scenario
+  corpus returned `case_count=15`, `passed_count=15`, `failed_count=0`,
+  `actionable_gap_count=0`.
 
 ## Probe Notes
 

@@ -39,7 +39,7 @@ except ModuleNotFoundError:  # Python < 3.11 fallback uses a narrow parser below
 SCHEMA_VERSION = 1
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
-ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[float, dict[tuple[str, str], dict[str, Any]]]] = {}
+ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[tuple[float, float, int], dict[tuple[str, str], dict[str, Any]]]] = {}
 
 
 class SearchSqliteConnection(sqlite3.Connection):
@@ -102,7 +102,7 @@ TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 1
 SEARCH_SCHEMA_VERSION = 14
 ENTITY_REGISTRY_SCHEMA_VERSION = 1
-ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 1
+ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 2
 INDEX_PROJECTION_STATE_SCHEMA_VERSION = 1
 MAINTENANCE_PLANNING_PHASE_MIN_SECONDS = 1.0
 MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS = 8.0
@@ -141,6 +141,12 @@ SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS = 180.0
 SEARCH_HOTSET_AUDIT_DEFAULT_MAX_SHARDS = 3
 SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS = 8.0
 SEARCH_HOTSET_AUDIT_TOP_LIMIT = 12
+SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST = "route-first"
+SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP = "deep"
+SEARCH_HOTSET_AUDIT_FOLLOWUP_MODES = (
+    SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST,
+    SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP,
+)
 SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES = (
     "ASSISTANT_MESSAGE",
     "ASSISTANT_REASONING_BOUNDARY",
@@ -4297,6 +4303,186 @@ def entity_registry_discover_mcp_services(aoa_root: Path) -> list[dict[str, Any]
     return entries
 
 
+def entity_registry_cli_subcommand_groups(parser: argparse.ArgumentParser) -> list[tuple[str, list[str]]]:
+    groups: dict[int, list[str]] = {}
+    for action in getattr(parser, "_actions", []):
+        choices = getattr(action, "choices", None)
+        if not isinstance(choices, dict):
+            continue
+        for name, subparser in choices.items():
+            if not name:
+                continue
+            groups.setdefault(id(subparser), []).append(str(name))
+    result: list[tuple[str, list[str]]] = []
+    for names in groups.values():
+        unique_names = list(dict.fromkeys(name for name in names if name))
+        if not unique_names:
+            continue
+        result.append((unique_names[0], unique_names))
+    return sorted(result, key=lambda item: item[0])
+
+
+def entity_registry_discover_cli_subcommands(aoa_root: Path) -> list[dict[str, Any]]:
+    try:
+        parser = build_parser()
+    except Exception:
+        return []
+    script_path = Path(__file__).resolve()
+    base_ref = entity_registry_source_ref(
+        script_path,
+        source_type="aoa_session_memory_cli_subcommands",
+        status="active",
+    )
+    entries: list[dict[str, Any]] = []
+    for canonical, names in entity_registry_cli_subcommand_groups(parser):
+        key = route_key_slug(canonical, fallback="", max_chars=120)
+        if not key:
+            continue
+        aliases = {
+            canonical,
+            key,
+            canonical.replace("-", "_"),
+            f"cli:{canonical}",
+            f"cli:{key}",
+            f"aoa_session_memory:{canonical}",
+            f"aoa_session_memory:{key}",
+            f"python3 scripts/aoa_session_memory.py {canonical}",
+            *names,
+        }
+        source_ref = dict(base_ref)
+        source_ref.update(
+            {
+                "subcommand": canonical,
+                "subcommand_aliases": names,
+                "source_role": "argparse_root_subcommand",
+            }
+        )
+        entries.append(
+            entity_registry_make_entry(
+                kind="tool",
+                key=key,
+                aliases=aliases,
+                source_refs=[source_ref],
+                source_surface="aoa_session_memory_cli_subcommands",
+                owner="aoa-session-memory",
+                status="active",
+            )
+        )
+    return entries
+
+
+def entity_registry_runtime_source_entries(aoa_root: Path) -> list[dict[str, Any]]:
+    return [
+        *entity_registry_discover_skills(aoa_root),
+        *entity_registry_discover_mcp_services(aoa_root),
+        *entity_registry_discover_mcp_tools(),
+        *entity_registry_discover_cli_subcommands(aoa_root),
+    ]
+
+
+def entity_registry_snapshot_generated_epoch(payload: dict[str, Any]) -> float:
+    try:
+        generated_at_epoch = float(payload.get("generated_at_epoch") or 0.0)
+    except (TypeError, ValueError):
+        generated_at_epoch = 0.0
+    if generated_at_epoch <= 0:
+        generated_at = parse_utc_timestamp(str(payload.get("generated_at") or ""))
+        if generated_at is not None:
+            generated_at_epoch = generated_at.timestamp() + 1.0
+    return generated_at_epoch
+
+
+def entity_registry_snapshot_needs_runtime_source_overlay(
+    aoa_root: Path,
+    payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    source_state = entity_registry_source_surface_state(aoa_root)
+    generated_at_epoch = entity_registry_snapshot_generated_epoch(payload)
+    latest_source_mtime = float(source_state.get("latest_source_mtime") or 0.0)
+    reasons: list[str] = []
+    if generated_at_epoch <= 0 and latest_source_mtime:
+        reasons.append("entity_registry_generated_at_unreadable")
+    elif generated_at_epoch > 0 and latest_source_mtime > generated_at_epoch + 0.001:
+        reasons.append("source_newer_than_entity_registry")
+    return bool(reasons), {
+        "reasons": reasons,
+        "generated_at_epoch": generated_at_epoch,
+        "source_surface": source_state,
+    }
+
+
+def entity_registry_payload_with_runtime_source_overlay(
+    aoa_root: Path,
+    payload: dict[str, Any],
+    *,
+    overlay_status: dict[str, Any],
+) -> dict[str, Any]:
+    entries_by_id: dict[str, dict[str, Any]] = {}
+    for entry in payload.get("entries", []) if isinstance(payload.get("entries"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        entity_id = str(entry.get("entity_id") or "")
+        if entity_id:
+            entries_by_id[entity_id] = entry
+    runtime_entries = entity_registry_runtime_source_entries(aoa_root)
+    current_active_entity_ids = {
+        str(entry.get("entity_id") or "")
+        for entry in runtime_entries
+        if str(entry.get("status") or "") == "active" and str(entry.get("entity_id") or "")
+    }
+    for retired_entry in entity_registry_retired_entries_from_previous_snapshot(
+        aoa_root,
+        current_active_entity_ids=current_active_entity_ids,
+    ):
+        entity_id = str(retired_entry.get("entity_id") or "")
+        if entity_id:
+            entries_by_id[entity_id] = retired_entry
+    for entry in runtime_entries:
+        entity_registry_merge_entry(entries_by_id, entry)
+    entries = sorted(
+        entries_by_id.values(),
+        key=lambda item: (str(item.get("kind") or ""), entity_registry_status_rank(str(item.get("status") or "")), str(item.get("canonical_key") or "")),
+    )
+    source_surfaces = set(str(item) for item in payload.get("source_surfaces", []) if str(item))
+    source_surfaces.update(
+        {
+            "runtime_skills",
+            "runtime_mcp_config",
+            "runtime_mcp_service_dirs",
+            "runtime_mcp_tool_sources",
+            "aoa_session_memory_cli_subcommands",
+            "previous_entity_registry_snapshot",
+        }
+    )
+    diagnostics = [str(item) for item in payload.get("diagnostics", []) if str(item)]
+    diagnostics.append("runtime_source_overlay_applied")
+    diagnostics.extend(str(reason) for reason in overlay_status.get("reasons", []) if str(reason))
+    overlaid = dict(payload)
+    overlaid.update(
+        {
+            "mutates": False,
+            "source_surfaces": sorted(source_surfaces),
+            "total_entity_count": len(entries),
+            "entity_count": len(entries),
+            "counts_by_kind": dict(Counter(str(entry.get("kind") or "unknown") for entry in entries)),
+            "counts_by_status": dict(Counter(str(entry.get("status") or "unknown") for entry in entries)),
+            "entries": entries,
+            "diagnostics": sorted(set(diagnostics)),
+            "read_mode": "generated_snapshot_with_runtime_source_overlay",
+            "runtime_source_overlay": {
+                "applied": True,
+                "runtime_entry_count": len(runtime_entries),
+                "reason_count": len(overlay_status.get("reasons", []) if isinstance(overlay_status.get("reasons"), list) else []),
+                "reasons": overlay_status.get("reasons", []),
+                "source_surface": overlay_status.get("source_surface", {}),
+                "snapshot_generated_at_epoch": overlay_status.get("generated_at_epoch"),
+                "write_route": "entity-registry-search-sync",
+            },
+        }
+    )
+    return overlaid
+
+
 def entity_registry_entries_from_route_terms(
     aoa_root: Path,
     *,
@@ -4679,6 +4865,7 @@ def entity_registry_source_surface_state(aoa_root: Path) -> dict[str, Any]:
             paths.extend(sorted(service_dir.glob("src/**/server.py")))
         except OSError:
             continue
+    paths.append(Path(__file__).resolve())
     latest_mtime = 0.0
     latest_path = ""
     readable_count = 0
@@ -4791,11 +4978,7 @@ def build_entity_registry(
         diagnostics.append(f"unknown_observed_source:{observed_source}")
         observed_source = "auto"
     if include_runtime:
-        runtime_entries = [
-            *entity_registry_discover_skills(aoa_root),
-            *entity_registry_discover_mcp_services(aoa_root),
-            *entity_registry_discover_mcp_tools(),
-        ]
+        runtime_entries = entity_registry_runtime_source_entries(aoa_root)
         current_active_entity_ids = {
             str(entry.get("entity_id") or "")
             for entry in runtime_entries
@@ -4808,7 +4991,16 @@ def build_entity_registry(
             current_active_entity_ids=current_active_entity_ids,
         ):
             entity_registry_merge_entry(entries_by_id, entry)
-        source_surfaces.extend(["runtime_skills", "runtime_mcp_config", "runtime_mcp_service_dirs", "runtime_mcp_tool_sources", "previous_entity_registry_snapshot"])
+        source_surfaces.extend(
+            [
+                "runtime_skills",
+                "runtime_mcp_config",
+                "runtime_mcp_service_dirs",
+                "runtime_mcp_tool_sources",
+                "aoa_session_memory_cli_subcommands",
+                "previous_entity_registry_snapshot",
+            ]
+        )
     observed_route_source = "none"
     observed_route_status: dict[str, Any] = {}
     observed_entries: list[dict[str, Any]] = []
@@ -4894,6 +5086,7 @@ def build_entity_registry(
             "CODEX_HOME/config.toml mcp_servers",
             "abyss-stack/mcp/services/*",
             "abyss-stack/mcp/services/*/src/**/server.py @mcp.tool functions",
+            "aoa_session_memory.py argparse root subcommands",
             "portable search route_terms archived evidence",
             "operational route-rollup navigation evidence when current",
             "previous entity registry snapshot for stale/removed navigation state",
@@ -4946,6 +5139,13 @@ def load_entity_registry(aoa_root: Path, *, include_runtime: bool = True) -> dic
     path = aoa_root / ENTITY_REGISTRY_PATH
     payload = read_json(path, {}) if path.exists() else {}
     if isinstance(payload, dict) and payload.get("artifact_type") == "entity_registry_snapshot":
+        needs_overlay, overlay_status = entity_registry_snapshot_needs_runtime_source_overlay(aoa_root, payload)
+        if needs_overlay:
+            return entity_registry_payload_with_runtime_source_overlay(
+                aoa_root,
+                payload,
+                overlay_status=overlay_status,
+            )
         return payload
     return build_entity_registry(aoa_root=aoa_root, write=False, include_runtime=include_runtime)
 
@@ -4992,8 +5192,9 @@ def filter_entity_registry_snapshot(
         "query": query,
         "kind": selected_kind,
         "entries": selected_entries,
-        "diagnostics": [],
-        "read_mode": "generated_snapshot",
+        "diagnostics": payload.get("diagnostics", []),
+        "read_mode": payload.get("read_mode") or "generated_snapshot",
+        "runtime_source_overlay": payload.get("runtime_source_overlay", {}),
         "next_route": "Use --lookup for one anchor, trace-route/search/graph/entity-usage-audit for observed use, and --write only when refreshing the generated registry.",
     }
 
@@ -5020,14 +5221,23 @@ def cached_entity_registry_entry_index(aoa_root: Path, *, include_runtime: bool 
     root_key = f"{aoa_root.resolve()}|include_runtime={include_runtime}"
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     try:
-        mtime = registry_path.stat().st_mtime if registry_path.exists() else 0.0
+        registry_mtime = registry_path.stat().st_mtime if registry_path.exists() else 0.0
     except OSError:
-        mtime = 0.0
+        registry_mtime = 0.0
+    if include_runtime:
+        source_state = entity_registry_source_surface_state(aoa_root)
+        fingerprint = (
+            registry_mtime,
+            float(source_state.get("latest_source_mtime") or 0.0),
+            int_value(source_state.get("source_path_count")),
+        )
+    else:
+        fingerprint = (registry_mtime, 0.0, 0)
     cached = ENTITY_REGISTRY_INDEX_CACHE.get(root_key)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == fingerprint:
         return cached[1]
     index = entity_registry_entry_index(aoa_root, include_runtime=include_runtime)
-    ENTITY_REGISTRY_INDEX_CACHE[root_key] = (mtime, index)
+    ENTITY_REGISTRY_INDEX_CACHE[root_key] = (fingerprint, index)
     return index
 
 
@@ -33378,22 +33588,37 @@ def search_documents_for_entity_registry(
         "stale_reason": "",
     }
 
+    def compact_registry_ref_path(value: Any) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        path = Path(text)
+        if path.is_absolute():
+            try:
+                return str(path.relative_to(aoa_root))
+            except ValueError:
+                parts = path.parts
+                return "/".join(parts[-4:]) if len(parts) >= 4 else path.name
+        return text
+
     def compact_registry_payload(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
         freshness = entry.get("freshness") if isinstance(entry.get("freshness"), dict) else {}
         compact_refs = [
             {
                 "source_type": ref.get("source_type"),
-                "path": ref.get("path"),
+                "path": compact_registry_ref_path(ref.get("path")),
                 "status": ref.get("status"),
             }
-            for ref in refs[:3]
+            for ref in refs[:2]
             if isinstance(ref, dict)
         ]
+        aliases = entry.get("aliases", []) if isinstance(entry.get("aliases"), list) else []
         return {
             "entity_id": entry.get("entity_id"),
             "kind": entry.get("kind"),
             "canonical_key": entry.get("canonical_key"),
-            "aliases": entry.get("aliases", [])[:8] if isinstance(entry.get("aliases"), list) else [],
+            "aliases": aliases[:4],
+            "alias_count": len(aliases),
             "status": entry.get("status"),
             "route_layer": entry.get("route_layer"),
             "route_signal": entry.get("route_signal"),
@@ -36421,6 +36646,587 @@ def agent_event_bounded_timeout_summary(
     return summary
 
 
+def session_index_task_episode_ranges(session_index: dict[str, Any]) -> list[tuple[str, int, int]]:
+    ranges: list[tuple[str, int, int]] = []
+    for episode in session_index.get("task_episodes", []) if isinstance(session_index.get("task_episodes"), list) else []:
+        if not isinstance(episode, dict):
+            continue
+        episode_id = str(episode.get("episode_id") or "")
+        event_range = episode.get("event_range") if isinstance(episode.get("event_range"), dict) else {}
+        from_line = int_value(event_range.get("from_line"))
+        to_line = int_value(event_range.get("to_line"))
+        if episode_id and from_line > 0 and to_line >= from_line:
+            ranges.append((episode_id, from_line, to_line))
+    return ranges
+
+
+def task_episode_id_for_indexed_event_line(line: int, ranges: list[tuple[str, int, int]]) -> str:
+    if line <= 0:
+        return ""
+    for episode_id, from_line, to_line in ranges:
+        if from_line <= line <= to_line:
+            return episode_id
+    return ""
+
+
+def segment_raw_block_ref(segment_index: dict[str, Any], session_dir: Path) -> str:
+    source_block = segment_index.get("source_block") if isinstance(segment_index.get("source_block"), dict) else {}
+    for key in ("rel", "plain_rel", "path", "plain_path"):
+        value = str(source_block.get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+def raw_semantic_preview_from_block_or_raw(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    raw_ref: Any,
+    *,
+    raw_block_ref: Any = "",
+    max_chars: int = 420,
+) -> dict[str, Any]:
+    raw_ref_text = str(raw_ref or "")
+    if raw_block_ref:
+        packet = raw_block_line_preview(
+            session_dir,
+            manifest,
+            raw_ref_text,
+            raw_block_ref=raw_block_ref,
+            max_chars=1_000_000,
+        )
+        if packet.get("status") == "available":
+            try:
+                row = json.loads(str(packet.get("text") or ""))
+            except json.JSONDecodeError:
+                row = {}
+            if isinstance(row, dict):
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                text = semantic_text_for_classification(str(row.get("type") or ""), payload, max_chars=max_chars)
+                if text:
+                    return {
+                        "status": "raw_block_semantic_text",
+                        "line": packet.get("line"),
+                        "block_line": packet.get("block_line"),
+                        "raw_block_ref": packet.get("raw_block_ref"),
+                        "text": short_text(text, max_chars=max_chars),
+                    }
+                if str(row.get("type") or "") == "response_item" and str(payload.get("type") or "") == "reasoning" and payload.get("encrypted_content"):
+                    return {
+                        "status": "encrypted_reasoning_boundary",
+                        "line": packet.get("line"),
+                        "block_line": packet.get("block_line"),
+                        "raw_block_ref": packet.get("raw_block_ref"),
+                        "text": "Reasoning boundary: encrypted content present; summary empty.",
+                    }
+            fallback = raw_semantic_preview(manifest_raw_path(session_dir, manifest), raw_ref_text, max_chars=max_chars)
+            fallback["raw_block_preview_status"] = packet.get("status")
+            return fallback
+    return raw_semantic_preview(manifest_raw_path(session_dir, manifest), raw_ref_text, max_chars=max_chars)
+
+
+def indexed_event_route_strings(event: dict[str, Any]) -> tuple[str, str]:
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    route_signals = facets.get("route_signals") if isinstance(facets.get("route_signals"), list) else []
+    layers: list[str] = []
+    signals: list[str] = []
+    for signal in route_signals:
+        if not isinstance(signal, dict):
+            continue
+        layer = str(signal.get("layer") or "")
+        key = str(signal.get("key") or "")
+        if layer and layer not in layers:
+            layers.append(layer)
+        if layer and key:
+            signals.append(route_signal_token(layer, key))
+    return " ".join(layers), " ".join(signals)
+
+
+def compact_agent_event_session_index_result(
+    *,
+    event: dict[str, Any],
+    session_dir: Path,
+    manifest: dict[str, Any],
+    segment_index_path: Path,
+    segment_index: dict[str, Any],
+    task_episode_id: str,
+    explain: bool,
+    query: str,
+) -> dict[str, Any]:
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+    conversation_act = facets.get("conversation_act") if isinstance(facets.get("conversation_act"), dict) else {}
+    session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
+    agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+    route_layers, route_signals = indexed_event_route_strings(event)
+    tags = " ".join(str(item) for item in event.get("tags", []) if item) if isinstance(event.get("tags"), list) else str(event.get("tags") or "")
+    segment_ref = str(event.get("md_anchor") or "")
+    if not segment_ref:
+        markdown_ref = str(segment_index.get("markdown") or "")
+        if markdown_ref:
+            segment_ref = Path(markdown_ref).name
+    refs = {
+        "session": str(session_dir / "session.manifest.json"),
+        "segment": segment_ref,
+        "segment_index": str(segment_index_path),
+        "raw": str(event.get("raw_ref") or ""),
+        "raw_block": segment_raw_block_ref(segment_index, session_dir),
+    }
+    event_type = str(event.get("type") or "")
+    conversation_kind = str(conversation_act.get("kind") or "")
+    session_kind = str(session_act.get("kind") or "")
+    title = str(event.get("title") or "")
+    raw_preview = raw_semantic_preview_from_block_or_raw(
+        session_dir,
+        manifest,
+        refs["raw"],
+        raw_block_ref=refs["raw_block"],
+        max_chars=420,
+    )
+    snippet = raw_preview.get("text") or lightweight_search_body_preview(title, max_chars=420)
+    preview_source = str(raw_preview.get("status") or "") if raw_preview.get("text") else "segment_index_title"
+    result = {
+        "rank": 0,
+        "doc_id": f"event:{manifest.get('session_id') or session_dir.name}:{event.get('segment_id') or segment_index.get('segment_id')}:{event.get('event_id')}",
+        "doc_type": "event",
+        "session_id": manifest.get("session_id") or session_dir.name,
+        "session_label": display.get("label") or manifest.get("session_label") or session_dir.name,
+        "session_title": display.get("title") or manifest.get("session_title") or "",
+        "session_date": display.get("date") or session_record_date({"session_label": display.get("label") or session_dir.name}),
+        "archive_status": manifest.get("archive_status") or "",
+        "segment_id": event.get("segment_id") or segment_index.get("segment_id"),
+        "event_id": event.get("event_id"),
+        "event_type": event_type,
+        "family": event.get("family"),
+        "phase": event.get("phase"),
+        "actor": event.get("actor"),
+        "action": event.get("action"),
+        "outcome": event.get("outcome"),
+        "conversation_act": conversation_kind,
+        "session_act": session_kind,
+        "agent_event": agent_event.get("class"),
+        "usage_role": entity_usage_event_role(event_type, conversation_kind, session_kind),
+        "agent_event_source": agent_event_source_from_tags(tags),
+        "task_episode_id": task_episode_id,
+        "route_layers": route_layers,
+        "route_signals": route_signals,
+        "title": title,
+        "snippet": snippet,
+        "preview": snippet,
+        "bounded_preview": snippet,
+        "preview_source": preview_source,
+        "refs": refs,
+        **route_result_ref_fields(refs),
+        "search_catalog": {
+            "active_projection": "session_segment_index",
+            "shard_strategy": SEARCH_SHARD_STRATEGY,
+            "shard": search_shard_key_for_session(str(display.get("label") or session_dir.name), str(display.get("date") or "")),
+        },
+        "freshness": {
+            "status": "fresh",
+            "reasons": [],
+            "basis": "session_segment_index_live_read",
+            "live_verification": "segment_index_read",
+            "segment_index_live_check": "fresh",
+        },
+    }
+    if explain:
+        result["explain"] = {
+            "query": query,
+            "matched_document_layer": "segment_index_event",
+            "routing_fields": {
+                "event_type": event_type,
+                "family": event.get("family"),
+                "conversation_act": conversation_kind,
+                "session_act": session_kind,
+                "agent_event": agent_event.get("class"),
+                "usage_role": result["usage_role"],
+                "agent_event_source": result["agent_event_source"],
+                "task_episode_id": task_episode_id,
+                "route_layers": route_layers,
+                "route_signals": route_signals,
+                "archive_status": result["archive_status"],
+            },
+            "semantic_preview": "skipped_for_lightweight_route",
+            "raw_preview": {
+                "status": raw_preview.get("status"),
+                "line": raw_preview.get("line"),
+            },
+            "why_this_is_not_authority": "Session segment index routes to raw/segment refs; raw transcript remains stronger evidence.",
+        }
+    return result
+
+
+def search_agent_event_documents_from_session_indexes(
+    *,
+    aoa_root: Path,
+    query: str,
+    limit: int,
+    provider: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    explain: bool,
+    include_stream_copies: bool,
+) -> dict[str, Any] | None:
+    if not session or fts_query_from_user(query):
+        return None
+    now = utc_now()
+    try:
+        record = resolve_session_record(aoa_root, session)
+    except ValueError:
+        return None
+    session_dir = session_dir_from_record(record)
+    if not session_dir.exists():
+        return None
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    session_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+    if not isinstance(manifest, dict) or not isinstance(session_index, dict) or not manifest or not session_index:
+        return None
+    episode_ranges = session_index_task_episode_ranges(session_index)
+    requested_episode_found = not task_episode_id or any(item[0] == task_episode_id for item in episode_ranges)
+    segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else session_index.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+    effective_limit = max(1, int_value(limit, 20))
+    class_set = set(classes)
+    diagnostics: list[str] = []
+    results: list[dict[str, Any]] = []
+    scanned_segment_count = 0
+    for segment in sorted((item for item in segments if isinstance(item, dict)), key=lambda item: str(item.get("segment_id") or ""), reverse=True):
+        index_ref = segment.get("index")
+        if not index_ref:
+            continue
+        index_path = projection_path_from_ref(index_ref, base=session_dir)
+        segment_index = read_json(index_path, {})
+        if not isinstance(segment_index, dict) or not segment_index:
+            diagnostics.append(f"segment_index_unavailable:{index_path}")
+            continue
+        scanned_segment_count += 1
+        for event in reversed([item for item in segment_index.get("events", []) if isinstance(item, dict)]):
+            facets = event.get("facets") if isinstance(event.get("facets"), dict) else {}
+            agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
+            agent_class = str(agent_event.get("class") or "")
+            if agent_class not in class_set:
+                continue
+            tags = " ".join(str(item) for item in event.get("tags", []) if item) if isinstance(event.get("tags"), list) else str(event.get("tags") or "")
+            if not include_stream_copies and agent_event_source_from_tags(tags) == "event_msg_stream":
+                continue
+            line = int_value(event.get("line"))
+            event_episode_id = task_episode_id_for_indexed_event_line(line, episode_ranges)
+            if task_episode_id and event_episode_id != task_episode_id:
+                continue
+            results.append(
+                compact_agent_event_session_index_result(
+                    event=event,
+                    session_dir=session_dir,
+                    manifest=manifest,
+                    segment_index_path=index_path,
+                    segment_index=segment_index,
+                    task_episode_id=event_episode_id,
+                    explain=explain,
+                    query=query,
+                )
+            )
+            if len(results) >= effective_limit:
+                break
+        if len(results) >= effective_limit:
+            break
+    if task_episode_id and not requested_episode_found:
+        diagnostics.append(f"task_episode_not_found:{task_episode_id}")
+    provider_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_provider_status",
+        "generated_at": now,
+        "ok": True,
+        "selected_provider": provider,
+        "status": "not_checked_session_segment_index_route",
+        "status_mode": "skipped_for_session_segment_index_route",
+        "diagnostics": [],
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": True,
+        "query": query,
+        "normalized_query": "",
+        "db_path": str(search_db_path(aoa_root)),
+        "index_generated_at": session_index.get("updated_at") or manifest.get("updated_at"),
+        "aoa_root": str(aoa_root),
+        "search_projection": {
+            "mode": "session_segment_index",
+            "route_kind": "agent_event_session_segment_index",
+            "requested_mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_scope": {
+                "requested": session or "",
+                "resolved_session_label": manifest.get("session_label") or session_dir.name,
+                "resolved_session_id": manifest.get("session_id") or "",
+                "session_dir": str(session_dir),
+            },
+            "segment_count": len(segments),
+            "scanned_segment_count": scanned_segment_count,
+            "task_episode_filter": task_episode_id or "",
+            "task_episode_found": requested_episode_found,
+            "next_expansion_command": "",
+        },
+        "cost_profile": {
+            "lightweight_route": True,
+            "structured_route_filter": True,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "semantic_preview": False,
+            "uses_shards": False,
+            "uses_session_segment_indexes": True,
+            "shard_query_limit": 0,
+            "class_query_count": 1,
+            "multi_class_structured_sql": False,
+            "agent_event_class_count": len(classes),
+        },
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "session_segment_index",
+            "status": provider_payload,
+            "accelerator_provider": None,
+            "accelerator_status": None,
+            "overlay": None,
+            "semantic_overlay": None,
+            "local_rerank": None,
+            "authority_law": search_provider_config(aoa_root).get("authority_law"),
+        },
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+    }
+
+
+def search_agent_event_documents_with_shards_structured_multi_class(
+    *,
+    aoa_root: Path,
+    query: str,
+    limit: int,
+    provider: str,
+    session: str | None,
+    task_episode_id: str | None,
+    classes: list[str],
+    explain: bool,
+    include_stream_copies: bool,
+    max_shards: int,
+) -> dict[str, Any]:
+    now = utc_now()
+    catalog = read_search_catalog(aoa_root)
+    shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
+    session_filter_column, session_filter_value = exact_session_filter_for_search(aoa_root, session)
+    session_scope_shard = ""
+    if session and session_filter_column and session_filter_value:
+        session_scope_record: dict[str, Any] = {}
+        try:
+            session_scope_record = resolve_session_record(aoa_root, session)
+        except ValueError:
+            session_scope_record = {}
+        session_scope_label = str(session_scope_record.get("session_label") or "")
+        session_scope_date = session_record_date(session_scope_record) if session_scope_record else ""
+        if not session_scope_label and session_filter_column == "documents.session_label":
+            session_scope_label = session_filter_value
+        if session_scope_label or session_scope_date:
+            session_scope_shard = search_shard_key_for_session(session_scope_label, session_scope_date)
+
+    candidate_shards: list[dict[str, Any]] = []
+    for item in shards:
+        if not isinstance(item, dict):
+            continue
+        shard_key = str(item.get("shard") or "")
+        shard_path = Path(str(item.get("shard_db_path") or ""))
+        if not shard_key or not shard_path.exists():
+            continue
+        if session_scope_shard and shard_key != session_scope_shard:
+            continue
+        candidate_shards.append(item)
+    candidate_shards.sort(key=lambda item: str(item.get("shard") or ""), reverse=True)
+    effective_max_shards = max(1, int_value(max_shards, 24))
+    queried_shards = candidate_shards[:effective_max_shards]
+    truncated = len(candidate_shards) > effective_max_shards
+    if not queried_shards:
+        payload = search_agent_event_documents(
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            session=session,
+            task_episode_id=task_episode_id,
+            agent_events=classes,
+            explain=explain,
+            include_stream_copies=include_stream_copies,
+            use_shards=False,
+            max_shards=max_shards,
+            query_timeout_ms=0,
+        )
+        payload["search_projection"] = {
+            "mode": SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "requested_mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "fallback_reason": "search_shard_fanout_no_materialized_shards_fallback_monolith",
+            "fallback_db_path": str(search_db_path(aoa_root)),
+        }
+        payload.setdefault("diagnostics", []).append("search_shard_fanout_no_materialized_shards_fallback_monolith")
+        return payload
+
+    effective_limit = max(1, int_value(limit, 20))
+    class_placeholders = ", ".join("?" for _ in classes)
+    merged: dict[str, dict[str, Any]] = {}
+    shard_payloads: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    sqlite_failure = False
+    used_index_hints: set[str] = set()
+    for shard_item in queried_shards:
+        shard_key = str(shard_item.get("shard") or "")
+        shard_path = Path(str(shard_item.get("shard_db_path") or ""))
+        index_hint = ""
+        filters = ["documents.doc_type = ?", f"documents.agent_event IN ({class_placeholders})"]
+        params: list[Any] = ["event", *classes]
+        if session:
+            if session_filter_column and session_filter_value:
+                filters.append(f"{session_filter_column} = ?")
+                params.append(session_filter_value)
+            else:
+                filters.append("(documents.session_id = ? OR documents.session_label LIKE ? OR documents.session_title LIKE ?)")
+                like = f"%{session}%"
+                params.extend([session, like, like])
+        if task_episode_id:
+            filters.append("documents.task_episode_id = ?")
+            params.append(task_episode_id)
+        if not include_stream_copies:
+            filters.append("COALESCE(documents.tags, '') NOT LIKE ?")
+            params.append("%agent_event_source:event_msg_stream%")
+        where = " AND ".join(filters)
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = connect_existing_search_db(shard_path)
+            index_names = {str(row[1]) for row in conn.execute("PRAGMA index_list(documents)").fetchall()}
+            if session_filter_column == "documents.session_label" and "idx_documents_session" in index_names:
+                index_hint = "idx_documents_session"
+            elif session_filter_column == "documents.session_id" and "idx_documents_session_id" in index_names:
+                index_hint = "idx_documents_session_id"
+            if index_hint:
+                used_index_hints.add(index_hint)
+            from_clause = f"FROM documents INDEXED BY {index_hint}" if index_hint else "FROM documents"
+            rows = conn.execute(
+                "SELECT documents.*, 0.0 AS rank, 0 AS source_rank "
+                + from_clause
+                + " WHERE "
+                + where
+                + " ORDER BY documents.session_date DESC, documents.rowid DESC LIMIT ?",
+                [*params, effective_limit],
+            ).fetchall()
+        except sqlite3.Error as exc:
+            sqlite_failure = True
+            diagnostics.append(f"{shard_key}:{sqlite_error_diagnostic(exc)}")
+            rows = []
+        finally:
+            if conn is not None:
+                conn.close()
+        shard_payloads.append(
+            {
+                "shard": shard_key,
+                "db_path": str(shard_path),
+                "ok": not any(item.startswith(f"{shard_key}:") for item in diagnostics),
+                "result_count": len(rows),
+                "raw_text_query_support": shard_item.get("raw_text_query_support") or "",
+                "storage_mode": shard_item.get("storage_mode") or "",
+                "index_hint": index_hint,
+                "diagnostics": [item for item in diagnostics if item.startswith(f"{shard_key}:")],
+            }
+        )
+        for row in rows:
+            result = compact_search_result(row, explain=explain, query=query, semantic_preview=False)
+            doc_id = str(result.get("doc_id") or "")
+            if not doc_id or doc_id in merged:
+                continue
+            search_catalog = result.get("search_catalog") if isinstance(result.get("search_catalog"), dict) else {}
+            result["search_catalog"] = {
+                **search_catalog,
+                "active_projection": SEARCH_ACTIVE_PROJECTION_SHARD,
+                "shard_strategy": SEARCH_SHARD_STRATEGY,
+                "shard": shard_key,
+                "shard_db_path": str(shard_path),
+            }
+            merged[doc_id] = result
+    results = sorted(merged.values(), key=lambda item: search_result_order_key(item, query=query))[:effective_limit]
+    if truncated:
+        diagnostics.append(f"search_shard_fanout_truncated:{len(candidate_shards)}:{effective_max_shards}")
+    provider_payload = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": now,
+        "ok": not sqlite_failure,
+        "query": query,
+        "normalized_query": "",
+        "db_path": str(search_db_path(aoa_root)),
+        "index_generated_at": catalog.get("generated_at"),
+        "aoa_root": str(aoa_root),
+        "search_projection": {
+            "mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "route_kind": "agent_event_structured_multi_class_shard_sql",
+            "catalog_status": catalog.get("status"),
+            "catalog_path": catalog.get("catalog_path"),
+            "candidate_shard_count": len(candidate_shards),
+            "queried_shard_count": len(queried_shards),
+            "max_shards": effective_max_shards,
+            "truncated": truncated,
+            "fallback_db_path": str(search_db_path(aoa_root)),
+            "queried_shards": shard_payloads,
+            "index_hints": sorted(used_index_hints),
+            "session_scope": {
+                "requested": session or "",
+                "exact_filter_column": session_filter_column or "",
+                "exact_filter_value": session_filter_value or "",
+                "resolved_shard": session_scope_shard,
+            },
+            "next_expansion_command": (
+                agent_event_shard_next_expansion_command(
+                    query=query,
+                    session=session,
+                    task_episode_id=task_episode_id,
+                    classes=classes,
+                    include_stream_copies=include_stream_copies,
+                    max_shards=max(len(candidate_shards), max_shards),
+                )
+                if truncated
+                else ""
+            ),
+        },
+        "cost_profile": {
+            "lightweight_route": True,
+            "structured_route_filter": True,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "semantic_preview": False,
+            "uses_shards": True,
+            "shard_query_limit": effective_limit,
+            "class_query_count": 1,
+            "multi_class_structured_sql": True,
+            "agent_event_class_count": len(classes),
+            "structured_index_hint": sorted(used_index_hints)[0] if used_index_hints else "",
+        },
+        "provider": {
+            "selected": provider,
+            "authoritative_result_provider": "portable_sqlite",
+            "status": provider_payload,
+            "accelerator_provider": None,
+            "accelerator_status": None,
+            "overlay": None,
+            "semantic_overlay": None,
+            "local_rerank": None,
+            "authority_law": search_provider_config(aoa_root).get("authority_law"),
+        },
+        "result_count": len(results),
+        "results": results,
+        "diagnostics": diagnostics,
+    }
+
+
 def search_agent_event_documents_with_shards(
     *,
     aoa_root: Path,
@@ -36437,6 +37243,33 @@ def search_agent_event_documents_with_shards(
 ) -> dict[str, Any]:
     now = utc_now()
     effective_limit = max(1, limit)
+    if not fts_query_from_user(query) and session:
+        session_index_payload = search_agent_event_documents_from_session_indexes(
+            aoa_root=aoa_root,
+            query=query,
+            limit=effective_limit,
+            provider=provider,
+            session=session,
+            task_episode_id=task_episode_id,
+            classes=classes,
+            explain=explain,
+            include_stream_copies=include_stream_copies,
+        )
+        if session_index_payload is not None:
+            return session_index_payload
+    if not fts_query_from_user(query) and len(classes) > 1:
+        return search_agent_event_documents_with_shards_structured_multi_class(
+            aoa_root=aoa_root,
+            query=query,
+            limit=effective_limit,
+            provider=provider,
+            session=session,
+            task_episode_id=task_episode_id,
+            classes=classes,
+            explain=explain,
+            include_stream_copies=include_stream_copies,
+            max_shards=max_shards,
+        )
     payloads: list[dict[str, Any]] = []
     for agent_event in classes:
         payloads.append(
@@ -36837,6 +37670,7 @@ def agent_event_route_search(
     query_timeout_ms: int | None = SEARCH_FTS_QUERY_TIMEOUT_MS,
 ) -> dict[str, Any]:
     now = utc_now()
+    started_monotonic = time.monotonic()
     requested_classes = [str(item) for item in (agent_events or []) if str(item or "").strip()]
     classes = normalize_agent_event_route_classes(requested_classes, default=AGENT_RESPONSE_ROUTE_CLASSES)
     route_payload = search_agent_event_documents(
@@ -36854,6 +37688,8 @@ def agent_event_route_search(
         query_timeout_ms=query_timeout_ms,
     )
     results = route_payload.get("results") if isinstance(route_payload.get("results"), list) else []
+    elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
+    cost_profile = route_payload.get("cost_profile") if isinstance(route_payload.get("cost_profile"), dict) else {}
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "agent_event_route_results",
@@ -36869,7 +37705,11 @@ def agent_event_route_search(
         "include_stream_copies": include_stream_copies,
         "search_projection": route_payload.get("search_projection") if isinstance(route_payload.get("search_projection"), dict) else {},
         "provider": route_payload.get("provider") if isinstance(route_payload.get("provider"), dict) else {},
-        "cost_profile": route_payload.get("cost_profile") if isinstance(route_payload.get("cost_profile"), dict) else {},
+        "cost_profile": cost_profile,
+        "elapsed_ms": elapsed_ms,
+        "uses_shards": bool(cost_profile.get("uses_shards")),
+        "uses_fts": bool(cost_profile.get("uses_fts")),
+        "hydrates_body": bool(cost_profile.get("hydrates_body")),
         "bounded_timeout": route_payload.get("bounded_timeout") if isinstance(route_payload.get("bounded_timeout"), dict) else {},
         "result_count": len(results),
         "results": results,
@@ -38391,6 +39231,7 @@ LITERAL_QUERY_ROUTE_SIGNAL_MARKER_TERMS = {
     "typing_prompt_bridge_failed",
 }
 LITERAL_QUERY_RAW_TEXT_FALLBACK_ROUTE_IDS = {"scoped_shard_full_text", "monolith_raw_text_fallback"}
+LITERAL_QUERY_SINGLE_TOKEN_PARTIAL_MATCH_MIN_RATIO = 0.75
 LITERAL_QUERY_STRUCTURED_FIRST_ROUTE_IDS = {
     "entity_inventory",
     "entity_registry_class",
@@ -38469,6 +39310,16 @@ def literal_query_tokens(query: str) -> set[str]:
     slug = route_key_slug(query, fallback="", max_chars=512)
     tokens.update(part for part in slug.split("_") if part)
     return tokens
+
+
+def literal_query_suppresses_short_single_token_partial_match(query: str, match_key: str) -> bool:
+    query_slug = route_key_slug(query, fallback="", max_chars=512)
+    key_slug = route_key_slug(match_key, fallback="", max_chars=512)
+    if not query_slug or not key_slug or query_slug == key_slug:
+        return False
+    if len(str(query or "").split()) > 1:
+        return False
+    return (len(key_slug) / max(1, len(query_slug))) < LITERAL_QUERY_SINGLE_TOKEN_PARTIAL_MATCH_MIN_RATIO
 
 
 def literal_query_broad_entity_class(query: str) -> dict[str, Any]:
@@ -38579,6 +39430,8 @@ def literal_query_embedded_entity_anchor(
             else:
                 match_relation = "embedded"
                 relation_score = 1
+            if match_relation != "exact" and literal_query_suppresses_short_single_token_partial_match(text, match_key):
+                continue
             status = str(entry.get("status") or "")
             status_score = {
                 "active": 5,
@@ -38672,6 +39525,8 @@ def literal_query_structured_route_signal_candidates(
             continue
         if path_like_query and source == "tool_alias":
             continue
+        if key and key != query_slug and literal_query_suppresses_short_single_token_partial_match(query, key):
+            continue
         selected.append(candidate)
     selected.sort(
         key=lambda item: (
@@ -38717,7 +39572,12 @@ def literal_query_shape(query: str) -> dict[str, Any]:
         or "prompt_hook" in lowered
     ):
         add(LITERAL_QUERY_KIND_HOOK_RECEIPT)
-    if has_failed_command_or_test_signal(text) or re.search(r"\b(traceback|exception|error|failed|failure|timeout|timed out)\b", lowered):
+    error_tokens = literal_query_tokens(text)
+    if (
+        has_failed_command_or_test_signal(text)
+        or re.search(r"\b(traceback|exception|error|failed|failure|timeout|timed out)\b", lowered)
+        or bool(error_tokens & (LITERAL_QUERY_ROUTE_SIGNAL_MARKER_TERMS | {"error", "failed", "failure", "exception", "traceback"}))
+    ):
         add(LITERAL_QUERY_KIND_ERROR_TEXT)
     if text and len(text.split()) <= 4 and any(
         marker in lowered
@@ -53504,6 +54364,14 @@ def graph_maintenance_status_from_state(
         "latest_maintenance": latest_maintenance_status,
         "latest_queue_maintenance": latest_queue_maintenance_status,
         "deferred_live_source_count": deferred_live_count,
+        "deferred_live_sources_sample": [
+            item
+            for item in [
+                *(ledger.get("deferred_live_sources_sample", []) if isinstance(ledger.get("deferred_live_sources_sample"), list) else []),
+                *(queue.get("deferred_live_sources_sample", []) if isinstance(queue.get("deferred_live_sources_sample"), list) else []),
+            ][:16]
+            if isinstance(item, dict)
+        ],
         "source_version_state": source_version_state,
         "reason_group_counts": reason_group_counts,
         "maintenance_recommendation": maintenance_recommendation,
@@ -54286,11 +55154,63 @@ def diagnostic_report_stale_segment_ref_shards(report: dict[str, Any]) -> set[st
     return shards
 
 
+def diagnostic_report_diagnostic_strings(report: dict[str, Any]) -> list[str]:
+    diagnostics: list[str] = []
+
+    def collect(payload: dict[str, Any]) -> None:
+        for key in ("diagnostics", "hard_diagnostics"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                diagnostics.extend(str(item) for item in value if str(item))
+
+    collect(report)
+    for key in ("child", "maintenance"):
+        nested = report.get(key)
+        if isinstance(nested, dict):
+            collect(nested)
+    child = report.get("child") if isinstance(report.get("child"), dict) else {}
+    child_maintenance = child.get("maintenance") if isinstance(child.get("maintenance"), dict) else {}
+    if child_maintenance:
+        collect(child_maintenance)
+    return diagnostics
+
+
 def diagnostic_report_handled_stale_segment_refs(report: dict[str, Any], repaired_search_shards: set[str]) -> bool:
     if str(report.get("artifact_type") or "") != "index_maintenance":
         return False
     stale_shards = diagnostic_report_stale_segment_ref_shards(report)
     return bool(stale_shards) and stale_shards.issubset(repaired_search_shards)
+
+
+def diagnostic_report_search_shard_diagnostic_shards(report: dict[str, Any]) -> set[str]:
+    shards: set[str] = set()
+    for item in diagnostic_report_diagnostic_strings(report):
+        shard, sep, reason = item.partition(":")
+        if sep and shard == "shard_document_count_catalog_mismatch" and reason:
+            shards.add(reason)
+    return shards
+
+
+def diagnostic_report_handled_search_shard_projection(report: dict[str, Any], repaired_search_shards: set[str]) -> bool:
+    artifact_type = str(report.get("artifact_type") or "")
+    if artifact_type not in {"auto_maintenance", "session_memory_auto_maintenance", "auto_maintenance_resource_launch"}:
+        return False
+    shard_diagnostic_shards = diagnostic_report_search_shard_diagnostic_shards(report)
+    if not shard_diagnostic_shards or not shard_diagnostic_shards.issubset(repaired_search_shards):
+        return False
+
+    unhandled: list[str] = []
+    for item in diagnostic_report_diagnostic_strings(report):
+        if expected_auto_maintenance_remaining_diagnostic(item):
+            continue
+        if item == "search_shards_incomplete_or_stale":
+            continue
+        if item.startswith("shard_document_count_catalog_mismatch:"):
+            shard = item.split(":", 1)[1]
+            if shard in repaired_search_shards:
+                continue
+        unhandled.append(item)
+    return not unhandled
 
 
 def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
@@ -54326,6 +55246,8 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
         if operational_key:
             seen_operational_keys.add(operational_key)
         if diagnostic_report_handled_stale_segment_refs(report, repaired_search_shards):
+            continue
+        if diagnostic_report_handled_search_shard_projection(report, repaired_search_shards):
             continue
         if diagnostic_report_problem(report):
             problems.append(maintenance_report_brief(report))
@@ -55927,14 +56849,20 @@ def session_memory_search_hotset_audit(
     per_shard_timeout_seconds: float = SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS,
     top_limit: int = SEARCH_HOTSET_AUDIT_TOP_LIMIT,
     shard: str = "",
+    followup_mode: str = SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST,
     write_report: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    normalized_followup_mode = str(followup_mode or SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST).strip().lower()
+    if normalized_followup_mode not in SEARCH_HOTSET_AUDIT_FOLLOWUP_MODES:
+        normalized_followup_mode = SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST
     selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
         aoa_root,
         max_shards=max_shards,
         shard=shard,
     )
+    if str(followup_mode or "").strip().lower() not in SEARCH_HOTSET_AUDIT_FOLLOWUP_MODES:
+        diagnostics.append(f"search_hotset_unknown_followup_mode_defaulted:{followup_mode}")
     projection_plan = session_memory_search_projection_plan(
         workspace_root=workspace_root,
         aoa_root=aoa_root,
@@ -56024,17 +56952,28 @@ def session_memory_search_hotset_audit(
             "--write-report",
         ]
 
-    targeted_followup_routes = [
+    deep_targeted_followup_routes = [
         targeted_hotset_command(str(item.get("shard") or ""))
         for item in partial_shards + failed_shards
         if item.get("shard")
     ][: max(1, int(max_shards))]
+    targeted_followup_routes = (
+        deep_targeted_followup_routes
+        if normalized_followup_mode == SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP
+        else []
+    )
     if failed_shards:
         measurement_gap_status = "failed_shard_sample"
     elif partial_shards:
         measurement_gap_status = "partial_shard_sample"
     else:
         measurement_gap_status = "none"
+    if targeted_followup_routes:
+        measurement_gap_next_route = "run_targeted_hotset_audit_for_partial_or_failed_shards"
+    elif deep_targeted_followup_routes:
+        measurement_gap_next_route = "use_route_rollup_or_projection_plan_first_deep_hotset_followup_available"
+    else:
+        measurement_gap_next_route = "none"
     sample_quality_status = "not_sampled"
     if successful:
         if failed or partial_hotset_count_shard_count or partial_context_tail_shard_count or partial_agent_event_coverage_shard_count:
@@ -56213,14 +57152,15 @@ def session_memory_search_hotset_audit(
         "measurement_gap": {
             "status": measurement_gap_status,
             "needs_targeted_followup": bool(targeted_followup_routes),
+            "deep_followup_available": bool(deep_targeted_followup_routes),
+            "followup_mode": normalized_followup_mode,
             "partial_shard_count": len(partial_shards),
             "failed_shard_count": len(failed_shards),
             "partial_shards": partial_shards,
             "failed_shards": failed_shards,
-            "next_route": "run_targeted_hotset_audit_for_partial_or_failed_shards"
-            if targeted_followup_routes
-            else "none",
+            "next_route": measurement_gap_next_route,
             "next_targeted_routes": targeted_followup_routes,
+            "deep_targeted_routes": deep_targeted_followup_routes,
             "quality_boundary": "targeted follow-up only improves measurement confidence; it does not mutate search, raw, graph, or route-rollup truth",
         },
         "cost_profile": {
@@ -56232,6 +57172,9 @@ def session_memory_search_hotset_audit(
             "resamples_shards": True,
             "uses_cached_projection_plan": True,
             "bounded_by_per_shard_timeout": True,
+            "followup_mode": normalized_followup_mode,
+            "targeted_followup_default": normalized_followup_mode == SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP,
+            "deep_followup_available": bool(deep_targeted_followup_routes),
         },
         "projection_context": {
             "status": projection_plan.get("status"),
@@ -60360,6 +61303,32 @@ def session_memory_search_projection_next_action(
             "note": "Materialize the generated route-ref replacement projection before any context-tail shrinkage; raw/segment refs remain authority.",
         }
     if route_rollup_status == "current":
+        shrink_gate_freshness = session_memory_search_projection_shrink_gate_freshness(aoa_root)
+        if shrink_gate_freshness.get("current"):
+            latest_gate = shrink_gate_freshness.get("latest_gate") if isinstance(shrink_gate_freshness.get("latest_gate"), dict) else {}
+            return {
+                "id": "operational_shrink_gates_current",
+                "reason": "search_projection_shrink_gates_current",
+                "route_kind": "search_operational_shrink_gate_advisory",
+                "advisory_only": True,
+                "freshness_status": shrink_gate_freshness.get("status"),
+                "latest_gate_path": latest_gate.get("path"),
+                "latest_gate_generated_at": latest_gate.get("generated_at"),
+                "latest_gate_mtime_iso": shrink_gate_freshness.get("gate_mtime_iso"),
+                "latest_source_mtime_iso": shrink_gate_freshness.get("latest_source_mtime_iso"),
+                "command": shrink_gate_command,
+                "supporting_route_rollup_query_command": query_route_rollup_command,
+                "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+                "document_hotset_status": document_hotset.get("status"),
+                "document_count": document_hotset.get("document_count"),
+                "latest_event_document_count": document_hotset.get("latest_materialization_event_document_count"),
+                "route_rollup_status": route_rollup_status,
+                "route_rollup_row_count": operational_route_rollup.get("route_rollup_row_count"),
+                "candidate_route_posting_count": operational_route_rollup.get("candidate_route_posting_count"),
+                "sampled_raw_term_count": operational_route_rollup.get("sampled_raw_term_count"),
+                "sampled_segment_term_count": operational_route_rollup.get("sampled_segment_term_count"),
+                "note": "Latest read-only shrink gates are current for the generated search projection; keep this as an advisory route unless a relevant search/rollup source changes.",
+            }
         return {
             "id": "run_operational_shrink_gates",
             "reason": "search_projection_route_rollup_current",
@@ -60565,18 +61534,29 @@ def session_memory_live_tail_status(
     now_value = time.time() if now_ts is None else float(now_ts)
     quiet = max(0.0, float(quiet_seconds))
     deferred_sessions = search.get("deferred_live_sessions") if isinstance(search.get("deferred_live_sessions"), list) else []
+    deferred_graph_sources = (
+        graph.get("deferred_live_sources_sample")
+        if isinstance(graph.get("deferred_live_sources_sample"), list)
+        else []
+    )
     samples: list[dict[str, Any]] = []
     ready_count = 0
     waiting_count = 0
     unknown_count = 0
     max_remaining = 0.0
     next_ready_epoch = 0.0
-    for item in deferred_sessions[:8]:
+
+    def append_sample(item: dict[str, Any], *, sample_kind: str) -> None:
+        nonlocal ready_count, waiting_count, unknown_count, max_remaining, next_ready_epoch
         if not isinstance(item, dict):
-            continue
+            return
         source_mtime = float(item.get("source_latest_mtime") or item.get("latest_source_mtime") or 0.0)
+        if source_mtime <= 0:
+            source_mtime = float(item.get("source_mtime") or 0.0)
         live_mtime = float(item.get("live_transcript_mtime") or 0.0)
-        latest_activity_mtime = max(source_mtime, live_mtime)
+        latest_activity_mtime = float(item.get("latest_activity_mtime") or 0.0)
+        if latest_activity_mtime <= 0:
+            latest_activity_mtime = max(source_mtime, live_mtime)
         if latest_activity_mtime > 0:
             age_seconds = max(0.0, now_value - latest_activity_mtime)
             remaining = max(0.0, quiet - age_seconds)
@@ -60595,8 +61575,10 @@ def session_memory_live_tail_status(
             unknown_count += 1
         samples.append(
             {
+                "kind": sample_kind,
                 "session_id": item.get("session_id"),
                 "session_label": item.get("session_label"),
+                "source_key": item.get("source_key"),
                 "reason": item.get("deferred_live_reason") or item.get("reason"),
                 "latest_activity_mtime": latest_activity_mtime,
                 "latest_activity_mtime_iso": iso_from_epoch(latest_activity_mtime),
@@ -60606,11 +61588,19 @@ def session_memory_live_tail_status(
                 "ready_for_catchup": ready,
             }
         )
+
+    for item in deferred_sessions[:8]:
+        append_sample(item, sample_kind="search_session")
+    for item in deferred_graph_sources[:8]:
+        append_sample(item, sample_kind="graph_source")
     deferred_search_count = int_value(search.get("deferred_live_session_count"))
     graph_deferred_count = int_value(graph.get("deferred_live_source_count"))
     deferred_count = deferred_search_count + graph_deferred_count
-    sampled_count = len(samples)
-    unsampled_count = max(0, deferred_search_count - sampled_count)
+    sampled_search_count = min(len(deferred_sessions[:8]), deferred_search_count)
+    sampled_graph_count = min(len(deferred_graph_sources[:8]), graph_deferred_count)
+    sampled_count = sampled_search_count + sampled_graph_count
+    unsampled_search_count = max(0, deferred_search_count - sampled_search_count)
+    unsampled_graph_count = max(0, graph_deferred_count - sampled_graph_count)
     if deferred_count <= 0:
         status = "none"
     elif ready_count > 0:
@@ -60618,6 +61608,8 @@ def session_memory_live_tail_status(
     elif waiting_count > 0:
         status = "waiting_for_quiet_window"
     elif unknown_count > 0 and ready_count <= 0:
+        status = "unknown_quiet_window"
+    elif sampled_count <= 0:
         status = "unknown_quiet_window"
     else:
         status = "ready_for_catchup"
@@ -60627,8 +61619,10 @@ def session_memory_live_tail_status(
         "deferred_count": deferred_count,
         "search_deferred_session_count": deferred_search_count,
         "graph_deferred_source_count": graph_deferred_count,
-        "sampled_search_session_count": sampled_count,
-        "unsampled_search_session_count": unsampled_count,
+        "sampled_search_session_count": sampled_search_count,
+        "unsampled_search_session_count": unsampled_search_count,
+        "sampled_graph_source_count": sampled_graph_count,
+        "unsampled_graph_source_count": unsampled_graph_count,
         "ready_count": ready_count,
         "waiting_count": waiting_count,
         "unknown_count": unknown_count,
@@ -60852,6 +61846,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "entity_registry_refresh",
                 "reason": ",".join(str(item) for item in route_entity_registry.get("diagnostics", []) if item) or "entity_registry_needs_refresh",
+                "route_kind": "entity_registry_search_sync",
                 "command": [
                     *cli,
                     "entity-registry-search-sync",
@@ -60883,6 +61878,7 @@ def session_memory_maintenance_next_actions(
                 {
                     "id": "repair_graph_store_incremental_recovery",
                     "reason": "graph_store_empty_generated_projection",
+                    "route_kind": "graph_store_incremental_recovery",
                     "command": [
                         *cli,
                         "graph-maintenance",
@@ -60906,6 +61902,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_graph_store_rebuild",
                 "reason": "graph_store_schema_or_structural_rebuild_needed",
+                "route_kind": "graph_store_rebuild",
                 "command": [*cli, "graph-build", "all", *root_args, "--write", "--store-only", "--write-report"],
             }
         )
@@ -60916,6 +61913,7 @@ def session_memory_maintenance_next_actions(
                 {
                     "id": "repair_graph_store_rebuild",
                     "reason": graph_recommendation.get("reason") or "graph_source_version_drift",
+                    "route_kind": "graph_store_only_rebuild",
                     "command": [*cli, "graph-build", "all", *root_args, "--write", "--store-only", "--progress-every", "10"],
                     "note": "A mostly missing generated graph store is cheaper and cleaner as a resource-gated store-only rebuild than as many small queue batches; add --in-place only when storage headroom is low.",
                 }
@@ -61067,6 +62065,7 @@ def session_memory_maintenance_next_actions(
                 {
                     "id": action_id,
                     "reason": graph_recommendation.get("reason") or "graph_budgeted_maintenance",
+                    "route_kind": graph_route or "graph_maintenance",
                     "command": command,
                     "note": action_note,
                 }
@@ -61076,6 +62075,7 @@ def session_memory_maintenance_next_actions(
             {
                 "id": "repair_graph_queue",
                 "reason": "graph_dirty_or_missing_sources",
+                "route_kind": "graph_queue_maintenance",
                 "command": [*cli, "graph-maintenance", "all", *root_args, "--use-queue", "--apply", "--write-report", "--write-hash-cache"],
             }
         )
@@ -61225,6 +62225,161 @@ def session_memory_search_shard_next_action(
             if dirty_drip_limit
             else "Refresh this generated structured shard without --full-text; deferred_live rows stay on the live-tail route unless explicitly included."
         ),
+    }
+
+
+def session_memory_search_projection_shrink_gate_freshness(aoa_root: Path) -> dict[str, Any]:
+    latest_gate = latest_diagnostic_summary(aoa_root, "*__search-operational-shrink-gates.json")
+    if not latest_gate.get("exists"):
+        return {"status": "missing", "current": False, "latest_gate": latest_gate}
+    if latest_gate.get("ok") is not True or str(latest_gate.get("status") or "") != "all_gates_passed_but_apply_still_manual":
+        return {"status": "not_passed", "current": False, "latest_gate": latest_gate}
+
+    source_summaries: list[dict[str, Any]] = []
+    for source_id, pattern in (
+        ("search_shards", "*__search-shards.json"),
+        ("search_catalog", "*__search-catalog.json"),
+        ("operational_route_rollup", "*__search-operational-route-rollup.json"),
+    ):
+        summary = latest_diagnostic_summary(aoa_root, pattern)
+        if summary.get("exists"):
+            source_summaries.append(
+                {
+                    "id": source_id,
+                    "path": summary.get("path"),
+                    "mtime": ops_float_value(summary.get("mtime")),
+                    "generated_at": summary.get("generated_at"),
+                    "status": summary.get("status"),
+                    "ok": summary.get("ok"),
+                }
+            )
+    for source_id, path in (
+        ("search_catalog", search_catalog_path(aoa_root)),
+        ("operational_route_rollup", search_operational_route_rollup_db_path(aoa_root)),
+    ):
+        if path.exists():
+            source_summaries.append({"id": source_id, "path": str(path), "mtime": path_mtime(path)})
+
+    latest_source_mtime = max((ops_float_value(item.get("mtime")) for item in source_summaries), default=0.0)
+    gate_mtime = ops_float_value(latest_gate.get("mtime"))
+    current = gate_mtime >= latest_source_mtime
+    return {
+        "status": "current" if current else "stale",
+        "current": current,
+        "latest_gate": latest_gate,
+        "gate_mtime": gate_mtime,
+        "latest_source_mtime": latest_source_mtime,
+        "gate_mtime_iso": iso_from_epoch(gate_mtime) if gate_mtime else "",
+        "latest_source_mtime_iso": iso_from_epoch(latest_source_mtime) if latest_source_mtime else "",
+        "source_summaries": sorted(source_summaries, key=lambda item: ops_float_value(item.get("mtime")), reverse=True)[:6],
+    }
+
+
+def session_memory_action_is_graph_lane(action: dict[str, Any]) -> bool:
+    action_id = route_key_slug(str(action.get("id") or ""), fallback="")
+    route_kind = route_key_slug(str(action.get("route_kind") or ""), fallback="")
+    command = " ".join(str(item) for item in action.get("command", []) if item) if isinstance(action.get("command"), list) else ""
+    command_key = route_key_slug(command, fallback="")
+    return action_id.startswith("repair_graph") or "graph" in route_kind or "graph_maintenance" in command_key
+
+
+def session_memory_action_is_graph_queue_lane(action: dict[str, Any]) -> bool:
+    action_id = route_key_slug(str(action.get("id") or ""), fallback="")
+    command = shlex.join(action.get("command", [])) if isinstance(action.get("command"), list) else ""
+    catchup_command = (
+        shlex.join(action.get("catchup_command_after_quiet_window", []))
+        if isinstance(action.get("catchup_command_after_quiet_window"), list)
+        else ""
+    )
+    return (
+        session_memory_action_is_graph_lane(action)
+        and (
+            "queue" in action_id
+            or " --use-queue " in f" {command} "
+            or " --use-queue " in f" {catchup_command} "
+            or action.get("catchup_command_kind") == "graph_queue_maintenance"
+        )
+    )
+
+
+def session_memory_graph_followup_actions_after_live_tail(
+    actions: list[dict[str, Any]],
+    *,
+    live_tail: dict[str, Any],
+    prerequisite_action_id: str,
+) -> list[dict[str, Any]]:
+    followups: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict) or not session_memory_action_is_graph_lane(action):
+            continue
+        action_id = route_key_slug(str(action.get("id") or ""), fallback="repair_graph")
+        followup = dict(action)
+        followup["id"] = f"{action_id}_after_live_tail"
+        followup["route_kind"] = "graph_backlog_after_live_tail"
+        followup["blocked_by_live_tail"] = True
+        followup["prerequisite_action_id"] = prerequisite_action_id
+        followup["live_tail_status"] = live_tail.get("status")
+        followup["quiet_seconds"] = live_tail.get("quiet_seconds")
+        followup["ready_count"] = live_tail.get("ready_count")
+        followup["waiting_count"] = live_tail.get("waiting_count")
+        followup["max_quiet_remaining_seconds"] = live_tail.get("max_quiet_remaining_seconds")
+        followup["next_ready_at"] = live_tail.get("next_ready_at")
+        followup["reason"] = f"graph_backlog_waits_for_live_tail:{action.get('reason') or 'graph_maintenance_needed'}"
+        followup["note"] = (
+            "Graph backlog is a separate generated-projection lane, but recent live sources are still inside the quiet window; "
+            "run the first live-tail action before this graph follow-up."
+        )
+        followups.append(followup)
+    return followups
+
+
+def session_memory_graph_queue_followup_after_live_tail(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    graph: dict[str, Any],
+    live_tail: dict[str, Any],
+    prerequisite_action_id: str,
+) -> dict[str, Any] | None:
+    queued_count = int_value(graph.get("queued_count"))
+    if queued_count <= 0:
+        return None
+    root_args = ["--workspace-root", str(workspace_root), "--aoa-root", str(aoa_root)]
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "graph-maintenance",
+        "all",
+        *root_args,
+        "--use-queue",
+        "--apply",
+        "--batch-limit",
+        str(GRAPH_MAINTENANCE_LIVE_CATCHUP_BATCH_LIMIT),
+        "--budget-seconds",
+        "300",
+        "--max-refresh-nodes",
+        str(GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_NODES),
+        "--max-refresh-edges",
+        str(GRAPH_MAINTENANCE_LIVE_CATCHUP_MAX_REFRESH_EDGES),
+        "--write-report",
+        "--write-hash-cache",
+        "--write-queue",
+        "--write-ledger",
+    ]
+    return {
+        "id": "repair_graph_queue_after_live_tail",
+        "reason": "graph_queue_waits_for_live_tail",
+        "route_kind": "graph_backlog_after_live_tail",
+        "command": command,
+        "blocked_by_live_tail": True,
+        "prerequisite_action_id": prerequisite_action_id,
+        "live_tail_status": live_tail.get("status"),
+        "quiet_seconds": live_tail.get("quiet_seconds"),
+        "ready_count": live_tail.get("ready_count"),
+        "waiting_count": live_tail.get("waiting_count"),
+        "max_quiet_remaining_seconds": live_tail.get("max_quiet_remaining_seconds"),
+        "next_ready_at": live_tail.get("next_ready_at"),
+        "queued_count": queued_count,
+        "note": "The generated graph queue already has pending entries, but recent live sources are still inside the quiet window; retry status first, then drain the queue with the bounded graph route.",
     }
 
 
@@ -61445,6 +62600,15 @@ def session_memory_maintenance_status(
             live_tail=live_tail,
         )
         catchup_command = catchup_route["command"]
+        status_retry_command = [
+            *session_memory_cli_command(aoa_root),
+            "maintenance-status",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--no-timers",
+        ]
         live_tail["catchup_command"] = catchup_command
         live_tail["exact_catchup_command"] = shlex.join(catchup_command)
         live_tail["catchup_command_kind"] = catchup_route.get("command_kind")
@@ -61479,6 +62643,48 @@ def session_memory_maintenance_status(
             isinstance(action, dict) and action.get("id") in graph_action_ids
             for action in next_actions
         )
+        graph_waiting_for_quiet_window = (
+            live_tail.get("status") == "waiting_for_quiet_window"
+            and not bool(catchup_route.get("ready_to_run"))
+            and int_value(graph.get("deferred_live_source_count")) > 0
+        )
+        if graph_waiting_for_quiet_window and (not next_actions or graph_actions_only):
+            graph_followups = session_memory_graph_followup_actions_after_live_tail(
+                next_actions,
+                live_tail=live_tail,
+                prerequisite_action_id="wait_live_catchup",
+            )
+            if not graph_followups:
+                graph_queue_followup = session_memory_graph_queue_followup_after_live_tail(
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                    graph=graph,
+                    live_tail=live_tail,
+                    prerequisite_action_id="wait_live_catchup",
+                )
+                if graph_queue_followup is not None:
+                    graph_followups.append(graph_queue_followup)
+            next_actions = [
+                {
+                    "id": "wait_live_catchup",
+                    "reason": "recent_live_graph_sources_deferred_until_quiet_window",
+                    "command": status_retry_command,
+                    "catchup_command_kind": catchup_route.get("command_kind"),
+                    "catchup_scope": catchup_route.get("scope"),
+                    "catchup_target": catchup_route.get("target"),
+                    "catchup_command_after_quiet_window": catchup_command,
+                    "graph_followup": catchup_route.get("graph_followup"),
+                    "quiet_seconds": live_tail.get("quiet_seconds"),
+                    "ready_count": live_tail.get("ready_count"),
+                    "waiting_count": live_tail.get("waiting_count"),
+                    "max_quiet_remaining_seconds": live_tail.get("max_quiet_remaining_seconds"),
+                    "next_ready_at": live_tail.get("next_ready_at"),
+                    "live_tail_status": live_tail.get("status"),
+                    "note": "Wait until next_ready_at for the live quiet window, then run graph queue catch-up or let the timer catch up; immediate graph repair would requeue recently written live sources.",
+                },
+                *graph_followups,
+            ]
+            recommendation = "wait_live_catchup"
         if graph_live_queue_ready and (not next_actions or graph_actions_only):
             next_actions = [
                 {
@@ -61501,10 +62707,10 @@ def session_memory_maintenance_status(
             recommendation = "run_live_catchup"
         for action in next_actions:
             if isinstance(action, dict) and action.get("id") == "wait_live_catchup":
-                action["command"] = catchup_command
                 action["catchup_command_kind"] = catchup_route.get("command_kind")
                 action["catchup_scope"] = catchup_route.get("scope")
                 action["catchup_target"] = catchup_route.get("target")
+                action["catchup_command_after_quiet_window"] = catchup_command
                 action["graph_followup"] = catchup_route.get("graph_followup")
                 action["quiet_seconds"] = live_tail.get("quiet_seconds")
                 action["ready_count"] = live_tail.get("ready_count")
@@ -61513,13 +62719,29 @@ def session_memory_maintenance_status(
                 action["next_ready_at"] = live_tail.get("next_ready_at")
                 action["live_tail_status"] = live_tail.get("status")
                 if live_tail.get("status") == "ready_for_catchup":
+                    action["command"] = catchup_command
                     action["id"] = "run_live_catchup"
                     action["reason"] = "deferred_live_ready_for_bounded_catchup"
                     action["note"] = "Live quiet window is satisfied; run the targeted search/atlas catch-up first or let the timer catch up. Graph repair remains an explicit follow-up."
                 elif live_tail.get("next_ready_at"):
+                    action["command"] = status_retry_command
                     action["note"] = "Wait until next_ready_at for the live quiet window, then run the targeted search/atlas catch-up command or let the timer catch up. Graph repair remains separate."
         if recommendation == "wait_live_catchup" and live_tail.get("status") == "ready_for_catchup":
             recommendation = "run_live_catchup"
+        if (
+            live_tail.get("status") == "waiting_for_quiet_window"
+            and int_value(graph.get("queued_count")) > 0
+            and not any(isinstance(action, dict) and session_memory_action_is_graph_queue_lane(action) for action in next_actions)
+        ):
+            graph_queue_followup = session_memory_graph_queue_followup_after_live_tail(
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                graph=graph,
+                live_tail=live_tail,
+                prerequisite_action_id="wait_live_catchup",
+            )
+            if graph_queue_followup is not None:
+                next_actions.append(graph_queue_followup)
     agent_route = session_memory_agent_route_status(
         recommendation=recommendation,
         search=search,
@@ -61574,6 +62796,7 @@ def session_memory_maintenance_status(
         elif not any(isinstance(action, dict) and action.get("id") == search_shard_next_action.get("id") for action in next_actions):
             next_actions.append(search_shard_next_action)
     search_projection_next_action = None
+    search_projection_advisory = None
     operations_search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
     if not portable_clean_runtime.get("ok") and search_shard_next_action is None:
         search_projection_next_action = session_memory_search_projection_next_action(
@@ -61586,8 +62809,11 @@ def session_memory_maintenance_status(
         isinstance(action, dict) and action.get("id") == search_projection_next_action.get("id")
         for action in next_actions
     ):
-        search_projection_advisory_only = search_projection_next_action.get("id") == "run_operational_shrink_gates"
+        search_projection_advisory_only = bool(search_projection_next_action.get("advisory_only"))
+        search_projection_nonblocking = search_projection_advisory_only or search_projection_next_action.get("id") == "run_operational_shrink_gates"
         if search_projection_advisory_only:
+            search_projection_advisory = search_projection_next_action
+        elif search_projection_nonblocking:
             next_actions.append(search_projection_next_action)
         elif next_actions and isinstance(next_actions[0], dict) and next_actions[0].get("id") == "use_graph_search":
             next_actions = [search_projection_next_action]
@@ -61628,7 +62854,7 @@ def session_memory_maintenance_status(
         agent_route["fast_path_defaults"] = operations_search_shards["fast_path_defaults"]
     agent_route["search_shards_status"] = operations_search_shards.get("status")
     agent_route["search_shard_action_pending"] = bool(search_shard_next_action)
-    agent_route["search_projection_action_pending"] = bool(search_projection_next_action)
+    agent_route["search_projection_action_pending"] = bool(search_projection_next_action and not search_projection_advisory)
     if search_shard_next_action is not None:
         agent_route["search_shard_next_action"] = {
             key: search_shard_next_action.get(key)
@@ -61664,8 +62890,41 @@ def session_memory_maintenance_status(
                 "candidate_route_posting_count",
                 "sampled_raw_term_count",
                 "sampled_segment_term_count",
+                "advisory_only",
+                "freshness_status",
+                "latest_gate_path",
+                "latest_gate_generated_at",
+                "latest_gate_mtime_iso",
+                "latest_source_mtime_iso",
             )
             if key in search_projection_next_action
+        }
+    if search_projection_advisory is not None:
+        agent_route["search_projection_advisory"] = agent_route.get("search_projection_next_action")
+    graph_next_actions = [
+        action
+        for action in next_actions
+        if isinstance(action, dict) and session_memory_action_is_graph_lane(action)
+    ]
+    agent_route["graph_action_pending"] = bool(graph_next_actions)
+    if graph_next_actions:
+        graph_next_action = graph_next_actions[0]
+        agent_route["graph_next_action"] = {
+            key: graph_next_action.get(key)
+            for key in (
+                "id",
+                "reason",
+                "route_kind",
+                "blocked_by_live_tail",
+                "prerequisite_action_id",
+                "live_tail_status",
+                "ready_count",
+                "waiting_count",
+                "max_quiet_remaining_seconds",
+                "next_ready_at",
+                "queued_count",
+            )
+            if key in graph_next_action
         }
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -61787,6 +63046,10 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             "deferred_count",
             "search_deferred_session_count",
             "graph_deferred_source_count",
+            "sampled_search_session_count",
+            "unsampled_search_session_count",
+            "sampled_graph_source_count",
+            "unsampled_graph_source_count",
             "ready_count",
             "waiting_count",
             "unknown_count",
@@ -61809,8 +63072,10 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             {
                 key: item.get(key)
                 for key in (
+                    "kind",
                     "session_id",
                     "session_label",
+                    "source_key",
                     "reason",
                     "latest_activity_mtime_iso",
                     "latest_activity_age_seconds",
@@ -61820,6 +63085,137 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 if key in item
             }
             for item in live_tail["samples"][:4]
+            if isinstance(item, dict)
+        ]
+
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    latest_graph_maintenance = (
+        graph.get("latest_maintenance") if isinstance(graph.get("latest_maintenance"), dict) else {}
+    )
+    latest_queue_maintenance = (
+        graph.get("latest_queue_maintenance") if isinstance(graph.get("latest_queue_maintenance"), dict) else {}
+    )
+    graph_source_version_state = (
+        graph.get("source_version_state") if isinstance(graph.get("source_version_state"), dict) else {}
+    )
+    graph_recommendation = (
+        graph.get("maintenance_recommendation") if isinstance(graph.get("maintenance_recommendation"), dict) else {}
+    )
+    compact_graph = {
+        key: graph.get(key)
+        for key in (
+            "status",
+            "needs_maintenance",
+            "needs_full_rebuild",
+            "source_count",
+            "existing_source_count",
+            "status_counts",
+            "dirty_count",
+            "missing_count",
+            "blocked_count",
+            "retired_count",
+            "actionable_count",
+            "queued_count",
+            "ledger_store_missing_count",
+            "ledger_store_missing_total_count",
+            "deferred_ledger_store_missing_count",
+            "latest_maintenance_remaining_count",
+            "latest_maintenance_remaining_total_count",
+            "deferred_live_source_count",
+            "reason_group_counts",
+            "truth_status",
+            "diagnostics",
+        )
+        if key in graph
+    }
+    compact_graph["latest_maintenance"] = {
+        key: latest_graph_maintenance.get(key)
+        for key in (
+            "exists",
+            "path",
+            "mtime",
+            "ok",
+            "target",
+            "scope_is_global",
+            "selection_scope",
+            "remaining_count",
+            "actionable_remaining_count",
+            "selected_count",
+            "batch_limit",
+            "candidate_pool_limit",
+            "budget_exhausted",
+            "elapsed_ms",
+            "mutation_rolled_back",
+            "usable_for_hot_gate",
+            "queue_queued_count",
+        )
+        if key in latest_graph_maintenance
+    }
+    compact_graph["latest_queue_maintenance"] = {
+        key: latest_queue_maintenance.get(key)
+        for key in (
+            "exists",
+            "path",
+            "mtime",
+            "ok",
+            "target",
+            "use_queue",
+            "remaining_count",
+            "selected_count",
+            "batch_limit",
+            "candidate_pool_limit",
+            "budget_exhausted",
+            "elapsed_ms",
+            "queue_queued_count",
+            "queue_removed_count",
+        )
+        if key in latest_queue_maintenance
+    }
+    compact_graph["source_version_state"] = {
+        key: graph_source_version_state.get(key)
+        for key in (
+            "status",
+            "needs_maintenance",
+            "source_count",
+            "version_mismatch_source_count",
+            "reason_group_counts",
+            "diagnostics",
+            "truth_status",
+        )
+        if key in graph_source_version_state
+    }
+    compact_graph["maintenance_recommendation"] = {
+        key: graph_recommendation.get(key)
+        for key in (
+            "route",
+            "reason",
+            "source_count",
+            "existing_source_count",
+            "actionable_count",
+            "blocked_count",
+            "dominant_reason",
+            "command",
+            "batch_limit",
+            "candidate_pool_limit",
+            "notes",
+        )
+        if key in graph_recommendation
+    }
+    if isinstance(graph.get("deferred_live_sources_sample"), list):
+        compact_graph["deferred_live_sources_sample"] = [
+            {
+                key: item.get(key)
+                for key in (
+                    "source_key",
+                    "session_id",
+                    "session_label",
+                    "live_transcript_mtime",
+                    "latest_activity_mtime",
+                    "age_seconds",
+                )
+                if isinstance(item, dict) and key in item
+            }
+            for item in graph["deferred_live_sources_sample"][:4]
             if isinstance(item, dict)
         ]
 
@@ -62400,7 +63796,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         "recommendation": payload.get("recommendation"),
         "agent_route": payload.get("agent_route"),
         "search": compact_search,
-        "graph": payload.get("graph"),
+        "graph": compact_graph,
         "entity_registry": payload.get("entity_registry"),
         "live_tail": compact_live_tail,
         "route": payload.get("route"),
@@ -62428,6 +63824,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "latest_materialization_budget_exhausted",
                     "latest_materialization_drip_sticky",
                     "blocked_by_live_tail",
+                    "prerequisite_action_id",
                     "command",
                     "note",
                     "live_tail_status",
@@ -62439,6 +63836,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                     "catchup_command_kind",
                     "catchup_scope",
                     "catchup_target",
+                    "catchup_command_after_quiet_window",
                     "graph_followup",
                 )
                 if key in action
@@ -63195,6 +64593,7 @@ def graph_store_hot_state(aoa_root: Path) -> dict[str, Any]:
             "deferred_live_source_count": int_value(ledger_live_summary.get("deferred_live_source_count")),
             "deferred_status_counts": ledger_live_summary.get("deferred_status_counts", {}),
             "actionable_status_counts": ledger_live_summary.get("actionable_status_counts", {}),
+            "deferred_live_sources_sample": ledger_live_summary.get("deferred_live_sources_sample", []),
             "live_transcript_lookup_mode": ledger_live_summary.get("live_transcript_lookup_mode"),
             "live_transcript_session_cache_count": ledger_live_summary.get("live_transcript_session_cache_count"),
         },
@@ -64543,7 +65942,7 @@ def entity_usage_audit(
         raw_preview_cache=raw_preview_cache,
     )
     sessions = entity_usage_sessions_summary(all_events_for_docs)
-    provider_status = search_provider_status(aoa_root=aoa_root, provider_name=provider)
+    provider_status = search_provider_status_fast(aoa_root=aoa_root, provider_name=provider)
     provider_payload = provider_status.get("providers", {}).get(provider) if isinstance(provider_status.get("providers"), dict) else {}
     quality = {
         "direct_usage_present": bool(usage_events),
@@ -65494,6 +66893,7 @@ ENTITY_USAGE_SCENARIO_NOISE_KEY_FRAGMENTS = (
 ENTITY_USAGE_SCENARIO_SOURCE_PREFERRED_LAYERS = {"api", "mcp", "skill", "tool"}
 ENTITY_USAGE_SCENARIO_SOURCE_BACKED_STATUSES = {"active", "available"}
 ENTITY_USAGE_SCENARIO_SOURCE_BACKED_SURFACES = {
+    "aoa_session_memory_cli_subcommands",
     "abyss_stack_mcp_tool_source",
     "abyss_stack_mcp_service_dir",
     "codex_mcp_config",
@@ -65656,8 +67056,8 @@ def entity_usage_scenario_probe_evidence(
             SELECT COUNT(*)
             FROM (
               SELECT 1
-              FROM document_routes
-              JOIN documents ON documents.rowid = document_routes.doc_rowid
+              FROM document_routes INDEXED BY idx_document_routes_route
+              CROSS JOIN documents ON documents.rowid = document_routes.doc_rowid
               WHERE document_routes.route_id = ?
                 AND documents.doc_type = 'event'
               LIMIT ?
@@ -65676,9 +67076,8 @@ def entity_usage_scenario_probe_evidence(
                 SELECT COUNT(*)
                 FROM (
                   SELECT 1
-                  FROM document_routes
-                  JOIN documents INDEXED BY idx_documents_doc_type_usage_role_date
-                    ON documents.rowid = document_routes.doc_rowid
+                  FROM document_routes INDEXED BY idx_document_routes_route
+                  CROSS JOIN documents ON documents.rowid = document_routes.doc_rowid
                   WHERE document_routes.route_id = ?
                     AND documents.doc_type = 'event'
                     AND documents.usage_role = 'usage'
@@ -65697,9 +67096,8 @@ def entity_usage_scenario_probe_evidence(
                 SELECT COUNT(*)
                 FROM (
                   SELECT 1
-                  FROM document_routes
-                  JOIN documents INDEXED BY idx_documents_type
-                    ON documents.rowid = document_routes.doc_rowid
+                  FROM document_routes INDEXED BY idx_document_routes_route
+                  CROSS JOIN documents ON documents.rowid = document_routes.doc_rowid
                   WHERE document_routes.route_id = ?
                     AND documents.doc_type = 'event'
                     AND documents.event_type IN ({result_type_placeholders})
@@ -65715,9 +67113,8 @@ def entity_usage_scenario_probe_evidence(
                 SELECT COUNT(*)
                 FROM (
                   SELECT 1
-                  FROM document_routes
-                  JOIN documents INDEXED BY idx_documents_type
-                    ON documents.rowid = document_routes.doc_rowid
+                  FROM document_routes INDEXED BY idx_document_routes_route
+                  CROSS JOIN documents ON documents.rowid = document_routes.doc_rowid
                   WHERE document_routes.route_id = ?
                     AND documents.doc_type = 'event'
                     AND documents.event_type IN ({outcome_type_placeholders})
@@ -65749,6 +67146,79 @@ def entity_usage_scenario_probe_evidence(
         "result_event_count": result_event_count,
         "outcome_event_count": outcome_event_count,
     }
+
+
+def entity_usage_scenario_rollup_route_rows(
+    *,
+    aoa_root: Path,
+    selected_layers: list[str],
+    min_postings: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    diagnostics: list[str] = []
+    db_path = search_operational_route_rollup_db_path(aoa_root)
+    if not db_path.exists():
+        return [], ["operational_route_rollup_missing"]
+    if not selected_layers:
+        return [], ["operational_route_rollup_no_layers"]
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        if not sqlite_table_exists(conn, "route_rollups"):
+            return [], ["operational_route_rollup_route_rollups_missing"]
+        placeholders = ",".join("?" for _ in selected_layers)
+        rows = conn.execute(
+            f"""
+            SELECT
+              layer,
+              key,
+              route_signal,
+              SUM(posting_count) AS rollup_posting_count,
+              SUM(session_count) AS rollup_session_count,
+              MIN(first_session_date) AS first_session_date,
+              MAX(last_session_date) AS last_session_date
+            FROM route_rollups
+            WHERE key <> ''
+              AND layer IN ({placeholders})
+            GROUP BY layer, key, route_signal
+            HAVING SUM(posting_count) >= ?
+            ORDER BY SUM(posting_count) DESC, layer, key
+            """,
+            [*selected_layers, max(1, int_value(min_postings, 1))],
+        ).fetchall()
+        return [
+            {
+                "route_id": 0,
+                "layer": str(row["layer"]),
+                "key": str(row["key"]),
+                "route_signal": str(row["route_signal"]),
+                "rollup_posting_count": int_value(row["rollup_posting_count"]),
+                "rollup_session_count": int_value(row["rollup_session_count"]),
+                "first_session_date": str(row["first_session_date"] or ""),
+                "last_session_date": str(row["last_session_date"] or ""),
+                "candidate_source": "operational_route_rollup",
+            }
+            for row in rows
+        ], diagnostics
+    except sqlite3.Error as exc:
+        return [], [f"operational_route_rollup_candidate_error:{sqlite_error_diagnostic(exc)}"]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def entity_usage_scenario_resolve_route_id(
+    conn: sqlite3.Connection,
+    *,
+    layer: str,
+    key: str,
+    route_signal: str,
+) -> int:
+    row = None
+    if route_signal:
+        row = conn.execute("SELECT id FROM route_terms WHERE route_signal = ? LIMIT 1", (route_signal,)).fetchone()
+    if row is None and layer and key:
+        row = conn.execute("SELECT id FROM route_terms WHERE layer = ? AND key = ? LIMIT 1", (layer, key)).fetchone()
+    return int_value(row[0] if row is not None else 0)
 
 
 def entity_usage_scenario_candidate_score(candidate: dict[str, Any]) -> int:
@@ -65796,20 +67266,41 @@ def entity_usage_scenario_candidates(
             probe_layer = str(probe.get("layer") or "")
             if probe_layer and probe_layer not in selected_layers:
                 selected_layers.append(probe_layer)
-        placeholders = ",".join("?" for _ in selected_layers)
-        rows = conn.execute(
-            f"""
-            SELECT
-              id AS route_id,
-              layer,
-              key,
-              route_signal
-            FROM route_terms
-            WHERE key <> ''
-              AND layer IN ({placeholders})
-            """,
-            selected_layers,
-        ).fetchall()
+        rows, rollup_diagnostics = entity_usage_scenario_rollup_route_rows(
+            aoa_root=aoa_root,
+            selected_layers=selected_layers,
+            min_postings=min_postings,
+        )
+        diagnostics.extend(rollup_diagnostics)
+        if rows:
+            diagnostics.append("candidate_selection_source:operational_route_rollup")
+        else:
+            placeholders = ",".join("?" for _ in selected_layers)
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT
+                      id AS route_id,
+                      layer,
+                      key,
+                      route_signal
+                    FROM route_terms
+                    WHERE key <> ''
+                      AND layer IN ({placeholders})
+                      AND EXISTS (
+                        SELECT 1
+                        FROM document_routes INDEXED BY idx_document_routes_route
+                        CROSS JOIN documents ON documents.rowid = document_routes.doc_rowid
+                        WHERE document_routes.route_id = route_terms.id
+                          AND documents.doc_type = 'event'
+                        LIMIT 1
+                      )
+                    """,
+                    selected_layers,
+                ).fetchall()
+            ]
+            diagnostics.append("candidate_selection_source:search_route_terms")
     except sqlite3.Error as exc:
         if conn is not None:
             conn.close()
@@ -65829,12 +67320,17 @@ def entity_usage_scenario_candidates(
         anchor = entity_usage_scenario_anchor(layer, key)
         registry_entry = entity_usage_scenario_registry_entry(registry_index, layer=layer, key=key, anchor=anchor)
         candidate = {
-            "route_id": int(row["route_id"]),
+            "route_id": int_value(row.get("route_id")),
             "layer": layer,
             "key": key,
             "kind": entity_usage_scenario_candidate_kind(layer),
             "anchor": anchor,
             "route_signal": str(row["route_signal"]),
+            "candidate_source": str(row.get("candidate_source") or "search_route_terms"),
+            "rollup_posting_count": int_value(row.get("rollup_posting_count")),
+            "rollup_session_count": int_value(row.get("rollup_session_count")),
+            "first_session_date": str(row.get("first_session_date") or ""),
+            "last_session_date": str(row.get("last_session_date") or ""),
             "registry_tier": entity_usage_scenario_registry_tier(layer=layer, registry_entry=registry_entry),
             "registry_status": str(registry_entry.get("status") or ""),
             "registry_source_surface": str(registry_entry.get("source_surface") or ""),
@@ -65870,9 +67366,21 @@ def entity_usage_scenario_candidates(
         if probe_count >= probe_budget:
             return None
         probe_count += 1
+        route_id = int_value(candidate.get("route_id"))
+        if route_id <= 0:
+            route_id = entity_usage_scenario_resolve_route_id(
+                conn,
+                layer=str(candidate.get("layer") or ""),
+                key=str(candidate.get("key") or ""),
+                route_signal=str(candidate.get("route_signal") or ""),
+            )
+            candidate["route_id"] = route_id
+        if route_id <= 0:
+            rejected_counts["route_id_missing"] += 1
+            return None
         evidence = entity_usage_scenario_probe_evidence(
             conn,
-            route_id=int_value(candidate.get("route_id")),
+            route_id=route_id,
             layer=str(candidate.get("layer") or ""),
         )
         candidate.update(evidence)
@@ -65895,7 +67403,14 @@ def entity_usage_scenario_candidates(
                     f"{probe.get('name')}:{probe.get('layer')}:{probe.get('key')}"
                 )
                 continue
-            route_id = int(row["route_id"])
+            route_id = int_value(row.get("route_id"))
+            if route_id <= 0:
+                route_id = entity_usage_scenario_resolve_route_id(
+                    conn,
+                    layer=str(row.get("layer") or ""),
+                    key=str(row.get("key") or ""),
+                    route_signal=str(row.get("route_signal") or ""),
+                )
             if route_id in seen_route_ids:
                 continue
             layer = str(row["layer"])
@@ -65910,6 +67425,11 @@ def entity_usage_scenario_candidates(
                     "kind": str(probe.get("kind") or entity_usage_scenario_candidate_kind(layer)),
                     "anchor": anchor,
                     "route_signal": str(row["route_signal"]),
+                    "candidate_source": str(row.get("candidate_source") or "search_route_terms"),
+                    "rollup_posting_count": int_value(row.get("rollup_posting_count")),
+                    "rollup_session_count": int_value(row.get("rollup_session_count")),
+                    "first_session_date": str(row.get("first_session_date") or ""),
+                    "last_session_date": str(row.get("last_session_date") or ""),
                     "registry_tier": entity_usage_scenario_registry_tier(layer=layer, registry_entry=registry_entry),
                     "registry_status": str(registry_entry.get("status") or ""),
                     "registry_source_surface": str(registry_entry.get("source_surface") or ""),
@@ -65924,8 +67444,9 @@ def entity_usage_scenario_candidates(
                 )
                 continue
             selected.append(probed)
-            seen_route_ids.add(route_id)
-            explicit_probe_route_ids.add(route_id)
+            resolved_route_id = int_value(probed.get("route_id"), route_id)
+            seen_route_ids.add(resolved_route_id)
+            explicit_probe_route_ids.add(resolved_route_id)
         for layer in layer_order:
             items = by_layer.get(layer) or []
             for candidate in items:
@@ -65936,7 +67457,7 @@ def entity_usage_scenario_candidates(
                 if not probed:
                     continue
                 selected.append(probed)
-                seen_route_ids.add(route_id)
+                seen_route_ids.add(int_value(probed.get("route_id"), route_id))
                 break
             if len(selected) >= requested:
                 break
@@ -65957,7 +67478,7 @@ def entity_usage_scenario_candidates(
                 if not probed:
                     continue
                 selected.append(probed)
-                seen_route_ids.add(route_id)
+                seen_route_ids.add(int_value(probed.get("route_id"), route_id))
                 if len(selected) >= requested:
                     break
     finally:
@@ -66274,7 +67795,7 @@ def entity_usage_scenario_audit(
         sample_total_elapsed_ms += int_value(sample.get("elapsed_ms"))
         audit_total_elapsed_ms += audit_elapsed_ms
         raw_preview_total_elapsed_ms += raw_preview_elapsed_ms
-    provider_status = search_provider_status(
+    provider_status = search_provider_status_fast(
         aoa_root=aoa_root,
         provider_name="portable_sqlite",
     )
@@ -67817,7 +69338,7 @@ def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[
         if warn_count:
             reasons.append(f"warn_subsample_count:{warn_count}")
         counts = scenario.get("evidence_ref_counts") if isinstance(scenario.get("evidence_ref_counts"), dict) else {}
-        if profile not in {"literal_planner", "entity_registry_lookup"} and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
+        if profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status"} and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
             reasons.append("no_direct_raw_segment_or_receipt_ref")
         if profile == "literal_planner" and scenario.get("monolith_fallback_first") is True:
             reasons.append("literal_planner_used_monolith_fallback_first")
@@ -68261,10 +69782,20 @@ def live_scenario_maintenance_status_audit(
     agent_route = packet.get("agent_route") if isinstance(packet.get("agent_route"), dict) else {}
     exact_next_command = str(packet.get("exact_next_command") or "")
     graph_queue_action_present = any(
-        maintenance_next_action_lane(item) == "graph"
-        and (
-            "queue" in route_key_slug(str(item.get("id") or ""), fallback="")
-            or " --use-queue " in f" {shlex.join(item.get('command', [])) if isinstance(item.get('command'), list) else ''} "
+        (
+            maintenance_next_action_lane(item) == "graph"
+            and (
+                "queue" in route_key_slug(str(item.get("id") or ""), fallback="")
+                or " --use-queue " in f" {shlex.join(item.get('command', [])) if isinstance(item.get('command'), list) else ''} "
+            )
+        )
+        or (
+            item.get("catchup_command_kind") == "graph_queue_maintenance"
+            and (
+                maintenance_next_action_lane(item) == "live_tail"
+                or " --use-queue "
+                in f" {shlex.join(item.get('catchup_command_after_quiet_window', [])) if isinstance(item.get('catchup_command_after_quiet_window'), list) else ''} "
+            )
         )
         for item in next_actions
     )
@@ -70665,6 +72196,7 @@ def command_search_hotset_audit(args: argparse.Namespace) -> int:
         per_shard_timeout_seconds=args.per_shard_timeout,
         top_limit=args.top_limit,
         shard=args.shard,
+        followup_mode=args.followup_mode,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -76911,6 +78443,12 @@ def build_parser() -> argparse.ArgumentParser:
     search_hotset_audit.add_argument("--shard", default="", help="Measure one search shard such as month/2026-06.")
     search_hotset_audit.add_argument("--per-shard-timeout", type=float, default=SEARCH_HOTSET_AUDIT_DEFAULT_TIMEOUT_SECONDS)
     search_hotset_audit.add_argument("--top-limit", type=int, default=SEARCH_HOTSET_AUDIT_TOP_LIMIT)
+    search_hotset_audit.add_argument(
+        "--followup-mode",
+        choices=SEARCH_HOTSET_AUDIT_FOLLOWUP_MODES,
+        default=SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST,
+        help="Choose route-first next steps by default; use deep to put targeted shard remeasurement first.",
+    )
     search_hotset_audit.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search hotset audit reports under .aoa/diagnostics.")
     search_hotset_audit.set_defaults(func=command_search_hotset_audit)
 
@@ -77746,7 +79284,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, route_rollup_query.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, route_rollup_query, maintenance_status.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)

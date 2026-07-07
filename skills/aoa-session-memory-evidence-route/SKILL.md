@@ -155,7 +155,12 @@ Use these first routes when available:
   `queue_had_items`, `queue_seed_from_ledger`, `queue_seed_limit`, and
   `queue_seed_include_deferred_live` visible in reports. This queue is a
   generated route/freshness aid; raw, segment, and owner layers remain the
-  evidence authority.
+  evidence authority. For graph deferred-live sources, read
+  `live_tail.status`, `catchup_ready_to_run`, `next_ready_at`, and graph-source
+  samples before running the returned catch-up command. A
+  `waiting_for_quiet_window` packet means the immediate command should be the
+  status retry route, while the graph catch-up command is only the post-window
+  expansion.
 - live route-quality regression proof: `live-scenario-corpus check` first when
   the question is whether current entity/search/literal/graph consumer routes
   still satisfy reviewed cases. Use `live-scenario-audit` for one-off

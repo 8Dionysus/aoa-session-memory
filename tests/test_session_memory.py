@@ -747,6 +747,8 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
         limit=10,
     )
     assert progress_route["result_count"] == 2
+    assert progress_route["search_projection"]["route_kind"] == "agent_event_session_segment_index"
+    assert progress_route["cost_profile"]["uses_session_segment_indexes"] is True
     assert {item["event_id"] for item in progress_route["results"]} == {"000005", "000008"}
     assert all(item["agent_event_source"] != "event_msg_stream" for item in progress_route["results"])
     progress_hit = progress_route["results"][0]
@@ -756,7 +758,7 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert progress_hit["segment_index"] == progress_hit["refs"]["segment_index"]
     assert progress_hit["session_ref"] == progress_hit["refs"]["session"]
     assert progress_hit["preview"] == progress_hit["bounded_preview"]
-    assert progress_hit["preview_source"] == "search_body"
+    assert progress_hit["preview_source"] in {"raw_block_semantic_text", "raw_semantic_text"}
     assert "route_signal" not in progress_hit["bounded_preview"]
     assert progress_hit["bounded_preview"]
     assert any(text in progress_hit["bounded_preview"] for text in ["Сейчас проверяю", "Почти готово"])
@@ -801,6 +803,75 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     )
     assert windows_without_explain["window_count"] == 1
     assert "explain" not in windows_without_explain["results"][0]
+
+
+def test_agent_event_route_prefers_session_index_and_keeps_multi_class_shard_sql(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-18T00-00-00-agent-event-shards.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-06-18T00:00:00Z", "type": "session_meta", "payload": {"id": "agent-event-shards", "cwd": str(workspace)}},
+            {"timestamp": "2026-06-18T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Check shard route"}]}},
+            {"timestamp": "2026-06-18T00:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Сейчас проверяю shard route."}]}},
+            {"timestamp": "2026-06-18T00:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-1", "arguments": "{\"cmd\":\"pytest -q\"}"}},
+            {"timestamp": "2026-06-18T00:00:04Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": "1 passed"}},
+            {"timestamp": "2026-06-18T00:00:05Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Shard route использует структурные refs и не открывает raw body."}]}},
+            {"timestamp": "2026-06-18T00:00:06Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Готово. Итог: проверка прошла."}]}},
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "agent-event-shards",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all", rebuild=True)["ok"] is True
+    assert module.materialize_search_shards(aoa_root=aoa_root, target="all")["ok"] is True
+
+    route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        session=session_dir.name,
+        agent_events=["assistant_answer", "assistant_final_closeout"],
+        limit=10,
+    )
+
+    assert route["ok"] is True
+    assert route["result_count"] == 2
+    assert route["uses_shards"] is False
+    assert route["uses_fts"] is False
+    assert route["elapsed_ms"] >= 0
+    assert route["cost_profile"]["uses_session_segment_indexes"] is True
+    assert route["cost_profile"]["multi_class_structured_sql"] is False
+    assert route["cost_profile"]["class_query_count"] == 1
+    assert route["cost_profile"]["agent_event_class_count"] == 2
+    assert route["search_projection"]["route_kind"] == "agent_event_session_segment_index"
+    assert route["provider"]["authoritative_result_provider"] == "session_segment_index"
+    assert all(item["refs"]["raw"] for item in route["results"])
+    assert {item["agent_event"] for item in route["results"]} == {"assistant_answer", "assistant_final_closeout"}
+
+    shard_route = module.agent_event_route_search(
+        aoa_root=aoa_root,
+        agent_events=["assistant_answer", "assistant_final_closeout"],
+        limit=10,
+    )
+
+    assert shard_route["ok"] is True
+    assert shard_route["result_count"] == 2
+    assert shard_route["uses_shards"] is True
+    assert shard_route["uses_fts"] is False
+    assert shard_route["cost_profile"]["multi_class_structured_sql"] is True
+    assert shard_route["cost_profile"]["class_query_count"] == 1
+    assert shard_route["search_projection"]["route_kind"] == "agent_event_structured_multi_class_shard_sql"
+    assert {item["agent_event"] for item in shard_route["results"]} == {"assistant_answer", "assistant_final_closeout"}
 
 
 def test_agent_event_splits_handoff_resume_and_ignores_external_restart(tmp_path: Path) -> None:
@@ -1075,12 +1146,10 @@ def test_agent_event_windows_resolve_renamed_latest_segment_refs(tmp_path: Path)
         limit=1,
     )
     assert route["result_count"] == 1
+    assert route["search_projection"]["route_kind"] == "agent_event_session_segment_index"
     hit = route["results"][0]
     assert hit["refs"]["segment_index"] == str(new_index)
-    assert {
-        "segment_index_ref_resolved_by_segment_id",
-        "segment_index_ref_derived_by_segment_id",
-    } & set(hit["ref_resolution"]["diagnostics"])
+    assert "ref_resolution" not in hit
 
     windows = module.agent_event_windows(
         aoa_root=aoa_root,
@@ -2717,13 +2786,14 @@ def test_entity_registry_source_mcp_tool_keys_are_service_namespaced(tmp_path: P
 
 def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
     aoa_root = tmp_path / ".aoa"
+    future_epoch = time.time() + 3600
     write_json(
         aoa_root / module.ENTITY_REGISTRY_PATH,
         {
             "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
             "artifact_type": "entity_registry_snapshot",
-            "generated_at": "2026-06-27T12:00:00Z",
-            "generated_at_epoch": 1782561600.0,
+            "generated_at": module.datetime.fromtimestamp(future_epoch, module.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at_epoch": future_epoch,
             "ok": True,
             "aoa_root": str(aoa_root),
             "registry_path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
@@ -2771,6 +2841,67 @@ def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path:
     assert payload["read_mode"] == "generated_snapshot"
     assert payload["entity_count"] == 1
     assert payload["entries"][0]["canonical_key"] == "aoa_session_memory_mcp"
+
+
+def test_entity_registry_stale_snapshot_overlays_cli_subcommands(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    empty_codex_home = tmp_path / "empty-codex-home"
+    empty_mcp_services_root = tmp_path / "empty-mcp-services"
+    empty_codex_home.mkdir()
+    empty_mcp_services_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(empty_codex_home))
+    monkeypatch.setenv("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS", str(empty_mcp_services_root))
+    write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "generated_at_epoch": 1.0,
+            "ok": True,
+            "mutates": False,
+            "aoa_root": str(aoa_root),
+            "truth_status": "generated_entity_registry_navigation_not_source_truth",
+            "registry_path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
+            "source_surfaces": ["previous_test_snapshot"],
+            "counts_by_kind": {},
+            "counts_by_status": {},
+            "entries": [],
+        },
+    )
+
+    snapshot = module.load_entity_registry(aoa_root)
+    cli_entries = [
+        entry
+        for entry in snapshot["entries"]
+        if entry.get("kind") == "tool" and entry.get("canonical_key") == "search_hotset_audit"
+    ]
+    lookup = module.entity_registry_lookup(
+        aoa_root=aoa_root,
+        anchor="search-hotset-audit",
+        kind="tool",
+        include_unknown=False,
+    )
+    plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="search-hotset-audit",
+        doc_type="event",
+    )
+
+    assert snapshot["read_mode"] == "generated_snapshot_with_runtime_source_overlay"
+    assert "source_newer_than_entity_registry" in snapshot["runtime_source_overlay"]["reasons"]
+    assert len(cli_entries) == 1
+    assert cli_entries[0]["status"] == "active"
+    assert cli_entries[0]["source_surface"] == "aoa_session_memory_cli_subcommands"
+    assert any(ref.get("subcommand") == "search-hotset-audit" for ref in cli_entries[0]["source_refs"])
+    assert lookup["agent_route_packet"]["registered"] is True
+    assert lookup["entries"][0]["canonical_key"] == "search_hotset_audit"
+    assert lookup["entries"][0]["source_surface"] == "aoa_session_memory_cli_subcommands"
+    assert plan["route_anchor_source"] == "embedded_entity_registry"
+    assert plan["route_anchor"] == "search_hotset_audit"
+    assert plan["route_anchor_kind"] == "tool"
+    assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+    assert plan["ordered_routes"][0]["route_id"] == "entity_usage_chain"
 
 
 def test_entity_registry_query_no_runtime_uses_archived_routes_not_runtime_snapshot(tmp_path: Path, capsys: Any) -> None:
@@ -4506,6 +4637,74 @@ def test_entity_usage_scenario_candidates_count_route_postings_for_minimum(tmp_p
     assert any(item.startswith("candidate_pool_filtered:min_postings:") for item in diagnostics)
 
 
+def test_entity_usage_scenario_candidates_use_operational_rollup_pool(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+
+    def add_route_doc(route_signal: str, *, doc_id: str, session_act: str = "memory_read") -> None:
+        layer, key = route_signal.split(":", 1)
+        conn.execute(
+            "INSERT OR IGNORE INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
+        )
+        route_id = conn.execute("SELECT id FROM route_terms WHERE route_signal = ?", (route_signal,)).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, usage_role, route_signals, raw_ref, manifest_path, payload_json
+            )
+            VALUES (?, 'event', 'scenario-session', 'scenario-session', '2026-06-21', ?,
+                    'COMMAND', ?, ?, ?, 'raw:line:1', 'session.manifest.json', '{}')
+            """,
+            (
+                doc_id,
+                doc_id,
+                session_act,
+                module.entity_usage_event_role("COMMAND", session_act=session_act),
+                f"|{route_signal}|",
+            ),
+        )
+        conn.execute("INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)", (cursor.lastrowid, route_id))
+
+    add_route_doc("mcp:aoa_session_memory_mcp", doc_id="good-mcp")
+    add_route_doc("skill:aoa_session_memory_global_route", doc_id="good-skill")
+    conn.commit()
+    conn.close()
+
+    rollup = module.init_search_operational_route_rollup_db(module.search_operational_route_rollup_db_path(aoa_root))
+    rollup.execute("INSERT INTO meta(key, value) VALUES ('artifact_type', 'search_operational_route_rollup')")
+    rollup.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (str(module.SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION),))
+    rollup.execute(
+        """
+        INSERT INTO route_rollups(
+          shard, layer, key, route_signal, posting_count, session_count, first_session_date, last_session_date
+        )
+        VALUES
+          ('month/2026-06', 'mcp', 'aoa_session_memory_mcp', 'mcp:aoa_session_memory_mcp', 5, 1, '2026-06-21', '2026-06-21'),
+          ('month/2026-06', 'skill', 'aoa_session_memory_global_route', 'skill:aoa_session_memory_global_route', 3, 1, '2026-06-21', '2026-06-21')
+        """
+    )
+    rollup.commit()
+    rollup.close()
+
+    candidates, diagnostics = module.entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=["mcp", "skill"],
+        sample_size=2,
+        seed="scenario-rollup-pool",
+    )
+
+    assert {candidate["route_signal"] for candidate in candidates} == {
+        "mcp:aoa_session_memory_mcp",
+        "skill:aoa_session_memory_global_route",
+    }
+    assert {candidate["candidate_source"] for candidate in candidates} == {"operational_route_rollup"}
+    assert all(candidate["route_id"] > 0 for candidate in candidates)
+    assert any(item == "candidate_selection_source:operational_route_rollup" for item in diagnostics)
+
+
 def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tmp_path: Path, monkeypatch: Any) -> None:
     candidates = [
         {
@@ -4612,6 +4811,7 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     monkeypatch.setattr(module, "entity_usage_scenario_candidates", fake_candidates)
     monkeypatch.setattr(module, "entity_usage_audit", fake_usage_audit)
     monkeypatch.setattr(module, "search_provider_status", fake_provider_status)
+    monkeypatch.setattr(module, "search_provider_status_fast", fake_provider_status)
     monkeypatch.setattr(module, "raw_preview_for_usage_event", lambda *_args, **_kwargs: {"status": "available", "line": 1, "text": "ok"})
 
     audit = module.entity_usage_scenario_audit(aoa_root=tmp_path / ".aoa", sample_size=3, seed="layer-aware")
@@ -4648,6 +4848,66 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["quality"]["provider_status"] == "ready"
     assert audit["quality"]["provider_freshness_status"] == "current"
     assert audit["provider_summary"]["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
+
+
+def test_entity_usage_audit_uses_fast_provider_status_for_route_packet(tmp_path: Path, monkeypatch: Any) -> None:
+    usage_hit = {
+        "doc_id": "event:session:001:000001",
+        "event_type": "TOOL_CALL",
+        "conversation_act": "tool_call_request",
+        "session_act": "tool_call",
+        "usage_role": "usage",
+        "title": "Tool call: aoa_session_memory_mcp",
+        "route_signals": "mcp:aoa_session_memory_mcp",
+        "refs": {"raw": "raw:line:1", "segment": "001.md", "session": "session.manifest.json"},
+    }
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("query"):
+            raise AssertionError("route packet should not fall back to broad text search")
+        return {"ok": True, "result_count": 1, "results": [usage_hit], "diagnostics": []}
+
+    def fail_deep_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("entity usage route packets must not run deep search provider status")
+
+    def fake_fast_provider_status(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "status_mode": "fast_presence_probe",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "count_mode": "not_counted_fast",
+                    "freshness": {"status": "current", "checked": True},
+                }
+            },
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_provider_status", fail_deep_provider_status)
+    monkeypatch.setattr(module, "search_provider_status_fast", fake_fast_provider_status)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["provider"]["status_mode"] == "fast_presence_probe"
+    assert audit["provider"]["providers"]["portable_sqlite"]["status"] == "ready"
+    assert audit["quality"]["search_has_route_index"] is True
+    assert audit["quality"]["search_has_route_terms"] is True
+    assert audit["quality"]["text_search_skipped"] is True
 
 
 def test_entity_usage_scenario_audit_recovers_kind_from_known_layer(
@@ -5511,6 +5771,72 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
     assert scenario["route_lane_count"] == 2
     assert scenario["graph_queue_action_present"] is True
     assert scenario["graph_queued_count"] == 25
+
+
+def test_live_scenario_audit_counts_wait_live_tail_as_deferred_graph_queue(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_maintenance_status(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["include_timers"] is False
+        return {
+            "ok": True,
+            "mutates": False,
+            "recommendation": "wait_live_catchup",
+            "agent_route": {
+                "action": "use_graph_search_for_stable_archive_wait_for_recent_live",
+                "maintenance_required": False,
+                "can_use_graph_search": True,
+            },
+            "search": {"status": "current", "actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+            "graph": {
+                "status": "dirty",
+                "actionable_count": 66,
+                "queued_count": 116,
+                "deferred_live_source_count": 571,
+            },
+            "entity_registry": {"status": "current", "entity_count": 42},
+            "next_actions": [
+                {
+                    "id": "wait_live_catchup",
+                    "reason": "recent_live_graph_sources_deferred_until_quiet_window",
+                    "catchup_command_kind": "graph_queue_maintenance",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", "--no-timers"],
+                    "catchup_command_after_quiet_window": [
+                        "python3",
+                        "scripts/aoa_session_memory.py",
+                        "graph-maintenance",
+                        "all",
+                        "--use-queue",
+                        "--apply",
+                    ],
+                },
+                {
+                    "id": "run_operational_shrink_gates",
+                    "route_kind": "search_operational_shrink_gate_check",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "search-operational-shrink-gates"],
+                },
+            ],
+            "exact_next_command": "python3 scripts/aoa_session_memory.py maintenance-status --no-timers",
+        }
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["maintenance_status"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "maintenance_status"
+    assert scenario["status"] == "passed"
+    assert scenario["next_action_lane_counts"] == {"live_tail": 1, "search_projection": 1}
+    assert scenario["graph_queue_action_present"] is True
+    assert scenario["graph_queued_count"] == 116
 
 
 def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() -> None:
@@ -7080,6 +7406,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query="aoa-session-memory-evidence-route",
         doc_type="event",
     )
+    single_token_tool_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="search-hotset-audit",
+        doc_type="event",
+    )
+    single_token_error_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="sqlite_query_timeout",
+        doc_type="event",
+    )
     structured_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="",
@@ -7253,6 +7589,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-explain"]).explain is False
     assert parser.parse_args(["search-hotset-audit", "--shard", "month/2026-06"]).shard == "month/2026-06"
     assert (
+        parser.parse_args(["search-hotset-audit", "--followup-mode", "deep"]).followup_mode
+        == module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP
+    )
+    assert (
         parser.parse_args(["search-operational-projection-plan", "--shard", "month/2026-06"]).shard
         == "month/2026-06"
     )
@@ -7376,6 +7716,21 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert overlapping_exact_skill_literal_plan["embedded_entity_anchor"]["match_relation"] == "exact"
     assert "usage-chain aoa_session_memory_evidence_route" in overlapping_exact_skill_literal_plan["next_command"]
     assert "--kind skill" in overlapping_exact_skill_literal_plan["next_command"]
+    assert single_token_tool_literal_plan["query_shape"]["primary"] == "entity_anchor"
+    assert single_token_tool_literal_plan["route_anchor"] == "search_hotset_audit"
+    assert single_token_tool_literal_plan["route_anchor_source"] == "embedded_entity_registry"
+    assert single_token_tool_literal_plan["route_anchor_kind"] == "tool"
+    assert single_token_tool_literal_plan["embedded_entity_anchor"]["registry_kind"] == "tool"
+    assert single_token_tool_literal_plan["embedded_entity_anchor"]["match_relation"] == "exact"
+    assert single_token_tool_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
+    assert "usage-chain search_hotset_audit" in single_token_tool_literal_plan["next_command"]
+    assert "usage-chain search " not in single_token_tool_literal_plan["next_command"]
+    assert single_token_error_literal_plan["query_shape"]["primary"] == "error_text"
+    assert single_token_error_literal_plan["route_anchor"] == "sqlite_query_timeout"
+    assert single_token_error_literal_plan["route_anchor_source"] == "query"
+    assert single_token_error_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
+    assert "--route-signal failure_mode:sqlite_query_timeout" in single_token_error_literal_plan["next_command"]
+    assert "usage-chain timeout " not in single_token_error_literal_plan["next_command"]
     assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
     assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
     assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
@@ -7392,7 +7747,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert command_literal_plan["query_shape"]["command_anchor"] == "scripts/aoa_session_memory.py"
     assert command_literal_plan["route_anchor"] == "scripts/aoa_session_memory.py"
     assert command_literal_plan["primary_route"]["route_id"] == "command_structured_search"
-    assert "--route-signal script:aoa_session_memory" in command_literal_plan["next_command"]
+    assert "--route-signal path:scripts_aoa_session_memory_py" in command_literal_plan["next_command"]
+    assert any(
+        candidate.get("route_signal") == "script:aoa_session_memory"
+        for candidate in command_literal_plan["route_candidates"]
+    )
     assert command_literal_plan["ordered_routes"][1]["route_id"] == "entity_usage_chain"
     assert "usage-chain scripts/aoa_session_memory.py" in command_literal_plan["ordered_routes"][1]["command"]
     assert command_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
@@ -15500,10 +15859,491 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     assert compact["next_actions"][0]["graph_followup"] == payload["live_tail"]["graph_followup"]
 
 
+def test_live_tail_status_waits_for_recent_graph_sources() -> None:
+    now_ts = 1_700_000_000.0
+    payload = module.session_memory_live_tail_status(
+        search={"deferred_live_session_count": 0, "deferred_live_sessions": []},
+        graph={
+            "deferred_live_source_count": 2,
+            "deferred_live_sources_sample": [
+                {
+                    "source_key": "segment:live:000",
+                    "session_id": "live-session",
+                    "session_label": "2026-06-18__001__live-session",
+                    "latest_activity_mtime": now_ts - 45,
+                    "live_transcript_mtime": now_ts - 45,
+                    "reason": "recent_live_graph_source_deferred",
+                }
+            ],
+        },
+        quiet_seconds=600,
+        now_ts=now_ts,
+    )
+
+    assert payload["status"] == "waiting_for_quiet_window"
+    assert payload["ready_count"] == 0
+    assert payload["waiting_count"] == 1
+    assert payload["sampled_graph_source_count"] == 1
+    assert payload["unsampled_graph_source_count"] == 1
+    assert payload["max_quiet_remaining_seconds"] == 555
+    assert payload["next_ready_at"]
+    assert payload["samples"][0]["kind"] == "graph_source"
+    assert payload["samples"][0]["source_key"] == "segment:live:000"
+    assert payload["samples"][0]["ready_for_catchup"] is False
+
+
+def test_compact_maintenance_status_keeps_graph_live_tail_bounded() -> None:
+    graph_samples = [
+        {
+            "source_key": f"segment:live:{idx:03d}",
+            "session_id": "live-session",
+            "session_label": "2026-06-18__001__live-session",
+            "source_path": f"/tmp/heavy/{idx}.index.json",
+            "live_transcript_path": "/tmp/heavy/live.jsonl",
+            "live_transcript_mtime": 1_700_000_000.0,
+            "latest_activity_mtime": 1_700_000_000.0,
+            "age_seconds": 3.0,
+        }
+        for idx in range(7)
+    ]
+    compact = module.compact_maintenance_status_payload(
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "graph": {
+                "status": "current_with_deferred_live_sources",
+                "deferred_live_source_count": 7,
+                "deferred_live_sources_sample": graph_samples,
+                "latest_maintenance": {"exists": True, "remaining_count": 7, "selected_count": 0},
+                "latest_queue_maintenance": {"exists": True, "remaining_count": 7, "selected_count": 0},
+                "source_version_state": {"status": "current", "source_count": 9},
+                "maintenance_recommendation": {"route": "none", "reason": "graph_sources_current"},
+            },
+            "live_tail": {
+                "status": "waiting_for_quiet_window",
+                "graph_deferred_source_count": 7,
+                "sampled_graph_source_count": 7,
+                "unsampled_graph_source_count": 0,
+                "ready_count": 0,
+                "waiting_count": 7,
+                "samples": graph_samples,
+            },
+        }
+    )
+
+    assert compact["graph"]["status"] == "current_with_deferred_live_sources"
+    assert len(compact["graph"]["deferred_live_sources_sample"]) == 4
+    assert "source_path" not in compact["graph"]["deferred_live_sources_sample"][0]
+    assert "live_transcript_path" not in compact["graph"]["deferred_live_sources_sample"][0]
+    assert compact["graph"]["latest_maintenance"]["remaining_count"] == 7
+    assert compact["live_tail"]["sampled_graph_source_count"] == 7
+    assert compact["live_tail"]["samples"][0]["source_key"] == "segment:live:000"
+
+
+def test_maintenance_status_waits_for_recent_graph_live_tail_before_catchup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now_ts = time.time()
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {"ok": True, "providers": {"portable_sqlite": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        module,
+        "search_maintenance_status_from_provider",
+        lambda _provider_status: {
+            "status": "current",
+            "provider_status": "ready",
+            "freshness_mode": "hot",
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 0,
+            "dirty_session_count": 0,
+            "missing_freshness_state_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": [],
+            "graph_store": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance_status_from_state",
+        lambda _graph_state, **_kwargs: {
+            "status": "current_with_deferred_live_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "source_count": 500,
+            "existing_source_count": 500,
+            "status_counts": {"dirty": 499},
+            "dirty_count": 0,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "retired_count": 0,
+            "actionable_count": 0,
+            "queued_count": 0,
+            "latest_maintenance_remaining_count": 0,
+            "latest_maintenance_remaining_total_count": 499,
+            "deferred_live_source_count": 499,
+            "deferred_live_sources_sample": [
+                {
+                    "source_key": "segment:recent-live:000",
+                    "session_id": "recent-live",
+                    "session_label": "2026-06-18__001__recent-live",
+                    "latest_activity_mtime": now_ts - 10,
+                    "live_transcript_mtime": now_ts - 10,
+                    "reason": "recent_live_graph_source_deferred",
+                }
+            ],
+            "maintenance_recommendation": {"route": "none", "reason": "graph_sources_current", "command": ""},
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 3,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "maintenance_lock_snapshot", lambda _aoa_root: {"active": False, "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 0,
+                "graph_actionable_source_count": 0,
+                "graph_dirty_count": 0,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current"},
+            "warnings": [],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+    compact = module.compact_maintenance_status_payload(payload)
+
+    assert payload["recommendation"] == "wait_live_catchup"
+    assert payload["live_tail"]["status"] == "waiting_for_quiet_window"
+    assert payload["live_tail"]["catchup_ready_to_run"] is False
+    assert payload["live_tail"]["waiting_count"] == 1
+    assert payload["next_actions"][0]["id"] == "wait_live_catchup"
+    assert payload["next_actions"][0]["command"][0] == "python3"
+    assert payload["next_actions"][0]["command"][2:4] == ["maintenance-status", "--workspace-root"]
+    assert payload["next_actions"][0]["catchup_command_after_quiet_window"][0] == "python3"
+    assert payload["next_actions"][0]["catchup_command_after_quiet_window"][2:4] == ["graph-maintenance", "all"]
+    assert "maintenance-status" in payload["exact_next_command"]
+    assert "graph-maintenance" not in payload["exact_next_command"]
+    assert compact["next_actions"][0]["catchup_command_after_quiet_window"][2:4] == ["graph-maintenance", "all"]
+
+
+def test_maintenance_status_waits_for_recent_graph_live_tail_even_with_queued_backlog(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now_ts = time.time()
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {"ok": True, "providers": {"portable_sqlite": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        module,
+        "search_maintenance_status_from_provider",
+        lambda _provider_status: {
+            "status": "current",
+            "provider_status": "ready",
+            "freshness_mode": "hot",
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 0,
+            "dirty_session_count": 0,
+            "missing_freshness_state_count": 0,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": False,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": True,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": ["graph_maintenance_needed"],
+            "graph_store": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance_status_from_state",
+        lambda _graph_state, **_kwargs: {
+            "status": "dirty",
+            "needs_maintenance": True,
+            "needs_full_rebuild": False,
+            "source_count": 6158,
+            "existing_source_count": 6158,
+            "status_counts": {"clean": 5560, "dirty": 527},
+            "dirty_count": 66,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "retired_count": 63,
+            "actionable_count": 66,
+            "queued_count": 119,
+            "latest_maintenance_remaining_count": 0,
+            "latest_maintenance_remaining_total_count": 0,
+            "deferred_live_source_count": 499,
+            "deferred_live_sources_sample": [
+                {
+                    "source_key": "segment:recent-live:401",
+                    "session_id": "recent-live",
+                    "session_label": "2026-06-18__001__recent-live",
+                    "latest_activity_mtime": now_ts - 20,
+                    "live_transcript_mtime": now_ts - 20,
+                    "reason": "recent_live_graph_source_deferred",
+                }
+            ],
+            "maintenance_recommendation": {
+                "route": "bounded_graph_maintenance",
+                "reason": "small_incremental_backlog",
+                "command": "python3 scripts/aoa_session_memory.py graph-maintenance all --apply --batch-limit 3",
+                "batch_limit": module.GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 3,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "maintenance_lock_snapshot", lambda _aoa_root: {"active": False, "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 0,
+                "graph_actionable_source_count": 66,
+                "graph_dirty_count": 66,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current"},
+            "warnings": [{"code": "graph_actionable_sources", "severity": "warning", "actionable_count": 66}],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert payload["recommendation"] == "wait_live_catchup"
+    assert payload["live_tail"]["status"] == "waiting_for_quiet_window"
+    assert payload["live_tail"]["catchup_ready_to_run"] is False
+    assert payload["next_actions"][0]["id"] == "wait_live_catchup"
+    assert payload["next_actions"][0]["reason"] == "recent_live_graph_sources_deferred_until_quiet_window"
+    assert payload["next_actions"][0]["catchup_command_kind"] == "graph_queue_maintenance"
+    assert payload["next_actions"][0]["catchup_command_after_quiet_window"][2:4] == ["graph-maintenance", "all"]
+    assert payload["next_actions"][1]["id"] == "repair_graph_bounded_after_live_tail"
+    assert payload["next_actions"][1]["route_kind"] == "graph_backlog_after_live_tail"
+    assert payload["next_actions"][1]["blocked_by_live_tail"] is True
+    assert payload["next_actions"][1]["prerequisite_action_id"] == "wait_live_catchup"
+    assert payload["agent_route"]["graph_action_pending"] is True
+    assert payload["agent_route"]["graph_next_action"]["id"] == "repair_graph_bounded_after_live_tail"
+    assert payload["agent_route"]["graph_next_action"]["blocked_by_live_tail"] is True
+    assert "maintenance-status" in payload["exact_next_command"]
+    assert "graph-maintenance" not in payload["exact_next_command"]
+
+
+def test_maintenance_status_surfaces_blocked_graph_queue_followup_for_stable_archive(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now_ts = time.time()
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {"ok": True, "providers": {"portable_sqlite": {"ok": True}}},
+    )
+    monkeypatch.setattr(
+        module,
+        "search_maintenance_status_from_provider",
+        lambda _provider_status: {
+            "status": "current_with_deferred_live_updates",
+            "provider_status": "ready_with_deferred_live_updates",
+            "freshness_mode": "hot",
+            "actionable_dirty_session_count": 0,
+            "deferred_live_session_count": 1,
+            "dirty_session_count": 1,
+            "missing_freshness_state_count": 0,
+            "deferred_live_sessions": [
+                {
+                    "session_id": "recent-search",
+                    "session_label": "2026-07-07__001__recent-search",
+                    "latest_activity_mtime": now_ts - 120,
+                    "deferred_live_reason": "recent_live_codex_transcript_update",
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "route_cache_freshness_gates",
+        lambda **_kwargs: {
+            "ok": True,
+            "source_scan": False,
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "route_drift_count": 0,
+            "diagnostics": [],
+            "graph_store": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance_status_from_state",
+        lambda _graph_state, **_kwargs: {
+            "status": "current_with_deferred_live_sources",
+            "needs_maintenance": False,
+            "needs_full_rebuild": False,
+            "source_count": 6158,
+            "existing_source_count": 6158,
+            "status_counts": {"clean": 5748, "dirty": 187},
+            "dirty_count": 0,
+            "missing_count": 0,
+            "blocked_count": 0,
+            "retired_count": 63,
+            "actionable_count": 0,
+            "queued_count": 187,
+            "latest_maintenance_remaining_count": 187,
+            "latest_maintenance_remaining_total_count": 187,
+            "deferred_live_source_count": 505,
+            "deferred_live_sources_sample": [
+                {
+                    "source_key": "segment:recent-live:037",
+                    "session_id": "recent-live",
+                    "session_label": "2026-06-13__004__recent-live",
+                    "latest_activity_mtime": now_ts - 30,
+                    "live_transcript_mtime": now_ts - 30,
+                    "reason": "recent_live_graph_source_deferred",
+                }
+            ],
+            "maintenance_recommendation": {"route": "none", "reason": "graph_sources_current", "command": ""},
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "needs_maintenance": False,
+            "entity_count": 3,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(module, "maintenance_lock_snapshot", lambda _aoa_root: {"active": False, "diagnostics": []})
+    monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"status": "not_requested", "timers": [], "diagnostics": []})
+    monkeypatch.setattr(
+        module,
+        "session_memory_operations_summary",
+        lambda **_kwargs: {
+            "mutates": False,
+            "dirty_counts": {
+                "search_actionable_dirty_session_count": 0,
+                "search_deferred_live_session_count": 1,
+                "graph_actionable_source_count": 0,
+                "graph_dirty_count": 0,
+                "graph_missing_count": 0,
+                "graph_blocked_count": 0,
+                "entity_registry_status": "current",
+                "entity_registry_entity_count": 3,
+            },
+            "search_shards": {"status": "current_with_deferred_live_updates"},
+            "warnings": [],
+        },
+    )
+
+    payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert payload["recommendation"] == "wait_live_catchup"
+    assert payload["agent_route"]["can_use_graph_search"] is True
+    assert payload["live_tail"]["status"] == "waiting_for_quiet_window"
+    assert payload["next_actions"][0]["id"] == "wait_live_catchup"
+    assert payload["next_actions"][0]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
+    assert payload["next_actions"][1]["id"] == "repair_graph_queue_after_live_tail"
+    assert payload["next_actions"][1]["route_kind"] == "graph_backlog_after_live_tail"
+    assert payload["next_actions"][1]["blocked_by_live_tail"] is True
+    assert payload["next_actions"][1]["queued_count"] == 187
+    assert "--use-queue" in payload["next_actions"][1]["command"]
+    assert payload["agent_route"]["graph_action_pending"] is True
+    assert payload["agent_route"]["graph_next_action"]["id"] == "repair_graph_queue_after_live_tail"
+    assert payload["agent_route"]["graph_next_action"]["blocked_by_live_tail"] is True
+    assert payload["agent_route"]["graph_next_action"]["queued_count"] == 187
+    assert "maintenance-status" in payload["exact_next_command"]
+
+
 def test_maintenance_status_routes_ready_graph_live_queue_before_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     aoa_root.mkdir(parents=True)
+    now_ts = time.time()
 
     monkeypatch.setattr(
         module,
@@ -15557,6 +16397,16 @@ def test_maintenance_status_routes_ready_graph_live_queue_before_source_scan(tmp
             "latest_maintenance_remaining_count": 0,
             "latest_maintenance_remaining_total_count": 0,
             "deferred_live_source_count": 499,
+            "deferred_live_sources_sample": [
+                {
+                    "source_key": "segment:ready-live:000",
+                    "session_id": "ready-live",
+                    "session_label": "2026-06-18__001__ready-live",
+                    "latest_activity_mtime": now_ts - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60,
+                    "live_transcript_mtime": now_ts - module.GRAPH_HOT_LIVE_DEFER_SECONDS - 60,
+                    "reason": "recent_live_graph_source_deferred",
+                }
+            ],
             "maintenance_recommendation": {
                 "route": "budgeted_graph_maintenance",
                 "reason": "mixed_or_medium_backlog",
@@ -16041,6 +16891,43 @@ def test_maintenance_status_treats_current_rollup_shrink_gate_as_advisory(tmp_pa
     assert payload["next_actions"][1]["id"] == "run_operational_shrink_gates"
     assert payload["next_actions"][1]["route_kind"] == "search_operational_shrink_gate_check"
     assert "search-operational-shrink-gates" in module.shlex.join(payload["next_actions"][1]["command"])
+
+    def fake_latest_diagnostic_summary(_aoa_root: Path, pattern: str, **_kwargs: Any) -> dict[str, Any]:
+        if "search-operational-shrink-gates" in pattern:
+            return {
+                "exists": True,
+                "ok": True,
+                "status": "all_gates_passed_but_apply_still_manual",
+                "path": str(aoa_root / "diagnostics" / "20260707T000000Z__search-operational-shrink-gates.json"),
+                "mtime": 2_000.0,
+                "generated_at": "2026-07-07T00:00:00Z",
+                "diagnostics": [],
+            }
+        if (
+            "search-shards" in pattern
+            or "search-catalog" in pattern
+            or "search-operational-route-rollup" in pattern
+        ):
+            return {"exists": True, "ok": True, "status": "current", "path": "", "mtime": 1_000.0, "diagnostics": []}
+        return {"exists": False}
+
+    monkeypatch.setattr(module, "latest_diagnostic_summary", fake_latest_diagnostic_summary)
+
+    fresh_payload = module.session_memory_maintenance_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_timers=False,
+    )
+
+    assert fresh_payload["ok"] is True
+    assert fresh_payload["recommendation"] == "use_graph_search"
+    assert fresh_payload["agent_route"]["search_projection_action_pending"] is False
+    assert [action["id"] for action in fresh_payload["next_actions"]] == ["use_graph_search"]
+    advisory = fresh_payload["agent_route"]["search_projection_advisory"]
+    assert advisory["id"] == "operational_shrink_gates_current"
+    assert advisory["route_kind"] == "search_operational_shrink_gate_advisory"
+    assert advisory["advisory_only"] is True
+    assert advisory["freshness_status"] == "current"
 
 
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -17579,6 +18466,119 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert "graph-cardinality" in ops["graph_pressure"]["exact_read_command"]
 
 
+def test_recent_problem_jobs_suppresses_superseded_search_shard_failure(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    base_mtime = time.time()
+
+    failed_hot = diagnostics / "20260707T000000Z__auto-maintenance-resource-hot.json"
+    failed_child = diagnostics / "20260707T000000Z__auto-maintenance-hot.json"
+    child_payload = {
+        "schema_version": module.SCHEMA_VERSION,
+        "artifact_type": "session_memory_auto_maintenance",
+        "generated_at": "2026-07-07T00:00:00Z",
+        "ok": False,
+        "status": "applied_with_deferred_live",
+        "profile": "hot",
+        "target": "all",
+        "diagnostics": [
+            "graph_maintenance_needed",
+            "index_maintenance_needed",
+            "search_shards_incomplete_or_stale",
+            "shard_document_count_catalog_mismatch:month/2026-07",
+        ],
+        "hard_diagnostics": [
+            "search_shards_incomplete_or_stale",
+            "shard_document_count_catalog_mismatch:month/2026-07",
+        ],
+    }
+    module.write_json(failed_child, child_payload)
+    os.utime(failed_child, (base_mtime + 0.5, base_mtime + 0.5))
+    module.write_json(
+        failed_hot,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-07-07T00:00:00Z",
+            "ok": False,
+            "status": "child_failed",
+            "profile": "hot",
+            "target": "all",
+            "diagnostics": [
+                "graph_maintenance_needed",
+                "index_maintenance_needed",
+                "search_shards_incomplete_or_stale",
+                "shard_document_count_catalog_mismatch:month/2026-07",
+            ],
+            "child": {
+                "ok": False,
+                "status": "applied_with_deferred_live",
+                "diagnostics": [
+                    "graph_maintenance_needed",
+                    "index_maintenance_needed",
+                    "search_shards_incomplete_or_stale",
+                    "shard_document_count_catalog_mismatch:month/2026-07",
+                ],
+            },
+        },
+    )
+    os.utime(failed_hot, (base_mtime + 1, base_mtime + 1))
+
+    unrepaired = module.recent_problem_maintenance_reports(aoa_root)
+    assert unrepaired
+    assert unrepaired[0]["status"] == "child_failed"
+
+    repaired_shard = diagnostics / "20260707T000010Z__search-shards.json"
+    module.write_json(
+        repaired_shard,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "search_shard_materialization",
+            "generated_at": "2026-07-07T00:00:10Z",
+            "ok": True,
+            "status": "current",
+            "target": "all",
+            "requested_shard": "month/2026-07",
+            "shards": [
+                {
+                    "shard": "month/2026-07",
+                    "status": "current",
+                    "ok": True,
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    os.utime(repaired_shard, (base_mtime + 2, base_mtime + 2))
+
+    assert module.recent_problem_maintenance_reports(aoa_root) == []
+
+    hard_failure = diagnostics / "20260707T000020Z__auto-maintenance-resource-catchup.json"
+    module.write_json(
+        hard_failure,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-07-07T00:00:20Z",
+            "ok": False,
+            "status": "child_failed",
+            "profile": "catchup",
+            "target": "all",
+            "diagnostics": [
+                "search_shards_incomplete_or_stale",
+                "shard_document_count_catalog_mismatch:month/2026-07",
+                "auto_maintenance_child_failed",
+            ],
+        },
+    )
+    os.utime(hard_failure, (base_mtime + 3, base_mtime + 3))
+
+    problems = module.recent_problem_maintenance_reports(aoa_root)
+    assert problems
+    assert problems[0]["profile"] == "catchup"
+
+
 def test_search_shards_deferred_live_tail_is_not_actionable_ops_warning(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -18541,12 +19541,15 @@ def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverag
     assert audit["sample_quality"]["partial_agent_event_coverage_shard_count"] == 1
     assert audit["sample_quality"]["agent_event_coverage_count_precision"] == "lower_bound"
     assert audit["measurement_gap"]["status"] == "partial_shard_sample"
-    assert audit["measurement_gap"]["needs_targeted_followup"] is True
+    assert audit["measurement_gap"]["needs_targeted_followup"] is False
+    assert audit["measurement_gap"]["deep_followup_available"] is True
+    assert audit["measurement_gap"]["followup_mode"] == module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_ROUTE_FIRST
     assert audit["measurement_gap"]["partial_shard_count"] == 1
     assert audit["measurement_gap"]["partial_shards"][0]["shard"] == "month/2026-06"
-    targeted_commands = [module.shlex.join(command) for command in audit["measurement_gap"]["next_targeted_routes"]]
+    targeted_commands = [module.shlex.join(command) for command in audit["measurement_gap"]["deep_targeted_routes"]]
     assert any("--shard month/2026-06" in command for command in targeted_commands)
-    assert audit["next_routes"][0] == audit["measurement_gap"]["next_targeted_routes"][0]
+    assert audit["measurement_gap"]["next_targeted_routes"] == []
+    assert audit["next_routes"][0][2] == "search-operational-route-rollup-query"
     assert audit["totals"]["measurement_modes"]["agent_event_coverage"] == "partial_timeout_budget"
     assert audit["agent_event_coverage"]["status"] == "partial_unknown"
     assert audit["agent_event_coverage"]["count_precision"] == "lower_bound"
@@ -18571,6 +19574,19 @@ def test_search_hotset_audit_marks_partial_measurements_without_claiming_coverag
         "search-operational-projection-plan" in command and "--shard month/2026-06" in command
         for command in targeted_next_commands
     )
+
+    deep = module.session_memory_search_hotset_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=2,
+        top_limit=8,
+        followup_mode=module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP,
+        write_report=False,
+    )
+
+    assert deep["measurement_gap"]["needs_targeted_followup"] is True
+    assert deep["measurement_gap"]["followup_mode"] == module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP
+    assert deep["next_routes"][0] == deep["measurement_gap"]["next_targeted_routes"][0]
 
 
 def test_search_operational_projection_plan_respects_target_shard(tmp_path: Path, monkeypatch: Any) -> None:
@@ -23967,9 +24983,9 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     )
     assert latest_progress["ok"] is True
     assert latest_progress["result_count"] == 2
-    assert latest_progress["search_projection"]["candidate_shard_count"] == 1
-    assert latest_progress["search_projection"]["session_scope"]["resolved_shard"] == "month/2026-06"
-    assert latest_progress["search_projection"]["session_scope"]["exact_filter_value"].startswith("2026-06-13__")
+    assert latest_progress["search_projection"]["route_kind"] == "agent_event_session_segment_index"
+    assert latest_progress["cost_profile"]["uses_session_segment_indexes"] is True
+    assert latest_progress["search_projection"]["session_scope"]["resolved_session_label"].startswith("2026-06-13__")
     assert {item["session_id"] for item in latest_progress["results"]} == {"agent-progress-shard"}
 
     truncated = module.agent_event_route_search(
@@ -25960,9 +26976,11 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert before["live_tail"]["waiting_count"] == 1
     assert before["next_actions"][0]["live_tail_status"] == "waiting_for_quiet_window"
     assert before["next_actions"][0]["id"] == "wait_live_catchup"
-    assert before["next_actions"][0]["command"][2] == "index-maintenance"
-    assert "--skip-graph-repair" in before["next_actions"][0]["command"]
-    assert "--skip-token-accounting" in before["next_actions"][0]["command"]
+    assert before["next_actions"][0]["command"][2] == "maintenance-status"
+    assert before["next_actions"][0]["command"][-1] == "--no-timers"
+    assert before["next_actions"][0]["catchup_command_after_quiet_window"][2] == "index-maintenance"
+    assert "--skip-graph-repair" in before["next_actions"][0]["catchup_command_after_quiet_window"]
+    assert "--skip-token-accounting" in before["next_actions"][0]["catchup_command_after_quiet_window"]
     assert before["live_tail"]["catchup_command_kind"] == "targeted_index_maintenance_without_graph"
     assert before["live_tail"]["catchup_ready_to_run"] is False
 

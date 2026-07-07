@@ -873,6 +873,10 @@ graph-deferred live sources use graph queue maintenance. This is the agent
 surface for deciding whether to use stable graph/search now, wait for the live
 quiet window, or run catch-up after the window has elapsed without dragging the
 full hot profile onto the interactive path.
+If a deferred graph source sample is still inside the quiet window, the packet
+must expose `catchup_ready_to_run=false`, keep the immediate next command on
+`maintenance-status --no-timers`, and carry the graph catch-up command only as
+the post-window expansion.
 For graph state, the quiet-window boundary is session-wide: if a graph source
 belongs to a Codex transcript that is still being written, older segment
 indexes from that same transcript are still treated as deferred live sources.
