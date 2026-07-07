@@ -61396,12 +61396,12 @@ def session_memory_graph_pressure_summary(
     if projection_status != "current":
         status = "large_cardinality_unknown" if graph_total_bytes >= OPS_GRAPH_DB_WARNING_BYTES else "cardinality_projection_missing_or_stale"
         next_route = "repair graph freshness first or refresh graph-cardinality through the resource lane before treating graph storage pressure as normal"
-    elif graph_total_bytes < OPS_GRAPH_DB_WARNING_BYTES:
-        status = "normal"
-        next_route = "continue using graph/search; no graph storage action is needed"
     elif edge_count >= OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT:
         status = "large_cardinality_dominates"
         next_route = "prioritize graph cardinality reduction, sharding, or high-fanout query projections; physical SQLite compaction is not the primary fix"
+    elif graph_total_bytes < OPS_GRAPH_DB_WARNING_BYTES:
+        status = "normal"
+        next_route = "continue using graph/search; no graph storage action is needed"
     elif reclaim_ratio >= 0.10 and compaction_plan.get("apply_ready"):
         status = "physical_compaction_candidate"
         next_route = "run graph-sqlite-compact --write-report, then stage vacuum-into only after reviewing the plan"

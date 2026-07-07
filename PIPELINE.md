@@ -651,7 +651,8 @@ ad hoc `GROUP BY node_type/edge_type` scans as the normal agent path.
 `operations.graph_pressure`, together with the conservative SQLite compaction
 headroom plan. Treat this as the agent-facing hot route for graph weight:
 large top edge counts mean graph cardinality or query-projection work comes
-before physical SQLite compaction.
+before physical SQLite compaction, even when the SQLite file is still below the
+physical-size warning threshold.
 When old live graph stores still contain generated standalone `raw_ref` nodes
 and `has_raw_ref` edges, use `graph-raw-ref-prune` as the bounded projection
 repair. It deletes only generated graph materialization rows, keeps raw/session

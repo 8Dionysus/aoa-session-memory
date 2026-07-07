@@ -2432,6 +2432,15 @@ Maintenance gates:
   `exact_next_command=maintenance-status --no-timers`; the full live scenario
   corpus returned `case_count=15`, `passed_count=15`, `failed_count=0`,
   `actionable_gap_count=0`.
+- 2026-07-07 graph pressure cardinality route correction:
+  `operations.graph_pressure` now surfaces `large_cardinality_dominates` when
+  graph edge cardinality crosses the route threshold even if the SQLite file is
+  still below the physical-size warning threshold. Live proof on the current
+  store returned `graph_db_total_human=30.7 GiB`, `edge_count=10814816`,
+  top edge types `event_mentions_registered_entity=3671955` and
+  `mentions_route_signal=2980345`, `physical.reclaim=0 B`, and
+  `next_route` pointing to cardinality reduction, sharding, or high-fanout
+  query projections rather than physical SQLite compaction.
 
 ## Probe Notes
 

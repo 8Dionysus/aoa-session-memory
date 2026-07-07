@@ -22461,6 +22461,65 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert "storage-audit" in summary["optional_deep_audit_command"]
 
 
+def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=8: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 2_000_000, "path": 220_000},
+                "edge": {
+                    "event_mentions_registered_entity": 3_700_000,
+                    "mentions_route_signal": 3_000_000,
+                    "has_event": 2_100_000,
+                    "session_has_route_signal": 1_400_000,
+                },
+            },
+            "top": {
+                "node": [{"type": "event", "count": 2_000_000}],
+                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_vacuum_headroom_plan",
+        lambda **_kwargs: {
+            "status": "ready",
+            "apply_ready": True,
+            "freelist_bytes": 0,
+            "freelist_human": "0 B",
+            "conservative_reclaimable_bytes": 0,
+            "conservative_reclaimable_human": "0 B",
+            "required_free_human": "55.0 GiB",
+            "free_human": "90.0 GiB",
+            "min_free_after_human": "25.0 GiB",
+            "diagnostics": [],
+        },
+    )
+
+    summary = module.session_memory_graph_pressure_summary(
+        aoa_root=aoa_root,
+        storage={
+            "graph_db": {
+                "total_with_wal_bytes": int(module.OPS_GRAPH_DB_WARNING_BYTES * 0.75),
+                "total_with_wal_human": "30.0 GiB",
+            }
+        },
+    )
+
+    assert summary["status"] == "large_cardinality_dominates"
+    assert summary["edge_count"] == 10_200_000
+    assert summary["graph_db_total_bytes"] < module.OPS_GRAPH_DB_WARNING_BYTES
+    assert summary["physical_compaction"]["conservative_reclaimable_bytes"] == 0
+    assert "physical SQLite compaction is not the primary fix" in summary["next_route"]
+
+
 def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
