@@ -607,6 +607,18 @@ python3 scripts/aoa_session_memory.py projection-status \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+By default this route stays fast: it reads the latest projection-catchup
+diagnostic plus the latest cached `maintenance-status` diagnostic and marks the
+maintenance snapshot as cached. If the operator needs current runtime
+maintenance truth in the same packet, make the heavier read explicit:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --refresh-maintenance
+```
+
 For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
 maintenance controller with a clean preflight gate, a lock, and bounded graph
 batches:

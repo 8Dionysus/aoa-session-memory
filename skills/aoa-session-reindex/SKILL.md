@@ -73,7 +73,8 @@ search rebuild or graph repair is required.
 - `projection-catchup` reports no remaining projection backlog, or returns the
   explicit next route needed to finish it.
 - `projection-status` reads the latest projection-catchup completeness packet
-  without running the writer route.
+  without running the writer route, and uses cached maintenance diagnostics
+  unless `--refresh-maintenance` is explicitly requested.
 - Run `doctor`, `audit`, and tests after broad reindexing.
 
 ## Stop Line

@@ -22009,11 +22009,93 @@ def projection_status_refresh_route(*, workspace_root: Path, aoa_root: Path) -> 
     }
 
 
+def maintenance_status_refresh_route(*, workspace_root: Path, aoa_root: Path) -> dict[str, Any]:
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "maintenance-status",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--no-timers",
+    ]
+    return {
+        "id": "refresh_maintenance_status",
+        "status": "available",
+        "reason": "current_runtime_maintenance_truth_requires_explicit_refresh",
+        "mutates": False,
+        "command": command,
+    }
+
+
+def cached_maintenance_status_snapshot(*, workspace_root: Path, aoa_root: Path) -> dict[str, Any]:
+    refresh_route = maintenance_status_refresh_route(workspace_root=workspace_root, aoa_root=aoa_root)
+    reports = diagnostic_json_payloads(aoa_root, "*__maintenance-status.json", limit=1)
+    if not reports:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status_snapshot",
+            "generated_at": utc_now(),
+            "ok": None,
+            "mutates": False,
+            "status": "not_checked",
+            "snapshot_mode": "missing_cached_diagnostic",
+            "refreshed": False,
+            "source": {
+                "kind": "missing_maintenance_status_diagnostic",
+                "path": None,
+                "generated_at": None,
+            },
+            "refresh_required_for_current_truth": True,
+            "refresh_route": refresh_route,
+            "exact_refresh_command": shlex.join(refresh_route["command"]),
+            "diagnostics": ["missing_maintenance_status_diagnostic"],
+            "truth_status": "no_cached_maintenance_status_available_refresh_for_current_runtime_truth",
+        }
+
+    report = reports[0]
+    compact = compact_maintenance_status_payload(report)
+    compact["snapshot_mode"] = "cached_diagnostic"
+    compact["refreshed"] = False
+    compact["source"] = {
+        "kind": "latest_maintenance_status_diagnostic",
+        **diagnostic_report_source(report),
+    }
+    compact["refresh_required_for_current_truth"] = True
+    compact["refresh_route"] = refresh_route
+    compact["exact_refresh_command"] = shlex.join(refresh_route["command"])
+    compact["truth_status"] = "cached_maintenance_status_navigation_not_current_runtime_truth"
+    return compact
+
+
+def refreshed_maintenance_status_snapshot(
+    maintenance: dict[str, Any],
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+) -> dict[str, Any]:
+    refresh_route = maintenance_status_refresh_route(workspace_root=workspace_root, aoa_root=aoa_root)
+    compact = compact_maintenance_status_payload(maintenance)
+    compact["snapshot_mode"] = "refreshed_hot"
+    compact["refreshed"] = True
+    compact["source"] = {
+        "kind": "refreshed_hot_maintenance_status",
+        "path": None,
+        "generated_at": maintenance.get("generated_at"),
+    }
+    compact["refresh_required_for_current_truth"] = False
+    compact["refresh_route"] = refresh_route
+    compact["exact_refresh_command"] = shlex.join(refresh_route["command"])
+    compact["truth_status"] = "current_runtime_maintenance_status_generated_now"
+    return compact
+
+
 def session_memory_projection_status(
     *,
     workspace_root: Path,
     aoa_root: Path,
     include_payload: bool = False,
+    refresh_maintenance: bool = False,
 ) -> dict[str, Any]:
     reports = diagnostic_json_payloads(aoa_root, "*__projection-catchup-*.json", limit=1)
     latest_payload = reports[0] if reports else {}
@@ -22040,13 +22122,20 @@ def session_memory_projection_status(
             **next_operator_route,
             "reason": f"projection_completeness_{completeness.get('status') or 'not_current'}",
         }
-    maintenance = session_memory_maintenance_status(
-        workspace_root=workspace_root,
-        aoa_root=aoa_root,
-        mode="hot",
-        include_timers=False,
-        write_report=False,
-    )
+    if refresh_maintenance:
+        maintenance = refreshed_maintenance_status_snapshot(
+            session_memory_maintenance_status(
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                mode="hot",
+                include_timers=False,
+                write_report=False,
+            ),
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        )
+    else:
+        maintenance = cached_maintenance_status_snapshot(workspace_root=workspace_root, aoa_root=aoa_root)
     source = (
         "latest_projection_catchup_diagnostic"
         if is_current
@@ -22073,7 +22162,14 @@ def session_memory_projection_status(
         }
         if latest_payload
         else {"path": None, "payload": None},
-        "current_maintenance": compact_maintenance_status_payload(maintenance),
+        "current_maintenance": maintenance,
+        "current_maintenance_freshness": {
+            "snapshot_mode": maintenance.get("snapshot_mode"),
+            "refreshed": bool(maintenance.get("refreshed")),
+            "source": maintenance.get("source") if isinstance(maintenance.get("source"), dict) else {},
+            "refresh_required_for_current_truth": bool(maintenance.get("refresh_required_for_current_truth")),
+            "exact_refresh_command": maintenance.get("exact_refresh_command") or "",
+        },
         "next_operator_route": next_operator_route,
         "exact_next_command": shlex.join(str(part) for part in next_operator_route.get("command", []))
         if isinstance(next_operator_route.get("command"), list)
@@ -55124,13 +55220,17 @@ def diagnostic_json_payloads(aoa_root: Path, glob_pattern: str, *, limit: int = 
     diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
     if not diagnostics_dir.exists():
         return []
-    candidates = sorted(
-        (path for path in diagnostics_dir.glob(glob_pattern) if path.is_file() and path.suffix == ".json"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
-        reverse=True,
-    )
+    limit_value = max(0, limit)
+    if limit_value <= 0:
+        return []
+    candidate_iter = (path for path in diagnostics_dir.glob(glob_pattern) if path.is_file() and path.suffix == ".json")
+    if limit_value == 1:
+        latest = max(candidate_iter, key=path_mtime, default=None)
+        candidates = [latest] if latest is not None else []
+    else:
+        candidates = sorted(candidate_iter, key=path_mtime, reverse=True)
     reports: list[dict[str, Any]] = []
-    for path in candidates[: max(0, limit)]:
+    for path in candidates[:limit_value]:
         payload = read_json(path, {})
         report = dict(payload) if isinstance(payload, dict) else {}
         markdown = path.with_suffix(".md")
@@ -72298,6 +72398,7 @@ def command_projection_status(args: argparse.Namespace) -> int:
         workspace_root=workspace,
         aoa_root=root,
         include_payload=args.include_payload,
+        refresh_maintenance=args.refresh_maintenance,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -78587,6 +78688,7 @@ def build_parser() -> argparse.ArgumentParser:
     projection_status_parser.add_argument("--workspace-root")
     projection_status_parser.add_argument("--aoa-root")
     projection_status_parser.add_argument("--include-payload", action="store_true", help="Include the full latest projection-catchup diagnostic payload.")
+    projection_status_parser.add_argument("--refresh-maintenance", action="store_true", help="Also run the hot maintenance-status calculation for current runtime guidance. Default uses the cached diagnostic only.")
     projection_status_parser.set_defaults(func=command_projection_status)
 
     auto_maintenance_parser = sub.add_parser(

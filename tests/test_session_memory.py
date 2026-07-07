@@ -23431,14 +23431,15 @@ def test_projection_status_reads_latest_completeness_without_running_catchup(tmp
             },
         },
     )
-    monkeypatch.setattr(
-        module,
-        "session_memory_maintenance_status",
-        lambda **_kwargs: {
+    write_json(
+        diagnostics / "20260526T000300Z__maintenance-status.json",
+        {
             "schema_version": module.SCHEMA_VERSION,
             "artifact_type": "session_memory_maintenance_status",
+            "generated_at": "2026-05-26T00:03:00Z",
             "ok": True,
             "mutates": False,
+            "mode": "hot",
             "recommendation": "use_graph_search",
             "search": {"status": "current"},
             "graph": {"status": "current"},
@@ -23448,6 +23449,11 @@ def test_projection_status_reads_latest_completeness_without_running_catchup(tmp
             "diagnostics": [],
         },
     )
+
+    def unexpected_maintenance_refresh(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("projection-status default must use cached maintenance diagnostics")
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", unexpected_maintenance_refresh)
 
     status = module.session_memory_projection_status(
         workspace_root=workspace,
@@ -23462,8 +23468,89 @@ def test_projection_status_reads_latest_completeness_without_running_catchup(tmp
     assert status["projection_completeness"]["surfaces"]["entity_registry"]["entity_count"] == 12
     assert status["next_operator_route"]["id"] == "verify_projection_status"
     assert "maintenance-status" in status["exact_next_command"]
+    assert status["current_maintenance"]["snapshot_mode"] == "cached_diagnostic"
+    assert status["current_maintenance"]["recommendation"] == "use_graph_search"
+    assert status["current_maintenance"]["source"]["kind"] == "latest_maintenance_status_diagnostic"
+    assert status["current_maintenance"]["refresh_required_for_current_truth"] is True
+    assert status["current_maintenance_freshness"]["refreshed"] is False
     assert status["mcp_access"]["does_not_run_projection_catchup"] is True
     assert status["latest_projection_catchup"]["payload"] is None
+
+
+def test_projection_status_refreshes_maintenance_only_when_requested(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    write_json(
+        diagnostics / "20260526T000200Z__projection-catchup-catchup.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_projection_catchup",
+            "generated_at": "2026-05-26T00:02:00Z",
+            "ok": True,
+            "mutates": False,
+            "projection_completeness": {
+                "schema_version": module.SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_completeness",
+                "status": "current",
+                "actionable_surface_ids": [],
+                "deferred_surface_ids": [],
+                "surfaces": {
+                    "raw_authority": {
+                        "status": "source_truth_not_projection",
+                        "needs_maintenance": False,
+                    },
+                    "search_index": {"status": "current", "needs_maintenance": False},
+                },
+            },
+            "next_route": {
+                "id": "verify_projection_status",
+                "status": "ready",
+                "reason": "projection_catchup_finished_without_remaining_backlog",
+                "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status"],
+            },
+        },
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "generated_at": "2026-05-26T00:04:00Z",
+            "ok": True,
+            "mutates": False,
+            "mode": "hot",
+            "recommendation": "use_graph_search",
+            "search": {"status": "current"},
+            "graph": {"status": "current"},
+            "route": {"status": "current"},
+            "entity_registry": {"status": "current"},
+            "next_actions": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance)
+
+    status = module.session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        refresh_maintenance=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["workspace_root"] == workspace
+    assert calls[0]["aoa_root"] == aoa_root
+    assert calls[0]["mode"] == "hot"
+    assert calls[0]["include_timers"] is False
+    assert calls[0]["write_report"] is False
+    assert status["current_maintenance"]["snapshot_mode"] == "refreshed_hot"
+    assert status["current_maintenance"]["source"]["kind"] == "refreshed_hot_maintenance_status"
+    assert status["current_maintenance"]["refresh_required_for_current_truth"] is False
+    assert status["current_maintenance_freshness"]["refreshed"] is True
+    assert status["current_maintenance_freshness"]["refresh_required_for_current_truth"] is False
 
 
 def test_projection_status_treats_plan_ready_verify_route_as_current(tmp_path: Path, monkeypatch: Any) -> None:
@@ -23708,11 +23795,13 @@ def test_projection_catchup_parser_routes_to_command(tmp_path: Path) -> None:
             "--aoa-root",
             str(aoa_root),
             "--include-payload",
+            "--refresh-maintenance",
         ]
     )
 
     assert status_args.func is module.command_projection_status
     assert status_args.include_payload is True
+    assert status_args.refresh_maintenance is True
     assert args.apply is True
     assert args.write_report is True
 

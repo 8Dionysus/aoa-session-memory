@@ -204,6 +204,9 @@ use. For graph/topology questions, search `aoa_session_graph_neighborhood`
 directly if a broad "graph route" tool search does not surface it. For common
 tools, MCP services, hooks, or skills with too many direct hits, search
 `aoa_session_graph_cooccurrence` directly before widening into raw text.
+Treat projection status as a fast cached diagnostic route by default; run the
+archive `projection-status --refresh-maintenance` only when the task needs a
+fresh runtime maintenance packet in the same response.
 
 If an exact MCP tool is discovered but the call returns `Transport closed`,
 treat it as a Codex/MCP transport reload gate, not as evidence failure and not
