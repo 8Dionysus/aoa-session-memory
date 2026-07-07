@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 19,
+  "case_count": 21,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -698,6 +698,62 @@
             "require_direct_event_rollup_current": true,
             "require_materialized_direct_event_rollup": true,
             "require_direct_event_rollup_usage_chain_boundary": true,
+            "require_no_shard_resample": true,
+            "require_no_monolith_open": true,
+            "require_no_fts": true,
+            "require_no_body_hydration": true,
+            "max_elapsed_ms": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "direct_event_rollup_agent_closeout_route_contract",
+      "profiles": [
+        "direct_event_rollup_query"
+      ],
+      "seed": "corpus-direct-event-rollup-agent-closeout",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 3,
+      "direct_event_rollup_usage_role": "outcome",
+      "direct_event_rollup_event_type": "FINAL_STATE",
+      "direct_event_rollup_route_signal": "agent_event:assistant_final_closeout",
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-07",
+        "note": "Direct operational-event rollup must support exact agent-event routes such as final closeouts without shard resampling, monolith reads, FTS, or body hydration."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "direct_event_rollup_query",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_result_count": 1,
+            "min_matched_group_count": 1,
+            "min_source_direct_event_count": 1,
+            "min_source_direct_event_term_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_session_ref_count": 1,
+            "required_usage_roles": [
+              "outcome"
+            ],
+            "required_event_types": [
+              "FINAL_STATE"
+            ],
+            "require_direct_event_rollup_current": true,
+            "require_materialized_direct_event_rollup": true,
+            "require_direct_event_rollup_usage_chain_boundary": true,
+            "require_direct_event_route_ref": true,
             "require_no_shard_resample": true,
             "require_no_monolith_open": true,
             "require_no_fts": true,

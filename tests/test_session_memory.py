@@ -22951,6 +22951,22 @@ def test_search_operational_direct_event_rollup_materializes_and_queries_refs(tm
         route_layer="validator",
         route_key="pytest",
     )
+    insert_event(
+        "assistant-closeout",
+        usage_role="outcome",
+        event_type="FINAL_STATE",
+        session_act="assistant_closeout",
+        route_layer="agent_event",
+        route_key="assistant_final_closeout",
+    )
+    insert_event(
+        "authority-source",
+        usage_role="outcome",
+        event_type="DECISION",
+        session_act="decision_note",
+        route_layer="authority_surface",
+        route_key="source",
+    )
     insert_event("user-entry", usage_role="entrypoint", event_type="USER_INTENT", session_act="user_request")
     insert_event("context-ignored", usage_role="context", event_type="CONTEXT_STATE")
     conn.commit()
@@ -22975,7 +22991,7 @@ def test_search_operational_direct_event_rollup_materializes_and_queries_refs(tm
                     "shard_db_path": str(shard_db),
                     "materialized": True,
                     "status": "current",
-                    "document_count": 5,
+                    "document_count": 7,
                     "total_with_wal_bytes": shard_db.stat().st_size,
                     "total_with_wal_human": module.human_size(shard_db.stat().st_size),
                 }
@@ -23008,17 +23024,29 @@ def test_search_operational_direct_event_rollup_materializes_and_queries_refs(tm
     assert applied["ok"] is True
     assert applied["status"] == "current"
     assert applied["written"] is True
-    assert applied["totals"]["direct_event_count"] == 4
-    assert applied["totals"]["route_bound_direct_event_count"] == 3
+    assert applied["totals"]["direct_event_count"] == 6
+    assert applied["totals"]["route_bound_direct_event_count"] == 5
     assert applied["totals"]["unrouted_direct_event_count"] == 1
-    assert applied["totals"]["direct_event_rollup_row_count"] == 4
+    assert applied["totals"]["direct_event_rollup_row_count"] == 10
+    assert applied["totals"]["direct_event_posting_count"] == 6
+    assert applied["totals"]["direct_event_rollup_posting_count"] == 10
+    assert applied["shards"][0]["summary"]["direct_route_posting_count"] == 4
+    assert "authority_surface" not in {item["route_layer"] for item in applied["top_route_terms"]}
+    assert any(
+        item["route_signal"] == module.route_signal_token("agent_event", "assistant_final_closeout")
+        for item in applied["top_route_terms"]
+    )
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
 
     status = module.session_memory_operational_direct_event_rollup_status(aoa_root=aoa_root)
     assert status["status"] == "current"
-    assert status["direct_event_count"] == 4
-    assert status["direct_event_rollup_row_count"] == 4
+    assert "agent_event" in status["route_layer_scope"]
+    assert "authority_surface" not in status["route_layer_scope"]
+    assert status["direct_event_count"] == 6
+    assert status["direct_event_rollup_row_count"] == 10
+    assert status["direct_event_posting_count"] == 6
+    assert status["direct_event_rollup_posting_count"] == 10
 
     query = module.session_memory_search_operational_direct_event_rollup_query(
         workspace_root=workspace,
@@ -23055,6 +23083,38 @@ def test_search_operational_direct_event_rollup_materializes_and_queries_refs(tm
     assert result_query["result_count"] == 1
     assert result_query["results"][0]["event_type"] == "TOOL_OUTPUT"
     assert result_query["results"][0]["raw_refs"] == ["raw:line:tool-output"]
+    assert result_query["quality"]["route_ref_present"] is False
+
+    closeout_query = module.session_memory_search_operational_direct_event_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        route_signal="agent_event:assistant_final_closeout",
+        limit=5,
+        ref_limit=4,
+    )
+    assert closeout_query["ok"] is True
+    assert closeout_query["status"] == "matched"
+    assert closeout_query["result_count"] == 1
+    assert closeout_query["results"][0]["usage_role"] == "outcome"
+    assert closeout_query["results"][0]["event_type"] == "FINAL_STATE"
+    assert closeout_query["results"][0]["route_signal"] == module.route_signal_token("agent_event", "assistant_final_closeout")
+    assert closeout_query["results"][0]["raw_refs"] == ["raw:line:assistant-closeout"]
+    assert closeout_query["quality"]["raw_or_segment_ref_present"] is True
+    assert closeout_query["quality"]["route_ref_present"] is True
+    assert closeout_query["cost_profile"]["resamples_shards"] is False
+    assert closeout_query["cost_profile"]["opens_monolith"] is False
+    assert closeout_query["cost_profile"]["uses_fts"] is False
+    assert closeout_query["cost_profile"]["hydrates_body"] is False
+
+    dense_route_query = module.session_memory_search_operational_direct_event_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        route_signal="authority_surface:source",
+        limit=5,
+    )
+    assert dense_route_query["ok"] is True
+    assert dense_route_query["status"] == "no_matches"
+    assert "authority_surface" not in dense_route_query["route_layer_scope"]
 
 
 def test_search_operational_route_rollup_scoped_refresh_replaces_one_shard(tmp_path: Path) -> None:

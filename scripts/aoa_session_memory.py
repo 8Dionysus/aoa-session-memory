@@ -296,6 +296,13 @@ SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
         "Agent route signals and nearby operational evidence.",
     ),
 )
+SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS = tuple(
+    dict.fromkeys(
+        layer
+        for _lane_id, lane_layers, _lane_terms, _preferred_first_route, _description in SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES
+        for layer in lane_layers
+    )
+)
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS = (
     "goal",
     "agent_event",
@@ -65000,7 +65007,7 @@ def search_operational_direct_event_rollup_shard_rows(
             ).fetchone()
             route_bound_direct_event_count = int_value(route_bound_row["count"] if route_bound_row else 0)
         direct_event_count = int_value(direct_count_row["direct_event_count"] if direct_count_row else 0)
-        direct_refs_sql = f"""
+        base_direct_refs_sql = f"""
             SELECT COALESCE(documents.usage_role, '') AS usage_role,
                    COALESCE(documents.event_type, '') AS event_type,
                    COALESCE(documents.session_act, '') AS session_act,
@@ -65017,6 +65024,34 @@ def search_operational_direct_event_rollup_shard_rows(
             WHERE documents.doc_type = 'event'
               AND COALESCE(documents.usage_role, '') IN ({direct_placeholders})
         """
+        routed_direct_refs_sql = ""
+        direct_refs_params = list(direct_params)
+        if has_route_tables:
+            direct_route_layers = list(SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS)
+            direct_route_layer_placeholders = ", ".join("?" for _ in direct_route_layers)
+            routed_direct_refs_sql = f"""
+                UNION ALL
+                SELECT COALESCE(documents.usage_role, '') AS usage_role,
+                       COALESCE(documents.event_type, '') AS event_type,
+                       COALESCE(documents.session_act, '') AS session_act,
+                       COALESCE(route_terms.layer, '') AS route_layer,
+                       COALESCE(route_terms.key, '') AS route_key,
+                       COALESCE(route_terms.route_signal, '') AS route_signal,
+                       COALESCE(documents.session_id, '') AS session_id,
+                       COALESCE(documents.session_date, '') AS session_date,
+                       COALESCE(documents.raw_ref, '') AS raw_ref,
+                       COALESCE(documents.segment_ref, '') AS segment_ref,
+                       COALESCE(documents.event_id, '') AS event_id,
+                       printf('%020d', documents.rowid) AS sort_id
+                FROM documents{usage_hint}
+                JOIN document_routes ON document_routes.doc_rowid = documents.rowid
+                JOIN route_terms ON route_terms.id = document_routes.route_id
+                WHERE documents.doc_type = 'event'
+                  AND COALESCE(documents.usage_role, '') IN ({direct_placeholders})
+                  AND route_terms.layer IN ({direct_route_layer_placeholders})
+            """
+            direct_refs_params.extend([*direct_params, *direct_route_layers])
+        direct_refs_sql = f"{base_direct_refs_sql}{routed_direct_refs_sql}"
         aggregate_rows = conn.execute(
             f"""
             WITH direct_refs AS (
@@ -65033,10 +65068,10 @@ def search_operational_direct_event_rollup_shard_rows(
                    MIN(session_date) AS first_session_date,
                    MAX(session_date) AS last_session_date
             FROM direct_refs
-            GROUP BY usage_role, event_type, session_act
+            GROUP BY usage_role, event_type, session_act, route_layer, route_key, route_signal
             ORDER BY posting_count DESC, usage_role ASC, event_type ASC, session_act ASC
             """,
-            direct_params,
+            direct_refs_params,
         ).fetchall()
         sample_limit = max(0, int(ref_sample_limit))
         samples_by_term: dict[tuple[str, str, str, str, str, str], dict[str, list[str]]] = defaultdict(
@@ -65062,14 +65097,14 @@ def search_operational_direct_event_rollup_shard_rows(
                            segment_ref,
                            event_id,
                            ROW_NUMBER() OVER (
-                               PARTITION BY usage_role, event_type, session_act
+                               PARTITION BY usage_role, event_type, session_act, route_layer, route_key, route_signal
                                ORDER BY session_date DESC, sort_id DESC
                            ) AS sample_rank
                     FROM direct_refs
                 )
                 WHERE sample_rank <= ?
                 """,
-                [*direct_params, sample_limit],
+                [*direct_refs_params, sample_limit],
             ).fetchall()
             for row in sample_rows:
                 token = (
@@ -65123,6 +65158,7 @@ def search_operational_direct_event_rollup_shard_rows(
                     "event_ids": samples["event_ids"][:sample_limit],
                 }
             )
+        direct_event_posting_count = sum(int_value(row.get("posting_count")) for row in rows if not row.get("route_layer"))
         route_posting_count = sum(int_value(row.get("posting_count")) for row in rows if row.get("route_layer"))
         return {
             "ok": True,
@@ -65134,7 +65170,7 @@ def search_operational_direct_event_rollup_shard_rows(
                 "direct_event_count": direct_event_count,
                 "route_bound_direct_event_count": route_bound_direct_event_count,
                 "unrouted_direct_event_count": max(0, direct_event_count - route_bound_direct_event_count),
-                "direct_event_posting_count": sum(int_value(row.get("posting_count")) for row in rows),
+                "direct_event_posting_count": direct_event_posting_count,
                 "direct_route_posting_count": route_posting_count,
                 "direct_event_term_count": len(rows),
             },
@@ -65193,7 +65229,7 @@ def insert_search_operational_direct_event_rollup_shard_result(
             int_value(summary.get("direct_event_count")),
             int_value(summary.get("route_bound_direct_event_count")),
             int_value(summary.get("unrouted_direct_event_count")),
-            sum(int_value(row.get("posting_count")) for row in rows if isinstance(row, dict)),
+            int_value(summary.get("direct_event_posting_count")),
             len(rows),
             int_value(item.get("elapsed_ms")),
         ),
@@ -65359,6 +65395,7 @@ def session_memory_operational_direct_event_rollup_status(
         "exists": target_db.exists(),
         "size_bytes": path_total_size(target_db),
         "size_human": human_size(path_total_size(target_db)),
+        "route_layer_scope": list(SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS),
         "source_search_shards_status": search_shards.get("status") or "unknown",
         "refresh_command": command,
         "exact_refresh_command": shlex.join(command),
@@ -65396,7 +65433,7 @@ def session_memory_operational_direct_event_rollup_status(
         total_row = conn.execute(
             """
             SELECT COUNT(*) AS row_count,
-                   COALESCE(SUM(posting_count), 0) AS posting_count,
+                   COALESCE(SUM(posting_count), 0) AS rollup_posting_count,
                    COUNT(CASE WHEN route_layer != '' THEN 1 END) AS routed_group_count,
                    COUNT(CASE WHEN raw_refs_json != '[]' THEN 1 END) AS sampled_raw_group_count,
                    COUNT(CASE WHEN segment_refs_json != '[]' THEN 1 END) AS sampled_segment_group_count
@@ -65408,12 +65445,13 @@ def session_memory_operational_direct_event_rollup_status(
             SELECT COALESCE(SUM(event_total), 0) AS event_total,
                    COALESCE(SUM(direct_event_count), 0) AS direct_event_count,
                    COALESCE(SUM(route_bound_direct_event_count), 0) AS route_bound_direct_event_count,
-                   COALESCE(SUM(unrouted_direct_event_count), 0) AS unrouted_direct_event_count
+                   COALESCE(SUM(unrouted_direct_event_count), 0) AS unrouted_direct_event_count,
+                   COALESCE(SUM(direct_event_posting_count), 0) AS direct_event_posting_count
             FROM shards
             """
         ).fetchone()
         rollup_row_count = int_value(total_row["row_count"] if total_row else 0)
-        posting_count = int_value(total_row["posting_count"] if total_row else 0)
+        rollup_posting_count = int_value(total_row["rollup_posting_count"] if total_row else 0)
         routed_group_count = int_value(total_row["routed_group_count"] if total_row else 0)
         sampled_raw_group_count = int_value(total_row["sampled_raw_group_count"] if total_row else 0)
         sampled_segment_group_count = int_value(total_row["sampled_segment_group_count"] if total_row else 0)
@@ -65423,6 +65461,7 @@ def session_memory_operational_direct_event_rollup_status(
             direct_event_total_row["route_bound_direct_event_count"] if direct_event_total_row else 0
         )
         unrouted_direct_event_count = int_value(direct_event_total_row["unrouted_direct_event_count"] if direct_event_total_row else 0)
+        direct_event_posting_count = int_value(direct_event_total_row["direct_event_posting_count"] if direct_event_total_row else 0)
     except sqlite3.Error as exc:
         diagnostics.append(f"operational_direct_event_rollup_unreadable:{sqlite_error_diagnostic(exc)}")
         return {
@@ -65508,7 +65547,8 @@ def session_memory_operational_direct_event_rollup_status(
         "route_bound_direct_event_count": route_bound_direct_event_count,
         "unrouted_direct_event_count": unrouted_direct_event_count,
         "direct_event_rollup_row_count": rollup_row_count,
-        "direct_event_posting_count": posting_count,
+        "direct_event_posting_count": direct_event_posting_count,
+        "direct_event_rollup_posting_count": rollup_posting_count,
         "routed_group_count": routed_group_count,
         "sampled_raw_group_count": sampled_raw_group_count,
         "sampled_segment_group_count": sampled_segment_group_count,
@@ -65567,15 +65607,20 @@ def session_memory_search_operational_direct_event_rollup(
     route_counts: Counter[tuple[str, str, str]] = Counter()
     for row in rows:
         posting_count = int_value(row.get("posting_count"))
-        role_counts[str(row.get("usage_role") or "")] += posting_count
-        event_type_counts[str(row.get("event_type") or "")] += posting_count
-        session_act_counts[str(row.get("session_act") or "")] += posting_count
         route_layer = str(row.get("route_layer") or "")
         route_key = str(row.get("route_key") or "")
         route_signal = str(row.get("route_signal") or "")
         if route_layer or route_key:
             route_counts[(route_layer, route_key, route_signal)] += posting_count
-    direct_event_posting_count = sum(int_value(row.get("posting_count")) for row in rows)
+        else:
+            role_counts[str(row.get("usage_role") or "")] += posting_count
+            event_type_counts[str(row.get("event_type") or "")] += posting_count
+            session_act_counts[str(row.get("session_act") or "")] += posting_count
+    direct_event_posting_count = sum(
+        int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("direct_event_posting_count"))
+        for item in successful
+    )
+    direct_event_rollup_posting_count = sum(int_value(row.get("posting_count")) for row in rows)
     direct_event_count = sum(int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("direct_event_count")) for item in successful)
     route_bound_direct_event_count = sum(
         int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("route_bound_direct_event_count"))
@@ -65615,6 +65660,7 @@ def session_memory_search_operational_direct_event_rollup(
         "aoa_root": str(aoa_root),
         "catalog_status": catalog.get("status"),
         "target_db": str(target_db),
+        "route_layer_scope": list(SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS),
         "written": bool(write_result),
         "write_result": write_result,
         "update_mode": "scoped_shard_replace" if scoped_update_requested else "full_rebuild",
@@ -65635,6 +65681,7 @@ def session_memory_search_operational_direct_event_rollup(
             "unrouted_direct_event_count": unrouted_direct_event_count,
             "direct_event_rollup_row_count": len(rows),
             "direct_event_posting_count": direct_event_posting_count,
+            "direct_event_rollup_posting_count": direct_event_rollup_posting_count,
             "route_bound_direct_event_ratio": round(route_bound_direct_event_count / direct_event_count, 6)
             if direct_event_count > 0
             else 0.0,
@@ -65933,6 +65980,7 @@ def session_memory_search_operational_direct_event_rollup_query(
         "target_db": str(target_db),
         "filters": filters,
         "normalized_filters": normalized_filters,
+        "route_layer_scope": list(SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS),
         "rollup_status": {
             key: rollup_status.get(key)
             for key in (
@@ -66010,6 +66058,11 @@ def session_memory_search_operational_direct_event_rollup_query(
             where.append(f"{column} = ?")
             params.append(value)
     query_terms = normalized_filters.get("query_terms") if isinstance(normalized_filters.get("query_terms"), list) else []
+    explicit_route_filter = bool(
+        normalized_filters.get("route_layer") or normalized_filters.get("route_key") or normalized_filters.get("route_signal")
+    )
+    if not explicit_route_filter and not query_terms:
+        where.append("route_layer = '' AND route_key = '' AND route_signal = ''")
     if query_terms:
         query_clauses: list[str] = []
         for term in query_terms:
@@ -75788,6 +75841,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         and scenario.get("usage_chain_required_for_behavior_proof") is not True
     ):
         failures.append(f"{profile}:usage_chain_required_for_behavior_proof:{scenario.get('usage_chain_required_for_behavior_proof')}")
+    if expectation.get("require_direct_event_route_ref") is True and scenario.get("route_ref_present") is not True:
+        failures.append(f"{profile}:route_ref_present:{scenario.get('route_ref_present')}")
     for expectation_key, scenario_key in (
         ("require_no_shard_resample", "resamples_shards"),
         ("require_no_monolith_open", "opens_monolith"),
