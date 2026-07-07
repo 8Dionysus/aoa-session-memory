@@ -50712,9 +50712,9 @@ def graph_entity_usage_replacement_corpus_evidence(aoa_root: Path) -> dict[str, 
         "freshness_basis": "corpus_and_route_code",
         "graph_store_mtime_observed": graph_store_mtime,
         "graph_store_mtime_is_blocking": False,
-        "exact_refresh_command": (
-            f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check "
-            f"--aoa-root {aoa_root} --case-limit 17 --write-report"
+        "exact_refresh_command": live_scenario_corpus_check_command_for_case(
+            aoa_root,
+            GRAPH_ENTITY_USAGE_REPLACEMENT_CORPUS_CASE_ID,
         ),
         "truth_status": "missing_current_live_scenario_corpus_evidence",
     }
@@ -50763,7 +50763,10 @@ def graph_high_fanout_replacement_plan_for_edge(
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-entity-usage-replacement-proof <anchor> --aoa-root {aoa_root} --kind <kind>",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} usage-chain <anchor> --aoa-root {aoa_root} --kind <kind>",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} entity-usage-audit <anchor> --aoa-root {aoa_root} --kind <kind>",
-                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check --aoa-root {aoa_root} --case-limit 17 --write-report",
+                live_scenario_corpus_check_command_for_case(
+                    aoa_root,
+                    GRAPH_ENTITY_USAGE_REPLACEMENT_CORPUS_CASE_ID,
+                ),
             ],
             "promotion_rule": "promote only after usage/consequence packets preserve raw/segment refs and route freshness on reviewed live cases",
             "can_prune_now": False,
@@ -74051,6 +74054,27 @@ def live_scenario_audit(
 
 def live_scenario_corpus_default_path(aoa_root: Path) -> Path:
     return aoa_root / LIVE_SCENARIO_CORPUS_PATH
+
+
+def live_scenario_corpus_case_limit_for_id(aoa_root: Path, case_id: str, corpus_path: Path | None = None) -> int:
+    target = corpus_path or live_scenario_corpus_default_path(aoa_root)
+    corpus, diagnostics = load_live_scenario_corpus(target)
+    if diagnostics:
+        return 0
+    cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
+    for index, case in enumerate(cases, start=1):
+        if isinstance(case, dict) and str(case.get("id") or "") == case_id:
+            return index
+    return 0
+
+
+def live_scenario_corpus_check_command_for_case(aoa_root: Path, case_id: str) -> str:
+    case_limit = live_scenario_corpus_case_limit_for_id(aoa_root, case_id)
+    case_limit_arg = f" --case-limit {case_limit}" if case_limit > 0 else ""
+    return (
+        f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check "
+        f"--aoa-root {aoa_root}{case_limit_arg} --write-report"
+    )
 
 
 def load_live_scenario_corpus(path: Path) -> tuple[dict[str, Any], list[str]]:

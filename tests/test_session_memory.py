@@ -23898,6 +23898,48 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
 
 
+def test_graph_high_fanout_policy_uses_corpus_limit_covering_replacement_case(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    script_path = aoa_root / "scripts" / "aoa_session_memory.py"
+    graph_path = module.graph_paths(aoa_root)["store"]
+    corpus_path = module.live_scenario_corpus_default_path(aoa_root)
+    script_path.parent.mkdir(parents=True)
+    graph_path.parent.mkdir(parents=True)
+    corpus_path.parent.mkdir(parents=True)
+    script_path.write_text("# fixture\n", encoding="utf-8")
+    graph_path.write_text("fixture graph store marker\n", encoding="utf-8")
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                *[
+                    {
+                        "id": f"filler_{index:02d}",
+                        "profiles": ["literal_planner"],
+                    }
+                    for index in range(17)
+                ],
+                {
+                    "id": module.GRAPH_ENTITY_USAGE_REPLACEMENT_CORPUS_CASE_ID,
+                    "profiles": ["graph_high_fanout_replacement"],
+                },
+            ],
+        },
+    )
+
+    evidence = module.graph_entity_usage_replacement_corpus_evidence(aoa_root)
+
+    assert evidence["status"] == "stale_or_missing"
+    assert evidence["exact_refresh_command"].endswith("--case-limit 18 --write-report")
+    assert module.live_scenario_corpus_case_limit_for_id(
+        aoa_root,
+        module.GRAPH_ENTITY_USAGE_REPLACEMENT_CORPUS_CASE_ID,
+    ) == 18
+
+
 def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
     tmp_path: Path,
     monkeypatch: Any,
