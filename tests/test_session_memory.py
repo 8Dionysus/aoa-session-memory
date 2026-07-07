@@ -24049,6 +24049,146 @@ def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
     assert payload["replacement_proof_states"][module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION]["status"] == "proven"
 
 
+def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    script_path = aoa_root / "scripts" / "aoa_session_memory.py"
+    graph_path = module.graph_paths(aoa_root)["store"]
+    corpus_path = module.live_scenario_corpus_default_path(aoa_root)
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("# fixture\n", encoding="utf-8")
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("fixture graph store marker\n", encoding="utf-8")
+    write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {"id": "filler_01", "profiles": ["literal_planner"]},
+                {"id": module.GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID, "profiles": ["graph_cooccurrence"]},
+                {"id": "filler_03", "profiles": ["literal_planner"]},
+                {"id": module.GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID, "profiles": ["route_rollup_query"]},
+            ],
+        },
+    )
+    base_ts = time.time()
+    for path in (script_path, graph_path, corpus_path):
+        os.utime(path, (base_ts, base_ts))
+    report_path = aoa_root / "diagnostics" / "20260707T010000Z__live-scenario-corpus-check.json"
+    write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_check",
+            "generated_at": "2026-07-07T01:00:00Z",
+            "ok": True,
+            "corpus_path": str(corpus_path),
+            "case_count": 4,
+            "passed_count": 4,
+            "failed_count": 0,
+            "results": [
+                {
+                    "id": module.GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID,
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "graph_cooccurrence",
+                                "status": "passed",
+                                "elapsed_ms": 624,
+                                "evidence_ref_counts": {"raw_ref": 36, "segment_ref": 36, "session_ref": 29},
+                                "first_ref": {"raw": "raw:line:12", "segment": "000__initial-to-compaction.md"},
+                                "evidence_ref_count": 40,
+                                "anchor_event_count": 40,
+                                "cooccurrence_count": 4,
+                                "bounded_store_query": True,
+                                "anchor_event_sample_truncated": True,
+                                "route_edge_sample_truncated": False,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": module.GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID,
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "route_rollup_query",
+                                "status": "passed",
+                                "elapsed_ms": 704,
+                                "evidence_ref_counts": {"raw_ref": 161, "segment_ref": 161, "session_ref": 154},
+                                "first_ref": {"raw": "raw:line:22761"},
+                                "layer_counts": {"mcp": 2},
+                                "result_count": 2,
+                                "matched_group_count": 2,
+                                "omitted_group_count": 0,
+                                "raw_or_segment_ref_present": True,
+                                "freshness_status": "current",
+                                "needs_refresh": False,
+                                "uses_materialized_route_rollup": True,
+                                "resamples_shards": False,
+                                "opens_monolith": False,
+                                "uses_fts": False,
+                                "hydrates_body": False,
+                            }
+                        ]
+                    },
+                },
+            ],
+        },
+    )
+    os.utime(report_path, (base_ts + 10, base_ts + 10))
+    os.utime(graph_path, (base_ts + 20, base_ts + 20))
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=12: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 2_000_000},
+                "edge": {
+                    "event_mentions_registered_entity": 3_700_000,
+                    "mentions_route_signal": 3_000_000,
+                    "has_event": 2_100_000,
+                    "session_has_route_signal": 1_400_000,
+                },
+            },
+            "top": {"node": [], "edge": []},
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
+
+    route_plan = next(
+        row["replacement_plan"]
+        for row in payload["edge_policies"]
+        if row["edge_type"] == "mentions_route_signal"
+    )
+    assert route_plan["status"] == "compact_layers_exist_replacement_quality_proven_cardinality_unproven"
+    assert route_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
+    assert "route_signal_rollup_refs_match_edge_samples" in route_plan["proven_proof_gates"]
+    assert "cooccurrence_packet_preserves_dense_anchor_neighbors" in route_plan["proven_proof_gates"]
+    assert route_plan["proof_evidence"]["status"] == "proven"
+    assert route_plan["proof_evidence"]["route_rollup_opens_monolith"] is False
+    assert route_plan["proof_evidence"]["route_rollup_uses_fts"] is False
+    assert route_plan["proof_evidence"]["route_rollup_hydrates_body"] is False
+    assert route_plan["proof_commands"][-1].endswith("--case-limit 4 --write-report")
+    assert "route_signal_rollup_refs_match_edge_samples" not in payload["replacement_readiness"]["missing_proof_gates"]
+    assert "cooccurrence_packet_preserves_dense_anchor_neighbors" not in payload["replacement_readiness"]["missing_proof_gates"]
+    assert "before_after_cardinality_comparison" in payload["replacement_readiness"]["missing_proof_gates"]
+    assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
+    assert payload["replacement_proof_states"][module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION]["status"] == "proven"
+
+
 def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edges(
     tmp_path: Path,
     monkeypatch: Any,

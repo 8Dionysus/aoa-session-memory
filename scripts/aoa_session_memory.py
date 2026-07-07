@@ -416,6 +416,13 @@ GRAPH_ENTITY_USAGE_REPLACEMENT_DEFAULT_PROBES = (
     {"name": "mcp_aoa_session_memory", "anchor": "aoa-session-memory-mcp", "kind": "mcp"},
 )
 GRAPH_ENTITY_USAGE_REPLACEMENT_CORPUS_CASE_ID = "graph_entity_usage_replacement_proof_contract"
+GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION = "route_signal_cooccurrence_rollup_by_segment_session"
+GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID = "graph_cooccurrence_dense_anchor_contract"
+GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID = "route_rollup_query_materialized_contract"
+GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS = (
+    GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID,
+    GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID,
+)
 GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES = frozenset(
     {
         "raw_or_segment_refs_preserved",
@@ -425,6 +432,17 @@ GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES = frozenset(
         "live_scenario_case_present",
         "usage_chain_preserves_consequence_links",
         "entity_usage_rollup_samples_match_event_refs",
+    }
+)
+GRAPH_ROUTE_SIGNAL_REPLACEMENT_PROVEN_GATES = frozenset(
+    {
+        "raw_or_segment_refs_preserved",
+        "freshness_current_or_stale_flag_visible",
+        "fallback_route_named",
+        "bounded_packet_default",
+        "live_scenario_case_present",
+        "route_signal_rollup_refs_match_edge_samples",
+        "cooccurrence_packet_preserves_dense_anchor_neighbors",
     }
 )
 GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
@@ -50629,12 +50647,147 @@ def graph_entity_usage_replacement_corpus_profile(result: dict[str, Any]) -> dic
     return {}
 
 
+def live_scenario_result_profile(result: dict[str, Any], profile_name: str) -> dict[str, Any]:
+    observed = result.get("observed") if isinstance(result.get("observed"), dict) else {}
+    for profile in observed.get("profiles", []) if isinstance(observed.get("profiles"), list) else []:
+        if isinstance(profile, dict) and profile.get("profile") == profile_name:
+            return profile
+    return {}
+
+
 def graph_entity_usage_replacement_report_min_source_mtime(aoa_root: Path) -> float:
     paths = [
         live_scenario_corpus_default_path(aoa_root),
         aoa_root / "scripts" / "aoa_session_memory.py",
     ]
     return max((path_mtime(path) for path in paths if path.exists()), default=0.0)
+
+
+def graph_route_signal_replacement_corpus_evidence(aoa_root: Path) -> dict[str, Any]:
+    required_mtime = graph_entity_usage_replacement_report_min_source_mtime(aoa_root)
+    graph_store_mtime = path_mtime(graph_paths(aoa_root)["store"])
+    stale_reports = 0
+    incomplete_reports = 0
+    for report in diagnostic_json_payloads(aoa_root, "*__live-scenario-corpus-check.json", limit=20):
+        source = diagnostic_report_source(report)
+        report_mtime = ops_float_value(report.get("_diagnostic_mtime"))
+        if required_mtime and report_mtime < required_mtime:
+            stale_reports += 1
+            continue
+        results = report.get("results") if isinstance(report.get("results"), list) else []
+        result_by_id = {
+            str(item.get("id") or ""): item
+            for item in results
+            if isinstance(item, dict) and item.get("id")
+        }
+        cooccurrence_result = result_by_id.get(GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID)
+        rollup_result = result_by_id.get(GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID)
+        if not isinstance(cooccurrence_result, dict) or not isinstance(rollup_result, dict):
+            incomplete_reports += 1
+            continue
+        cooccurrence_profile = live_scenario_result_profile(cooccurrence_result, "graph_cooccurrence")
+        rollup_profile = live_scenario_result_profile(rollup_result, "route_rollup_query")
+        cooccurrence_refs = (
+            cooccurrence_profile.get("evidence_ref_counts")
+            if isinstance(cooccurrence_profile.get("evidence_ref_counts"), dict)
+            else {}
+        )
+        rollup_refs = (
+            rollup_profile.get("evidence_ref_counts")
+            if isinstance(rollup_profile.get("evidence_ref_counts"), dict)
+            else {}
+        )
+        cooccurrence_ok = (
+            cooccurrence_result.get("ok") is True
+            and cooccurrence_profile.get("status") == "passed"
+            and cooccurrence_profile.get("bounded_store_query") is True
+            and int_value(cooccurrence_profile.get("anchor_event_count")) > 0
+            and int_value(cooccurrence_profile.get("cooccurrence_count")) > 0
+            and int_value(cooccurrence_profile.get("evidence_ref_count")) > 0
+            and int_value(cooccurrence_refs.get("raw_ref")) > 0
+            and int_value(cooccurrence_refs.get("segment_ref")) > 0
+        )
+        rollup_ok = (
+            rollup_result.get("ok") is True
+            and rollup_profile.get("status") == "passed"
+            and rollup_profile.get("uses_materialized_route_rollup") is True
+            and rollup_profile.get("resamples_shards") is False
+            and rollup_profile.get("opens_monolith") is False
+            and rollup_profile.get("uses_fts") is False
+            and rollup_profile.get("hydrates_body") is False
+            and rollup_profile.get("raw_or_segment_ref_present") is True
+            and rollup_profile.get("freshness_status") == "current"
+            and rollup_profile.get("needs_refresh") is not True
+            and int_value(rollup_profile.get("result_count")) > 0
+            and int_value(rollup_profile.get("matched_group_count")) > 0
+            and int_value(rollup_refs.get("raw_ref")) > 0
+            and int_value(rollup_refs.get("segment_ref")) > 0
+        )
+        if cooccurrence_ok and rollup_ok:
+            return {
+                "status": "proven",
+                "case_ids": list(GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS),
+                "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+                "proven_gates": sorted(GRAPH_ROUTE_SIGNAL_REPLACEMENT_PROVEN_GATES),
+                "source": source,
+                "freshness_basis": "corpus_and_route_code",
+                "graph_store_mtime_observed": graph_store_mtime,
+                "graph_store_mtime_is_blocking": False,
+                "cooccurrence_anchor_event_count": int_value(cooccurrence_profile.get("anchor_event_count")),
+                "cooccurrence_count": int_value(cooccurrence_profile.get("cooccurrence_count")),
+                "cooccurrence_evidence_ref_count": int_value(cooccurrence_profile.get("evidence_ref_count")),
+                "route_rollup_result_count": int_value(rollup_profile.get("result_count")),
+                "route_rollup_matched_group_count": int_value(rollup_profile.get("matched_group_count")),
+                "route_rollup_freshness_status": rollup_profile.get("freshness_status"),
+                "route_rollup_uses_materialized_projection": rollup_profile.get("uses_materialized_route_rollup"),
+                "route_rollup_opens_monolith": rollup_profile.get("opens_monolith"),
+                "route_rollup_uses_fts": rollup_profile.get("uses_fts"),
+                "route_rollup_hydrates_body": rollup_profile.get("hydrates_body"),
+                "fallback_routes": ["graph-cooccurrence", "search-operational-route-rollup-query"],
+                "truth_status": "generated_live_scenario_corpus_evidence_not_prune_permission",
+            }
+        return {
+            "status": "not_proven",
+            "case_ids": list(GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS),
+            "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+            "proven_gates": [],
+            "source": source,
+            "freshness_basis": "corpus_and_route_code",
+            "graph_store_mtime_observed": graph_store_mtime,
+            "graph_store_mtime_is_blocking": False,
+            "cooccurrence_ok": cooccurrence_ok,
+            "route_rollup_ok": rollup_ok,
+            "cooccurrence_status": cooccurrence_profile.get("status"),
+            "route_rollup_status": rollup_profile.get("status"),
+            "cooccurrence_failures": (
+                cooccurrence_result.get("failures")
+                if isinstance(cooccurrence_result.get("failures"), list)
+                else []
+            ),
+            "route_rollup_failures": (
+                rollup_result.get("failures")
+                if isinstance(rollup_result.get("failures"), list)
+                else []
+            ),
+            "truth_status": "latest_live_scenario_corpus_cases_do_not_prove_route_signal_replacement",
+        }
+    return {
+        "status": "stale_or_missing",
+        "case_ids": list(GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS),
+        "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+        "proven_gates": [],
+        "stale_report_count": stale_reports,
+        "incomplete_report_count": incomplete_reports,
+        "required_min_source_mtime": required_mtime,
+        "freshness_basis": "corpus_and_route_code",
+        "graph_store_mtime_observed": graph_store_mtime,
+        "graph_store_mtime_is_blocking": False,
+        "exact_refresh_command": live_scenario_corpus_check_command_for_cases(
+            aoa_root,
+            GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS,
+        ),
+        "truth_status": "missing_current_live_scenario_corpus_evidence",
+    }
 
 
 def graph_entity_usage_replacement_corpus_evidence(aoa_root: Path) -> dict[str, Any]:
@@ -50772,22 +50925,40 @@ def graph_high_fanout_replacement_plan_for_edge(
             "can_prune_now": False,
         }
     if edge_type == "mentions_route_signal":
+        proof_state = (proof_states or {}).get(GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION)
+        if not isinstance(proof_state, dict):
+            proof_state = {}
+        proven_gates = {
+            str(gate)
+            for gate in proof_state.get("proven_gates", [])
+            if gate
+        } if proof_state.get("status") == "proven" else set()
         missing_gates = common + [
             "route_signal_rollup_refs_match_edge_samples",
             "cooccurrence_packet_preserves_dense_anchor_neighbors",
         ]
+        missing_gates = [gate for gate in missing_gates if gate not in proven_gates]
         return {
             "edge_type": edge_type,
-            "status": "compact_layers_exist_replacement_projection_unproven",
+            "status": (
+                "compact_layers_exist_replacement_quality_proven_cardinality_unproven"
+                if proven_gates
+                else "compact_layers_exist_replacement_projection_unproven"
+            ),
             "candidate_for_cardinality_reduction": True,
-            "target_projection": "route_signal_cooccurrence_rollup_by_segment_session",
+            "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
             "existing_compact_routes": ["graph-cooccurrence", "search-operational-route-rollup-query"],
             "replacement_layers": replacement_layers,
+            "proven_proof_gates": sorted(proven_gates),
             "missing_proof_gates": missing_gates,
+            "proof_evidence": proof_state,
             "proof_commands": [
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cooccurrence <anchor> --aoa-root {aoa_root} --kind <kind> --limit 30",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} search-operational-route-rollup-query <query> --aoa-root {aoa_root} --layer <layer> --limit 12 --ref-limit 3",
-                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check --aoa-root {aoa_root} --case-limit 1",
+                live_scenario_corpus_check_command_for_cases(
+                    aoa_root,
+                    GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS,
+                ),
             ],
             "promotion_rule": "promote only after cooccurrence and rollup packets preserve bounded neighbors, refs, freshness, and exact next expansion",
             "can_prune_now": False,
@@ -50981,7 +51152,8 @@ def graph_high_fanout_policy_from_projection(
         for edge_type, count in edge_rows[:selected_limit]
     ]
     proof_states = {
-        GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION: graph_entity_usage_replacement_corpus_evidence(aoa_root)
+        GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION: graph_entity_usage_replacement_corpus_evidence(aoa_root),
+        GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION: graph_route_signal_replacement_corpus_evidence(aoa_root),
     }
     for row in edge_policies:
         row["replacement_plan"] = graph_high_fanout_replacement_plan_for_edge(
@@ -74068,13 +74240,30 @@ def live_scenario_corpus_case_limit_for_id(aoa_root: Path, case_id: str, corpus_
     return 0
 
 
-def live_scenario_corpus_check_command_for_case(aoa_root: Path, case_id: str) -> str:
-    case_limit = live_scenario_corpus_case_limit_for_id(aoa_root, case_id)
+def live_scenario_corpus_case_limit_for_ids(
+    aoa_root: Path,
+    case_ids: Sequence[str],
+    corpus_path: Path | None = None,
+) -> int:
+    limits = [
+        live_scenario_corpus_case_limit_for_id(aoa_root, str(case_id), corpus_path=corpus_path)
+        for case_id in case_ids
+        if str(case_id)
+    ]
+    return max(limits, default=0)
+
+
+def live_scenario_corpus_check_command_for_cases(aoa_root: Path, case_ids: Sequence[str]) -> str:
+    case_limit = live_scenario_corpus_case_limit_for_ids(aoa_root, case_ids)
     case_limit_arg = f" --case-limit {case_limit}" if case_limit > 0 else ""
     return (
         f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check "
         f"--aoa-root {aoa_root}{case_limit_arg} --write-report"
     )
+
+
+def live_scenario_corpus_check_command_for_case(aoa_root: Path, case_id: str) -> str:
+    return live_scenario_corpus_check_command_for_cases(aoa_root, [case_id])
 
 
 def load_live_scenario_corpus(path: Path) -> tuple[dict[str, Any], list[str]]:
