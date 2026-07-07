@@ -21956,6 +21956,141 @@ def projection_catchup_print_payload(payload: dict[str, Any], *, full: bool = Fa
     return compact
 
 
+def projection_completeness_has_current_schema(completeness: Any) -> bool:
+    return (
+        isinstance(completeness, dict)
+        and completeness.get("artifact_type") == "session_memory_projection_completeness"
+        and isinstance(completeness.get("surfaces"), dict)
+    )
+
+
+def projection_completeness_surface_current(surface_id: str, surface: dict[str, Any]) -> bool:
+    if surface_id == "raw_authority":
+        return surface.get("needs_maintenance") is not True
+    return surface.get("status") == "current" and surface.get("needs_maintenance") is not True
+
+
+def projection_completeness_is_current(
+    completeness: dict[str, Any],
+    *,
+    next_route: dict[str, Any] | None = None,
+) -> bool:
+    if not projection_completeness_has_current_schema(completeness):
+        return False
+    surfaces = completeness.get("surfaces")
+    status = str(completeness.get("status") or "")
+    route_id = str((next_route or {}).get("id") or "")
+    status_is_current = status == "current" or (status == "plan_ready" and route_id == "verify_projection_status")
+    return (
+        status_is_current
+        and not completeness.get("actionable_surface_ids")
+        and not completeness.get("deferred_surface_ids")
+        and isinstance(surfaces, dict)
+        and all(
+            isinstance(surface, dict) and projection_completeness_surface_current(str(surface_id), surface)
+            for surface_id, surface in surfaces.items()
+        )
+    )
+
+
+def projection_status_refresh_route(*, workspace_root: Path, aoa_root: Path) -> dict[str, Any]:
+    return {
+        "id": "run_projection_catchup_outside_mcp",
+        "status": "needed",
+        "reason": "projection_completeness_missing_or_legacy",
+        "command": projection_catchup_cli_command(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target="all",
+            profile="catchup",
+            apply=False,
+            write_report=True,
+        ),
+    }
+
+
+def session_memory_projection_status(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    include_payload: bool = False,
+) -> dict[str, Any]:
+    reports = diagnostic_json_payloads(aoa_root, "*__projection-catchup-*.json", limit=1)
+    latest_payload = reports[0] if reports else {}
+    completeness = latest_payload.get("projection_completeness")
+    if not isinstance(completeness, dict):
+        completeness = (
+            latest_payload.get("completeness_check")
+            if isinstance(latest_payload.get("completeness_check"), dict)
+            else {}
+        )
+    has_schema = projection_completeness_has_current_schema(completeness)
+    latest_route = latest_payload.get("next_route") if isinstance(latest_payload.get("next_route"), dict) else {}
+    is_current = projection_completeness_is_current(
+        completeness if isinstance(completeness, dict) else {},
+        next_route=latest_route,
+    )
+    fallback_route = projection_status_refresh_route(workspace_root=workspace_root, aoa_root=aoa_root)
+    if has_schema and latest_route:
+        next_operator_route = latest_route
+    else:
+        next_operator_route = fallback_route
+    if has_schema and not is_current and not next_operator_route.get("reason"):
+        next_operator_route = {
+            **next_operator_route,
+            "reason": f"projection_completeness_{completeness.get('status') or 'not_current'}",
+        }
+    maintenance = session_memory_maintenance_status(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        mode="hot",
+        include_timers=False,
+        write_report=False,
+    )
+    source = (
+        "latest_projection_catchup_diagnostic"
+        if is_current
+        else (
+            "noncurrent_projection_catchup_diagnostic"
+            if has_schema
+            else ("legacy_projection_catchup_diagnostic" if completeness else "missing_projection_catchup_diagnostic")
+        )
+    )
+    diagnostic_reason = "" if is_current else str(next_operator_route.get("reason") or fallback_route["reason"])
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": "aoa_session_memory_projection_status_v1",
+        "artifact_type": "session_memory_projection_status",
+        "generated_at": utc_now(),
+        "ok": is_current,
+        "status": completeness.get("status") if isinstance(completeness, dict) and completeness else "missing",
+        "mutates": False,
+        "source": source,
+        "projection_completeness": completeness,
+        "latest_projection_catchup": {
+            **diagnostic_report_source(latest_payload),
+            "payload": latest_payload if include_payload else None,
+        }
+        if latest_payload
+        else {"path": None, "payload": None},
+        "current_maintenance": compact_maintenance_status_payload(maintenance),
+        "next_operator_route": next_operator_route,
+        "exact_next_command": shlex.join(str(part) for part in next_operator_route.get("command", []))
+        if isinstance(next_operator_route.get("command"), list)
+        else "",
+        "diagnostics": [] if is_current else [diagnostic_reason],
+        "mcp_access": {
+            "mutates": False,
+            "archive_command": None,
+            "read_only": True,
+            "does_not_run_projection_catchup": True,
+            "writer_route_stays_outside_mcp": True,
+            "archive_fallback_command": "projection-status",
+        },
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+    }
+
+
 def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
     execution = payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
     lines = [
@@ -72155,6 +72290,19 @@ def command_projection_catchup(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_projection_status(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=root,
+        include_payload=args.include_payload,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -78431,6 +78579,15 @@ def build_parser() -> argparse.ArgumentParser:
     projection_catchup_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown projection catch-up reports under .aoa/diagnostics.")
     projection_catchup_parser.add_argument("--full", action="store_true", help="Print complete projection catch-up payload to stdout.")
     projection_catchup_parser.set_defaults(func=command_projection_catchup)
+
+    projection_status_parser = sub.add_parser(
+        "projection-status",
+        help="Read the latest projection-catchup completeness diagnostic and maintenance guidance without running catch-up.",
+    )
+    projection_status_parser.add_argument("--workspace-root")
+    projection_status_parser.add_argument("--aoa-root")
+    projection_status_parser.add_argument("--include-payload", action="store_true", help="Include the full latest projection-catchup diagnostic payload.")
+    projection_status_parser.set_defaults(func=command_projection_status)
 
     auto_maintenance_parser = sub.add_parser(
         "auto-maintenance",

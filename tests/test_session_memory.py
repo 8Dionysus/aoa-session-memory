@@ -23391,6 +23391,222 @@ def test_projection_catchup_dry_run_without_work_routes_to_verify(tmp_path: Path
     assert "projection-catchup" not in route["command"]
 
 
+def test_projection_status_reads_latest_completeness_without_running_catchup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    write_json(
+        diagnostics / "20260526T000200Z__projection-catchup-catchup.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_projection_catchup",
+            "generated_at": "2026-05-26T00:02:00Z",
+            "ok": True,
+            "mutates": False,
+            "projection_completeness": {
+                "schema_version": module.SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_completeness",
+                "status": "current",
+                "actionable_surface_ids": [],
+                "deferred_surface_ids": [],
+                "surfaces": {
+                    "raw_authority": {
+                        "status": "source_truth_not_projection",
+                        "needs_maintenance": False,
+                    },
+                    "search_index": {"status": "current", "needs_maintenance": False},
+                    "entity_registry": {
+                        "status": "current",
+                        "needs_maintenance": False,
+                        "entity_count": 12,
+                    },
+                },
+            },
+            "next_route": {
+                "id": "verify_projection_status",
+                "status": "ready",
+                "reason": "projection_catchup_finished_without_remaining_backlog",
+                "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_maintenance_status",
+        lambda **_kwargs: {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "ok": True,
+            "mutates": False,
+            "recommendation": "use_graph_search",
+            "search": {"status": "current"},
+            "graph": {"status": "current"},
+            "route": {"status": "current"},
+            "entity_registry": {"status": "current"},
+            "next_actions": [],
+            "diagnostics": [],
+        },
+    )
+
+    status = module.session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert status["artifact_type"] == "session_memory_projection_status"
+    assert status["schema"] == "aoa_session_memory_projection_status_v1"
+    assert status["ok"] is True
+    assert status["mutates"] is False
+    assert status["source"] == "latest_projection_catchup_diagnostic"
+    assert status["projection_completeness"]["surfaces"]["entity_registry"]["entity_count"] == 12
+    assert status["next_operator_route"]["id"] == "verify_projection_status"
+    assert "maintenance-status" in status["exact_next_command"]
+    assert status["mcp_access"]["does_not_run_projection_catchup"] is True
+    assert status["latest_projection_catchup"]["payload"] is None
+
+
+def test_projection_status_treats_plan_ready_verify_route_as_current(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    write_json(
+        diagnostics / "20260526T000200Z__projection-catchup-catchup.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_projection_catchup",
+            "ok": True,
+            "mutates": False,
+            "projection_completeness": {
+                "schema_version": module.SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_completeness",
+                "status": "plan_ready",
+                "actionable_surface_ids": [],
+                "deferred_surface_ids": [],
+                "surfaces": {
+                    "raw_authority": {
+                        "status": "source_truth_not_projection",
+                        "needs_maintenance": False,
+                    },
+                    "search_index": {"status": "current", "needs_maintenance": False},
+                    "entity_registry": {"status": "current", "needs_maintenance": False},
+                },
+            },
+            "next_route": {
+                "id": "verify_projection_status",
+                "status": "ready",
+                "reason": "dry_run_found_no_projection_work",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "maintenance-status",
+                    "--full",
+                    "--no-timers",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_maintenance_status",
+        lambda **_kwargs: {
+            "artifact_type": "session_memory_maintenance_status",
+            "ok": True,
+            "mutates": False,
+            "recommendation": "use_graph_search",
+            "search": {},
+            "graph": {},
+            "route": {},
+            "entity_registry": {},
+            "next_actions": [],
+            "diagnostics": [],
+        },
+    )
+
+    status = module.session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert status["ok"] is True
+    assert status["status"] == "plan_ready"
+    assert status["source"] == "latest_projection_catchup_diagnostic"
+    assert status["diagnostics"] == []
+    assert status["next_operator_route"]["id"] == "verify_projection_status"
+
+
+def test_projection_status_preserves_plan_ready_next_operator_route(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    write_json(
+        diagnostics / "20260526T000200Z__projection-catchup-catchup.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_projection_catchup",
+            "ok": True,
+            "mutates": False,
+            "projection_completeness": {
+                "schema_version": module.SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_completeness",
+                "status": "plan_ready",
+                "actionable_surface_ids": ["search_index"],
+                "deferred_surface_ids": [],
+                "surfaces": {
+                    "search_index": {"status": "planned", "needs_maintenance": True},
+                    "entity_registry": {"status": "current", "needs_maintenance": False},
+                },
+            },
+            "next_route": {
+                "id": "apply_projection_catchup",
+                "status": "ready",
+                "reason": "dry_run_completed",
+                "command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "projection-catchup",
+                    "all",
+                    "--apply",
+                    "--write-report",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_maintenance_status",
+        lambda **_kwargs: {
+            "artifact_type": "session_memory_maintenance_status",
+            "ok": True,
+            "mutates": False,
+            "recommendation": "use_graph_search",
+            "search": {},
+            "graph": {},
+            "route": {},
+            "entity_registry": {},
+            "next_actions": [],
+            "diagnostics": [],
+        },
+    )
+
+    status = module.session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_payload=True,
+    )
+
+    assert status["ok"] is False
+    assert status["status"] == "plan_ready"
+    assert status["source"] == "noncurrent_projection_catchup_diagnostic"
+    assert status["next_operator_route"]["id"] == "apply_projection_catchup"
+    assert "projection-catchup" in status["exact_next_command"]
+    assert "--apply" in status["exact_next_command"]
+    assert status["latest_projection_catchup"]["payload"]["artifact_type"] == "session_memory_projection_catchup"
+    assert status["diagnostics"] == ["dry_run_completed"]
+
+
 def test_projection_catchup_routes_schema_rebuild_to_deep_projection_route(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -23483,6 +23699,20 @@ def test_projection_catchup_parser_routes_to_command(tmp_path: Path) -> None:
     assert args.func is module.command_projection_catchup
     assert args.session == "all"
     assert args.profile == "deep"
+
+    status_args = parser.parse_args(
+        [
+            "projection-status",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--include-payload",
+        ]
+    )
+
+    assert status_args.func is module.command_projection_status
+    assert status_args.include_payload is True
     assert args.apply is True
     assert args.write_report is True
 

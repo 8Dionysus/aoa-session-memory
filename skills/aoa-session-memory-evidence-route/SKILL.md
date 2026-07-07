@@ -192,6 +192,7 @@ query is fuzzy:
 - graph topology: `aoa_session_graph_neighborhood`
 - graph relation bridge: `aoa_session_graph_bridge`
 - dense-anchor graph cooccurrence: `aoa_session_graph_cooccurrence`
+- projection/readiness status: `aoa_session_projection_status`
 - operational route-rollup projection:
   `aoa_session_route_rollup_query`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
@@ -235,6 +236,7 @@ python3 scripts/aoa_session_memory.py entity-usage-audit <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
+python3 scripts/aoa_session_memory.py projection-status
 python3 scripts/aoa_session_memory.py search-operational-route-rollup-query "<query>" --layer <layer> --limit 12 --ref-limit 3
 python3 scripts/aoa_session_memory.py search-operational-shrink-apply --apply --write-report
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48

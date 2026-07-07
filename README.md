@@ -598,6 +598,14 @@ For agent/MCP routing, read `projection_completeness` first: it gives a
 machine-readable status row for every generated projection surface, including
 which surfaces are actionable, deferred, covered by search/index routes, or
 waiting on live-tail quiet windows.
+To inspect the latest projection-catchup completeness packet without running
+the writer route, use the read-only status route:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
 
 For recurring unattended upkeep, use `auto-maintenance`. It wraps the same
 maintenance controller with a clean preflight gate, a lock, and bounded graph

@@ -72,6 +72,8 @@ search rebuild or graph repair is required.
 - Event records contain universal facets and relationship refs where available.
 - `projection-catchup` reports no remaining projection backlog, or returns the
   explicit next route needed to finish it.
+- `projection-status` reads the latest projection-catchup completeness packet
+  without running the writer route.
 - Run `doctor`, `audit`, and tests after broad reindexing.
 
 ## Stop Line

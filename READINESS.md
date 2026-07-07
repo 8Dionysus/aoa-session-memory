@@ -1114,8 +1114,8 @@ Last observed result:
   `ok=true`, `recommendation=use_graph_search`, `warnings=[]`, and
   `projection-catchup all --write-report` returned `status=nothing_to_do`,
   empty actionable/deferred surfaces, and `next_route=verify_projection_status`.
-  MCP `projection-status` reads that report without running catch-up and
-  returns empty actionable/deferred surfaces.
+  MCP and archive `projection-status` read that report without running catch-up
+  and return empty actionable/deferred surfaces.
 - 2026-06-21 structured shard slimming contract: default `search-shards`
   materialization now builds monthly structured-route shard projections that
   skip local raw-text FTS inserts, compressed `document_bodies`, and raw event
