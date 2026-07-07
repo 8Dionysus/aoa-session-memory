@@ -8769,6 +8769,19 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
 
 
+def test_graph_store_creates_edge_type_composite_indexes(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        rows = store.conn.execute("PRAGMA index_list('edges')").fetchall()
+        index_names = {str(row["name"]) for row in rows}
+    finally:
+        store.close()
+
+    assert "idx_edges_source_type" in index_names
+    assert "idx_edges_target_type" in index_names
+
+
 def test_graph_cooccurrence_uses_direct_store_for_dense_route_anchor(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     anchor_node = module.graph_route_node_id("tool", "exec_command")
@@ -22802,6 +22815,51 @@ def test_recent_problem_jobs_do_not_ignore_resource_graph_drip_lock_conflict(tmp
     problems = module.recent_problem_maintenance_reports(aoa_root)
     assert len(problems) == 1
     assert problems[0]["status"] == "resource_blocked_graph_drip_completed"
+
+
+def test_recent_problem_jobs_suppress_lock_held_graph_drip_when_graph_current(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    report = diagnostics / "20260707T155405Z__auto-maintenance-resource-catchup.json"
+    module.write_json(
+        report,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "generated_at": "2026-07-07T15:53:42Z",
+            "ok": False,
+            "status": "resource_blocked_graph_drip_failed",
+            "profile": "catchup",
+            "resource_ok": False,
+            "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
+            "fallback_graph_drip": {
+                "ok": False,
+                "status": "skipped_lock_held",
+                "resource_ok": True,
+                "execution": {"ok": True, "returncode": 0},
+            },
+            "diagnostics": [
+                "graph_drip_fallback_skipped_lock_held",
+                "resource_blocked:indexing_unattended_swap_used_pressure",
+            ],
+        },
+    )
+
+    problems = module.recent_problem_maintenance_reports(aoa_root)
+    assert len(problems) == 1
+    assert module.filter_recent_problem_jobs_for_current_state(
+        problems,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={"actionable_count": 0, "dirty_count": 0, "missing_count": 0, "blocked_count": 0},
+        search_shards={"status": "current"},
+    ) == []
+    assert module.filter_recent_problem_jobs_for_current_state(
+        problems,
+        search={"actionable_dirty_session_count": 0, "deferred_live_session_count": 0},
+        graph={"actionable_count": 1, "dirty_count": 0, "missing_count": 0, "blocked_count": 0},
+        search_shards={"status": "current"},
+    ) == problems
 
 
 def test_recent_problem_jobs_ignore_handled_resource_index_drip(tmp_path: Path) -> None:

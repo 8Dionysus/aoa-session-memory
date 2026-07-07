@@ -42514,6 +42514,8 @@ class GraphSqliteStore:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_contribs_edge ON edge_contribs(edge_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_node)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_node)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(source_node, edge_type)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_node, edge_type)")
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
             ("graph_store_schema_version", str(GRAPH_STORE_SCHEMA_VERSION)),
@@ -49547,6 +49549,8 @@ def graph_event_sequence_projection_recommendation(
             "sqlite_autoindex_edge_contribs_1",
             "idx_edges_source",
             "idx_edges_target",
+            "idx_edges_source_type",
+            "idx_edges_target_type",
             "idx_edge_contribs_edge",
         )
     )
@@ -56924,6 +56928,58 @@ def recent_problem_maintenance_reports(aoa_root: Path, *, limit: int = 8) -> lis
     return problems
 
 
+def recent_problem_handled_by_current_state(
+    problem: dict[str, Any],
+    *,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    search_shards: dict[str, Any],
+) -> bool:
+    status = str(problem.get("status") or "")
+    diagnostics = {str(item) for item in problem.get("diagnostics", []) if item} if isinstance(problem.get("diagnostics"), list) else set()
+    fallback_graph_drip = problem.get("fallback_graph_drip") if isinstance(problem.get("fallback_graph_drip"), dict) else {}
+    fallback_index_drip = problem.get("fallback_index_drip") if isinstance(problem.get("fallback_index_drip"), dict) else {}
+    if (
+        status == "resource_blocked_graph_drip_failed"
+        and str(fallback_graph_drip.get("status") or "") == "skipped_lock_held"
+        and "graph_drip_fallback_skipped_lock_held" in diagnostics
+    ):
+        return all(
+            int_value(graph.get(key)) == 0
+            for key in ("actionable_count", "dirty_count", "missing_count", "blocked_count")
+        )
+    if (
+        status == "resource_blocked_index_drip_failed"
+        and str(fallback_index_drip.get("status") or "") == "skipped_lock_held"
+        and "index_drip_fallback_skipped_lock_held" in diagnostics
+    ):
+        return (
+            int_value(search.get("actionable_dirty_session_count")) == 0
+            and int_value(search.get("deferred_live_session_count")) == 0
+            and str(search_shards.get("status") or "") == "current"
+        )
+    return False
+
+
+def filter_recent_problem_jobs_for_current_state(
+    problems: list[dict[str, Any]],
+    *,
+    search: dict[str, Any],
+    graph: dict[str, Any],
+    search_shards: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        problem
+        for problem in problems
+        if not recent_problem_handled_by_current_state(
+            problem,
+            search=search,
+            graph=graph,
+            search_shards=search_shards,
+        )
+    ]
+
+
 def ops_size_warning(*, code: str, label: str, entry: dict[str, Any], warning_bytes: int, critical_bytes: int) -> dict[str, Any] | None:
     total_bytes = int_value(entry.get("total_with_wal_bytes"), int_value(entry.get("size_bytes")))
     if total_bytes < warning_bytes:
@@ -63150,8 +63206,13 @@ def session_memory_operations_summary(
     writer = session_memory_ops_writer_summary(coordinator)
     last_successful_auto_maintenance = latest_successful_auto_maintenance_reports(aoa_root)
     last_auto_maintenance_resource_launch = latest_auto_maintenance_resource_reports(aoa_root)
-    recent_problem_jobs = recent_problem_maintenance_reports(aoa_root)
     search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    recent_problem_jobs = filter_recent_problem_jobs_for_current_state(
+        recent_problem_maintenance_reports(aoa_root),
+        search=search,
+        graph=graph,
+        search_shards=search_shards,
+    )
     search_pressure = session_memory_search_pressure_summary(
         aoa_root=aoa_root,
         storage=storage,
