@@ -5740,6 +5740,16 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
                 "deferred_live_source_count": 0,
             },
             "entity_registry": {"status": "current", "entity_count": 42},
+            "operations": {
+                "graph_pressure": {
+                    "status": "large_cardinality_dominates",
+                    "high_fanout_policy": {
+                        "status": "large_cardinality_dominates",
+                        "dominant_edge_count": 3,
+                        "mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
+                    },
+                }
+            },
             "next_actions": [
                 {
                     "id": "repair_graph_queue_drip",
@@ -5785,6 +5795,10 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
     assert scenario["route_lane_count"] == 2
     assert scenario["graph_queue_action_present"] is True
     assert scenario["graph_queued_count"] == 25
+    assert scenario["graph_pressure_status"] == "large_cardinality_dominates"
+    assert scenario["graph_high_fanout_policy_status"] == "large_cardinality_dominates"
+    assert scenario["graph_high_fanout_dominant_edge_count"] == 3
+    assert scenario["graph_high_fanout_mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
 
 
 def test_live_scenario_audit_counts_wait_live_tail_as_deferred_graph_queue(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5868,6 +5882,10 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "route_lane_count": 2,
             "graph_queued_count": 25,
             "graph_queue_action_present": True,
+            "graph_pressure_status": "large_cardinality_dominates",
+            "graph_high_fanout_policy_status": "large_cardinality_dominates",
+            "graph_high_fanout_dominant_edge_count": 3,
+            "graph_high_fanout_mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
         },
         {
             "profile": "maintenance_status",
@@ -5879,6 +5897,9 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "require_exact_next_command": True,
             "require_maintenance_packet_no_mutation": True,
             "require_graph_queue_action_when_queued": True,
+            "require_graph_high_fanout_policy_when_pressure": True,
+            "require_graph_high_fanout_no_mutation_boundary": True,
+            "min_graph_high_fanout_dominant_edge_count": 1,
             "required_next_action_ids": ["repair_graph_queue_drip"],
             "required_next_action_lanes": ["graph"],
         },
@@ -5899,6 +5920,10 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "route_lane_count": 0,
             "graph_queued_count": 4,
             "graph_queue_action_present": False,
+            "graph_pressure_status": "large_cardinality_dominates",
+            "graph_high_fanout_policy_status": "",
+            "graph_high_fanout_dominant_edge_count": 0,
+            "graph_high_fanout_mutation_boundary": "",
         },
         {
             "profile": "maintenance_status",
@@ -5909,6 +5934,9 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "require_exact_next_command": True,
             "require_maintenance_packet_no_mutation": True,
             "require_graph_queue_action_when_queued": True,
+            "require_graph_high_fanout_policy_when_pressure": True,
+            "require_graph_high_fanout_no_mutation_boundary": True,
+            "min_graph_high_fanout_dominant_edge_count": 1,
             "required_next_action_lanes": ["graph"],
         },
     )
@@ -5918,6 +5946,8 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
     assert "maintenance_status:mutates:True" in failing
     assert "maintenance_status:graph_queue_action_missing_for_queued_count:4" in failing
     assert "maintenance_status:missing_next_action_lane:graph" in failing
+    assert "maintenance_status:graph_high_fanout_policy_missing_for_pressure" in failing
+    assert "maintenance_status:graph_high_fanout_dominant_edge_count:0<1" in failing
 
 
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
@@ -7614,6 +7644,9 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert parser.parse_args(["entity-usage-chain", "aoa-decisions-mcp", "--kind", "mcp_service"]).func == module.command_entity_usage_chain
     assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
     assert parser.parse_args(["graph-neighborhood", "aoa-session-memory-mcp", "--edge-limit", "5"]).edge_limit == 5
+    high_fanout_args = parser.parse_args(["graph-high-fanout-policy", "--limit", "7"])
+    assert high_fanout_args.func == module.command_graph_high_fanout_policy
+    assert high_fanout_args.limit == 7
     parsed_bridge = parser.parse_args(["graph-bridge", "aoa-session-memory-mcp", "exec_command", "--source-kind", "mcp", "--target-kind", "tool"])
     assert parsed_bridge.source_kind == "mcp"
     assert parsed_bridge.target_kind == "tool"
@@ -22696,7 +22729,60 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
     assert summary["edge_count"] == 10_200_000
     assert summary["graph_db_total_bytes"] < module.OPS_GRAPH_DB_WARNING_BYTES
     assert summary["physical_compaction"]["conservative_reclaimable_bytes"] == 0
+    assert summary["high_fanout_policy"]["status"] == "large_cardinality_dominates"
+    assert summary["high_fanout_policy"]["dominant_edge_types"][:2] == [
+        "event_mentions_registered_entity",
+        "mentions_route_signal",
+    ]
+    assert "graph-high-fanout-policy" in summary["high_fanout_policy"]["exact_read_command"]
     assert "physical SQLite compaction is not the primary fix" in summary["next_route"]
+
+
+def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=12: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 2_000_000, "entity": 220_000},
+                "edge": {
+                    "event_mentions_registered_entity": 3_700_000,
+                    "mentions_route_signal": 3_000_000,
+                    "has_event": 2_100_000,
+                    "session_has_route_signal": 1_400_000,
+                },
+            },
+            "top": {
+                "node": [{"type": "event", "count": 2_000_000}],
+                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+            },
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
+
+    assert payload["artifact_type"] == "session_memory_graph_high_fanout_policy"
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["status"] == "large_cardinality_dominates"
+    assert payload["edge_count"] == 10_200_000
+    assert payload["dominant_edge_types"][:2] == ["event_mentions_registered_entity", "mentions_route_signal"]
+    assert payload["edge_policies"][0]["edge_type"] == "event_mentions_registered_entity"
+    assert payload["edge_policies"][0]["can_prune_now"] is False
+    assert payload["edge_policies"][0]["replacement_required_before_prune"] is True
+    assert payload["edge_policies"][0]["compact_query_route"] == "usage-chain"
+    assert payload["edge_policies"][1]["edge_type"] == "mentions_route_signal"
+    assert payload["edge_policies"][1]["current_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+    assert "segment_has_route_signal" in payload["edge_policies"][1]["replacement_layers"]
+    assert payload["high_fanout_nodes"][0]["node_type"] == "event"
+    assert payload["next_actions"][0]["id"] == "use_compact_graph_routes_for_dense_anchors"
+    assert "graph-cooccurrence" in payload["next_actions"][0]["example_command"]
+    assert payload["mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
 
 
 def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(tmp_path: Path) -> None:

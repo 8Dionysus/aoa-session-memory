@@ -149,6 +149,11 @@ Use these first routes when available:
   as common tools/MCP/services, prefer `graph-cooccurrence` as the bounded
   neighboring-route packet before widening into raw search or GraphRAG.
 - graph maintenance pressure: read `maintenance-status` next actions first.
+  If `operations.graph_pressure` reports large cardinality or dominant edge
+  classes, use `graph-high-fanout-policy` as the read-only policy packet before
+  proposing graph compaction or pruning. It names dense edge classes, compact
+  query routes, replacement layers, and the mutation boundary; it is not
+  permission to delete graph rows.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
   the outer maintenance profile. Global fallbacks use the generated graph
@@ -242,6 +247,7 @@ python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py projection-status
 python3 scripts/aoa_session_memory.py search-operational-route-rollup-query "<query>" --layer <layer> --limit 12 --ref-limit 3
 python3 scripts/aoa_session_memory.py search-operational-shrink-apply --apply --write-report
+python3 scripts/aoa_session_memory.py graph-high-fanout-policy --limit 12
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
 python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1

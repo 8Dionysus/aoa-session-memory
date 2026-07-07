@@ -502,6 +502,8 @@ OPS_SEARCH_DB_NEAR_WARNING_RATIO = 0.80
 OPS_GRAPH_DB_WARNING_BYTES = 40 * 1024 * 1024 * 1024
 OPS_GRAPH_DB_CRITICAL_BYTES = 80 * 1024 * 1024 * 1024
 OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT = 10_000_000
+OPS_GRAPH_HIGH_FANOUT_EDGE_WARNING_COUNT = 1_000_000
+OPS_GRAPH_HIGH_FANOUT_NODE_WARNING_COUNT = 1_000_000
 OPS_SQLITE_WAL_WARNING_BYTES = 512 * 1024 * 1024
 OPS_WRITER_WARNING_MS = 10 * 60 * 1000
 OPS_LOCK_WAIT_WARNING_MS = 1000
@@ -50239,6 +50241,203 @@ def graph_cardinality(
     return payload
 
 
+def graph_high_fanout_edge_policy_row(
+    *,
+    aoa_root: Path,
+    edge_type: str,
+    count: int,
+    edge_total: int,
+) -> dict[str, Any]:
+    share = round(count / edge_total, 6) if edge_total > 0 else 0.0
+    base = {
+        "edge_type": edge_type,
+        "count": count,
+        "share": share,
+        "high_fanout": count >= OPS_GRAPH_HIGH_FANOUT_EDGE_WARNING_COUNT,
+        "can_prune_now": False,
+        "replacement_required_before_prune": True,
+        "authority_boundary": "graph edges are generated topology; raw/segment refs and owner source surfaces remain stronger",
+    }
+    if edge_type == "mentions_route_signal":
+        return {
+            **base,
+            "class": "event_route_signal_fanout",
+            "current_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "mitigation_status": "bounded_event_route_edges_with_segment_summary_replacement",
+            "replacement_layers": ["segment_has_route_signal", "session_has_route_signal"],
+            "compact_query_route": "graph-cooccurrence",
+            "next_route": "Use graph-cooccurrence for dense operational anchors; rebuild stale graph sources only if this policy is missing from generated sources.",
+            "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cooccurrence <anchor> --aoa-root {aoa_root} --kind <kind> --limit 30",
+        }
+    if edge_type == "event_mentions_registered_entity":
+        return {
+            **base,
+            "class": "event_registered_entity_fanout",
+            "current_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "mitigation_status": "bounded_event_entity_edges_preserve_usage_refs",
+            "replacement_layers": ["session_has_registered_entity", "usage-chain"],
+            "compact_query_route": "usage-chain",
+            "next_route": "Keep event-level refs for entity usage; reduce only after a usage/rollup replacement preserves consequence and raw/segment refs.",
+            "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} usage-chain <anchor> --aoa-root {aoa_root} --kind <kind>",
+        }
+    if edge_type in {"segment_has_route_signal", "session_has_route_signal", "session_has_registered_entity"}:
+        return {
+            **base,
+            "class": "aggregate_summary_layer",
+            "current_policy": "aggregate_summary_replacement_layer",
+            "mitigation_status": "keep_as_compact_replacement_for_event_fanout",
+            "replacement_layers": [],
+            "compact_query_route": "search-operational-route-rollup-query",
+            "next_route": "Keep this aggregate layer as compact navigation unless a stronger rollup replaces it with raw/segment refs.",
+            "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} search-operational-route-rollup-query <query> --aoa-root {aoa_root} --layer <layer>",
+        }
+    if edge_type in {"has_event", "answered_by", "responds_to", "goal_lifecycle_has_event", "has_task_episode"}:
+        return {
+            **base,
+            "class": "structural_event_chain",
+            "current_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+            "mitigation_status": "keep_bounded_query_routes_before_prune",
+            "replacement_layers": ["agent-responses", "goal-lifecycles", "graph-timeline"],
+            "compact_query_route": "graph-timeline",
+            "next_route": "Use typed answer/goal/timeline routes before considering structural edge pruning.",
+            "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-timeline <anchor> --aoa-root {aoa_root} --kind <kind> --limit 40",
+        }
+    return {
+        **base,
+        "class": "other_high_fanout_edge",
+        "current_policy": "observe_before_mutation",
+        "mitigation_status": "needs_targeted_policy_before_prune",
+        "replacement_layers": [],
+        "compact_query_route": "graph-cardinality",
+        "next_route": "Measure the edge class and design a replacement route before any pruning.",
+        "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cardinality --aoa-root {aoa_root} --limit 20",
+    }
+
+
+def graph_high_fanout_policy_from_projection(
+    *,
+    aoa_root: Path,
+    projection: dict[str, Any],
+    limit: int = 12,
+) -> dict[str, Any]:
+    selected_limit = max(1, min(int_value(limit, 12), 80))
+    counts = projection.get("counts") if isinstance(projection.get("counts"), dict) else {}
+    node_counts = counts.get("node") if isinstance(counts.get("node"), dict) else {}
+    edge_counts = counts.get("edge") if isinstance(counts.get("edge"), dict) else {}
+    node_total = sum(int_value(value) for value in node_counts.values())
+    edge_total = sum(int_value(value) for value in edge_counts.values())
+    edge_rows = sorted(
+        ((str(edge_type), int_value(count)) for edge_type, count in edge_counts.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    node_rows = sorted(
+        ((str(node_type), int_value(count)) for node_type, count in node_counts.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    edge_policies = [
+        graph_high_fanout_edge_policy_row(
+            aoa_root=aoa_root,
+            edge_type=edge_type,
+            count=count,
+            edge_total=edge_total,
+        )
+        for edge_type, count in edge_rows[:selected_limit]
+    ]
+    dominant_edges = [
+        row
+        for row in edge_policies
+        if row.get("high_fanout") or str(row.get("class") or "") in {"event_route_signal_fanout", "event_registered_entity_fanout"}
+    ]
+    high_fanout_nodes = [
+        {
+            "node_type": node_type,
+            "count": count,
+            "share": round(count / node_total, 6) if node_total > 0 else 0.0,
+            "high_fanout": count >= OPS_GRAPH_HIGH_FANOUT_NODE_WARNING_COUNT,
+            "policy": "prefer typed route packets over unbounded node expansion",
+        }
+        for node_type, count in node_rows[:selected_limit]
+        if count >= OPS_GRAPH_HIGH_FANOUT_NODE_WARNING_COUNT or node_type == "event"
+    ]
+    projection_status = str(projection.get("status") or "unknown")
+    if projection_status != "current":
+        status = "cardinality_projection_missing_or_stale"
+    elif edge_total >= OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT:
+        status = "large_cardinality_dominates"
+    elif dominant_edges or high_fanout_nodes:
+        status = "localized_high_fanout"
+    else:
+        status = "normal"
+    next_actions = [
+        {
+            "id": "use_compact_graph_routes_for_dense_anchors",
+            "reason": "dense anchors should use bounded cooccurrence/timeline/usage packets before raw graph expansion",
+            "mutates": False,
+            "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cooccurrence <anchor> --aoa-root {aoa_root} --kind <kind> --limit 30",
+        },
+        {
+            "id": "refresh_graph_cardinality_if_stale",
+            "reason": "type-count projection must be current before graph storage/cardinality decisions",
+            "mutates": False,
+            "command": [
+                *session_memory_cli_command(aoa_root),
+                "graph-cardinality",
+                "--aoa-root",
+                str(aoa_root),
+                "--limit",
+                str(selected_limit),
+            ],
+        },
+    ]
+    if status == "large_cardinality_dominates":
+        next_actions.append(
+            {
+                "id": "design_high_fanout_replacement_before_prune",
+                "reason": "physical compaction or row deletion must wait for a replacement route with refs/freshness/fallback proof",
+                "mutates": False,
+                "replacement_layers": sorted({layer for row in edge_policies for layer in row.get("replacement_layers", []) if layer}),
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_high_fanout_policy",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": projection_status == "current",
+        "mutates": False,
+        "status": status,
+        "projection_status": projection_status,
+        "node_count": node_total,
+        "edge_count": edge_total,
+        "edge_warning_count": OPS_GRAPH_EDGE_CARDINALITY_WARNING_COUNT,
+        "high_fanout_edge_warning_count": OPS_GRAPH_HIGH_FANOUT_EDGE_WARNING_COUNT,
+        "high_fanout_node_warning_count": OPS_GRAPH_HIGH_FANOUT_NODE_WARNING_COUNT,
+        "edge_policies": edge_policies,
+        "high_fanout_nodes": high_fanout_nodes,
+        "dominant_edge_count": len(dominant_edges),
+        "dominant_edge_types": [str(row.get("edge_type") or "") for row in dominant_edges],
+        "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+        "graph_event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
+        "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
+        "next_actions": next_actions,
+        "exact_read_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-high-fanout-policy --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit {selected_limit}",
+        "exact_cardinality_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cardinality --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit {selected_limit}",
+        "next_route": (
+            "use compact graph routes and design replacement projections before mutating high-fanout edge rows"
+            if status != "normal"
+            else "continue using compact graph packets; no high-fanout policy action is needed"
+        ),
+        "mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
+        "authority_boundary": "graph policy is generated routing guidance; raw/segment refs and owner source surfaces remain stronger",
+        "diagnostics": projection.get("diagnostics", []) if isinstance(projection.get("diagnostics"), list) else [],
+    }
+
+
+def graph_high_fanout_policy(*, aoa_root: Path, limit: int = 12) -> dict[str, Any]:
+    projection = graph_cardinality_projection_read(aoa_root, limit=max(12, int_value(limit, 12)))
+    return graph_high_fanout_policy_from_projection(aoa_root=aoa_root, projection=projection, limit=limit)
+
+
 def graph_node_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(node.get("id")): node for node in graph.get("nodes", []) if isinstance(node, dict) and node.get("id")}
 
@@ -61826,6 +62025,7 @@ def session_memory_graph_pressure_summary(
     top = projection.get("top") if isinstance(projection.get("top"), dict) else {}
     top_node_types = top.get("node", []) if isinstance(top.get("node"), list) else []
     top_edge_types = top.get("edge", []) if isinstance(top.get("edge"), list) else []
+    high_fanout_policy = graph_high_fanout_policy_from_projection(aoa_root=aoa_root, projection=projection, limit=8)
     compaction_plan = sqlite_vacuum_headroom_plan(
         db_path=graph_db_path,
         method="vacuum-into",
@@ -61872,6 +62072,21 @@ def session_memory_graph_pressure_summary(
         "graph_event_relationship_omitted_edge_types": sorted(GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES),
         "graph_event_route_signal_edge_layers": sorted(GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS),
         "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
+        "high_fanout_policy": {
+            key: high_fanout_policy.get(key)
+            for key in (
+                "status",
+                "projection_status",
+                "dominant_edge_count",
+                "dominant_edge_types",
+                "edge_warning_count",
+                "high_fanout_edge_warning_count",
+                "mutation_boundary",
+                "next_route",
+                "exact_read_command",
+            )
+            if key in high_fanout_policy
+        },
         "physical_compaction": {
             "status": compaction_plan.get("status"),
             "apply_ready": compaction_plan.get("apply_ready"),
@@ -64024,6 +64239,7 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 "node_count",
                 "edge_count",
                 "top_edge_types",
+                "high_fanout_policy",
                 "next_route",
                 "exact_read_command",
                 "optional_deep_audit_command",
@@ -69684,6 +69900,10 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "graph_actionable_count": payload.get("graph_actionable_count"),
                 "graph_queued_count": payload.get("graph_queued_count"),
                 "graph_deferred_live_source_count": payload.get("graph_deferred_live_source_count"),
+                "graph_pressure_status": payload.get("graph_pressure_status"),
+                "graph_high_fanout_policy_status": payload.get("graph_high_fanout_policy_status"),
+                "graph_high_fanout_dominant_edge_count": payload.get("graph_high_fanout_dominant_edge_count"),
+                "graph_high_fanout_mutation_boundary": payload.get("graph_high_fanout_mutation_boundary"),
                 "entity_count": payload.get("entity_count"),
             }
         )
@@ -70254,6 +70474,13 @@ def live_scenario_maintenance_status_audit(
     graph = packet.get("graph") if isinstance(packet.get("graph"), dict) else {}
     search = packet.get("search") if isinstance(packet.get("search"), dict) else {}
     entity_registry = packet.get("entity_registry") if isinstance(packet.get("entity_registry"), dict) else {}
+    operations = packet.get("operations") if isinstance(packet.get("operations"), dict) else {}
+    graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
+    high_fanout_policy = (
+        graph_pressure.get("high_fanout_policy")
+        if isinstance(graph_pressure.get("high_fanout_policy"), dict)
+        else {}
+    )
     agent_route = packet.get("agent_route") if isinstance(packet.get("agent_route"), dict) else {}
     exact_next_command = str(packet.get("exact_next_command") or "")
     graph_queue_action_present = any(
@@ -70291,6 +70518,11 @@ def live_scenario_maintenance_status_audit(
         diagnostics.append("maintenance_status_missing_entity_registry_lane")
     if int_value(graph.get("queued_count")) > 0 and not graph_queue_action_present:
         diagnostics.append("maintenance_status_graph_queue_without_queue_next_action")
+    if (
+        str(graph_pressure.get("status") or "") == "large_cardinality_dominates"
+        and not high_fanout_policy
+    ):
+        diagnostics.append("maintenance_status_graph_pressure_missing_high_fanout_policy")
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -70322,6 +70554,10 @@ def live_scenario_maintenance_status_audit(
         "graph_actionable_count": graph.get("actionable_count"),
         "graph_queued_count": graph.get("queued_count"),
         "graph_deferred_live_source_count": graph.get("deferred_live_source_count"),
+        "graph_pressure_status": graph_pressure.get("status"),
+        "graph_high_fanout_policy_status": high_fanout_policy.get("status"),
+        "graph_high_fanout_dominant_edge_count": high_fanout_policy.get("dominant_edge_count"),
+        "graph_high_fanout_mutation_boundary": high_fanout_policy.get("mutation_boundary"),
         "entity_count": entity_registry.get("entity_count"),
         "elapsed_ms": elapsed_ms,
         "diagnostics": diagnostics,
@@ -70471,6 +70707,7 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_live_tail_next_action_count", "live_tail_next_action_count"),
         ("min_route_lane_count", "route_lane_count"),
         ("min_graph_queued_count", "graph_queued_count"),
+        ("min_graph_high_fanout_dominant_edge_count", "graph_high_fanout_dominant_edge_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
@@ -70487,6 +70724,18 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         and scenario.get("graph_queue_action_present") is not True
     ):
         failures.append(f"{profile}:graph_queue_action_missing_for_queued_count:{scenario.get('graph_queued_count')}")
+    if (
+        expectation.get("require_graph_high_fanout_policy_when_pressure") is True
+        and scenario.get("graph_pressure_status") == "large_cardinality_dominates"
+        and not scenario.get("graph_high_fanout_policy_status")
+    ):
+        failures.append(f"{profile}:graph_high_fanout_policy_missing_for_pressure")
+    if (
+        expectation.get("require_graph_high_fanout_no_mutation_boundary") is True
+        and scenario.get("graph_high_fanout_policy_status")
+        and scenario.get("graph_high_fanout_mutation_boundary") != "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
+    ):
+        failures.append(f"{profile}:graph_high_fanout_mutation_boundary:{scenario.get('graph_high_fanout_mutation_boundary')}")
     next_action_ids = {str(item) for item in scenario.get("next_action_ids", []) if item} if isinstance(scenario.get("next_action_ids"), list) else set()
     for action_id in expectation.get("required_next_action_ids", []) if isinstance(expectation.get("required_next_action_ids"), list) else []:
         if str(action_id) not in next_action_ids:
@@ -73532,6 +73781,17 @@ def command_graph_cardinality(args: argparse.Namespace) -> int:
     payload = graph_cardinality(
         aoa_root=root,
         refresh=args.refresh,
+        limit=args.limit,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_graph_high_fanout_policy(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = graph_high_fanout_policy(
+        aoa_root=root,
         limit=args.limit,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -79488,6 +79748,15 @@ def build_parser() -> argparse.ArgumentParser:
     graph_cardinality_parser.add_argument("--refresh", action="store_true", help="Recompute the graph_type_counts projection from graph.sqlite3.")
     graph_cardinality_parser.add_argument("--limit", type=int, default=40, help="Top type rows to include for each graph kind.")
     graph_cardinality_parser.set_defaults(func=command_graph_cardinality)
+
+    graph_high_fanout_policy_parser = sub.add_parser(
+        "graph-high-fanout-policy",
+        help="Read cached graph cardinality counts and classify high-fanout edge policy without mutating graph rows.",
+    )
+    graph_high_fanout_policy_parser.add_argument("--workspace-root")
+    graph_high_fanout_policy_parser.add_argument("--aoa-root")
+    graph_high_fanout_policy_parser.add_argument("--limit", type=int, default=12, help="Top edge/node type rows to classify.")
+    graph_high_fanout_policy_parser.set_defaults(func=command_graph_high_fanout_policy)
 
     graph_neighborhood_parser = sub.add_parser(
         "graph-neighborhood",

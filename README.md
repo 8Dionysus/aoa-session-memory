@@ -761,6 +761,18 @@ types dominate, plan sharding, high-fanout edge policy, or query projections
 before physical compaction. `graph-sqlite-compact` remains the explicit
 preflight for staged physical shrink and must not replace live
 `graph.sqlite3` by default.
+Use the read-only high-fanout policy packet when a route needs the edge-class
+shape rather than only top counts:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-high-fanout-policy \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+This packet classifies dominant edge types, names the compact query route that
+should be used first for dense anchors, and keeps `can_prune_now=false` until a
+replacement projection preserves refs, freshness, and fallback behavior.
 
 ## Storage Audit
 

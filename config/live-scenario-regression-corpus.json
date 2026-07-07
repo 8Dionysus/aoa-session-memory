@@ -729,6 +729,8 @@
             "require_exact_next_command": true,
             "require_maintenance_packet_no_mutation": true,
             "require_graph_queue_action_when_queued": true,
+            "require_graph_high_fanout_policy_when_pressure": true,
+            "require_graph_high_fanout_no_mutation_boundary": true,
             "max_elapsed_ms": 30000
           }
         ]
