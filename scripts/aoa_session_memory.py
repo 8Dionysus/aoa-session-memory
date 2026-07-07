@@ -57607,6 +57607,48 @@ def session_memory_search_pressure_summary(
         aoa_root=aoa_root,
         search_shards=search_shards,
     )
+    latest_shrink_apply = latest_search_operational_shrink_apply_proof(aoa_root)
+    latest_shrink_comparison = (
+        latest_shrink_apply.get("comparison") if isinstance(latest_shrink_apply.get("comparison"), dict) else {}
+    )
+    context_tail_rehome_status = {
+        "status": "not_applied_or_not_proven",
+        "applied": False,
+        "latest_shrink_apply_status": latest_shrink_apply.get("status"),
+        "already_rehomed_route_ref_document_count": 0,
+        "already_rehomed_route_ref_row_count": 0,
+        "operational_route_rollup_status": operational_route_rollup.get("status"),
+        "next_route": "use_search_operational_projection_plan_for_fresh_context_tail_measurement",
+    }
+    if (
+        str(latest_shrink_apply.get("status") or "") == "found"
+        and bool(latest_shrink_comparison.get("captured"))
+        and int_value(latest_shrink_comparison.get("omitted_document_count")) > 0
+    ):
+        rollup_current = (
+            str(operational_route_rollup.get("status") or "") == "current"
+            and not bool(operational_route_rollup.get("needs_refresh"))
+            and int_value(operational_route_rollup.get("source_mismatch_count")) == 0
+        )
+        context_tail_rehome_status = {
+            "status": "applied_current" if rollup_current else "applied_rollup_not_current",
+            "applied": True,
+            "latest_shrink_apply_status": latest_shrink_apply.get("status"),
+            "latest_shrink_apply_source": latest_shrink_apply.get("source"),
+            "already_rehomed_route_ref_document_count": int_value(
+                latest_shrink_comparison.get("omitted_document_count")
+            ),
+            "already_rehomed_route_ref_row_count": int_value(
+                latest_shrink_comparison.get("omitted_route_ref_row_count")
+            ),
+            "operational_route_rollup_status": operational_route_rollup.get("status"),
+            "next_route": (
+                "design_remaining_operational_event_read_models"
+                if rollup_current
+                else "refresh_operational_route_rollup_then_recheck_remaining_pressure"
+            ),
+            "quality_boundary": "latest shrink-apply diagnostic proves generated route-backed context-tail rehome, not archive truth",
+        }
     near_warning_bytes = int(OPS_SEARCH_DB_WARNING_BYTES * OPS_SEARCH_DB_NEAR_WARNING_RATIO)
     if combined_total_bytes >= OPS_SEARCH_DB_CRITICAL_BYTES:
         status = "critical_projection_stack"
@@ -57628,7 +57670,12 @@ def session_memory_search_pressure_summary(
             "while only deferred_live sessions are pending"
         )
     elif status in {"critical_projection_stack", "large_projection_stack"} and document_hotset.get("status") != "normal":
-        if operational_route_rollup.get("status") == "current":
+        if context_tail_rehome_status.get("status") == "applied_current":
+            next_route = (
+                "route-backed context-tail rehome is already applied; design the remaining direct operational-event "
+                "and agent-context read-model before any further physical shrinkage"
+            )
+        elif operational_route_rollup.get("status") == "current":
             next_route = (
                 "use the current operational route-rollup as the replacement navigation proof before any physical "
                 "context-tail shrinkage; keep raw/segment refs as authority"
@@ -57699,6 +57746,7 @@ def session_memory_search_pressure_summary(
         "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
         "document_hotset": document_hotset,
         "operational_route_rollup": operational_route_rollup,
+        "context_tail_rehome_status": context_tail_rehome_status,
         "quality_boundary": "structured routes and raw-text fallback are routing projections; raw transcripts and segment indexes remain authority",
         "speed_boundary": "agent-event/entity/goal routes should use structured shards; literal raw-text stays bounded and may use the monolith fallback",
         "weight_boundary": "do not remove the monolith solely for size while it is the verified raw-text fallback",
@@ -57741,11 +57789,17 @@ def session_memory_search_projection_plan(
     operational_route_rollup = (
         pressure.get("operational_route_rollup") if isinstance(pressure.get("operational_route_rollup"), dict) else {}
     )
+    context_tail_rehome_status = (
+        pressure.get("context_tail_rehome_status") if isinstance(pressure.get("context_tail_rehome_status"), dict) else {}
+    )
     freshness_status = str(pressure.get("freshness_status") or "unknown")
     pressure_status = str(pressure.get("status") or "unknown")
     if freshness_status not in {"current", "empty", "current_with_deferred_live_updates"}:
         next_route = "restore_search_projection_freshness_first"
         actionability = "blocked_by_projection_freshness"
+    elif pressure_status in {"critical_projection_stack", "large_projection_stack"} and context_tail_rehome_status.get("status") == "applied_current":
+        next_route = "design_direct_operational_event_read_model"
+        actionability = "remaining_projection_pressure_design_lane"
     elif pressure_status in {"critical_projection_stack", "large_projection_stack"} and operational_route_rollup.get("status") == "current":
         next_route = "use_operational_route_rollup_before_physical_shrinkage"
         actionability = "replacement_route_ready"
@@ -57822,6 +57876,20 @@ def session_memory_search_projection_plan(
             )
             if key in operational_route_rollup
         },
+        "context_tail_rehome_status": {
+            key: context_tail_rehome_status.get(key)
+            for key in (
+                "status",
+                "applied",
+                "latest_shrink_apply_status",
+                "already_rehomed_route_ref_document_count",
+                "already_rehomed_route_ref_row_count",
+                "operational_route_rollup_status",
+                "next_route",
+                "quality_boundary",
+            )
+            if key in context_tail_rehome_status
+        },
         "largest_shards": document_hotset.get("largest_shards", [])[:4]
         if isinstance(document_hotset.get("largest_shards"), list)
         else [],
@@ -57831,9 +57899,25 @@ def session_memory_search_projection_plan(
         "candidate_lanes": [
             {
                 "id": "compact_operational_event_projection",
-                "status": "route_rollup_ready" if actionability == "replacement_route_ready" else ("recommended" if actionability == "actionable_design_lane" else "not_currently_needed"),
+                "status": (
+                    "already_applied"
+                    if context_tail_rehome_status.get("status") == "applied_current"
+                    else (
+                        "route_rollup_ready"
+                        if actionability == "replacement_route_ready"
+                        else ("recommended" if actionability == "actionable_design_lane" else "not_currently_needed")
+                    )
+                ),
                 "reason": "event/document cardinality is the visible search weight driver",
                 "quality_boundary": "preserve agent-event, usage, consequence, route-signal, raw_ref, segment_ref, and session refs before reducing generic event document rows",
+            },
+            {
+                "id": "direct_operational_event_read_model",
+                "status": "recommended"
+                if actionability == "remaining_projection_pressure_design_lane"
+                else "evidence_only",
+                "reason": "after route-backed context-tail rehome, usage/result/outcome/entrypoint event rows dominate the remaining generated search weight",
+                "quality_boundary": "direct operational rows are behavior evidence; replacement must keep raw, segment, session, freshness, usage, and consequence refs",
             },
             {
                 "id": "schema_normalization_before_physical_compaction",
@@ -57927,6 +58011,7 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
     projection = payload.get("search_projection") if isinstance(payload.get("search_projection"), dict) else {}
     hotset = payload.get("document_hotset") if isinstance(payload.get("document_hotset"), dict) else {}
     route_rollup = payload.get("operational_route_rollup") if isinstance(payload.get("operational_route_rollup"), dict) else {}
+    rehome = payload.get("context_tail_rehome_status") if isinstance(payload.get("context_tail_rehome_status"), dict) else {}
     lines = [
         "# Search Projection Plan",
         "",
@@ -57939,6 +58024,7 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
         f"- shards: `{projection.get('shard_db_total_human')}`",
         f"- document_hotset: `{hotset.get('status')}` docs=`{hotset.get('document_count')}` latest_event_docs=`{hotset.get('latest_materialization_event_document_count')}`",
         f"- operational_route_rollup: `{route_rollup.get('status')}` rows=`{route_rollup.get('route_rollup_row_count')}` postings=`{route_rollup.get('candidate_route_posting_count')}` size=`{route_rollup.get('size_human')}`",
+        f"- context_tail_rehome: `{rehome.get('status')}` already_rehomed_docs=`{rehome.get('already_rehomed_route_ref_document_count')}`",
         "",
         "## Candidate Lanes",
         "",
@@ -59514,23 +59600,36 @@ def search_operational_context_tail_physical_shrink_plan(
     sampled_route_posting_count: int,
     materialized_rollup: dict[str, Any],
     materialized_rollup_ready: bool,
+    already_rehomed_route_ref_document_count: int = 0,
+    already_rehomed_route_ref_row_count: int = 0,
 ) -> dict[str, Any]:
     materialized_status = str(materialized_rollup.get("status") or "unknown")
     materialized_row_count = int_value(materialized_rollup.get("route_rollup_row_count"))
     materialized_posting_count = int_value(materialized_rollup.get("candidate_route_posting_count"))
-    if candidate_count <= 0:
+    virtual_candidate_count = int_value(candidate_count)
+    rehomed_document_count = max(0, int_value(already_rehomed_route_ref_document_count))
+    rehomed_row_count = max(0, int_value(already_rehomed_route_ref_row_count))
+    active_candidate_count = max(0, virtual_candidate_count - rehomed_document_count)
+    active_candidate_with_routes = max(0, int_value(candidate_with_routes) - rehomed_document_count)
+    active_candidate_without_routes = max(0, int_value(candidate_without_routes))
+    if active_candidate_count <= 0:
         status = "not_needed"
         blocked_reason = ""
-    elif candidate_with_routes <= 0:
+    elif active_candidate_with_routes <= 0 and rehomed_document_count > 0:
+        status = "route_backed_context_tail_rehomed_with_unrouted_tail_kept"
+        blocked_reason = "route-backed context-tail rows are already rehomed; remaining context-tail rows lack route refs and must stay until raw/literal replacement is proven"
+    elif active_candidate_with_routes <= 0:
         status = "blocked_unrouted_context_tail"
-        blocked_reason = "candidate context-tail rows do not have route refs to rehome"
+        blocked_reason = "active candidate context-tail rows do not have route refs to rehome"
     elif not materialized_rollup_ready:
         status = "blocked_missing_materialized_rollup"
         blocked_reason = "materialized operational route-rollup is missing, stale, or source-mismatched"
     else:
         status = "guarded_plan_ready"
         blocked_reason = "operator rebuild route exists; run it only after shrink gates and capture before/after storage"
-    route_ref_coverage_ratio = round(candidate_with_routes / candidate_count, 6) if candidate_count > 0 else 0.0
+    route_ref_coverage_ratio = (
+        round(active_candidate_with_routes / active_candidate_count, 6) if active_candidate_count > 0 else 0.0
+    )
     operator_rebuild_command = [
         *session_memory_cli_command(aoa_root),
         "search-shards",
@@ -59543,13 +59642,25 @@ def search_operational_context_tail_physical_shrink_plan(
         "route-ref-backed",
         "--write-report",
     ]
-    operator_rebuild_route_available = candidate_with_routes > 0
+    operator_rebuild_route_available = active_candidate_with_routes > 0
     if status == "guarded_plan_ready":
         apply_status = "operator_rebuild_route_available"
+    elif status == "route_backed_context_tail_rehomed_with_unrouted_tail_kept":
+        apply_status = "not_needed_for_route_backed_tail"
     elif operator_rebuild_route_available:
         apply_status = "operator_rebuild_route_available_but_blocked"
     else:
         apply_status = "blocked"
+    if rehomed_document_count > 0 and active_candidate_with_routes <= 0:
+        rehome_status = "applied_current"
+    elif rehomed_document_count > 0 and active_candidate_with_routes > 0:
+        rehome_status = "partially_applied_new_route_backed_tail_seen"
+    elif active_candidate_with_routes > 0:
+        rehome_status = "not_applied_route_backed_tail_available"
+    elif active_candidate_without_routes > 0:
+        rehome_status = "not_applicable_unrouted_tail_only"
+    else:
+        rehome_status = "not_needed"
     return {
         "schema_version": 1,
         "id": "guarded_context_tail_physical_shrink_v1",
@@ -59577,9 +59688,14 @@ def search_operational_context_tail_physical_shrink_plan(
             "task_episode_id!=''",
             "event_type IN protected_context_event_types",
         ],
-        "context_tail_candidate_count": candidate_count,
-        "route_ref_backed_omission_candidate_count": candidate_with_routes,
-        "unrouted_keep_candidate_count": max(0, candidate_without_routes),
+        "context_tail_candidate_count": active_candidate_count,
+        "virtual_context_tail_candidate_count": virtual_candidate_count,
+        "active_context_tail_candidate_count": active_candidate_count,
+        "active_route_ref_backed_candidate_count": active_candidate_with_routes,
+        "already_rehomed_route_ref_document_count": rehomed_document_count,
+        "already_rehomed_route_ref_row_count": rehomed_row_count,
+        "route_ref_backed_omission_candidate_count": active_candidate_with_routes,
+        "unrouted_keep_candidate_count": active_candidate_without_routes,
         "route_ref_coverage_ratio": route_ref_coverage_ratio,
         "sampled_candidate_route_posting_count": sampled_route_posting_count,
         "materialized_rollup_status": materialized_status,
@@ -59608,14 +59724,96 @@ def search_operational_context_tail_physical_shrink_plan(
             "run_explicit_structured_shard_context_tail_omission_rebuild_after_shrink_gates"
             if status == "guarded_plan_ready"
             else (
+                "route_backed_context_tail_rehome_already_applied_design_remaining_operational_event_read_models"
+                if status == "route_backed_context_tail_rehomed_with_unrouted_tail_kept"
+                else (
                 "refresh_operational_route_rollup_then_recheck_shrink_gates"
                 if operator_rebuild_route_available
                 else "implement_explicit_structured_shard_context_tail_omission_policy_after_live_corpus_and_literal_gates"
+                )
             )
         ),
+        "context_tail_rehome_status": {
+            "status": rehome_status,
+            "applied": rehomed_document_count > 0,
+            "already_rehomed_route_ref_document_count": rehomed_document_count,
+            "already_rehomed_route_ref_row_count": rehomed_row_count,
+            "active_route_ref_backed_candidate_count": active_candidate_with_routes,
+            "active_unrouted_keep_candidate_count": active_candidate_without_routes,
+            "next_route": (
+                "design_remaining_operational_event_read_models"
+                if rehome_status == "applied_current"
+                else (
+                    "run_guarded_context_tail_rehome_for_new_route_backed_tail"
+                    if rehome_status == "partially_applied_new_route_backed_tail_seen"
+                    else "preserve_unrouted_context_tail_until_raw_literal_replacement_is_proven"
+                )
+            ),
+            "quality_boundary": "omitted_context_tail_route_refs is a compact generated navigation sidecar; raw and segment refs remain authority",
+        },
         "rollback_route": "rebuild structured search shards from raw/session indexes; do not repair by deleting raw evidence",
         "mutation_boundary": "read-only plan packet; no search/raw/graph/session mutation is performed here",
         "authority_boundary": "physical shrink may reduce generated search rows only after replacement refs are proven; raw and segment refs remain authority",
+    }
+
+
+def search_operational_remaining_projection_pressure(
+    *,
+    totals: dict[str, Any],
+    role_counts: dict[str, int],
+    physical_shrink_plan: dict[str, Any],
+    raw_text_fallback_status: str = "",
+) -> dict[str, Any]:
+    event_total = int_value(totals.get("event_total"))
+    direct_actionable_event_count = int_value(totals.get("direct_actionable_event_count"))
+    protected_context_event_count = int_value(totals.get("protected_context_event_count"))
+    active_context_tail_count = int_value(physical_shrink_plan.get("active_context_tail_candidate_count"))
+    active_route_ref_backed_candidate_count = int_value(
+        physical_shrink_plan.get("active_route_ref_backed_candidate_count")
+    )
+    unrouted_keep_candidate_count = int_value(physical_shrink_plan.get("unrouted_keep_candidate_count"))
+    already_rehomed_count = int_value(physical_shrink_plan.get("already_rehomed_route_ref_document_count"))
+    pressure_counts = {
+        "direct_operational_event_count": direct_actionable_event_count,
+        "protected_agent_or_task_context_count": protected_context_event_count,
+        "active_context_tail_candidate_count": active_context_tail_count,
+        "active_route_ref_backed_candidate_count": active_route_ref_backed_candidate_count,
+        "unrouted_context_tail_keep_count": unrouted_keep_candidate_count,
+        "already_rehomed_context_tail_ref_count": already_rehomed_count,
+    }
+    dominant = [
+        {"id": key, "count": count}
+        for key, count in sorted(pressure_counts.items(), key=lambda item: (-item[1], item[0]))
+        if count > 0
+    ]
+    if active_route_ref_backed_candidate_count > 0:
+        status = "context_tail_rehome_pressure_active"
+        next_design_route = "finish_guarded_context_tail_rehome_before_direct_event_compaction"
+    elif direct_actionable_event_count > 0:
+        status = "direct_operational_event_pressure_active"
+        next_design_route = "design_direct_operational_event_read_model_before_more_physical_shrink"
+    elif protected_context_event_count > 0:
+        status = "agent_or_task_context_pressure_active"
+        next_design_route = "design_agent_event_and_task_episode_read_model_before_context_compaction"
+    elif str(raw_text_fallback_status or "") == "monolith_required_for_raw_text_query":
+        status = "raw_text_fallback_dependency_active"
+        next_design_route = "design_scoped_literal_full_text_shards_for_repeated_raw_text_loads"
+    else:
+        status = "no_remaining_projection_pressure_seen"
+        next_design_route = "no_remaining_projection_weight_action_needed"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "event_total": event_total,
+        "counts": pressure_counts,
+        "dominant_classes": dominant[:6],
+        "role_counts": dict(sorted(role_counts.items())),
+        "raw_text_fallback_status": raw_text_fallback_status or "unknown",
+        "next_design_route": next_design_route,
+        "quality_boundary": (
+            "direct usage/result/outcome/entrypoint rows are operational evidence; do not omit them "
+            "until a replacement read-model preserves usage/consequence semantics plus raw, segment, session, and freshness refs"
+        ),
     }
 
 
@@ -59903,6 +60101,46 @@ def search_operational_shrink_projection_plan_from_apply_proof(
         "mutation_boundary": "read-only fast gate packet; no search/raw/graph/session mutation is performed here",
         "authority_boundary": "latest apply diagnostic and rollup are navigation proof; raw and segment refs remain authority",
     }
+    context_tail_rehome_status = {
+        "status": "applied_current" if materialized_rollup_ready else "applied_rollup_not_current",
+        "applied": True,
+        "latest_shrink_apply_status": apply_proof.get("status"),
+        "latest_shrink_apply_source": apply_proof.get("source"),
+        "already_rehomed_route_ref_document_count": omitted_document_count,
+        "already_rehomed_route_ref_row_count": omitted_route_ref_row_count,
+        "active_route_ref_backed_candidate_count": None,
+        "active_unrouted_keep_candidate_count": None,
+        "operational_route_rollup_status": rollup_status,
+        "next_route": (
+            "run_search_operational_projection_plan_for_fresh_remaining_pressure"
+            if materialized_rollup_ready
+            else "refresh_operational_route_rollup_then_recheck_remaining_pressure"
+        ),
+        "quality_boundary": "latest shrink-apply diagnostic proves generated route-backed context-tail rehome, not archive truth",
+    }
+    remaining_pressure = {
+        "schema_version": 1,
+        "status": "needs_fresh_shard_sample",
+        "event_total": None,
+        "counts": {
+            "direct_operational_event_count": None,
+            "protected_agent_or_task_context_count": None,
+            "active_context_tail_candidate_count": None,
+            "active_route_ref_backed_candidate_count": None,
+            "unrouted_context_tail_keep_count": None,
+            "already_rehomed_context_tail_ref_count": omitted_document_count,
+        },
+        "dominant_classes": [
+            {"id": "already_rehomed_context_tail_ref_count", "count": omitted_document_count}
+        ]
+        if omitted_document_count > 0
+        else [],
+        "next_design_route": "run_search_operational_projection_plan_for_fresh_direct_event_sample",
+        "quality_boundary": (
+            "post-apply proof avoids heavy shard resampling; run the heavy projection plan when direct/agent/context "
+            "remaining-pressure counts are required"
+        ),
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_operational_event_projection_plan",
@@ -59921,6 +60159,8 @@ def search_operational_shrink_projection_plan_from_apply_proof(
             "after_search_shards_status": apply_proof.get("after_search_shards_status"),
             "after_operational_route_rollup_status": apply_proof.get("after_operational_route_rollup_status"),
         },
+        "context_tail_rehome_status": context_tail_rehome_status,
+        "remaining_projection_pressure": remaining_pressure,
         "sample": {
             "selection": "latest_shrink_apply_proof_without_shard_resample",
             "selected_shard_count": 0,
@@ -59981,6 +60221,9 @@ def search_operational_shrink_projection_plan_from_apply_proof(
             "replacement_route_kind": "operational_route_rollup" if materialized_rollup_ready else "",
             "candidate_route_posting_count": omitted_route_ref_row_count,
             "physical_shrink_plan_status": physical_shrink_plan["status"],
+            "context_tail_rehome_status": context_tail_rehome_status["status"],
+            "active_route_ref_backed_candidate_count": None,
+            "already_rehomed_route_ref_document_count": omitted_document_count,
             "route_ref_backed_omission_candidate_count": physical_shrink_plan[
                 "route_ref_backed_omission_candidate_count"
             ],
@@ -60333,6 +60576,8 @@ def session_memory_search_operational_shrink_gates(
             "status": projection_plan.get("status"),
             "projection_plan_source": projection_plan.get("projection_plan_source") or "fresh_shard_sample",
             "cost_profile": projection_plan.get("cost_profile"),
+            "context_tail_rehome_status": projection_plan.get("context_tail_rehome_status"),
+            "remaining_projection_pressure": projection_plan.get("remaining_projection_pressure"),
             "route_ref_rollup_plan": projection_plan.get("route_ref_rollup_plan"),
             "physical_shrink_plan": physical,
             "report_json": projection_plan.get("report_json", ""),
@@ -61103,6 +61348,8 @@ def session_memory_search_operational_event_projection_plan(
         "candidate_context_tail_v1_count",
         "candidate_context_tail_with_route_signals_count",
         "candidate_context_tail_without_route_signals_count",
+        "omitted_context_tail_route_ref_row_count",
+        "omitted_context_tail_route_ref_document_count",
     )
     for key in total_keys:
         totals[key] = sum(int_value(item.get(key)) for item in successful)
@@ -61212,10 +61459,55 @@ def session_memory_search_operational_event_projection_plan(
         candidate_count=candidate_count,
         candidate_with_routes=candidate_with_routes,
         candidate_without_routes=int_value(totals.get("candidate_context_tail_without_route_signals_count")),
+        already_rehomed_route_ref_document_count=int_value(
+            totals.get("omitted_context_tail_route_ref_document_count")
+        ),
+        already_rehomed_route_ref_row_count=int_value(totals.get("omitted_context_tail_route_ref_row_count")),
         sampled_route_posting_count=route_posting_total,
         materialized_rollup=materialized_rollup,
         materialized_rollup_ready=materialized_rollup_ready,
     )
+    context_tail_rehome_status = (
+        physical_shrink_plan.get("context_tail_rehome_status")
+        if isinstance(physical_shrink_plan.get("context_tail_rehome_status"), dict)
+        else {}
+    )
+    raw_text_fallback_status = ""
+    raw_text_dependency = catalog.get("raw_text_fallback_dependency") if isinstance(catalog, dict) else {}
+    if isinstance(raw_text_dependency, dict):
+        raw_text_fallback_status = str(raw_text_dependency.get("status") or "")
+    if not raw_text_fallback_status:
+        shard_projection_summary = session_memory_search_shard_projection_summary(aoa_root)
+        shard_raw_dependency = (
+            shard_projection_summary.get("raw_text_fallback_dependency")
+            if isinstance(shard_projection_summary.get("raw_text_fallback_dependency"), dict)
+            else {}
+        )
+        raw_text_fallback_status = str(shard_raw_dependency.get("status") or "")
+    remaining_pressure = search_operational_remaining_projection_pressure(
+        totals=totals,
+        role_counts=dict(role_counts),
+        physical_shrink_plan=physical_shrink_plan,
+        raw_text_fallback_status=raw_text_fallback_status,
+    )
+    if str(context_tail_rehome_status.get("status") or "") in {
+        "applied_current",
+        "route_backed_context_tail_rehomed_with_unrouted_tail_kept",
+    }:
+        next_design_route = str(
+            remaining_pressure.get("next_design_route")
+            or "design_direct_operational_event_read_model_before_more_physical_shrink"
+        )
+    elif materialized_rollup_ready:
+        next_design_route = "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
+    else:
+        next_design_route = "design_route_ref_preserving_operational_event_rollup"
+    if (
+        status == "candidate_tail_measured"
+        and context_tail_rehome_status.get("status") == "applied_current"
+        and int_value(physical_shrink_plan.get("active_route_ref_backed_candidate_count")) == 0
+    ):
+        status = "remaining_pressure_measured"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_operational_event_projection_plan",
@@ -61239,6 +61531,8 @@ def session_memory_search_operational_event_projection_plan(
         "direct_keep_roles": list(SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES),
         "context_role": SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
         "protected_context_event_types": list(SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES),
+        "context_tail_rehome_status": context_tail_rehome_status,
+        "remaining_projection_pressure": remaining_pressure,
         "totals": {
             **totals,
             "candidate_context_tail_v1_ratio": round(candidate_count / event_total, 6) if event_total > 0 else 0.0,
@@ -61246,6 +61540,10 @@ def session_memory_search_operational_event_projection_plan(
             if candidate_count > 0
             else 0.0,
             "replacement_route_refs_required": candidate_with_routes > 0,
+            "active_replacement_route_refs_required": int_value(
+                physical_shrink_plan.get("active_route_ref_backed_candidate_count")
+            )
+            > 0,
             "candidate_route_posting_count": route_posting_total,
             "candidate_route_term_count_sum": route_term_total_sum,
             "role_counts": dict(sorted(role_counts.items())),
@@ -61292,16 +61590,19 @@ def session_memory_search_operational_event_projection_plan(
             "replacement_route_kind": "operational_route_rollup" if materialized_rollup_ready else "",
             "candidate_route_posting_count": route_posting_total,
             "physical_shrink_plan_status": physical_shrink_plan["status"],
+            "context_tail_rehome_status": context_tail_rehome_status.get("status"),
+            "active_route_ref_backed_candidate_count": physical_shrink_plan[
+                "active_route_ref_backed_candidate_count"
+            ],
+            "already_rehomed_route_ref_document_count": physical_shrink_plan[
+                "already_rehomed_route_ref_document_count"
+            ],
             "route_ref_backed_omission_candidate_count": physical_shrink_plan[
                 "route_ref_backed_omission_candidate_count"
             ],
             "unrouted_keep_candidate_count": physical_shrink_plan["unrouted_keep_candidate_count"],
             "safe_to_apply_physical_compaction": physical_shrink_plan["safe_to_apply_physical_compaction"],
-            "next_design_route": (
-                "design_physical_context_tail_shrink_using_materialized_route_rollup_guard"
-                if materialized_rollup_ready
-                else "design_route_ref_preserving_operational_event_rollup"
-            ),
+            "next_design_route": next_design_route,
         },
         "physical_shrink_plan": physical_shrink_plan,
         "shards": shard_results,
@@ -61354,6 +61655,8 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
+    rehome = payload.get("context_tail_rehome_status") if isinstance(payload.get("context_tail_rehome_status"), dict) else {}
+    remaining = payload.get("remaining_projection_pressure") if isinstance(payload.get("remaining_projection_pressure"), dict) else {}
     rollup = payload.get("route_ref_rollup_plan") if isinstance(payload.get("route_ref_rollup_plan"), dict) else {}
     physical = payload.get("physical_shrink_plan") if isinstance(payload.get("physical_shrink_plan"), dict) else {}
     materialized_rollup = rollup.get("materialized_rollup") if isinstance(rollup.get("materialized_rollup"), dict) else {}
@@ -61377,6 +61680,9 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- replacement_read_model_status: `{rollup.get('replacement_read_model_status')}`",
         f"- replacement_route_refs_required: `{totals.get('replacement_route_refs_required')}`",
         f"- physical_shrink_plan_status: `{physical.get('status')}`",
+        f"- context_tail_rehome_status: `{rehome.get('status')}`",
+        f"- already_rehomed_route_ref_document_count: `{rehome.get('already_rehomed_route_ref_document_count')}`",
+        f"- remaining_projection_pressure: `{remaining.get('status')}`",
         f"- safe_to_apply_physical_compaction: `{physical.get('safe_to_apply_physical_compaction')}`",
         f"- next_design_route: `{candidate.get('next_design_route')}`",
         "",

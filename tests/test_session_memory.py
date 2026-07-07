@@ -19861,6 +19861,7 @@ def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path,
     assert plan["freshness_status"] == "current"
     assert plan["actionability"] == "actionable_design_lane"
     assert plan["next_route"] == "design_compact_operational_event_projection"
+    assert plan["context_tail_rehome_status"]["status"] == "not_applied_or_not_proven"
     assert plan["candidate_lanes"][0]["id"] == "compact_operational_event_projection"
     assert plan["candidate_lanes"][0]["status"] == "recommended"
     assert "do_not_run_broad_monolith_group_by_on_hot_agent_path" in plan["stop_lines"]
@@ -19868,6 +19869,98 @@ def test_search_projection_plan_uses_cached_projection_summaries(tmp_path: Path,
     assert any("search-operational-projection-plan" in command for command in measurement_texts)
     assert Path(plan["report_json"]).exists()
     assert Path(plan["report_markdown"]).exists()
+
+
+def test_search_projection_plan_promotes_remaining_pressure_after_context_tail_rehome(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    storage = {
+        "search_db": {
+            "total_with_wal_bytes": 10 * 1024 * 1024 * 1024,
+            "total_with_wal_human": "10.0 GiB",
+        },
+        "search_root": {"size_bytes": 16 * 1024 * 1024 * 1024, "size_human": "16.0 GiB"},
+    }
+    search_shards = {
+        "status": "current",
+        "combined_search_projection_total_bytes": 16 * 1024 * 1024 * 1024,
+        "combined_search_projection_total_human": "16.0 GiB",
+        "monolith_db_total_bytes": 10 * 1024 * 1024 * 1024,
+        "monolith_db_total_human": "10.0 GiB",
+        "shard_db_total_bytes": 6 * 1024 * 1024 * 1024,
+        "shard_db_total_human": "6.0 GiB",
+        "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+        "active_projection": module.SEARCH_ACTIVE_PROJECTION_MONOLITH,
+        "materialized_shard_count": 3,
+        "shard_count": 3,
+        "raw_text_fallback_dependency": {"status": "monolith_required_for_raw_text_query"},
+        "document_count": 1_900_000,
+        "latest_materialization": {
+            "document_count": 70_000,
+            "document_counts": {"event": 69_000, "segment": 500, "session": 1},
+            "event_document_count": 69_000,
+        },
+        "largest_shards": [
+            {
+                "shard": "month/2026-06",
+                "status": "current",
+                "document_count": 700_000,
+                "total_with_wal_human": "2.0 GiB",
+            }
+        ],
+    }
+    apply_report = aoa_root / module.DIAGNOSTICS_ROOT / "20260630T000000Z__search-operational-shrink-apply.json"
+    module.write_json(
+        apply_report,
+        {
+            "artifact_type": "session_memory_search_operational_shrink_apply",
+            "ok": True,
+            "apply": True,
+            "status": "applied_with_storage_warning",
+            "storage_before_after_comparison": {
+                "captured": True,
+                "omission_policy": module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_ROUTE_REF_BACKED,
+                "omitted_document_count": 391_566,
+                "omitted_route_ref_row_count": 1_617_295,
+            },
+            "after": {
+                "search_shards": {"status": "current"},
+                "operational_route_rollup": {"status": "current"},
+            },
+        },
+    )
+    monkeypatch.setattr(module, "maintenance_storage_status", lambda _aoa_root: storage)
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", lambda _aoa_root: search_shards)
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "current",
+            "needs_refresh": False,
+            "route_rollup_row_count": 60_767,
+            "candidate_route_posting_count": 1_617_295,
+            "source_mismatch_count": 0,
+            "size_human": "37.5 MiB",
+        },
+    )
+
+    plan = module.session_memory_search_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        write_report=False,
+    )
+
+    assert plan["status"] == "large_projection_stack"
+    assert plan["actionability"] == "remaining_projection_pressure_design_lane"
+    assert plan["next_route"] == "design_direct_operational_event_read_model"
+    assert plan["context_tail_rehome_status"]["status"] == "applied_current"
+    assert plan["context_tail_rehome_status"]["already_rehomed_route_ref_document_count"] == 391_566
+    lanes = {item["id"]: item for item in plan["candidate_lanes"]}
+    assert lanes["compact_operational_event_projection"]["status"] == "already_applied"
+    assert lanes["direct_operational_event_read_model"]["status"] == "recommended"
 
 
 def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monolith(tmp_path: Path, monkeypatch: Any) -> None:
@@ -20233,6 +20326,95 @@ def test_search_operational_projection_plan_respects_target_shard(tmp_path: Path
     assert any(
         "search-operational-projection-plan" in command and "--shard month/2026-06" in command
         for command in targeted_next_commands
+    )
+
+
+def test_search_operational_projection_plan_distinguishes_rehomed_tail_from_remaining_pressure(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    selected = [{"shard": "month/2026-06", "db_path": str(tmp_path / "june.sqlite3"), "document_count": 12}]
+
+    monkeypatch.setattr(
+        module,
+        "search_operational_event_projection_shard_candidates",
+        lambda _aoa_root, *, max_shards, shard="": (selected[:max_shards], {"status": "current"}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "search_operational_event_projection_probe_shard",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "sampled",
+            "shard": "month/2026-06",
+            "event_total": 12,
+            "direct_actionable_event_count": 5,
+            "context_event_count": 7,
+            "context_agent_event_count": 1,
+            "context_task_episode_count": 0,
+            "context_protected_event_type_count": 0,
+            "context_route_signal_preview_count": 3,
+            "context_empty_session_act_count": 1,
+            "protected_context_event_count": 3,
+            "candidate_context_tail_v1_count": 4,
+            "candidate_context_tail_with_route_signals_count": 3,
+            "candidate_context_tail_without_route_signals_count": 1,
+            "omitted_context_tail_route_ref_row_count": 9,
+            "omitted_context_tail_route_ref_document_count": 3,
+            "role_counts": {"context": 7, "usage": 3, "result": 2},
+            "route_ref_rollup": {
+                "status": "measured",
+                "candidate_route_posting_count": 9,
+                "candidate_route_term_count": 2,
+                "top_route_layers": [{"layer": "tool", "posting_count": 9, "key_count": 2}],
+                "top_route_terms": [
+                    {
+                        "layer": "tool",
+                        "key": "exec_command",
+                        "route_signal": "tool:exec_command",
+                        "posting_count": 9,
+                    }
+                ],
+                "elapsed_ms": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "current",
+            "needs_refresh": False,
+            "route_rollup_row_count": 2,
+            "candidate_route_posting_count": 9,
+            "source_mismatch_count": 0,
+            "size_human": "1.0 KiB",
+        },
+    )
+
+    plan = module.session_memory_search_operational_event_projection_plan(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+    )
+
+    assert plan["ok"] is True
+    assert plan["status"] == "remaining_pressure_measured"
+    assert plan["context_tail_rehome_status"]["status"] == "applied_current"
+    assert plan["context_tail_rehome_status"]["already_rehomed_route_ref_document_count"] == 3
+    assert plan["remaining_projection_pressure"]["status"] == "direct_operational_event_pressure_active"
+    assert plan["remaining_projection_pressure"]["counts"]["direct_operational_event_count"] == 5
+    assert plan["physical_shrink_plan"]["status"] == "route_backed_context_tail_rehomed_with_unrouted_tail_kept"
+    assert plan["physical_shrink_plan"]["context_tail_candidate_count"] == 1
+    assert plan["physical_shrink_plan"]["active_route_ref_backed_candidate_count"] == 0
+    assert plan["physical_shrink_plan"]["already_rehomed_route_ref_document_count"] == 3
+    assert plan["projection_candidate"]["active_route_ref_backed_candidate_count"] == 0
+    assert plan["projection_candidate"]["already_rehomed_route_ref_document_count"] == 3
+    assert (
+        plan["projection_candidate"]["next_design_route"]
+        == "design_direct_operational_event_read_model_before_more_physical_shrink"
     )
 
 
@@ -20779,6 +20961,8 @@ def test_search_operational_shrink_gates_passes_with_latest_apply_comparison(
     assert payload["latest_shrink_apply_proof"]["source"]["path"] == str(apply_report)
     assert payload["projection_plan"]["projection_plan_source"] == "latest_shrink_apply_proof"
     assert payload["projection_plan"]["status"] == "post_apply_proof_current"
+    assert payload["projection_plan"]["context_tail_rehome_status"]["status"] == "applied_current"
+    assert payload["projection_plan"]["remaining_projection_pressure"]["status"] == "needs_fresh_shard_sample"
     assert payload["projection_plan"]["cost_profile"]["resamples_shards"] is False
     assert any(
         item["phase"] == "projection_plan" and item["source"] == "latest_shrink_apply_proof"
