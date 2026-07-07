@@ -50936,6 +50936,79 @@ def graph_usage_event_has_raw_or_segment_ref(event: dict[str, Any]) -> bool:
     return graph_ref_has_raw_or_segment(refs)
 
 
+def graph_usage_event_source_key(event: dict[str, Any]) -> str:
+    session_id = str(event.get("session_id") or "")
+    segment_id = str(event.get("segment_id") or "")
+    if session_id and segment_id:
+        return graph_source_key("segment", session_id, segment_id)
+    return ""
+
+
+def graph_usage_event_deferred_live_info(
+    aoa_root: Path,
+    event: dict[str, Any],
+    *,
+    ledger_sources: dict[str, Any] | None = None,
+    now_ts: float | None = None,
+    quiet_seconds: float = GRAPH_HOT_LIVE_DEFER_SECONDS,
+) -> dict[str, Any]:
+    source_key = graph_usage_event_source_key(event)
+    sources = ledger_sources if isinstance(ledger_sources, dict) else {}
+    entry = sources.get(source_key) if source_key else None
+    if not isinstance(entry, dict):
+        return {"deferred_live": False, "source_key": source_key, "source_status": ""}
+    status = str(entry.get("status") or "")
+    live_transcript_mtime, _live_transcript_path = graph_state_item_live_transcript_mtime(entry)
+    now_value = time.time() if now_ts is None else float(now_ts)
+    threshold = now_value - max(0.0, float(quiet_seconds))
+    deferred_live = bool(status in GRAPH_ACTIONABLE_SOURCE_STATUSES and live_transcript_mtime > threshold)
+    return {
+        "deferred_live": deferred_live,
+        "source_key": source_key,
+        "source_status": status,
+        "session_id": event.get("session_id"),
+        "segment_id": event.get("segment_id"),
+        "event_id": event.get("event_id"),
+        "event_node_id": graph_usage_event_node_id(event),
+        "live_transcript_mtime": live_transcript_mtime if deferred_live else 0.0,
+        "age_seconds": max(0.0, now_value - live_transcript_mtime) if deferred_live and live_transcript_mtime > 0 else 0.0,
+    }
+
+
+def graph_usage_events_for_edge_check(
+    aoa_root: Path,
+    usage_events: list[dict[str, Any]],
+    *,
+    limit: int,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    ledger = read_graph_source_state_ledger(aoa_root)
+    sources = ledger.get("sources") if isinstance(ledger.get("sources"), dict) else {}
+    stable_events: list[dict[str, Any]] = []
+    deferred_events: list[dict[str, Any]] = []
+    deferred_infos: list[dict[str, Any]] = []
+    for event in usage_events:
+        info = graph_usage_event_deferred_live_info(
+            aoa_root,
+            event,
+            ledger_sources=sources,
+            now_ts=now_ts,
+        )
+        if info.get("deferred_live"):
+            deferred_events.append(event)
+            deferred_infos.append(info)
+            continue
+        stable_events.append(event)
+    selected_limit = max(1, int_value(limit, 1))
+    return {
+        "selected_usage_events": stable_events[:selected_limit],
+        "stable_usage_event_count": len(stable_events),
+        "deferred_live_usage_event_count": len(deferred_events),
+        "deferred_live_usage_events_sample": deferred_infos[:8],
+        "harvest_usage_event_count": len(usage_events),
+    }
+
+
 def graph_registry_nodes_for_route_nodes(
     conn: sqlite3.Connection,
     route_node_ids: list[str],
@@ -51151,27 +51224,47 @@ def graph_entity_usage_replacement_proof(
     selected_limit = max(1, min(int_value(limit, 6), 20))
     selected_sample_limit = max(1, min(int_value(sample_limit, 8), 40))
     selected_per_route_limit = max(selected_limit, min(int_value(per_route_limit, 12), 80))
+    usage_harvest_limit = max(selected_limit, min(20, max(selected_per_route_limit, selected_limit * 6)))
+    usage_harvest_per_route_limit = max(selected_per_route_limit, usage_harvest_limit)
     usage_packet = entity_usage_chain(
         aoa_root=aoa_root,
         anchor=anchor,
         kind=normalized_kind,
-        limit=selected_limit,
-        per_route_limit=selected_per_route_limit,
+        limit=usage_harvest_limit,
+        per_route_limit=usage_harvest_per_route_limit,
         consequence_window=consequence_window,
-        document_limit=max(12, selected_limit * 4),
+        document_limit=max(12, usage_harvest_limit * 4),
         provider=provider,
         write_report=False,
     )
     chains = usage_packet.get("usage_chain", {}).get("chains", []) if isinstance(usage_packet.get("usage_chain"), dict) else []
-    usage_events = [
+    harvested_usage_events = [
         item.get("usage_event")
         for item in chains
         if isinstance(item, dict) and isinstance(item.get("usage_event"), dict)
     ]
+    usage_selection = graph_usage_events_for_edge_check(
+        aoa_root,
+        harvested_usage_events,
+        limit=selected_limit,
+    )
+    usage_events = [
+        event
+        for event in usage_selection.get("selected_usage_events", [])
+        if isinstance(event, dict)
+    ]
     usage_quality = usage_packet.get("quality") if isinstance(usage_packet.get("quality"), dict) else {}
     raw_or_segment_usage_count = sum(1 for event in usage_events if graph_usage_event_has_raw_or_segment_ref(event))
-    chain_with_link_count = sum(1 for item in chains if isinstance(item, dict) and "result_or_consequence_count" in item)
-    chain_with_result_count = sum(1 for item in chains if isinstance(item, dict) and bool(item.get("has_result_or_consequence")))
+    selected_event_node_ids = {graph_usage_event_node_id(event) for event in usage_events}
+    selected_chains = [
+        item
+        for item in chains
+        if isinstance(item, dict)
+        and isinstance(item.get("usage_event"), dict)
+        and graph_usage_event_node_id(item["usage_event"]) in selected_event_node_ids
+    ]
+    chain_with_link_count = sum(1 for item in selected_chains if "result_or_consequence_count" in item)
+    chain_with_result_count = sum(1 for item in selected_chains if bool(item.get("has_result_or_consequence")))
     graph_state = graph_store_query_state(aoa_root)
     diagnostics: list[str] = []
     graph_resolution: dict[str, Any] = {}
@@ -51208,19 +51301,30 @@ def graph_entity_usage_replacement_proof(
     usage_count = len(usage_events)
     checked_count = int_value(edge_matches.get("checked_count"))
     matched_count = int_value(edge_matches.get("matched_count"))
+    deferred_live_usage_event_count = int_value(usage_selection.get("deferred_live_usage_event_count"))
     gates = [
         graph_replacement_gate(
             "raw_or_segment_refs_preserved",
-            "passed" if usage_count and raw_or_segment_usage_count == usage_count else "failed",
+            (
+                "passed"
+                if usage_count and raw_or_segment_usage_count == usage_count
+                else ("not_proven" if deferred_live_usage_event_count and not usage_count else "failed")
+            ),
             reason="usage-chain usage events expose raw, raw-block, segment, or segment-index refs",
-            details={"usage_event_count": usage_count, "raw_or_segment_ref_count": raw_or_segment_usage_count},
+            details={
+                "usage_event_count": usage_count,
+                "raw_or_segment_ref_count": raw_or_segment_usage_count,
+                "deferred_live_usage_event_count": deferred_live_usage_event_count,
+            },
         ),
         graph_replacement_gate(
             "freshness_current_or_stale_flag_visible",
-            "passed"
-            if usage_count
-            and all(isinstance(event.get("freshness"), dict) and event.get("freshness", {}).get("status") for event in usage_events)
-            else "failed",
+            (
+                "passed"
+                if usage_count
+                and all(isinstance(event.get("freshness"), dict) and event.get("freshness", {}).get("status") for event in usage_events)
+                else ("not_proven" if deferred_live_usage_event_count and not usage_count else "failed")
+            ),
             reason="usage-chain keeps freshness status visible on checked usage events",
         ),
         graph_replacement_gate(
@@ -51239,9 +51343,18 @@ def graph_entity_usage_replacement_proof(
         ),
         graph_replacement_gate(
             "entity_usage_rollup_samples_match_event_refs",
-            "passed" if checked_count and matched_count == checked_count else "failed",
+            (
+                "passed"
+                if checked_count and matched_count == checked_count
+                else ("not_proven" if deferred_live_usage_event_count and not checked_count else "failed")
+            ),
             reason="usage-chain event refs match generated event_mentions_registered_entity graph edges for this anchor sample",
-            details={"checked_count": checked_count, "matched_count": matched_count, "missing_count": edge_matches.get("missing_count")},
+            details={
+                "checked_count": checked_count,
+                "matched_count": matched_count,
+                "missing_count": edge_matches.get("missing_count"),
+                "deferred_live_usage_event_count": deferred_live_usage_event_count,
+            },
         ),
         graph_replacement_gate(
             "sample_before_after_cardinality_comparison",
@@ -51255,9 +51368,18 @@ def graph_entity_usage_replacement_proof(
         ),
         graph_replacement_gate(
             "usage_chain_preserves_consequence_links",
-            "passed" if usage_count and chain_with_link_count == usage_count else "failed",
+            (
+                "passed"
+                if usage_count and chain_with_link_count == usage_count
+                else ("not_proven" if deferred_live_usage_event_count and not usage_count else "failed")
+            ),
             reason="usage-chain keeps per-usage result_or_consequence link fields even when no consequence was observed",
-            details={"chain_count": len(chains), "chain_with_link_count": chain_with_link_count, "chain_with_result_count": chain_with_result_count},
+            details={
+                "chain_count": len(selected_chains),
+                "chain_with_link_count": chain_with_link_count,
+                "chain_with_result_count": chain_with_result_count,
+                "deferred_live_usage_event_count": deferred_live_usage_event_count,
+            },
         ),
         graph_replacement_gate(
             "global_before_after_cardinality_comparison",
@@ -51276,7 +51398,7 @@ def graph_entity_usage_replacement_proof(
         "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
         "graph_schema_version": GRAPH_SCHEMA_VERSION,
         "generated_at": utc_now(),
-        "ok": bool(usage_packet.get("ok")) and not failed_core_gates and bool(registry_node_ids),
+        "ok": bool(usage_packet.get("ok")) and usage_count > 0 and not failed_core_gates and bool(registry_node_ids),
         "mutates": False,
         "truth_status": "generated_graph_replacement_sample_proof_not_prune_permission",
         "anchor": anchor,
@@ -51288,7 +51410,11 @@ def graph_entity_usage_replacement_proof(
         "usage_chain": {
             "ok": usage_packet.get("ok"),
             "usage_event_count": usage_count,
-            "chain_count": len(chains),
+            "usage_event_harvest_count": usage_selection.get("harvest_usage_event_count"),
+            "stable_usage_event_count": usage_selection.get("stable_usage_event_count"),
+            "deferred_live_usage_event_count": deferred_live_usage_event_count,
+            "deferred_live_usage_events_sample": usage_selection.get("deferred_live_usage_events_sample"),
+            "chain_count": len(selected_chains),
             "chain_with_result_or_consequence_count": chain_with_result_count,
             "raw_or_segment_ref_count": raw_or_segment_usage_count,
             "first_ref": usage_packet.get("first_ref"),
@@ -51403,15 +51529,27 @@ def graph_replacement_probe_summary(
     failed_core_gate_count = int_value(proof_summary.get("failed_core_gate_count"))
     missing_edge_count = int_value(edge_match.get("missing_count"))
     usage_event_count = int_value(usage_chain.get("usage_event_count"))
+    deferred_live_usage_event_count = int_value(usage_chain.get("deferred_live_usage_event_count"))
     checked_count = int_value(edge_match.get("checked_count"))
     target_projection = str(proof.get("target_projection") or "")
+    accepted_deferred_live = bool(
+        deferred_live_usage_event_count > 0
+        and usage_event_count <= 0
+        and checked_count <= 0
+        and missing_edge_count <= 0
+        and failed_core_gate_count <= 0
+    )
     quality_flags: list[str] = []
-    if not proof.get("ok"):
+    if not proof.get("ok") and not accepted_deferred_live:
         quality_flags.append("graph_replacement_probe_not_ok")
-    if usage_event_count <= 0:
+    if usage_event_count <= 0 and not accepted_deferred_live:
         quality_flags.append("graph_replacement_probe_no_usage_events")
-    if checked_count <= 0:
-        quality_flags.append("graph_replacement_probe_no_checked_event_edges")
+    if checked_count <= 0 and not accepted_deferred_live:
+        quality_flags.append(
+            "graph_replacement_probe_only_deferred_live_event_edges"
+            if deferred_live_usage_event_count
+            else "graph_replacement_probe_no_checked_event_edges"
+        )
     if missing_edge_count > 0:
         quality_flags.append("graph_replacement_probe_missing_event_edges")
     if failed_core_gate_count > 0:
@@ -51429,10 +51567,14 @@ def graph_replacement_probe_summary(
         "kind": proof.get("kind") or probe.get("kind"),
         "status": status,
         "ok": not quality_flags,
+        "accepted_deferred_live": accepted_deferred_live,
         "elapsed_ms": elapsed_ms,
         "target_projection": target_projection,
         "replacement_scope": proof.get("replacement_scope"),
         "usage_event_count": usage_event_count,
+        "usage_event_harvest_count": int_value(usage_chain.get("usage_event_harvest_count")),
+        "stable_usage_event_count": int_value(usage_chain.get("stable_usage_event_count")),
+        "deferred_live_usage_event_count": deferred_live_usage_event_count,
         "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
         "graph_event_edge_checked_count": checked_count,
         "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
@@ -51513,6 +51655,10 @@ def graph_high_fanout_replacement_scenario_audit(
         "anchor_count": len(anchor_counts),
         "anchor_counts": dict(sorted(anchor_counts.items())),
         "usage_event_count": sum(int_value(sample.get("usage_event_count")) for sample in samples),
+        "usage_event_harvest_count": sum(int_value(sample.get("usage_event_harvest_count")) for sample in samples),
+        "stable_usage_event_count": sum(int_value(sample.get("stable_usage_event_count")) for sample in samples),
+        "deferred_live_usage_event_count": sum(int_value(sample.get("deferred_live_usage_event_count")) for sample in samples),
+        "accepted_deferred_live_probe_count": sum(1 for sample in samples if sample.get("accepted_deferred_live") is True),
         "raw_or_segment_ref_count": sum(int_value(sample.get("raw_or_segment_ref_count")) for sample in samples),
         "graph_event_edge_checked_count": sum(int_value(sample.get("graph_event_edge_checked_count")) for sample in samples),
         "graph_event_edge_match_count": sum(int_value(sample.get("graph_event_edge_match_count")) for sample in samples),
@@ -73200,6 +73346,10 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                     "replacement_scope": payload.get("replacement_scope"),
                     "replacement_proof_ok": payload.get("ok"),
                     "usage_event_count": int_value(quality.get("usage_event_count")),
+                    "usage_event_harvest_count": int_value(quality.get("usage_event_harvest_count")),
+                    "stable_usage_event_count": int_value(quality.get("stable_usage_event_count")),
+                    "deferred_live_usage_event_count": int_value(quality.get("deferred_live_usage_event_count")),
+                    "accepted_deferred_live_probe_count": int_value(quality.get("accepted_deferred_live_probe_count")),
                     "raw_or_segment_ref_count": int_value(quality.get("raw_or_segment_ref_count")),
                     "graph_event_edge_checked_count": int_value(quality.get("graph_event_edge_checked_count")),
                     "graph_event_edge_match_count": int_value(quality.get("graph_event_edge_match_count")),
@@ -73231,6 +73381,13 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                     "replacement_scope": payload.get("replacement_scope"),
                     "replacement_proof_ok": payload.get("ok"),
                     "usage_event_count": int_value(usage_chain.get("usage_event_count")),
+                    "usage_event_harvest_count": int_value(usage_chain.get("usage_event_harvest_count")),
+                    "stable_usage_event_count": int_value(usage_chain.get("stable_usage_event_count")),
+                    "deferred_live_usage_event_count": int_value(usage_chain.get("deferred_live_usage_event_count")),
+                    "accepted_deferred_live_probe_count": 1
+                    if int_value(usage_chain.get("deferred_live_usage_event_count")) > 0
+                    and int_value(usage_chain.get("usage_event_count")) <= 0
+                    else 0,
                     "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
                     "graph_event_edge_checked_count": int_value(edge_match.get("checked_count")),
                     "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
@@ -73843,6 +74000,10 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "replacement_scope": scenario.get("replacement_scope"),
             "replacement_proof_ok": scenario.get("replacement_proof_ok"),
             "usage_event_count": scenario.get("usage_event_count"),
+            "usage_event_harvest_count": scenario.get("usage_event_harvest_count"),
+            "stable_usage_event_count": scenario.get("stable_usage_event_count"),
+            "deferred_live_usage_event_count": scenario.get("deferred_live_usage_event_count"),
+            "accepted_deferred_live_probe_count": scenario.get("accepted_deferred_live_probe_count"),
             "raw_or_segment_ref_count": scenario.get("raw_or_segment_ref_count"),
             "graph_event_edge_checked_count": scenario.get("graph_event_edge_checked_count"),
             "graph_event_edge_match_count": scenario.get("graph_event_edge_match_count"),
@@ -74157,6 +74318,12 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
             required_value = str(required)
             if int_value(observed_counts.get(required_value)) <= 0:
                 failures.append(f"{profile}:missing_{label}:{required_value}")
+    accepted_deferred_live_probe_count = int_value(scenario.get("accepted_deferred_live_probe_count"))
+    graph_replacement_deferred_adjusted_minimums = {
+        "min_graph_replacement_usage_event_count",
+        "min_graph_replacement_edge_checked_count",
+        "min_graph_replacement_edge_match_count",
+    }
     for expectation_key, scenario_key in (
         ("min_next_action_count", "next_action_count"),
         ("min_graph_next_action_count", "graph_next_action_count"),
@@ -74177,6 +74344,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_graph_replacement_target_projection_match_count", "target_projection_match_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
+        if expectation_key in graph_replacement_deferred_adjusted_minimums and accepted_deferred_live_probe_count:
+            minimum = max(0, minimum - accepted_deferred_live_probe_count)
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
             failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
     max_graph_replacement_sample_elapsed_ms = expectation.get("max_graph_replacement_sample_elapsed_ms")

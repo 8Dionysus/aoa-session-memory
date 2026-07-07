@@ -24222,6 +24222,309 @@ def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edge
     assert payload["prune_gate"]["status"] == "blocked_anchor_sample_only"
 
 
+def test_graph_entity_usage_replacement_proof_uses_stable_events_when_live_tail_is_deferred(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    session_id = "sample-session"
+    stable_segment_id = "001"
+    live_segment_id = "002"
+    route_node_id = module.graph_route_node_id("tool", "sample_tool")
+    registry_node_id = f"entity_registry:{module.entity_registry_id('tool', 'sample_tool')}"
+    session_node_id = f"session:{session_id}"
+    session_dir = aoa_root / "sessions" / session_id
+    live_transcript = tmp_path / ".codex" / "sessions" / "2026" / "07" / "07" / "rollout-live.jsonl"
+    live_transcript.parent.mkdir(parents=True)
+    live_transcript.write_text("{}\n", encoding="utf-8")
+    now_value = time.time()
+    os.utime(live_transcript, (now_value, now_value))
+    write_json(session_dir / "session.manifest.json", {"source": {"transcript_path": str(live_transcript)}})
+
+    def refs(segment_id: str, event_id: str = "") -> dict[str, str]:
+        raw = f"raw:line:{event_id or session_id}"
+        return {
+            "session": str(session_dir / "session.manifest.json"),
+            "segment": str(session_dir / "segments" / f"{segment_id}.md"),
+            "segment_index": str(session_dir / "segments" / f"{segment_id}.index.json"),
+            "raw": raw,
+        }
+
+    def evidence(segment_id: str = "", event_id: str = "") -> list[dict[str, Any]]:
+        return [
+            {
+                "session_id": session_id,
+                "segment_id": segment_id,
+                "event_id": event_id,
+                "refs": refs(segment_id or stable_segment_id, event_id),
+            }
+        ]
+
+    stable_event_id = "000001"
+    extra_stable_event_id = "000003"
+    stable_event_node_id = f"event:{session_id}:{stable_segment_id}:{stable_event_id}"
+    extra_stable_event_node_id = f"event:{session_id}:{stable_segment_id}:{extra_stable_event_id}"
+    session_contribution = {
+        "source": {
+            "source_key": f"session:{session_id}",
+            "source_type": "session",
+            "session_id": session_id,
+            "session_label": "2026-07-07__001__sample-session",
+            "segment_id": "",
+            "source_path": str(session_dir / "session.index.json"),
+            "source_paths": [str(session_dir / "session.index.json")],
+            "source_sha": "sha-session",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": session_node_id, "type": "session", "label": session_id, "evidence_refs": evidence()},
+            {
+                "id": route_node_id,
+                "type": module.graph_route_node_type("tool", "sample_tool"),
+                "label": "tool:sample_tool",
+                "route_layer": "tool",
+                "route_key": "sample_tool",
+                "route_signal": "tool:sample_tool",
+                "evidence_refs": evidence(),
+            },
+            {
+                "id": registry_node_id,
+                "type": "entity_registry",
+                "label": "tool:sample_tool",
+                "entity_id": module.entity_registry_id("tool", "sample_tool"),
+                "entity_kind": "tool",
+                "canonical_key": "sample_tool",
+                "route_layer": "tool",
+                "route_signal": "tool:sample_tool",
+                "evidence_refs": evidence(),
+            },
+        ],
+        "edges": [
+            {
+                "id": module.graph_edge_id(session_node_id, registry_node_id, module.GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE),
+                "source": session_node_id,
+                "target": registry_node_id,
+                "type": module.GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE,
+                "evidence_refs": evidence(),
+            },
+            {
+                "id": module.graph_edge_id(registry_node_id, route_node_id, "registry_entity_has_route_signal"),
+                "source": registry_node_id,
+                "target": route_node_id,
+                "type": "registry_entity_has_route_signal",
+                "evidence_refs": evidence(),
+            },
+        ],
+    }
+    stable_contribution = {
+        "source": {
+            "source_key": module.graph_source_key("segment", session_id, stable_segment_id),
+            "source_type": "segment",
+            "session_id": session_id,
+            "session_label": "2026-07-07__001__sample-session",
+            "segment_id": stable_segment_id,
+            "source_path": str(session_dir / "segments" / f"{stable_segment_id}.index.json"),
+            "source_paths": [str(session_dir / "segments" / f"{stable_segment_id}.index.json")],
+            "source_sha": "sha-stable-event",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {
+                "id": stable_event_node_id,
+                "type": "event",
+                "label": f"event {stable_event_id}",
+                "session_id": session_id,
+                "segment_id": stable_segment_id,
+                "event_id": stable_event_id,
+                "evidence_refs": evidence(stable_segment_id, stable_event_id),
+            },
+            {
+                "id": registry_node_id,
+                "type": "entity_registry",
+                "label": "tool:sample_tool",
+                "entity_id": module.entity_registry_id("tool", "sample_tool"),
+                "entity_kind": "tool",
+                "canonical_key": "sample_tool",
+                "route_layer": "tool",
+                "route_signal": "tool:sample_tool",
+                "evidence_refs": evidence(stable_segment_id, stable_event_id),
+            },
+            {
+                "id": extra_stable_event_node_id,
+                "type": "event",
+                "label": f"event {extra_stable_event_id}",
+                "session_id": session_id,
+                "segment_id": stable_segment_id,
+                "event_id": extra_stable_event_id,
+                "evidence_refs": evidence(stable_segment_id, extra_stable_event_id),
+            },
+        ],
+        "edges": [
+            {
+                "id": module.graph_edge_id(stable_event_node_id, registry_node_id, module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE),
+                "source": stable_event_node_id,
+                "target": registry_node_id,
+                "type": module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,
+                "evidence_refs": evidence(stable_segment_id, stable_event_id),
+            },
+            {
+                "id": module.graph_edge_id(extra_stable_event_node_id, registry_node_id, module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE),
+                "source": extra_stable_event_node_id,
+                "target": registry_node_id,
+                "type": module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,
+                "evidence_refs": evidence(stable_segment_id, extra_stable_event_id),
+            }
+        ],
+    }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([session_contribution, stable_contribution])
+    finally:
+        store.close()
+
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                module.graph_source_key("segment", session_id, live_segment_id): {
+                    "source_key": module.graph_source_key("segment", session_id, live_segment_id),
+                    "status": "dirty",
+                    "session_id": session_id,
+                    "session_label": "2026-07-07__001__sample-session",
+                    "segment_id": live_segment_id,
+                    "source_path": str(session_dir / "segments" / f"{live_segment_id}.index.json"),
+                }
+            }
+        },
+    )
+
+    live_usage_event = {
+        "doc_id": f"event:{session_id}:{live_segment_id}:000002",
+        "session_id": session_id,
+        "segment_id": live_segment_id,
+        "event_id": "000002",
+        "role": "direct_usage",
+        "refs": refs(live_segment_id, "000002"),
+        "freshness": {"status": "current"},
+    }
+    stable_usage_event = {
+        "doc_id": stable_event_node_id,
+        "session_id": session_id,
+        "segment_id": stable_segment_id,
+        "event_id": stable_event_id,
+        "role": "direct_usage",
+        "refs": refs(stable_segment_id, stable_event_id),
+        "freshness": {"status": "current"},
+    }
+
+    def fake_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["limit"] > 1
+        return {
+            "artifact_type": "session_memory_entity_usage_chain",
+            "ok": True,
+            "normalized_entity": {"anchor": "sample_tool", "kind": "tool"},
+            "usage_chain": {
+                "chains": [
+                    {
+                        "usage_event": live_usage_event,
+                        "has_result_or_consequence": False,
+                        "result_or_consequence_count": 0,
+                    },
+                    {
+                        "usage_event": stable_usage_event,
+                        "has_result_or_consequence": False,
+                        "result_or_consequence_count": 0,
+                    },
+                ]
+            },
+            "first_ref": {"raw": refs(live_segment_id, "000002")["raw"], "segment": refs(live_segment_id, "000002")["segment"]},
+            "quality": {
+                "skipped_graph_rag_packet": True,
+                "skipped_graph_neighborhood": True,
+                "skipped_raw_preview_neighborhood": True,
+            },
+            "next_expansion_command": "python3 scripts/aoa_session_memory.py entity-usage-audit sample-tool --kind tool",
+        }
+
+    monkeypatch.setattr(module, "entity_usage_chain", fake_usage_chain)
+
+    payload = module.graph_entity_usage_replacement_proof(
+        aoa_root=aoa_root,
+        anchor="sample-tool",
+        kind="tool",
+        limit=1,
+        per_route_limit=2,
+        sample_limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["usage_chain"]["usage_event_count"] == 1
+    assert payload["usage_chain"]["usage_event_harvest_count"] == 2
+    assert payload["usage_chain"]["stable_usage_event_count"] == 1
+    assert payload["usage_chain"]["deferred_live_usage_event_count"] == 1
+    assert payload["usage_chain"]["deferred_live_usage_events_sample"][0]["source_key"] == module.graph_source_key("segment", session_id, live_segment_id)
+    assert payload["edge_match"]["checked_count"] == 1
+    assert payload["edge_match"]["matched_count"] == 1
+    assert payload["edge_match"]["missing_count"] == 0
+    assert payload["proof_gate_summary"]["failed_core_gate_count"] == 0
+
+
+def test_graph_replacement_summary_accepts_pure_deferred_live_probe() -> None:
+    proof = {
+        "ok": False,
+        "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+        "replacement_scope": "anchor_sample",
+        "kind": "tool",
+        "usage_chain": {
+            "usage_event_count": 0,
+            "usage_event_harvest_count": 20,
+            "stable_usage_event_count": 0,
+            "deferred_live_usage_event_count": 20,
+            "raw_or_segment_ref_count": 0,
+            "first_ref": {"raw": "raw:line:1"},
+        },
+        "graph_sample": {
+            "event_edge_count": 10,
+            "session_aggregate_edge_count": 1,
+            "anchor_sample_reduction_ratio": 0.9,
+        },
+        "edge_match": {
+            "checked_count": 0,
+            "matched_count": 0,
+            "missing_count": 0,
+        },
+        "proof_gate_summary": {
+            "failed_core_gate_count": 0,
+            "not_proven_gate_count": 5,
+        },
+        "prune_gate": {"apply_ready": False, "status": "blocked_anchor_sample_only"},
+        "diagnostics": [],
+    }
+
+    sample = module.graph_replacement_probe_summary(
+        probe={"name": "tool_exec", "anchor": "exec_command", "kind": "tool"},
+        proof=proof,
+        elapsed_ms=123,
+    )
+
+    assert sample["status"] == "passed"
+    assert sample["ok"] is True
+    assert sample["accepted_deferred_live"] is True
+    assert sample["deferred_live_usage_event_count"] == 20
+    assert sample["graph_event_edge_checked_count"] == 0
+    assert sample["quality_flags"] == []
+
+
 def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
