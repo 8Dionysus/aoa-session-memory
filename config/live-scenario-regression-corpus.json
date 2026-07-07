@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 16,
+  "case_count": 17,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -733,6 +733,47 @@
             "require_graph_high_fanout_no_mutation_boundary": true,
             "require_graph_high_fanout_replacement_status": true,
             "require_graph_high_fanout_prune_gate_closed": true,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph_entity_usage_replacement_proof_contract",
+      "profiles": [
+        "graph_high_fanout_replacement"
+      ],
+      "seed": "corpus-graph-entity-usage-replacement-proof",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 4,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-07",
+        "note": "Dense registered-entity graph edges may only be treated as replaceable after a live proof matches usage-chain event refs to graph edges and keeps the prune gate closed."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "profile_expectations": [
+          {
+            "profile": "graph_high_fanout_replacement",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "require_graph_replacement_target_projection": true,
+            "require_graph_replacement_proof_ok": true,
+            "require_graph_replacement_prune_gate_closed": true,
+            "require_graph_replacement_no_missing_event_edges": true,
+            "require_graph_replacement_no_failed_core_gates": true,
+            "min_graph_replacement_usage_event_count": 1,
+            "min_graph_replacement_edge_checked_count": 1,
+            "min_graph_replacement_edge_match_count": 1,
+            "min_graph_replacement_event_edge_count": 1,
+            "min_graph_replacement_session_aggregate_edge_count": 1,
             "max_elapsed_ms": 30000
           }
         ]

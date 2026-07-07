@@ -157,6 +157,10 @@ Use these first routes when available:
   `prune_gate.apply_ready=false` as the normal state until replacement
   projections prove raw/segment refs, freshness, fallback, live-scenario
   quality, and before/after cardinality.
+  For `event_mentions_registered_entity`, use
+  `graph-entity-usage-replacement-proof <anchor> --kind <kind>` to prove one
+  dense anchor against `usage-chain` refs and graph edge samples before any
+  wider replacement or pruning plan.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
   the outer maintenance profile. Global fallbacks use the generated graph

@@ -776,6 +776,20 @@ replacement projection preserves refs, freshness, and fallback behavior. Read
 `replacement_readiness` and `prune_gate` before planning any graph-row pruning:
 they name the candidate replacement projections, missing proof gates, live
 proof commands, and the read-only mutation boundary.
+For the registered-entity edge class, prove one dense anchor with the
+read-only replacement packet before widening the corpus:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-entity-usage-replacement-proof \
+  aoa-session-memory-mcp \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --kind mcp
+```
+
+This packet checks `usage-chain` refs against
+`event_mentions_registered_entity` graph edges and keeps
+`prune_gate.apply_ready=false`; it is route evidence, not permission to prune.
 
 ## Storage Audit
 

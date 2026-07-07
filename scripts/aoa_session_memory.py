@@ -405,6 +405,9 @@ GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES = frozenset({"next_event", "previous_ev
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT = 8
 GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT = 8
 GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT = 64
+GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE = "event_mentions_registered_entity"
+GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE = "session_has_registered_entity"
+GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION = "entity_usage_rollup_by_anchor_session_segment"
 GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
     "raw_or_segment_refs_preserved",
     "freshness_current_or_stale_flag_visible",
@@ -50350,6 +50353,7 @@ def graph_high_fanout_replacement_plan_for_edge(
             "replacement_layers": replacement_layers,
             "missing_proof_gates": missing_gates,
             "proof_commands": [
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-entity-usage-replacement-proof <anchor> --aoa-root {aoa_root} --kind <kind>",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} usage-chain <anchor> --aoa-root {aoa_root} --kind <kind>",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} entity-usage-audit <anchor> --aoa-root {aoa_root} --kind <kind>",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check --aoa-root {aoa_root} --case-limit 1",
@@ -50658,6 +50662,436 @@ def graph_high_fanout_policy_from_projection(
 def graph_high_fanout_policy(*, aoa_root: Path, limit: int = 12) -> dict[str, Any]:
     projection = graph_cardinality_projection_read(aoa_root, limit=max(12, int_value(limit, 12)))
     return graph_high_fanout_policy_from_projection(aoa_root=aoa_root, projection=projection, limit=limit)
+
+
+def graph_usage_event_node_id(event: dict[str, Any]) -> str:
+    doc_id = str(event.get("doc_id") or "")
+    if doc_id.startswith("event:"):
+        return doc_id
+    session_id = str(event.get("session_id") or "")
+    segment_id = str(event.get("segment_id") or "")
+    event_id = str(event.get("event_id") or "")
+    if session_id and segment_id and event_id:
+        return f"event:{session_id}:{segment_id}:{event_id}"
+    return ""
+
+
+def graph_ref_has_raw_or_segment(refs: dict[str, Any]) -> bool:
+    return any(str(refs.get(key) or "").strip() for key in ("raw", "raw_block", "segment", "segment_index"))
+
+
+def graph_usage_event_has_raw_or_segment_ref(event: dict[str, Any]) -> bool:
+    refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    return graph_ref_has_raw_or_segment(refs)
+
+
+def graph_registry_nodes_for_route_nodes(
+    conn: sqlite3.Connection,
+    route_node_ids: list[str],
+    *,
+    limit: int,
+) -> list[str]:
+    registry_nodes: list[str] = []
+    seen: set[str] = set()
+    for node_id in route_node_ids:
+        node_id = str(node_id or "")
+        if not node_id:
+            continue
+        if node_id.startswith("entity_registry:") and node_id not in seen:
+            registry_nodes.append(node_id)
+            seen.add(node_id)
+        remaining = max(1, limit - len(registry_nodes))
+        rows = conn.execute(
+            """
+            SELECT source_node
+            FROM edges
+            WHERE target_node = ?
+              AND edge_type = 'registry_entity_has_route_signal'
+            LIMIT ?
+            """,
+            (node_id, remaining),
+        ).fetchall()
+        for row in rows:
+            registry_node = str(row["source_node"] or "")
+            if registry_node and registry_node not in seen:
+                registry_nodes.append(registry_node)
+                seen.add(registry_node)
+            if len(registry_nodes) >= limit:
+                return registry_nodes
+    return registry_nodes
+
+
+def graph_entity_usage_replacement_graph_sample(
+    conn: sqlite3.Connection,
+    *,
+    registry_node_ids: list[str],
+    sample_limit: int,
+) -> dict[str, Any]:
+    event_edge_count = 0
+    aggregate_edge_count = 0
+    sample_edge_ids: list[str] = []
+    sample_session_edge_ids: list[str] = []
+    per_registry: list[dict[str, Any]] = []
+    for registry_node in registry_node_ids:
+        registry_node = str(registry_node or "")
+        if not registry_node:
+            continue
+        event_count = int_value(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM edges
+                WHERE target_node = ?
+                  AND edge_type = ?
+                """,
+                (registry_node, GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE),
+            ).fetchone()[0]
+        )
+        session_count = int_value(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM edges
+                WHERE target_node = ?
+                  AND edge_type = ?
+                """,
+                (registry_node, GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE),
+            ).fetchone()[0]
+        )
+        event_edge_count += event_count
+        aggregate_edge_count += session_count
+        if len(sample_edge_ids) < sample_limit:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM edges
+                WHERE target_node = ?
+                  AND edge_type = ?
+                LIMIT ?
+                """,
+                (registry_node, GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE, max(1, sample_limit - len(sample_edge_ids))),
+            ).fetchall()
+            sample_edge_ids.extend(str(row["id"] or "") for row in rows if row["id"])
+        if len(sample_session_edge_ids) < sample_limit:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM edges
+                WHERE target_node = ?
+                  AND edge_type = ?
+                LIMIT ?
+                """,
+                (registry_node, GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE, max(1, sample_limit - len(sample_session_edge_ids))),
+            ).fetchall()
+            sample_session_edge_ids.extend(str(row["id"] or "") for row in rows if row["id"])
+        per_registry.append(
+            {
+                "registry_node": registry_node,
+                "event_edge_count": event_count,
+                "session_aggregate_edge_count": session_count,
+            }
+        )
+    event_samples = graph_store_fetch_payloads(conn, "edges", sample_edge_ids[:sample_limit])
+    aggregate_samples = graph_store_fetch_payloads(conn, "edges", sample_session_edge_ids[:sample_limit])
+    reduction_ratio = round(1 - (aggregate_edge_count / event_edge_count), 6) if event_edge_count > 0 else 0.0
+    return {
+        "event_edge_count": event_edge_count,
+        "session_aggregate_edge_count": aggregate_edge_count,
+        "sample_event_edge_count": len(event_samples),
+        "sample_session_aggregate_edge_count": len(aggregate_samples),
+        "sample_event_edges": event_samples,
+        "sample_session_aggregate_edges": aggregate_samples,
+        "per_registry": per_registry,
+        "anchor_sample_reduction_ratio": reduction_ratio,
+        "cardinality_improves_for_anchor": event_edge_count > aggregate_edge_count > 0,
+    }
+
+
+def graph_entity_usage_replacement_matching_edges(
+    conn: sqlite3.Connection,
+    *,
+    usage_events: list[dict[str, Any]],
+    registry_node_ids: list[str],
+    sample_limit: int,
+) -> dict[str, Any]:
+    checked: list[dict[str, Any]] = []
+    matched_edge_ids: list[str] = []
+    missing: list[dict[str, Any]] = []
+    for event in usage_events[:sample_limit]:
+        event_node_id = graph_usage_event_node_id(event)
+        matched_registry_node = ""
+        matched_edge_id = ""
+        if event_node_id:
+            for registry_node in registry_node_ids:
+                edge_id = graph_edge_id(event_node_id, registry_node, GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE)
+                row = conn.execute("SELECT id FROM edges WHERE id = ?", (edge_id,)).fetchone()
+                if row:
+                    matched_registry_node = registry_node
+                    matched_edge_id = str(row["id"] or edge_id)
+                    break
+        item = {
+            "event_node_id": event_node_id,
+            "session_id": event.get("session_id"),
+            "segment_id": event.get("segment_id"),
+            "event_id": event.get("event_id"),
+            "usage_role": event.get("role"),
+            "raw_or_segment_ref_present": graph_usage_event_has_raw_or_segment_ref(event),
+            "matched": bool(matched_edge_id),
+            "matched_registry_node": matched_registry_node,
+            "matched_edge_id": matched_edge_id,
+        }
+        checked.append(item)
+        if matched_edge_id:
+            matched_edge_ids.append(matched_edge_id)
+        else:
+            missing.append(item)
+    matched_edges = graph_store_fetch_payloads(conn, "edges", matched_edge_ids[:sample_limit])
+    matched_edges_with_refs = 0
+    for edge in matched_edges:
+        refs = edge.get("evidence_refs") if isinstance(edge.get("evidence_refs"), list) else []
+        if refs:
+            matched_edges_with_refs += 1
+    return {
+        "checked_count": len(checked),
+        "matched_count": len(matched_edge_ids),
+        "missing_count": len(missing),
+        "usage_events_checked": checked,
+        "missing_usage_events": missing[:sample_limit],
+        "matched_edges": matched_edges,
+        "matched_edges_with_evidence_refs": matched_edges_with_refs,
+    }
+
+
+def graph_replacement_gate(id_: str, status: str, *, reason: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": id_,
+        "status": status,
+        "passed": status == "passed",
+        "reason": reason,
+        "details": details or {},
+    }
+
+
+def graph_entity_usage_replacement_proof(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 6,
+    per_route_limit: int = 12,
+    consequence_window: int = 6,
+    sample_limit: int = 8,
+    provider: str = "portable_sqlite",
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    normalized_kind = normalize_trace_route_kind(kind)
+    if normalized_kind not in TRACE_ROUTE_KINDS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
+            "generated_at": utc_now(),
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "diagnostics": [f"unknown trace kind: {kind}"],
+        }
+    selected_limit = max(1, min(int_value(limit, 6), 20))
+    selected_sample_limit = max(1, min(int_value(sample_limit, 8), 40))
+    selected_per_route_limit = max(selected_limit, min(int_value(per_route_limit, 12), 80))
+    usage_packet = entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor=anchor,
+        kind=normalized_kind,
+        limit=selected_limit,
+        per_route_limit=selected_per_route_limit,
+        consequence_window=consequence_window,
+        document_limit=max(12, selected_limit * 4),
+        provider=provider,
+        write_report=False,
+    )
+    chains = usage_packet.get("usage_chain", {}).get("chains", []) if isinstance(usage_packet.get("usage_chain"), dict) else []
+    usage_events = [
+        item.get("usage_event")
+        for item in chains
+        if isinstance(item, dict) and isinstance(item.get("usage_event"), dict)
+    ]
+    usage_quality = usage_packet.get("quality") if isinstance(usage_packet.get("quality"), dict) else {}
+    raw_or_segment_usage_count = sum(1 for event in usage_events if graph_usage_event_has_raw_or_segment_ref(event))
+    chain_with_link_count = sum(1 for item in chains if isinstance(item, dict) and "result_or_consequence_count" in item)
+    chain_with_result_count = sum(1 for item in chains if isinstance(item, dict) and bool(item.get("has_result_or_consequence")))
+    graph_state = graph_store_query_state(aoa_root)
+    diagnostics: list[str] = []
+    graph_resolution: dict[str, Any] = {}
+    graph_sample: dict[str, Any] = {}
+    edge_matches: dict[str, Any] = {}
+    registry_node_ids: list[str] = []
+    if graph_state.get("status") != "current":
+        diagnostics.append("graph_store_not_current")
+    else:
+        try:
+            conn = sqlite3.connect(str(graph_paths(aoa_root)["store"]))
+            conn.row_factory = sqlite3.Row
+            graph_resolution = graph_store_resolve_anchor(conn, anchor, kind=normalized_kind, limit=max(10, selected_sample_limit))
+            route_node_ids = [str(node_id) for node_id in graph_resolution.get("start_node_ids", []) if node_id]
+            registry_node_ids = graph_registry_nodes_for_route_nodes(conn, route_node_ids, limit=max(4, selected_sample_limit))
+            graph_sample = graph_entity_usage_replacement_graph_sample(
+                conn,
+                registry_node_ids=registry_node_ids,
+                sample_limit=selected_sample_limit,
+            )
+            edge_matches = graph_entity_usage_replacement_matching_edges(
+                conn,
+                usage_events=usage_events,
+                registry_node_ids=registry_node_ids,
+                sample_limit=selected_sample_limit,
+            )
+            conn.close()
+        except sqlite3.Error as exc:
+            diagnostics.append(f"graph_sqlite_error:{str(exc)[:180]}")
+    usage_count = len(usage_events)
+    checked_count = int_value(edge_matches.get("checked_count"))
+    matched_count = int_value(edge_matches.get("matched_count"))
+    gates = [
+        graph_replacement_gate(
+            "raw_or_segment_refs_preserved",
+            "passed" if usage_count and raw_or_segment_usage_count == usage_count else "failed",
+            reason="usage-chain usage events expose raw, raw-block, segment, or segment-index refs",
+            details={"usage_event_count": usage_count, "raw_or_segment_ref_count": raw_or_segment_usage_count},
+        ),
+        graph_replacement_gate(
+            "freshness_current_or_stale_flag_visible",
+            "passed"
+            if usage_count
+            and all(isinstance(event.get("freshness"), dict) and event.get("freshness", {}).get("status") for event in usage_events)
+            else "failed",
+            reason="usage-chain keeps freshness status visible on checked usage events",
+        ),
+        graph_replacement_gate(
+            "fallback_route_named",
+            "passed" if usage_packet.get("next_expansion_command") or usage_packet.get("next_expansion") else "failed",
+            reason="usage-chain packet names a bounded next expansion route",
+        ),
+        graph_replacement_gate(
+            "bounded_packet_default",
+            "passed"
+            if usage_quality.get("skipped_graph_rag_packet") is True
+            and usage_quality.get("skipped_graph_neighborhood") is True
+            and usage_quality.get("skipped_raw_preview_neighborhood") is True
+            else "failed",
+            reason="replacement route avoids GraphRAG, graph-neighborhood, and raw-preview expansion by default",
+        ),
+        graph_replacement_gate(
+            "entity_usage_rollup_samples_match_event_refs",
+            "passed" if checked_count and matched_count == checked_count else "failed",
+            reason="usage-chain event refs match generated event_mentions_registered_entity graph edges for this anchor sample",
+            details={"checked_count": checked_count, "matched_count": matched_count, "missing_count": edge_matches.get("missing_count")},
+        ),
+        graph_replacement_gate(
+            "sample_before_after_cardinality_comparison",
+            "passed" if graph_sample.get("cardinality_improves_for_anchor") else "failed",
+            reason="anchor sample compares event-level graph edges against session_has_registered_entity aggregate edges",
+            details={
+                "event_edge_count": graph_sample.get("event_edge_count"),
+                "session_aggregate_edge_count": graph_sample.get("session_aggregate_edge_count"),
+                "anchor_sample_reduction_ratio": graph_sample.get("anchor_sample_reduction_ratio"),
+            },
+        ),
+        graph_replacement_gate(
+            "usage_chain_preserves_consequence_links",
+            "passed" if usage_count and chain_with_link_count == usage_count else "failed",
+            reason="usage-chain keeps per-usage result_or_consequence link fields even when no consequence was observed",
+            details={"chain_count": len(chains), "chain_with_link_count": chain_with_link_count, "chain_with_result_count": chain_with_result_count},
+        ),
+        graph_replacement_gate(
+            "global_before_after_cardinality_comparison",
+            "not_proven",
+            reason="this proof is bounded to one anchor; global graph-row pruning still needs an explicit apply route and before/after report",
+        ),
+    ]
+    failed_core_gates = [
+        gate["id"]
+        for gate in gates
+        if gate.get("status") == "failed"
+        and gate.get("id") != "global_before_after_cardinality_comparison"
+    ]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(usage_packet.get("ok")) and not failed_core_gates and bool(registry_node_ids),
+        "mutates": False,
+        "truth_status": "generated_graph_replacement_sample_proof_not_prune_permission",
+        "anchor": anchor,
+        **trace_kind_payload_fields(kind, normalized_kind),
+        "target_edge_type": GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,
+        "target_projection": GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+        "replacement_scope": "anchor_sample",
+        "normalized_entity": usage_packet.get("normalized_entity") if isinstance(usage_packet.get("normalized_entity"), dict) else {},
+        "usage_chain": {
+            "ok": usage_packet.get("ok"),
+            "usage_event_count": usage_count,
+            "chain_count": len(chains),
+            "chain_with_result_or_consequence_count": chain_with_result_count,
+            "raw_or_segment_ref_count": raw_or_segment_usage_count,
+            "first_ref": usage_packet.get("first_ref"),
+            "quality": usage_quality,
+            "next_expansion_command": usage_packet.get("next_expansion_command"),
+        },
+        "graph_resolution": {
+            "status": graph_state.get("status"),
+            "route_candidates": graph_resolution.get("route_candidates", []) if isinstance(graph_resolution, dict) else [],
+            "start_node_ids": graph_resolution.get("start_node_ids", []) if isinstance(graph_resolution, dict) else [],
+            "registry_node_ids": registry_node_ids,
+            "registry_node_count": len(registry_node_ids),
+            "resolver_strategy": graph_resolution.get("resolver_strategy") if isinstance(graph_resolution, dict) else "",
+        },
+        "graph_sample": graph_sample,
+        "edge_match": edge_matches,
+        "proof_gates": gates,
+        "proof_gate_summary": {
+            "failed_core_gate_count": len(failed_core_gates),
+            "failed_core_gates": failed_core_gates,
+            "passed_gate_count": sum(1 for gate in gates if gate.get("status") == "passed"),
+            "not_proven_gate_count": sum(1 for gate in gates if gate.get("status") == "not_proven"),
+        },
+        "prune_gate": {
+            "status": "blocked_anchor_sample_only",
+            "apply_ready": False,
+            "can_prune_now": False,
+            "reason": "anchor-sample replacement proof does not prove archive-wide cardinality, freshness, fallback, and before/after storage behavior",
+            "required_before_apply": [
+                "multi_anchor_live_scenario_corpus",
+                "materialized_replacement_projection",
+                "global_before_after_cardinality_comparison",
+                "operator_reviewed_mutation_boundary",
+            ],
+            "mutation_boundary": "read_only_proof_packet_no_graph_rows_are_deleted_or_rebuilt",
+        },
+        "next_route": "run this proof across more dense anchors, then materialize the entity-usage rollup only after corpus and cardinality comparison stay green",
+        "exact_read_command": entity_usage_chain_command(
+            "graph-entity-usage-replacement-proof",
+            anchor=anchor,
+            kind=normalized_kind,
+            aoa_root=aoa_root,
+            limit=selected_limit,
+            per_route_limit=selected_per_route_limit,
+            extra=["--sample-limit", str(selected_sample_limit)],
+        ),
+        "authority_boundary": "replacement proof is generated route evidence; raw/segment refs and owner source surfaces remain stronger",
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": diagnostics,
+    }
+    if write_report:
+        stem = f"{compact_stamp()}__graph-entity-usage-replacement-proof"
+        report_json, report_md = reserve_diagnostic_report_paths(aoa_root / DIAGNOSTICS_ROOT, stem)
+        write_json(report_json, payload)
+        write_markdown(report_md, json_markdown_report("Graph Entity Usage Replacement Proof", payload))
+        payload["report_json"] = str(report_json)
+        payload["report_md"] = str(report_md)
+    return payload
 
 
 def graph_node_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -70139,9 +70573,47 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         if ok and not payload.get("exact_next_command_present"):
             result["status"] = "warn"
             result.setdefault("quality_flags", []).append("maintenance_status_missing_exact_next_command")
+    elif profile == "graph_high_fanout_replacement":
+        usage_chain = payload.get("usage_chain") if isinstance(payload.get("usage_chain"), dict) else {}
+        graph_sample = payload.get("graph_sample") if isinstance(payload.get("graph_sample"), dict) else {}
+        edge_match = payload.get("edge_match") if isinstance(payload.get("edge_match"), dict) else {}
+        proof_summary = payload.get("proof_gate_summary") if isinstance(payload.get("proof_gate_summary"), dict) else {}
+        prune_gate = payload.get("prune_gate") if isinstance(payload.get("prune_gate"), dict) else {}
+        result.update(
+            {
+                "target_projection": payload.get("target_projection"),
+                "replacement_scope": payload.get("replacement_scope"),
+                "replacement_proof_ok": payload.get("ok"),
+                "usage_event_count": int_value(usage_chain.get("usage_event_count")),
+                "raw_or_segment_ref_count": int_value(usage_chain.get("raw_or_segment_ref_count")),
+                "graph_event_edge_checked_count": int_value(edge_match.get("checked_count")),
+                "graph_event_edge_match_count": int_value(edge_match.get("matched_count")),
+                "graph_event_edge_missing_count": int_value(edge_match.get("missing_count")),
+                "event_edge_count": int_value(graph_sample.get("event_edge_count")),
+                "session_aggregate_edge_count": int_value(graph_sample.get("session_aggregate_edge_count")),
+                "anchor_sample_reduction_ratio": graph_sample.get("anchor_sample_reduction_ratio"),
+                "proof_failed_core_gate_count": int_value(proof_summary.get("failed_core_gate_count")),
+                "proof_not_proven_gate_count": int_value(proof_summary.get("not_proven_gate_count")),
+                "replacement_prune_apply_ready": prune_gate.get("apply_ready"),
+                "replacement_prune_gate_status": prune_gate.get("status"),
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if result["usage_event_count"] <= 0:
+            quality_flags.append("graph_replacement_no_usage_events")
+        if result["graph_event_edge_checked_count"] <= 0:
+            quality_flags.append("graph_replacement_no_checked_event_edges")
+        if result["graph_event_edge_missing_count"] > 0:
+            quality_flags.append("graph_replacement_missing_event_edges")
+        if result["proof_failed_core_gate_count"] > 0:
+            quality_flags.append("graph_replacement_failed_core_gates")
+        if prune_gate.get("apply_ready") is not False:
+            quality_flags.append("graph_replacement_prune_gate_not_closed")
+        if ok and quality_flags:
+            result["status"] = "warn"
     if not ok:
         result["status"] = "failed"
-    if not counts and profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status"}:
+    if not counts and profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status", "graph_high_fanout_replacement"}:
         result.setdefault("quality_flags", []).append("no_raw_or_segment_refs_detected")
         if result["status"] == "passed":
             result["status"] = "warn"
@@ -70202,6 +70674,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Open the receipt ref, then rerun hook-receipts with the same event/date filter."
     if profile in {"graph_neighborhood", "graph_cooccurrence", "graph_bridge"}:
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
+    if profile == "graph_high_fanout_replacement":
+        return "Run graph-entity-usage-replacement-proof for the same anchor, inspect proof_gates and edge_match, then widen only through reviewed live-scenario corpus cases."
     if profile == "route_rollup_query":
         return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
     if profile == "maintenance_status":
@@ -70244,7 +70718,7 @@ def live_scenario_actionable_gaps(scenarios: list[dict[str, Any]]) -> list[dict[
         if warn_count:
             reasons.append(f"warn_subsample_count:{warn_count}")
         counts = scenario.get("evidence_ref_counts") if isinstance(scenario.get("evidence_ref_counts"), dict) else {}
-        if profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status"} and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
+        if profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status", "graph_high_fanout_replacement"} and not any(int_value(counts.get(key)) for key in ("raw_ref", "segment_ref", "receipt_ref")):
             reasons.append("no_direct_raw_segment_or_receipt_ref")
         if profile == "literal_planner" and scenario.get("monolith_fallback_first") is True:
             reasons.append("literal_planner_used_monolith_fallback_first")
@@ -70298,6 +70772,7 @@ def live_scenario_audit(
         "graph_neighborhood",
         "graph_cooccurrence",
         "graph_bridge",
+        "graph_high_fanout_replacement",
         "route_rollup_query",
         "maintenance_status",
     }
@@ -70460,6 +70935,21 @@ def live_scenario_audit(
                         target_kind="tool",
                         limit=max(selected_limit, 4),
                         max_depth=4,
+                    ),
+                )
+            )
+        elif profile == "graph_high_fanout_replacement":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_entity_usage_replacement_proof(
+                        aoa_root=aoa_root,
+                        anchor="aoa-session-memory-mcp",
+                        kind="mcp",
+                        limit=max(selected_limit, 4),
+                        per_route_limit=max(selected_limit * 3, 12),
+                        consequence_window=4,
+                        sample_limit=max(selected_limit, 4),
                     ),
                 )
             )
@@ -70659,6 +71149,21 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "graph_high_fanout_replacement_proof_gap_count": scenario.get("graph_high_fanout_replacement_proof_gap_count"),
             "graph_high_fanout_prune_apply_ready": scenario.get("graph_high_fanout_prune_apply_ready"),
             "graph_high_fanout_prune_gate_status": scenario.get("graph_high_fanout_prune_gate_status"),
+            "target_projection": scenario.get("target_projection"),
+            "replacement_scope": scenario.get("replacement_scope"),
+            "replacement_proof_ok": scenario.get("replacement_proof_ok"),
+            "usage_event_count": scenario.get("usage_event_count"),
+            "raw_or_segment_ref_count": scenario.get("raw_or_segment_ref_count"),
+            "graph_event_edge_checked_count": scenario.get("graph_event_edge_checked_count"),
+            "graph_event_edge_match_count": scenario.get("graph_event_edge_match_count"),
+            "graph_event_edge_missing_count": scenario.get("graph_event_edge_missing_count"),
+            "event_edge_count": scenario.get("event_edge_count"),
+            "session_aggregate_edge_count": scenario.get("session_aggregate_edge_count"),
+            "anchor_sample_reduction_ratio": scenario.get("anchor_sample_reduction_ratio"),
+            "proof_failed_core_gate_count": scenario.get("proof_failed_core_gate_count"),
+            "proof_not_proven_gate_count": scenario.get("proof_not_proven_gate_count"),
+            "replacement_prune_apply_ready": scenario.get("replacement_prune_apply_ready"),
+            "replacement_prune_gate_status": scenario.get("replacement_prune_gate_status"),
             "entity_count": scenario.get("entity_count"),
         }
         profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
@@ -70963,6 +71468,11 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_graph_high_fanout_dominant_edge_count", "graph_high_fanout_dominant_edge_count"),
         ("min_graph_high_fanout_replacement_candidate_count", "graph_high_fanout_replacement_candidate_count"),
         ("min_graph_high_fanout_replacement_proof_gap_count", "graph_high_fanout_replacement_proof_gap_count"),
+        ("min_graph_replacement_usage_event_count", "usage_event_count"),
+        ("min_graph_replacement_edge_checked_count", "graph_event_edge_checked_count"),
+        ("min_graph_replacement_edge_match_count", "graph_event_edge_match_count"),
+        ("min_graph_replacement_event_edge_count", "event_edge_count"),
+        ("min_graph_replacement_session_aggregate_edge_count", "session_aggregate_edge_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
@@ -71003,6 +71513,31 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         and scenario.get("graph_high_fanout_prune_apply_ready") is not False
     ):
         failures.append(f"{profile}:graph_high_fanout_prune_apply_ready:{scenario.get('graph_high_fanout_prune_apply_ready')}")
+    if (
+        expectation.get("require_graph_replacement_target_projection") is True
+        and scenario.get("target_projection") != GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
+    ):
+        failures.append(f"{profile}:target_projection:{scenario.get('target_projection')}")
+    if (
+        expectation.get("require_graph_replacement_proof_ok") is True
+        and scenario.get("replacement_proof_ok") is not True
+    ):
+        failures.append(f"{profile}:replacement_proof_ok:{scenario.get('replacement_proof_ok')}")
+    if (
+        expectation.get("require_graph_replacement_prune_gate_closed") is True
+        and scenario.get("replacement_prune_apply_ready") is not False
+    ):
+        failures.append(f"{profile}:replacement_prune_apply_ready:{scenario.get('replacement_prune_apply_ready')}")
+    if (
+        expectation.get("require_graph_replacement_no_missing_event_edges") is True
+        and int_value(scenario.get("graph_event_edge_missing_count")) > 0
+    ):
+        failures.append(f"{profile}:graph_event_edge_missing_count:{scenario.get('graph_event_edge_missing_count')}")
+    if (
+        expectation.get("require_graph_replacement_no_failed_core_gates") is True
+        and int_value(scenario.get("proof_failed_core_gate_count")) > 0
+    ):
+        failures.append(f"{profile}:proof_failed_core_gate_count:{scenario.get('proof_failed_core_gate_count')}")
     next_action_ids = {str(item) for item in scenario.get("next_action_ids", []) if item} if isinstance(scenario.get("next_action_ids"), list) else set()
     for action_id in expectation.get("required_next_action_ids", []) if isinstance(expectation.get("required_next_action_ids"), list) else []:
         if str(action_id) not in next_action_ids:
@@ -74060,6 +74595,24 @@ def command_graph_high_fanout_policy(args: argparse.Namespace) -> int:
     payload = graph_high_fanout_policy(
         aoa_root=root,
         limit=args.limit,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_graph_entity_usage_replacement_proof(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = graph_entity_usage_replacement_proof(
+        aoa_root=root,
+        anchor=args.anchor,
+        kind=args.kind,
+        limit=args.limit,
+        per_route_limit=args.per_route_limit,
+        consequence_window=args.consequence_window,
+        sample_limit=args.sample_limit,
+        provider=args.provider,
+        write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -80025,6 +80578,23 @@ def build_parser() -> argparse.ArgumentParser:
     graph_high_fanout_policy_parser.add_argument("--limit", type=int, default=12, help="Top edge/node type rows to classify.")
     graph_high_fanout_policy_parser.set_defaults(func=command_graph_high_fanout_policy)
 
+    graph_entity_usage_replacement_proof_parser = sub.add_parser(
+        "graph-entity-usage-replacement-proof",
+        aliases=["graph-high-fanout-replacement-proof", "graph-registered-entity-replacement-proof"],
+        help="Prove one anchor sample for replacing event_mentions_registered_entity edges with compact entity usage routes without mutating graph rows.",
+    )
+    graph_entity_usage_replacement_proof_parser.add_argument("anchor", help="Entity anchor to prove through usage-chain and graph edge samples.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--workspace-root")
+    graph_entity_usage_replacement_proof_parser.add_argument("--aoa-root")
+    graph_entity_usage_replacement_proof_parser.add_argument("--kind", choices=TRACE_ROUTE_KIND_CHOICES, default="auto")
+    graph_entity_usage_replacement_proof_parser.add_argument("--limit", type=int, default=6, help="Maximum usage-chain events to check.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--per-route-limit", type=int, default=12, help="Bounded usage-chain harvest limit.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--consequence-window", type=int, default=6, help="Usage-chain consequence window.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--sample-limit", type=int, default=8, help="Maximum graph edge samples to include.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--provider", default="portable_sqlite", help="Search provider for usage-chain.")
+    graph_entity_usage_replacement_proof_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown proof reports under .aoa/diagnostics.")
+    graph_entity_usage_replacement_proof_parser.set_defaults(func=command_graph_entity_usage_replacement_proof)
+
     graph_neighborhood_parser = sub.add_parser(
         "graph-neighborhood",
         help="Return a bounded graph neighborhood for a skill, MCP, hook, tool, path, goal, or entity anchor.",
@@ -80323,7 +80893,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, route_rollup_query, maintenance_status.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, graph_high_fanout_replacement, route_rollup_query, maintenance_status.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)

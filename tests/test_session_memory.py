@@ -5815,6 +5815,57 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
     assert scenario["graph_high_fanout_prune_gate_status"] == "blocked_replacement_projection_not_proven"
 
 
+def test_live_scenario_audit_routes_graph_high_fanout_replacement_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_replacement_proof(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["aoa_root"] == aoa_root
+        assert kwargs["anchor"] == "aoa-session-memory-mcp"
+        assert kwargs["kind"] == "mcp"
+        assert kwargs["limit"] == 4
+        assert kwargs["per_route_limit"] == 12
+        assert kwargs["sample_limit"] == 4
+        return {
+            "artifact_type": "session_memory_graph_entity_usage_replacement_proof",
+            "ok": True,
+            "mutates": False,
+            "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            "replacement_scope": "anchor_sample",
+            "usage_chain": {"usage_event_count": 4, "raw_or_segment_ref_count": 4},
+            "graph_sample": {
+                "event_edge_count": 42,
+                "session_aggregate_edge_count": 3,
+                "anchor_sample_reduction_ratio": 0.928571,
+            },
+            "edge_match": {"checked_count": 4, "matched_count": 4, "missing_count": 0},
+            "proof_gate_summary": {"failed_core_gate_count": 0, "not_proven_gate_count": 1},
+            "prune_gate": {"status": "blocked_anchor_sample_only", "apply_ready": False},
+        }
+
+    monkeypatch.setattr(module, "graph_entity_usage_replacement_proof", fake_replacement_proof)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["graph_high_fanout_replacement"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "graph_high_fanout_replacement"
+    assert scenario["status"] == "passed"
+    assert scenario["target_projection"] == module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
+    assert scenario["replacement_proof_ok"] is True
+    assert scenario["usage_event_count"] == 4
+    assert scenario["graph_event_edge_checked_count"] == 4
+    assert scenario["graph_event_edge_match_count"] == 4
+    assert scenario["event_edge_count"] == 42
+    assert scenario["session_aggregate_edge_count"] == 3
+    assert scenario["replacement_prune_apply_ready"] is False
+
+
 def test_live_scenario_audit_counts_wait_live_tail_as_deferred_graph_queue(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path
     aoa_root = workspace / ".aoa"
@@ -5982,6 +6033,83 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
     assert "maintenance_status:graph_high_fanout_replacement_status_missing_for_pressure" in failing
     assert "maintenance_status:graph_high_fanout_replacement_candidate_count:0<1" in failing
     assert "maintenance_status:graph_high_fanout_replacement_proof_gap_count:0<1" in failing
+
+
+def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() -> None:
+    failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_high_fanout_replacement",
+            "status": "passed",
+            "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            "replacement_proof_ok": True,
+            "usage_event_count": 4,
+            "graph_event_edge_checked_count": 4,
+            "graph_event_edge_match_count": 4,
+            "graph_event_edge_missing_count": 0,
+            "event_edge_count": 42,
+            "session_aggregate_edge_count": 3,
+            "proof_failed_core_gate_count": 0,
+            "replacement_prune_apply_ready": False,
+        },
+        {
+            "profile": "graph_high_fanout_replacement",
+            "allowed_statuses": ["passed"],
+            "require_graph_replacement_target_projection": True,
+            "require_graph_replacement_proof_ok": True,
+            "require_graph_replacement_prune_gate_closed": True,
+            "require_graph_replacement_no_missing_event_edges": True,
+            "require_graph_replacement_no_failed_core_gates": True,
+            "min_graph_replacement_usage_event_count": 1,
+            "min_graph_replacement_edge_checked_count": 1,
+            "min_graph_replacement_edge_match_count": 1,
+            "min_graph_replacement_event_edge_count": 2,
+            "min_graph_replacement_session_aggregate_edge_count": 1,
+        },
+    )
+
+    assert failures == []
+
+    failing = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_high_fanout_replacement",
+            "status": "passed",
+            "target_projection": "wrong",
+            "replacement_proof_ok": False,
+            "usage_event_count": 0,
+            "graph_event_edge_checked_count": 0,
+            "graph_event_edge_match_count": 0,
+            "graph_event_edge_missing_count": 1,
+            "event_edge_count": 1,
+            "session_aggregate_edge_count": 0,
+            "proof_failed_core_gate_count": 2,
+            "replacement_prune_apply_ready": True,
+        },
+        {
+            "profile": "graph_high_fanout_replacement",
+            "allowed_statuses": ["passed"],
+            "require_graph_replacement_target_projection": True,
+            "require_graph_replacement_proof_ok": True,
+            "require_graph_replacement_prune_gate_closed": True,
+            "require_graph_replacement_no_missing_event_edges": True,
+            "require_graph_replacement_no_failed_core_gates": True,
+            "min_graph_replacement_usage_event_count": 1,
+            "min_graph_replacement_edge_checked_count": 1,
+            "min_graph_replacement_edge_match_count": 1,
+            "min_graph_replacement_event_edge_count": 2,
+            "min_graph_replacement_session_aggregate_edge_count": 1,
+        },
+    )
+
+    assert "graph_high_fanout_replacement:target_projection:wrong" in failing
+    assert "graph_high_fanout_replacement:replacement_proof_ok:False" in failing
+    assert "graph_high_fanout_replacement:replacement_prune_apply_ready:True" in failing
+    assert "graph_high_fanout_replacement:graph_event_edge_missing_count:1" in failing
+    assert "graph_high_fanout_replacement:proof_failed_core_gate_count:2" in failing
+    assert "graph_high_fanout_replacement:usage_event_count:0<1" in failing
+    assert "graph_high_fanout_replacement:graph_event_edge_checked_count:0<1" in failing
+    assert "graph_high_fanout_replacement:graph_event_edge_match_count:0<1" in failing
+    assert "graph_high_fanout_replacement:event_edge_count:1<2" in failing
+    assert "graph_high_fanout_replacement:session_aggregate_edge_count:0<1" in failing
 
 
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
@@ -7681,6 +7809,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     high_fanout_args = parser.parse_args(["graph-high-fanout-policy", "--limit", "7"])
     assert high_fanout_args.func == module.command_graph_high_fanout_policy
     assert high_fanout_args.limit == 7
+    replacement_proof_args = parser.parse_args(
+        ["graph-entity-usage-replacement-proof", "aoa-session-memory-mcp", "--kind", "mcp", "--sample-limit", "4"]
+    )
+    assert replacement_proof_args.func == module.command_graph_entity_usage_replacement_proof
+    assert replacement_proof_args.kind == "mcp"
+    assert replacement_proof_args.sample_limit == 4
     parsed_bridge = parser.parse_args(["graph-bridge", "aoa-session-memory-mcp", "exec_command", "--source-kind", "mcp", "--target-kind", "tool"])
     assert parsed_bridge.source_kind == "mcp"
     assert parsed_bridge.target_kind == "tool"
@@ -22834,6 +22968,221 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["next_actions"][0]["id"] == "use_compact_graph_routes_for_dense_anchors"
     assert "graph-cooccurrence" in payload["next_actions"][0]["example_command"]
     assert payload["mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
+
+
+def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edges(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    session_id = "sample-session"
+    segment_id = "001"
+    route_node_id = module.graph_route_node_id("mcp", "sample_mcp")
+    registry_node_id = f"entity_registry:{module.entity_registry_id('mcp_service', 'sample_mcp')}"
+    session_node_id = f"session:{session_id}"
+
+    def refs(event_id: str = "") -> dict[str, str]:
+        raw = f"raw:line:{event_id or session_id}"
+        return {
+            "session": str(aoa_root / "sessions" / session_id / "session.manifest.json"),
+            "segment": str(aoa_root / "sessions" / session_id / "segments" / "001.md"),
+            "segment_index": str(aoa_root / "sessions" / session_id / "segments" / "001.index.json"),
+            "raw": raw,
+        }
+
+    def evidence(event_id: str = "") -> list[dict[str, Any]]:
+        return [
+            {
+                "session_id": session_id,
+                "segment_id": segment_id if event_id else "",
+                "event_id": event_id,
+                "refs": refs(event_id),
+            }
+        ]
+
+    session_contribution = {
+        "source": {
+            "source_key": f"session:{session_id}",
+            "source_type": "session",
+            "session_id": session_id,
+            "session_label": "2026-07-07__001__sample-session",
+            "segment_id": "",
+            "source_path": str(aoa_root / "sessions" / session_id / "session.index.json"),
+            "source_paths": [str(aoa_root / "sessions" / session_id / "session.index.json")],
+            "source_sha": "sha-session",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {"id": session_node_id, "type": "session", "label": session_id, "evidence_refs": evidence()},
+            {
+                "id": route_node_id,
+                "type": module.graph_route_node_type("mcp", "sample_mcp"),
+                "label": "mcp:sample_mcp",
+                "route_layer": "mcp",
+                "route_key": "sample_mcp",
+                "route_signal": "mcp:sample_mcp",
+                "evidence_refs": evidence(),
+            },
+            {
+                "id": registry_node_id,
+                "type": "entity_registry",
+                "label": "mcp_service:sample_mcp",
+                "entity_id": module.entity_registry_id("mcp_service", "sample_mcp"),
+                "entity_kind": "mcp_service",
+                "canonical_key": "sample_mcp",
+                "route_layer": "mcp",
+                "route_signal": "mcp:sample_mcp",
+                "evidence_refs": evidence(),
+            },
+        ],
+        "edges": [
+            {
+                "id": module.graph_edge_id(session_node_id, registry_node_id, module.GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE),
+                "source": session_node_id,
+                "target": registry_node_id,
+                "type": module.GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE,
+                "evidence_refs": evidence(),
+            },
+            {
+                "id": module.graph_edge_id(registry_node_id, route_node_id, "registry_entity_has_route_signal"),
+                "source": registry_node_id,
+                "target": route_node_id,
+                "type": "registry_entity_has_route_signal",
+                "evidence_refs": evidence(),
+            },
+        ],
+    }
+
+    event_contributions = []
+    for index in (1, 2):
+        event_id = f"{index:06}"
+        event_node_id = f"event:{session_id}:{segment_id}:{event_id}"
+        event_contributions.append(
+            {
+                "source": {
+                    "source_key": f"segment:{session_id}:{segment_id}:{event_id}",
+                    "source_type": "segment",
+                    "session_id": session_id,
+                    "session_label": "2026-07-07__001__sample-session",
+                    "segment_id": segment_id,
+                    "source_path": str(aoa_root / "sessions" / session_id / "segments" / f"{segment_id}.{event_id}.index.json"),
+                    "source_paths": [
+                        str(aoa_root / "sessions" / session_id / "segments" / f"{segment_id}.{event_id}.index.json")
+                    ],
+                    "source_sha": f"sha-event-{event_id}",
+                    "source_mtime": 1.0 + index,
+                    "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                    "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                    "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                    "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                },
+                "nodes": [
+                    {
+                        "id": event_node_id,
+                        "type": "event",
+                        "label": f"event {event_id}",
+                        "session_id": session_id,
+                        "segment_id": segment_id,
+                        "event_id": event_id,
+                        "evidence_refs": evidence(event_id),
+                    },
+                    {
+                        "id": registry_node_id,
+                        "type": "entity_registry",
+                        "label": "mcp_service:sample_mcp",
+                        "entity_id": module.entity_registry_id("mcp_service", "sample_mcp"),
+                        "entity_kind": "mcp_service",
+                        "canonical_key": "sample_mcp",
+                        "route_layer": "mcp",
+                        "route_signal": "mcp:sample_mcp",
+                        "evidence_refs": evidence(event_id),
+                    },
+                ],
+                "edges": [
+                    {
+                        "id": module.graph_edge_id(event_node_id, registry_node_id, module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE),
+                        "source": event_node_id,
+                        "target": registry_node_id,
+                        "type": module.GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,
+                        "evidence_refs": evidence(event_id),
+                    }
+                ],
+            }
+        )
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([session_contribution, *event_contributions])
+    finally:
+        store.close()
+
+    usage_event = {
+        "doc_id": f"event:{session_id}:{segment_id}:000001",
+        "session_id": session_id,
+        "segment_id": segment_id,
+        "event_id": "000001",
+        "role": "direct_usage",
+        "refs": refs("000001"),
+        "freshness": {"status": "current"},
+    }
+
+    def fake_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["aoa_root"] == aoa_root
+        assert kwargs["anchor"] == "sample-mcp"
+        assert kwargs["kind"] == "mcp"
+        return {
+            "artifact_type": "session_memory_entity_usage_chain",
+            "ok": True,
+            "normalized_entity": {"anchor": "sample_mcp", "kind": "mcp"},
+            "usage_chain": {
+                "chains": [
+                    {
+                        "usage_event": usage_event,
+                        "has_result_or_consequence": False,
+                        "result_or_consequence_count": 0,
+                    }
+                ]
+            },
+            "first_ref": {"raw": refs("000001")["raw"], "segment": refs("000001")["segment"]},
+            "quality": {
+                "skipped_graph_rag_packet": True,
+                "skipped_graph_neighborhood": True,
+                "skipped_raw_preview_neighborhood": True,
+            },
+            "next_expansion_command": "python3 scripts/aoa_session_memory.py entity-usage-audit sample-mcp --kind mcp",
+        }
+
+    monkeypatch.setattr(module, "entity_usage_chain", fake_usage_chain)
+
+    payload = module.graph_entity_usage_replacement_proof(
+        aoa_root=aoa_root,
+        anchor="sample-mcp",
+        kind="mcp",
+        limit=1,
+        sample_limit=2,
+    )
+
+    assert payload["artifact_type"] == "session_memory_graph_entity_usage_replacement_proof"
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["target_projection"] == module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION
+    assert payload["graph_resolution"]["registry_node_ids"] == [registry_node_id]
+    assert payload["usage_chain"]["usage_event_count"] == 1
+    assert payload["usage_chain"]["raw_or_segment_ref_count"] == 1
+    assert payload["graph_sample"]["event_edge_count"] == 2
+    assert payload["graph_sample"]["session_aggregate_edge_count"] == 1
+    assert payload["graph_sample"]["cardinality_improves_for_anchor"] is True
+    assert payload["edge_match"]["checked_count"] == 1
+    assert payload["edge_match"]["matched_count"] == 1
+    assert payload["edge_match"]["missing_count"] == 0
+    assert payload["proof_gate_summary"]["failed_core_gate_count"] == 0
+    assert payload["prune_gate"]["apply_ready"] is False
+    assert payload["prune_gate"]["status"] == "blocked_anchor_sample_only"
 
 
 def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(tmp_path: Path) -> None:
