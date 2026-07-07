@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-06-30T02:05:00Z",
+  "generated_at": "2026-07-07T10:00:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 14,
+  "case_count": 16,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -578,6 +578,45 @@
             "min_segment_ref_count": 1,
             "min_session_ref_count": 1,
             "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph_cooccurrence_dense_anchor_contract",
+      "profiles": [
+        "graph_cooccurrence"
+      ],
+      "seed": "corpus-graph-cooccurrence-dense-anchor",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 4,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-07",
+        "note": "Dense operational anchors such as exec_command must use the bounded direct graph-store cooccurrence route, return neighboring route nodes and evidence refs, and expose truncation as route posture rather than an empty silent packet."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "graph_cooccurrence",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_anchor_event_count": 1,
+            "min_cooccurrence_count": 1,
+            "min_evidence_ref_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_session_ref_count": 1,
+            "require_bounded_store_query": true,
+            "max_elapsed_ms": 10000
           }
         ]
       }

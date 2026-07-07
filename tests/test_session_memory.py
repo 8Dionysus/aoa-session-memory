@@ -5372,6 +5372,16 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     def fake_graph(**_kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "node_count": 2, "edge_count": 1, "evidence_refs": [{"refs": {"raw": "raw:line:3"}}]}
 
+    def fake_cooccurrence(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "anchor_event_count": 4,
+            "cooccurrence_count": 2,
+            "cooccurrences": [{"node": {"id": "route:tool:tool:apply_patch"}, "count": 2}],
+            "evidence_refs": [{"refs": {"raw": "raw:line:4", "segment": "segment.md"}}],
+            "quality": {"bounded_store_query": True, "evidence_ref_count": 1},
+        }
+
     def fake_registry(**_kwargs: Any) -> dict[str, Any]:
         return {
             "ok": True,
@@ -5412,6 +5422,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     monkeypatch.setattr(module, "agent_event_route_search", fake_closeouts)
     monkeypatch.setattr(module, "literal_query_plan", fake_literal)
     monkeypatch.setattr(module, "graph_neighborhood", fake_graph)
+    monkeypatch.setattr(module, "graph_cooccurrence", fake_cooccurrence)
     monkeypatch.setattr(module, "live_scenario_entity_registry_lookup_audit", fake_registry)
 
     audit = module.live_scenario_audit(
@@ -5425,6 +5436,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
             "agent_closeout",
             "literal_planner",
             "graph_neighborhood",
+            "graph_cooccurrence",
         ],
         sample_size=1,
         recent_days=7,
@@ -5433,7 +5445,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
 
     assert audit["ok"] is True
     assert audit["artifact_type"] == "session_memory_live_scenario_audit"
-    assert audit["quality"]["scenario_count"] == 8
+    assert audit["quality"]["scenario_count"] == 9
     assert audit["quality"]["failed_count"] == 0
     assert audit["quality"]["actionable_gap_count"] == 0
     assert audit["quality"]["raw_or_segment_ref_scenario_count"] >= 6
@@ -5449,6 +5461,8 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     assert scenarios["literal_planner"]["shape_counts"]["entity_class"] == 1
     assert scenarios["literal_planner"]["route_anchor_kind_counts"]["mcp"] == 2
     assert scenarios["literal_planner"]["route_anchor_source_counts"]["embedded_entity_registry"] == 1
+    assert scenarios["graph_cooccurrence"]["cooccurrence_count"] == 2
+    assert scenarios["graph_cooccurrence"]["bounded_store_query"] is True
     assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
 
 
@@ -6537,6 +6551,29 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_neighborhood:node_count:0<1" in graph_failures
     assert "graph_neighborhood:edge_count:0<1" in graph_failures
     assert "graph_neighborhood:evidence_ref_count:0<1" in graph_failures
+
+    cooccurrence_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_cooccurrence",
+            "status": "passed",
+            "anchor_event_count": 0,
+            "cooccurrence_count": 0,
+            "evidence_ref_count": 0,
+            "bounded_store_query": False,
+        },
+        {
+            "profile": "graph_cooccurrence",
+            "min_anchor_event_count": 1,
+            "min_cooccurrence_count": 1,
+            "min_evidence_ref_count": 1,
+            "require_bounded_store_query": True,
+        },
+    )
+
+    assert "graph_cooccurrence:anchor_event_count:0<1" in cooccurrence_failures
+    assert "graph_cooccurrence:cooccurrence_count:0<1" in cooccurrence_failures
+    assert "graph_cooccurrence:evidence_ref_count:0<1" in cooccurrence_failures
+    assert "graph_cooccurrence:bounded_store_query:False" in cooccurrence_failures
 
     goal_failures = module.live_scenario_profile_expectation_failures(
         {
@@ -8354,6 +8391,148 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert "segment_index" not in edge_contrib["evidence_refs"][0]["refs"]
     assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
+
+
+def test_graph_cooccurrence_uses_direct_store_for_dense_route_anchor(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    anchor_node = module.graph_route_node_id("tool", "exec_command")
+    apply_node = module.graph_route_node_id("tool", "apply_patch")
+    skill_node = module.graph_route_node_id("skill", "aoa_decision")
+    event_one = "event:session-cooccurrence:000:000001"
+    event_two = "event:session-cooccurrence:000:000002"
+
+    def route_node(layer: str, key: str) -> dict[str, Any]:
+        return {
+            "id": module.graph_route_node_id(layer, key),
+            "type": module.graph_route_node_type(layer, key),
+            "label": f"{layer}:{key}",
+            "route_layer": layer,
+            "route_key": key,
+            "route_signal": f"{layer}:{key}",
+        }
+
+    def event_node(event_id: str, raw_ref: str, title: str) -> dict[str, Any]:
+        return {
+            "id": event_id,
+            "type": "event",
+            "label": title,
+            "title": title,
+            "session_id": "session-cooccurrence",
+            "session_label": "2026-07-07__001__cooccurrence",
+            "segment_id": "000",
+            "event_id": event_id.rsplit(":", 1)[-1],
+            "refs": {
+                "raw": raw_ref,
+                "segment": "000__initial-to-latest.md",
+                "session": "sessions/2026-07-07__001__cooccurrence/session.manifest.json",
+            },
+        }
+
+    def mention_edge(event_id: str, route_id: str, raw_ref: str) -> dict[str, Any]:
+        return {
+            "id": module.graph_edge_id(event_id, route_id, "mentions_route_signal"),
+            "source": event_id,
+            "target": route_id,
+            "type": "mentions_route_signal",
+            "evidence_refs": [
+                {
+                    "session_id": "session-cooccurrence",
+                    "segment_id": "000",
+                    "refs": {"raw": raw_ref, "segment": "000__initial-to-latest.md"},
+                }
+            ],
+        }
+
+    contribution = {
+        "source": {
+            "source_key": "segment:session-cooccurrence:000",
+            "source_type": "segment",
+            "session_id": "session-cooccurrence",
+            "session_label": "2026-07-07__001__cooccurrence",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "000.index.json"),
+            "source_paths": [str(tmp_path / "000.index.json")],
+            "source_sha": "sha-cooccurrence",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            route_node("tool", "exec_command"),
+            route_node("tool", "apply_patch"),
+            route_node("skill", "aoa_decision"),
+            event_node(event_one, "raw:line:1", "Tool call: exec_command"),
+            event_node(event_two, "raw:line:2", "Tool call: exec_command"),
+        ],
+        "edges": [
+            mention_edge(event_one, anchor_node, "raw:line:1"),
+            mention_edge(event_one, apply_node, "raw:line:1"),
+            mention_edge(event_two, anchor_node, "raw:line:2"),
+            mention_edge(event_two, skill_node, "raw:line:2"),
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+    finally:
+        store.close()
+
+    payload = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool", limit=5)
+
+    assert payload["ok"] is True
+    assert payload["source"] == "sqlite_graph_store_direct_cooccurrence"
+    assert payload["anchor_event_count"] == 2
+    assert payload["cooccurrence_count"] == 2
+    assert payload["quality"]["bounded_store_query"] is True
+    assert payload["evidence_refs"]
+    assert payload["evidence_refs"][0]["refs"]["raw"].startswith("raw:line:")
+    cooccurring_ids = {item["node"]["id"] for item in payload["cooccurrences"]}
+    assert apply_node in cooccurring_ids
+    assert skill_node in cooccurring_ids
+    assert anchor_node not in cooccurring_ids
+
+
+def test_graph_cooccurrence_packet_diagnoses_truncated_empty_routes() -> None:
+    anchor_node = module.graph_route_node_id("tool", "exec_command")
+    event_node = {
+        "id": "event:session:000:000001",
+        "type": "event",
+        "title": "Tool call: exec_command",
+        "session_id": "session",
+        "segment_id": "000",
+        "event_id": "000001",
+        "refs": {"raw": "raw:line:1", "segment": "000.md"},
+    }
+    payload = module.graph_cooccurrence_from_packet(
+        aoa_root=Path("/tmp/nonexistent-aoa"),
+        anchor="exec_command",
+        kind="tool",
+        packet={
+            "nodes": [
+                {"id": anchor_node, "type": "tool", "label": "tool:exec_command"},
+                event_node,
+            ],
+            "edges": [
+                {
+                    "id": "edge:1",
+                    "type": "mentions_route_signal",
+                    "source": event_node["id"],
+                    "target": anchor_node,
+                }
+            ],
+            "resolved": {"start_node_ids": [anchor_node]},
+            "truncated": True,
+            "freshness": {"status": "graph_store_stale"},
+        },
+    )
+
+    assert payload["ok"] is False
+    assert payload["anchor_event_count"] == 1
+    assert payload["cooccurrence_count"] == 0
+    assert "graph_cooccurrence_no_route_neighbors_in_bounded_packet" in payload["diagnostics"]
+    assert "graph_cooccurrence_bounded_packet_truncated_before_cooccurrence_routes" in payload["diagnostics"]
+    assert "graph-neighborhood" in payload["next_route"]
 
 
 def test_graph_source_fingerprint_tracks_contrib_payload_mode(tmp_path: Path, monkeypatch: Any) -> None:

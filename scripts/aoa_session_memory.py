@@ -52024,6 +52024,11 @@ def graph_cooccurrence_from_packet(
         selected.append({"node": graph_compact_node_for_packet(route_node), "count": count, "samples": samples.get(route_id, [])})
     evidence_nodes = [node_map[event_id] for event_id in anchor_events if event_id in node_map]
     selected_limit = max(1, min(int_value(limit, 30), 100))
+    diagnostics = list(graph.get("diagnostics", []))
+    if anchor_events and not selected:
+        diagnostics.append("graph_cooccurrence_no_route_neighbors_in_bounded_packet")
+    if packet.get("truncated") and not selected:
+        diagnostics.append("graph_cooccurrence_bounded_packet_truncated_before_cooccurrence_routes")
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_cooccurrence",
@@ -52037,11 +52042,16 @@ def graph_cooccurrence_from_packet(
         **trace_kind_payload_fields(kind, route_kind),
         "resolved": resolved,
         "anchor_event_count": len(anchor_events),
+        "cooccurrence_count": len(selected),
         "cooccurrences": selected,
         "evidence_refs": graph_collect_evidence(evidence_nodes, [], limit=80),
         "freshness": packet.get("freshness") if isinstance(packet.get("freshness"), dict) else graph_freshness(aoa_root, graph),
-        "diagnostics": graph.get("diagnostics", []),
-        "next_route": "verify cooccurrence claims through raw_ref, segment_ref, and session_ref before promotion",
+        "diagnostics": diagnostics,
+        "next_route": (
+            "verify cooccurrence claims through raw_ref, segment_ref, and session_ref before promotion"
+            if selected
+            else "use graph-neighborhood for nearby evidence refs or increase the bounded cooccurrence route only when route cooccurrences are required"
+        ),
         "next_command": graph_packet_command_line(
             aoa_root=aoa_root,
             command_name="graph-cooccurrence",
@@ -52062,6 +52072,200 @@ def graph_cooccurrence_from_packet(
     }
 
 
+def graph_cooccurrence_from_store(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 30,
+) -> dict[str, Any] | None:
+    state = graph_store_query_state(aoa_root)
+    if state.get("status") != "current":
+        return None
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    selected_limit = max(1, min(int_value(limit, 30), 100))
+    anchor_event_limit = max(40, min(selected_limit * 10, 300))
+    route_edge_limit = max(120, min(anchor_event_limit * 12, 2400))
+    paths = graph_paths(aoa_root)
+    diagnostics: list[str] = []
+    try:
+        conn = sqlite3.connect(str(paths["store"]))
+        conn.row_factory = sqlite3.Row
+        resolved = graph_store_resolve_anchor(conn, anchor, kind=route_kind, limit=max(10, selected_limit))
+        start_ids = [str(node_id) for node_id in resolved.get("start_node_ids", []) if node_id]
+        if not start_ids:
+            conn.close()
+            return None
+        anchor_events: list[str] = []
+        seen_anchor_events: set[str] = set()
+        for node_id in start_ids:
+            if node_id.startswith("event:") and node_id not in seen_anchor_events:
+                seen_anchor_events.add(node_id)
+                anchor_events.append(node_id)
+            if len(anchor_events) >= anchor_event_limit:
+                break
+            for column, opposite_column, index_name in (
+                ("target_node", "source_node", "idx_edges_target"),
+                ("source_node", "target_node", "idx_edges_source"),
+            ):
+                if len(anchor_events) >= anchor_event_limit:
+                    break
+                remaining = anchor_event_limit - len(anchor_events)
+                rows = conn.execute(
+                    f"""
+                    SELECT source_node, target_node
+                    FROM edges INDEXED BY {index_name}
+                    WHERE {column} = ?
+                      AND edge_type = 'mentions_route_signal'
+                    LIMIT ?
+                    """,
+                    (node_id, remaining),
+                ).fetchall()
+                for row in rows:
+                    event_id = str(row[opposite_column] or "")
+                    if not event_id.startswith("event:") or event_id in seen_anchor_events:
+                        continue
+                    seen_anchor_events.add(event_id)
+                    anchor_events.append(event_id)
+                    if len(anchor_events) >= anchor_event_limit:
+                        break
+        route_counts: Counter[str] = Counter()
+        samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        selected_edge_ids: list[str] = []
+        seen_edge_ids: set[str] = set()
+        start_id_set = set(start_ids)
+        for offset in range(0, len(anchor_events), 80):
+            if len(selected_edge_ids) >= route_edge_limit:
+                break
+            chunk = anchor_events[offset : offset + 80]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _item in chunk)
+            remaining_edges = max(1, route_edge_limit - len(selected_edge_ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, source_node, target_node, count
+                FROM edges INDEXED BY idx_edges_source
+                WHERE source_node IN ({placeholders})
+                  AND edge_type = 'mentions_route_signal'
+                LIMIT ?
+                """,
+                (*chunk, remaining_edges),
+            ).fetchall()
+            for row in rows:
+                edge_id = str(row["id"])
+                route_id = str(row["target_node"] or "")
+                event_id = str(row["source_node"] or "")
+                if route_id in start_id_set:
+                    continue
+                route_counts[route_id] += max(1, int_value(row["count"], 1))
+                if edge_id not in seen_edge_ids and len(selected_edge_ids) < route_edge_limit:
+                    seen_edge_ids.add(edge_id)
+                    selected_edge_ids.append(edge_id)
+                if len(samples[route_id]) < 5:
+                    samples[route_id].append({"event_node_id": event_id})
+        route_ids = [route_id for route_id, _count in route_counts.most_common(selected_limit)]
+        event_nodes = graph_store_fetch_payloads(conn, "nodes", anchor_events)
+        route_nodes = graph_store_fetch_payloads(conn, "nodes", route_ids)
+        edge_payloads = graph_store_fetch_payloads(conn, "edges", selected_edge_ids[: min(route_edge_limit, selected_limit * 20)])
+        conn.close()
+    except sqlite3.Error:
+        return None
+    event_node_map = {str(node.get("id")): node for node in event_nodes if isinstance(node, dict)}
+    route_node_map = {str(node.get("id")): node for node in route_nodes if isinstance(node, dict)}
+    selected: list[dict[str, Any]] = []
+    for route_id, count in route_counts.most_common(selected_limit):
+        sample_rows: list[dict[str, Any]] = []
+        for sample in samples.get(route_id, []):
+            event_node = event_node_map.get(str(sample.get("event_node_id") or ""), {})
+            sample_rows.append(
+                {
+                    "event_node_id": sample.get("event_node_id"),
+                    "event_title": event_node.get("title") or event_node.get("label"),
+                    "session_id": event_node.get("session_id"),
+                    "segment_id": event_node.get("segment_id"),
+                    "event_id": event_node.get("event_id"),
+                    "refs": event_node.get("refs"),
+                }
+            )
+        selected.append(
+            {
+                "node": graph_compact_node_for_packet(route_node_map.get(route_id, {"id": route_id})),
+                "count": count,
+                "samples": sample_rows,
+            }
+        )
+    anchor_event_sample_truncated = len(anchor_events) >= anchor_event_limit
+    route_edge_sample_truncated = len(selected_edge_ids) >= route_edge_limit
+    if anchor_events and not selected:
+        diagnostics.append("graph_cooccurrence_no_route_neighbors_in_store_sample")
+    if anchor_event_sample_truncated:
+        diagnostics.append("graph_cooccurrence_anchor_event_sample_truncated")
+    if route_edge_sample_truncated:
+        diagnostics.append("graph_cooccurrence_route_edge_sample_truncated")
+    freshness_graph = {
+        "source": "sqlite_graph_store_direct_cooccurrence",
+        "generated_at": (state.get("metadata") or {}).get("updated_at") or (state.get("metadata") or {}).get("generated_at") or utc_now(),
+    }
+    evidence_refs = graph_collect_evidence(event_nodes, edge_payloads, limit=80)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_cooccurrence",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(selected),
+        "mutates": False,
+        "truth_status": "cooccurrence_packet_not_reviewed_truth",
+        "source": "sqlite_graph_store_direct_cooccurrence",
+        "anchor": anchor,
+        **trace_kind_payload_fields(kind, route_kind),
+        "resolved": resolved,
+        "anchor_event_count": len(anchor_events),
+        "anchor_event_sample_limit": anchor_event_limit,
+        "anchor_event_sample_truncated": anchor_event_sample_truncated,
+        "route_edge_sample_limit": route_edge_limit,
+        "route_edge_sample_truncated": route_edge_sample_truncated,
+        "cooccurrence_count": len(selected),
+        "cooccurrences": selected,
+        "evidence_refs": evidence_refs,
+        "freshness": graph_freshness(aoa_root, freshness_graph),
+        "quality": {
+            "one_short_route": True,
+            "bounded_store_query": True,
+            "anchor_event_count": len(anchor_events),
+            "cooccurrence_count": len(selected),
+            "evidence_ref_count": len(evidence_refs),
+            "anchor_event_sample_truncated": anchor_event_sample_truncated,
+            "route_edge_sample_truncated": route_edge_sample_truncated,
+        },
+        "diagnostics": diagnostics,
+        "next_route": (
+            "verify cooccurrence claims through raw_ref, segment_ref, and session_ref before promotion"
+            if selected
+            else "use graph-neighborhood for nearby evidence refs or increase the bounded cooccurrence route only when route cooccurrences are required"
+        ),
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=selected_limit,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=graph_packet_expanded_limit(selected_limit, default=selected_limit, maximum=100),
+        ),
+        "next_expansion_reason": "Increase the bounded cooccurrence limit when more neighboring route signals are needed.",
+        "authority_boundary": "graph cooccurrence routes relation evidence only; raw/segment refs and owner source surfaces remain stronger.",
+    }
+
+
 def graph_cooccurrence(
     *,
     aoa_root: Path,
@@ -52071,6 +52275,9 @@ def graph_cooccurrence(
 ) -> dict[str, Any]:
     normalized_kind = normalize_trace_route_kind(kind)
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    store_packet = graph_cooccurrence_from_store(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=limit)
+    if store_packet is not None:
+        return store_packet
     packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=1, limit=max(limit * 6, 60))
     return graph_cooccurrence_from_packet(
         aoa_root=aoa_root,
@@ -69137,6 +69344,21 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         )
         if ok and not (result["node_count"] or result["edge_count"] or result["evidence_ref_count"]):
             result["status"] = "warn"
+    elif profile == "graph_cooccurrence":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        result.update(
+            {
+                "anchor_event_count": int_value(payload.get("anchor_event_count")),
+                "cooccurrence_count": int_value(payload.get("cooccurrence_count"), len(payload.get("cooccurrences") or [])),
+                "evidence_ref_count": int_value(quality.get("evidence_ref_count"), len(payload.get("evidence_refs") or [])),
+                "bounded_store_query": quality.get("bounded_store_query"),
+                "anchor_event_sample_truncated": payload.get("anchor_event_sample_truncated"),
+                "route_edge_sample_truncated": payload.get("route_edge_sample_truncated"),
+            }
+        )
+        if ok and not result["cooccurrence_count"]:
+            result["status"] = "warn"
+            result.setdefault("quality_flags", []).append("graph_cooccurrence_no_route_neighbors")
     elif profile == "graph_bridge":
         quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
         result.update(
@@ -69294,7 +69516,7 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run live-scenario-audit --profile literal_planner with the same seed and inspect failed route samples before changing planner rules."
     if profile == "hook_failure":
         return "Open the receipt ref, then rerun hook-receipts with the same event/date filter."
-    if profile in {"graph_neighborhood", "graph_bridge"}:
+    if profile in {"graph_neighborhood", "graph_cooccurrence", "graph_bridge"}:
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
     if profile == "route_rollup_query":
         return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
@@ -69390,6 +69612,7 @@ def live_scenario_audit(
         "agent_closeout",
         "literal_planner",
         "graph_neighborhood",
+        "graph_cooccurrence",
         "graph_bridge",
         "route_rollup_query",
         "maintenance_status",
@@ -69526,6 +69749,18 @@ def live_scenario_audit(
                         kind="mcp",
                         limit=max(selected_limit, 4),
                         edge_limit=max(selected_limit * 4, 8),
+                    ),
+                )
+            )
+        elif profile == "graph_cooccurrence":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_cooccurrence(
+                        aoa_root=aoa_root,
+                        anchor="exec_command",
+                        kind="tool",
+                        limit=max(selected_limit, 4),
                     ),
                 )
             )
@@ -69692,6 +69927,11 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "node_count": scenario.get("node_count"),
             "edge_count": scenario.get("edge_count"),
             "evidence_ref_count": scenario.get("evidence_ref_count"),
+            "anchor_event_count": scenario.get("anchor_event_count"),
+            "cooccurrence_count": scenario.get("cooccurrence_count"),
+            "bounded_store_query": scenario.get("bounded_store_query"),
+            "anchor_event_sample_truncated": scenario.get("anchor_event_sample_truncated"),
+            "route_edge_sample_truncated": scenario.get("route_edge_sample_truncated"),
             "path_found": scenario.get("path_found"),
             "matched_group_count": scenario.get("matched_group_count"),
             "omitted_group_count": scenario.get("omitted_group_count"),
@@ -69876,6 +70116,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_returned_receipt_count", "returned_receipt_count"),
         ("min_node_count", "node_count"),
         ("min_edge_count", "edge_count"),
+        ("min_anchor_event_count", "anchor_event_count"),
+        ("min_cooccurrence_count", "cooccurrence_count"),
         ("min_work_chain_linked_count", "work_chain_linked_count"),
         ("min_work_chain_episode_count", "work_chain_episode_count"),
         ("min_work_chain_goal_event_ref_count", "work_chain_goal_event_ref_count"),
@@ -70002,6 +70244,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         failures.append(f"{profile}:exact_next_command_present:{scenario.get('exact_next_command_present')}")
     if expectation.get("require_maintenance_packet_no_mutation") is True and scenario.get("mutates") is not False:
         failures.append(f"{profile}:mutates:{scenario.get('mutates')}")
+    if expectation.get("require_bounded_store_query") is True and scenario.get("bounded_store_query") is not True:
+        failures.append(f"{profile}:bounded_store_query:{scenario.get('bounded_store_query')}")
     if (
         expectation.get("require_graph_queue_action_when_queued") is True
         and int_value(scenario.get("graph_queued_count")) > 0

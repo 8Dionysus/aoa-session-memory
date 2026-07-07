@@ -145,7 +145,9 @@ Use these first routes when available:
 - relation/topology question between entities: `graph-bridge` first when the
   question asks how two anchors connect; otherwise `graph-neighborhood`,
   `graph-timeline`, `graph-shortest-path`, or `graph-cooccurrence` with
-  compact node, edge, and evidence budgets.
+  compact node, edge, and evidence budgets. For dense operational anchors such
+  as common tools/MCP/services, prefer `graph-cooccurrence` as the bounded
+  neighboring-route packet before widening into raw search or GraphRAG.
 - graph maintenance pressure: read `maintenance-status` next actions first.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
