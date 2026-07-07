@@ -164,6 +164,10 @@ SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME = "operational-route-rollup.sqlite3"
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 1
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT = 3
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_TOP_KEYS = 3
+SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DB_NAME = "operational-direct-event-rollup.sqlite3"
+SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION = 1
+SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT = 3
+SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_LANES = (
     (
         "tools",
@@ -19472,15 +19476,31 @@ def maintain_indexes(
             "diagnostics": ["index_maintenance_planning_budget_exhausted"] if planning_budget_exhausted else [],
             "truth_status": "generated_search_route_rollup_projection_not_archive_truth",
         }
+        operational_direct_event_rollup_state = {
+            "status": "deferred_budget_exhausted" if planning_budget_exhausted else "deferred_not_checked",
+            "needs_refresh": None,
+            "diagnostics": ["index_maintenance_planning_budget_exhausted"] if planning_budget_exhausted else [],
+            "truth_status": "generated_search_direct_event_rollup_projection_not_archive_truth",
+        }
     else:
         search_shards_state = session_memory_search_shard_projection_summary(aoa_root)
         operational_route_rollup_state = session_memory_operational_route_rollup_status(
             aoa_root=aoa_root,
             search_shards=search_shards_state,
         )
+        operational_direct_event_rollup_state = session_memory_operational_direct_event_rollup_status(
+            aoa_root=aoa_root,
+            search_shards=search_shards_state,
+        )
     operational_route_rollup_repair_needed = (
         repair_indexes
         and bool(operational_route_rollup_state.get("needs_refresh"))
+        and str(search_shards_state.get("status") or "") in {"current", "current_with_deferred_live_updates"}
+    )
+    operational_direct_event_rollup_repair_needed = (
+        repair_indexes
+        and bool(operational_direct_event_rollup_state.get("exists"))
+        and bool(operational_direct_event_rollup_state.get("needs_refresh"))
         and str(search_shards_state.get("status") or "") in {"current", "current_with_deferred_live_updates"}
     )
     effective_graph_batch_limit = max(0, min(int_value(graph_batch_limit, GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT), 500))
@@ -19494,6 +19514,7 @@ def maintain_indexes(
         or token_backfill_needed
         or entity_registry_repair_needed
         or operational_route_rollup_repair_needed
+        or operational_direct_event_rollup_repair_needed
         or planning_budget_exhausted
     )
     graph_repair_needed = (
@@ -19608,6 +19629,17 @@ def maintain_indexes(
             "--write-report",
         ]
     )
+    operational_direct_event_rollup_command = (
+        base
+        + [
+            "search-operational-direct-event-rollup",
+            *root_args,
+            "--max-shards",
+            str(max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_direct_event_rollup_state.get("shard_count")))),
+            "--apply",
+            "--write-report",
+        ]
+    )
     atlas_command = (
         base
         + ["atlas", "build", "all", *root_args]
@@ -19672,6 +19704,12 @@ def maintain_indexes(
             command=operational_route_rollup_command,
         ),
         maintenance_action(
+            "refresh_operational_direct_event_rollup",
+            reason="operational_direct_event_rollup_existing_projection_stale",
+            needed=operational_direct_event_rollup_repair_needed,
+            command=operational_direct_event_rollup_command,
+        ),
+        maintenance_action(
             "route_readiness",
             reason="post_maintenance_gate",
             needed=repair_indexes and index_repair_needed,
@@ -19715,9 +19753,10 @@ def maintain_indexes(
     entity_registry_action = actions[4]
     atlas_action = actions[5]
     operational_route_rollup_action = actions[6]
-    readiness_action = actions[7]
-    graph_action = actions[8]
-    sample_action = actions[9]
+    operational_direct_event_rollup_action = actions[7]
+    readiness_action = actions[8]
+    graph_action = actions[9]
+    sample_action = actions[10]
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -19776,6 +19815,11 @@ def maintain_indexes(
             "selection_count": int_value(operational_route_rollup_state.get("shard_count"), SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS),
             "dirty_count": 1 if operational_route_rollup_repair_needed else 0,
         },
+        "refresh_operational_direct_event_rollup": {
+            "action_kind": "state_reconcile",
+            "selection_count": int_value(operational_direct_event_rollup_state.get("shard_count"), SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS),
+            "dirty_count": 1 if operational_direct_event_rollup_repair_needed else 0,
+        },
         "route_readiness": {
             "action_kind": "state_reconcile",
             "selection_count": len(records),
@@ -19817,6 +19861,7 @@ def maintain_indexes(
         token_backfill_ran = False
         entity_registry_ran = False
         operational_route_rollup_ran = False
+        operational_direct_event_rollup_ran = False
         post_index_ran = False
         graph_ran = False
         if token_action["needed"]:
@@ -20143,6 +20188,41 @@ def maintain_indexes(
                 operational_route_rollup_ran = bool(result.get("ok"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
+        if operational_direct_event_rollup_action["needed"]:
+            if not has_budget():
+                budget_exhausted = True
+                operational_direct_event_rollup_action["status"] = "deferred_budget_exhausted"
+                action_results.append(operational_direct_event_rollup_action)
+            else:
+                result = session_memory_search_operational_direct_event_rollup(
+                    workspace_root=aoa_root.parent,
+                    aoa_root=aoa_root,
+                    max_shards=max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(operational_direct_event_rollup_state.get("shard_count"))),
+                    per_shard_timeout_seconds=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+                    ref_sample_limit=SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+                    apply=True,
+                    write_report=write_report,
+                )
+                operational_direct_event_rollup_action["status"] = "applied" if result.get("ok") else "failed"
+                operational_direct_event_rollup_action["result"] = {
+                    key: result.get(key)
+                    for key in (
+                        "ok",
+                        "status",
+                        "written",
+                        "target_db",
+                        "write_result",
+                        "totals",
+                        "elapsed_ms",
+                        "report_json",
+                        "report_markdown",
+                        "diagnostics",
+                    )
+                }
+                action_results.append(operational_direct_event_rollup_action)
+                operational_direct_event_rollup_ran = bool(result.get("ok"))
+                if not result.get("ok") and result.get("diagnostics"):
+                    diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_indexes and has_budget():
             try:
                 refreshed_records = current_selected_records()
@@ -20329,7 +20409,16 @@ def maintain_indexes(
                 budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if readiness_action["needed"] or reindex_ran or token_backfill_ran or entity_registry_ran or operational_route_rollup_ran or post_index_ran or graph_ran:
+        if (
+            readiness_action["needed"]
+            or reindex_ran
+            or token_backfill_ran
+            or entity_registry_ran
+            or operational_route_rollup_ran
+            or operational_direct_event_rollup_ran
+            or post_index_ran
+            or graph_ran
+        ):
             if not has_budget():
                 budget_exhausted = True
                 readiness_action["status"] = "deferred_budget_exhausted"
@@ -20414,6 +20503,7 @@ def maintain_indexes(
     final_entity_registry_state = entity_registry_state
     final_search_shards_state = search_shards_state
     final_operational_route_rollup_state = operational_route_rollup_state
+    final_operational_direct_event_rollup_state = operational_direct_event_rollup_state
     final_snapshot_budget_remaining = budget_remaining()
     if deadline is not None and final_snapshot_budget_remaining is not None and final_snapshot_budget_remaining <= 0:
         budget_exhausted = True
@@ -20440,6 +20530,10 @@ def maintain_indexes(
             final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
             final_search_shards_state = session_memory_search_shard_projection_summary(aoa_root)
             final_operational_route_rollup_state = session_memory_operational_route_rollup_status(
+                aoa_root=aoa_root,
+                search_shards=final_search_shards_state,
+            )
+            final_operational_direct_event_rollup_state = session_memory_operational_direct_event_rollup_status(
                 aoa_root=aoa_root,
                 search_shards=final_search_shards_state,
             )
@@ -20478,6 +20572,7 @@ def maintain_indexes(
         "graph_repair_needed": graph_repair_needed,
         "entity_registry_repair_needed": entity_registry_repair_needed,
         "operational_route_rollup_repair_needed": operational_route_rollup_repair_needed,
+        "operational_direct_event_rollup_repair_needed": operational_direct_event_rollup_repair_needed,
         "repair_limit": effective_repair_limit,
         "selected_count": len(records),
         "max_raw_bytes": max_raw_bytes,
@@ -20558,6 +20653,7 @@ def maintain_indexes(
         "entity_registry": entity_registry_state,
         "search_shards": search_shards_state,
         "operational_route_rollup": operational_route_rollup_state,
+        "operational_direct_event_rollup": operational_direct_event_rollup_state,
         "graph_store": graph_state,
         "post_maintenance_states": post_maintenance_states,
         "final_search_index": final_search_state,
@@ -20565,6 +20661,7 @@ def maintain_indexes(
         "final_entity_registry": final_entity_registry_state,
         "final_search_shards": final_search_shards_state,
         "final_operational_route_rollup": final_operational_route_rollup_state,
+        "final_operational_direct_event_rollup": final_operational_direct_event_rollup_state,
         "final_graph_store": final_graph_state,
         "action_counts": action_counts,
         "actions": action_results,
@@ -20602,6 +20699,7 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- graph_repair_needed: `{payload.get('graph_repair_needed')}`",
         f"- entity_registry_repair_needed: `{payload.get('entity_registry_repair_needed')}`",
         f"- operational_route_rollup_repair_needed: `{payload.get('operational_route_rollup_repair_needed')}`",
+        f"- operational_direct_event_rollup_repair_needed: `{payload.get('operational_direct_event_rollup_repair_needed')}`",
         f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- processed_count: `{payload.get('processed_count')}`",
@@ -20632,11 +20730,13 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- atlas_index: `{(payload.get('atlas_index') or {}).get('status') if isinstance(payload.get('atlas_index'), dict) else ''}`",
         f"- entity_registry: `{(payload.get('entity_registry') or {}).get('status') if isinstance(payload.get('entity_registry'), dict) else ''}`",
         f"- operational_route_rollup: `{(payload.get('operational_route_rollup') or {}).get('status') if isinstance(payload.get('operational_route_rollup'), dict) else ''}`",
+        f"- operational_direct_event_rollup: `{(payload.get('operational_direct_event_rollup') or {}).get('status') if isinstance(payload.get('operational_direct_event_rollup'), dict) else ''}`",
         f"- graph_store: `{(payload.get('graph_store') or {}).get('status') if isinstance(payload.get('graph_store'), dict) else ''}`",
         f"- final_search_index: `{(payload.get('final_search_index') or {}).get('status') if isinstance(payload.get('final_search_index'), dict) else ''}`",
         f"- final_atlas_index: `{(payload.get('final_atlas_index') or {}).get('status') if isinstance(payload.get('final_atlas_index'), dict) else ''}`",
         f"- final_entity_registry: `{(payload.get('final_entity_registry') or {}).get('status') if isinstance(payload.get('final_entity_registry'), dict) else ''}`",
         f"- final_operational_route_rollup: `{(payload.get('final_operational_route_rollup') or {}).get('status') if isinstance(payload.get('final_operational_route_rollup'), dict) else ''}`",
+        f"- final_operational_direct_event_rollup: `{(payload.get('final_operational_direct_event_rollup') or {}).get('status') if isinstance(payload.get('final_operational_direct_event_rollup'), dict) else ''}`",
         f"- final_graph_store: `{(payload.get('final_graph_store') or {}).get('status') if isinstance(payload.get('final_graph_store'), dict) else ''}`",
         "",
         "## Actions",
@@ -20705,6 +20805,8 @@ def index_maintenance_print_payload(payload: dict[str, Any], *, full: bool = Fal
         "final_atlas_index",
         "entity_registry",
         "final_entity_registry",
+        "operational_direct_event_rollup",
+        "final_operational_direct_event_rollup",
         "graph_store",
         "final_graph_store",
     ):
@@ -57607,6 +57709,10 @@ def session_memory_search_pressure_summary(
         aoa_root=aoa_root,
         search_shards=search_shards,
     )
+    direct_event_rollup = session_memory_operational_direct_event_rollup_status(
+        aoa_root=aoa_root,
+        search_shards=search_shards,
+    )
     latest_shrink_apply = latest_search_operational_shrink_apply_proof(aoa_root)
     latest_shrink_comparison = (
         latest_shrink_apply.get("comparison") if isinstance(latest_shrink_apply.get("comparison"), dict) else {}
@@ -57671,10 +57777,16 @@ def session_memory_search_pressure_summary(
         )
     elif status in {"critical_projection_stack", "large_projection_stack"} and document_hotset.get("status") != "normal":
         if context_tail_rehome_status.get("status") == "applied_current":
-            next_route = (
-                "route-backed context-tail rehome is already applied; design the remaining direct operational-event "
-                "and agent-context read-model before any further physical shrinkage"
-            )
+            if direct_event_rollup.get("status") == "current" and not bool(direct_event_rollup.get("needs_refresh")):
+                next_route = (
+                    "route-backed context-tail rehome is applied and direct operational-event read-model is current; "
+                    "prove usage-chain/live-corpus parity before any direct event physical shrinkage"
+                )
+            else:
+                next_route = (
+                    "route-backed context-tail rehome is already applied; materialize the direct operational-event "
+                    "read-model before any further physical shrinkage"
+                )
         elif operational_route_rollup.get("status") == "current":
             next_route = (
                 "use the current operational route-rollup as the replacement navigation proof before any physical "
@@ -57746,6 +57858,7 @@ def session_memory_search_pressure_summary(
         "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
         "document_hotset": document_hotset,
         "operational_route_rollup": operational_route_rollup,
+        "direct_operational_event_read_model": direct_event_rollup,
         "context_tail_rehome_status": context_tail_rehome_status,
         "quality_boundary": "structured routes and raw-text fallback are routing projections; raw transcripts and segment indexes remain authority",
         "speed_boundary": "agent-event/entity/goal routes should use structured shards; literal raw-text stays bounded and may use the monolith fallback",
@@ -57789,6 +57902,11 @@ def session_memory_search_projection_plan(
     operational_route_rollup = (
         pressure.get("operational_route_rollup") if isinstance(pressure.get("operational_route_rollup"), dict) else {}
     )
+    direct_event_read_model = (
+        pressure.get("direct_operational_event_read_model")
+        if isinstance(pressure.get("direct_operational_event_read_model"), dict)
+        else {}
+    )
     context_tail_rehome_status = (
         pressure.get("context_tail_rehome_status") if isinstance(pressure.get("context_tail_rehome_status"), dict) else {}
     )
@@ -57812,6 +57930,12 @@ def session_memory_search_projection_plan(
     else:
         next_route = "no_search_projection_weight_action_needed"
         actionability = "none"
+    if (
+        next_route == "design_direct_operational_event_read_model"
+        and direct_event_read_model.get("status") == "current"
+        and not bool(direct_event_read_model.get("needs_refresh"))
+    ):
+        next_route = "prove_direct_operational_event_read_model"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_search_projection_plan",
@@ -57876,6 +58000,32 @@ def session_memory_search_projection_plan(
             )
             if key in operational_route_rollup
         },
+        "direct_operational_event_read_model": {
+            key: direct_event_read_model.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "path",
+                "size_human",
+                "generated_at",
+                "shard_count",
+                "event_total",
+                "direct_event_count",
+                "route_bound_direct_event_count",
+                "unrouted_direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
+                "routed_group_count",
+                "sampled_raw_group_count",
+                "sampled_segment_group_count",
+                "source_mismatch_count",
+                "exact_refresh_command",
+                "exact_query_command",
+                "quality_boundary",
+                "truth_status",
+            )
+            if key in direct_event_read_model
+        },
         "context_tail_rehome_status": {
             key: context_tail_rehome_status.get(key)
             for key in (
@@ -57913,11 +58063,22 @@ def session_memory_search_projection_plan(
             },
             {
                 "id": "direct_operational_event_read_model",
-                "status": "recommended"
-                if actionability == "remaining_projection_pressure_design_lane"
-                else "evidence_only",
+                "status": (
+                    "read_model_ready"
+                    if actionability == "remaining_projection_pressure_design_lane"
+                    and direct_event_read_model.get("status") == "current"
+                    and not bool(direct_event_read_model.get("needs_refresh"))
+                    else (
+                        "recommended"
+                        if actionability == "remaining_projection_pressure_design_lane"
+                        else "evidence_only"
+                    )
+                ),
                 "reason": "after route-backed context-tail rehome, usage/result/outcome/entrypoint event rows dominate the remaining generated search weight",
                 "quality_boundary": "direct operational rows are behavior evidence; replacement must keep raw, segment, session, freshness, usage, and consequence refs",
+                "read_model_status": direct_event_read_model.get("status"),
+                "direct_event_rollup_row_count": direct_event_read_model.get("direct_event_rollup_row_count"),
+                "direct_event_posting_count": direct_event_read_model.get("direct_event_posting_count"),
             },
             {
                 "id": "schema_normalization_before_physical_compaction",
@@ -57954,6 +58115,16 @@ def session_memory_search_projection_plan(
                 str(workspace_root),
                 "--aoa-root",
                 str(aoa_root),
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-direct-event-rollup-query",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--limit",
+                "12",
             ],
             [
                 *session_memory_cli_command(aoa_root),
@@ -58011,6 +58182,11 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
     projection = payload.get("search_projection") if isinstance(payload.get("search_projection"), dict) else {}
     hotset = payload.get("document_hotset") if isinstance(payload.get("document_hotset"), dict) else {}
     route_rollup = payload.get("operational_route_rollup") if isinstance(payload.get("operational_route_rollup"), dict) else {}
+    direct_model = (
+        payload.get("direct_operational_event_read_model")
+        if isinstance(payload.get("direct_operational_event_read_model"), dict)
+        else {}
+    )
     rehome = payload.get("context_tail_rehome_status") if isinstance(payload.get("context_tail_rehome_status"), dict) else {}
     lines = [
         "# Search Projection Plan",
@@ -58024,6 +58200,7 @@ def search_projection_plan_markdown(payload: dict[str, Any]) -> str:
         f"- shards: `{projection.get('shard_db_total_human')}`",
         f"- document_hotset: `{hotset.get('status')}` docs=`{hotset.get('document_count')}` latest_event_docs=`{hotset.get('latest_materialization_event_document_count')}`",
         f"- operational_route_rollup: `{route_rollup.get('status')}` rows=`{route_rollup.get('route_rollup_row_count')}` postings=`{route_rollup.get('candidate_route_posting_count')}` size=`{route_rollup.get('size_human')}`",
+        f"- direct_operational_event_read_model: `{direct_model.get('status')}` rows=`{direct_model.get('direct_event_rollup_row_count')}` postings=`{direct_model.get('direct_event_posting_count')}` size=`{direct_model.get('size_human')}`",
         f"- context_tail_rehome: `{rehome.get('status')}` already_rehomed_docs=`{rehome.get('already_rehomed_route_ref_document_count')}`",
         "",
         "## Candidate Lanes",
@@ -59763,7 +59940,9 @@ def search_operational_remaining_projection_pressure(
     role_counts: dict[str, int],
     physical_shrink_plan: dict[str, Any],
     raw_text_fallback_status: str = "",
+    direct_event_read_model: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    direct_event_read_model = direct_event_read_model if isinstance(direct_event_read_model, dict) else {}
     event_total = int_value(totals.get("event_total"))
     direct_actionable_event_count = int_value(totals.get("direct_actionable_event_count"))
     protected_context_event_count = int_value(totals.get("protected_context_event_count"))
@@ -59791,7 +59970,10 @@ def search_operational_remaining_projection_pressure(
         next_design_route = "finish_guarded_context_tail_rehome_before_direct_event_compaction"
     elif direct_actionable_event_count > 0:
         status = "direct_operational_event_pressure_active"
-        next_design_route = "design_direct_operational_event_read_model_before_more_physical_shrink"
+        if direct_event_read_model.get("status") == "current" and not bool(direct_event_read_model.get("needs_refresh")):
+            next_design_route = "prove_direct_operational_event_read_model_before_more_physical_shrink"
+        else:
+            next_design_route = "materialize_direct_operational_event_read_model_before_more_physical_shrink"
     elif protected_context_event_count > 0:
         status = "agent_or_task_context_pressure_active"
         next_design_route = "design_agent_event_and_task_episode_read_model_before_context_compaction"
@@ -59809,6 +59991,26 @@ def search_operational_remaining_projection_pressure(
         "dominant_classes": dominant[:6],
         "role_counts": dict(sorted(role_counts.items())),
         "raw_text_fallback_status": raw_text_fallback_status or "unknown",
+        "direct_operational_event_read_model": {
+            key: direct_event_read_model.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "size_human",
+                "generated_at",
+                "shard_count",
+                "direct_event_count",
+                "route_bound_direct_event_count",
+                "unrouted_direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
+                "source_mismatch_count",
+                "exact_refresh_command",
+                "exact_query_command",
+                "truth_status",
+            )
+            if key in direct_event_read_model
+        },
         "next_design_route": next_design_route,
         "quality_boundary": (
             "direct usage/result/outcome/entrypoint rows are operational evidence; do not omit them "
@@ -61484,11 +61686,13 @@ def session_memory_search_operational_event_projection_plan(
             else {}
         )
         raw_text_fallback_status = str(shard_raw_dependency.get("status") or "")
+    direct_event_read_model = session_memory_operational_direct_event_rollup_status(aoa_root=aoa_root)
     remaining_pressure = search_operational_remaining_projection_pressure(
         totals=totals,
         role_counts=dict(role_counts),
         physical_shrink_plan=physical_shrink_plan,
         raw_text_fallback_status=raw_text_fallback_status,
+        direct_event_read_model=direct_event_read_model,
     )
     if str(context_tail_rehome_status.get("status") or "") in {
         "applied_current",
@@ -61532,6 +61736,27 @@ def session_memory_search_operational_event_projection_plan(
         "context_role": SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
         "protected_context_event_types": list(SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES),
         "context_tail_rehome_status": context_tail_rehome_status,
+        "direct_operational_event_read_model": {
+            key: direct_event_read_model.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "path",
+                "size_human",
+                "generated_at",
+                "shard_count",
+                "direct_event_count",
+                "route_bound_direct_event_count",
+                "unrouted_direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
+                "source_mismatch_count",
+                "exact_refresh_command",
+                "exact_query_command",
+                "truth_status",
+            )
+            if key in direct_event_read_model
+        },
         "remaining_projection_pressure": remaining_pressure,
         "totals": {
             **totals,
@@ -61656,6 +61881,11 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
     sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
     candidate = payload.get("projection_candidate") if isinstance(payload.get("projection_candidate"), dict) else {}
     rehome = payload.get("context_tail_rehome_status") if isinstance(payload.get("context_tail_rehome_status"), dict) else {}
+    direct_model = (
+        payload.get("direct_operational_event_read_model")
+        if isinstance(payload.get("direct_operational_event_read_model"), dict)
+        else {}
+    )
     remaining = payload.get("remaining_projection_pressure") if isinstance(payload.get("remaining_projection_pressure"), dict) else {}
     rollup = payload.get("route_ref_rollup_plan") if isinstance(payload.get("route_ref_rollup_plan"), dict) else {}
     physical = payload.get("physical_shrink_plan") if isinstance(payload.get("physical_shrink_plan"), dict) else {}
@@ -61682,6 +61912,7 @@ def search_operational_event_projection_plan_markdown(payload: dict[str, Any]) -
         f"- physical_shrink_plan_status: `{physical.get('status')}`",
         f"- context_tail_rehome_status: `{rehome.get('status')}`",
         f"- already_rehomed_route_ref_document_count: `{rehome.get('already_rehomed_route_ref_document_count')}`",
+        f"- direct_operational_event_read_model: `{direct_model.get('status')}` rows=`{direct_model.get('direct_event_rollup_row_count')}` postings=`{direct_model.get('direct_event_posting_count')}` size=`{direct_model.get('size_human')}`",
         f"- remaining_projection_pressure: `{remaining.get('status')}`",
         f"- safe_to_apply_physical_compaction: `{physical.get('safe_to_apply_physical_compaction')}`",
         f"- next_design_route: `{candidate.get('next_design_route')}`",
@@ -63253,6 +63484,1472 @@ def search_operational_route_rollup_query_markdown(payload: dict[str, Any]) -> s
     return "\n".join(lines)
 
 
+def search_operational_direct_event_rollup_db_path(aoa_root: Path) -> Path:
+    return aoa_root / SEARCH_ROOT / SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DB_NAME
+
+
+def init_search_operational_direct_event_rollup_db(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shards(
+            shard TEXT PRIMARY KEY,
+            shard_db_path TEXT NOT NULL,
+            source_size_bytes INTEGER NOT NULL DEFAULT 0,
+            source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+            generated_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            event_total INTEGER NOT NULL DEFAULT 0,
+            direct_event_count INTEGER NOT NULL DEFAULT 0,
+            route_bound_direct_event_count INTEGER NOT NULL DEFAULT 0,
+            unrouted_direct_event_count INTEGER NOT NULL DEFAULT 0,
+            direct_event_posting_count INTEGER NOT NULL DEFAULT 0,
+            direct_event_term_count INTEGER NOT NULL DEFAULT 0,
+            elapsed_ms INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS direct_event_rollups(
+            shard TEXT NOT NULL,
+            usage_role TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            session_act TEXT NOT NULL,
+            route_layer TEXT NOT NULL,
+            route_key TEXT NOT NULL,
+            route_signal TEXT NOT NULL,
+            posting_count INTEGER NOT NULL DEFAULT 0,
+            session_count INTEGER NOT NULL DEFAULT 0,
+            first_session_date TEXT NOT NULL DEFAULT '',
+            last_session_date TEXT NOT NULL DEFAULT '',
+            raw_refs_json TEXT NOT NULL DEFAULT '[]',
+            segment_refs_json TEXT NOT NULL DEFAULT '[]',
+            session_ids_json TEXT NOT NULL DEFAULT '[]',
+            event_ids_json TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY(shard, usage_role, event_type, session_act, route_layer, route_key)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_direct_event_rollups_role_type ON direct_event_rollups(usage_role, event_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_direct_event_rollups_session_act ON direct_event_rollups(session_act)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_direct_event_rollups_route ON direct_event_rollups(route_layer, route_key)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_direct_event_rollups_shard_postings ON direct_event_rollups(shard, posting_count DESC)"
+    )
+    return conn
+
+
+def search_operational_direct_event_rollup_shard_rows(
+    *,
+    db_path: Path,
+    shard: str,
+    per_shard_timeout_seconds: float,
+    ref_sample_limit: int,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = started + max(0.1, float(per_shard_timeout_seconds))
+    diagnostics: list[str] = []
+    payload: dict[str, Any] = {
+        "ok": False,
+        "status": "not_started",
+        "shard": shard,
+        "db_path": str(db_path),
+        "rows": [],
+        "diagnostics": diagnostics,
+    }
+    if not db_path.exists():
+        payload.update({"status": "missing", "diagnostics": ["search_shard_db_missing"]})
+        return payload
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path, timeout=min(1.0, max(0.1, float(per_shard_timeout_seconds))))
+        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
+        if not sqlite_table_exists(conn, "documents"):
+            payload.update({"status": "missing_documents_table", "diagnostics": ["search_documents_table_missing"]})
+            return payload
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        required_columns = {
+            "doc_type",
+            "usage_role",
+            "event_type",
+            "session_act",
+            "session_id",
+            "session_date",
+            "raw_ref",
+            "segment_ref",
+            "event_id",
+        }
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            payload.update(
+                {
+                    "status": "schema_missing_columns",
+                    "diagnostics": [f"search_operational_direct_event_rollup_missing_columns:{','.join(missing_columns)}"],
+                }
+            )
+            return payload
+        index_names = {str(item[1]) for item in conn.execute("PRAGMA index_list(documents)").fetchall()}
+        doc_type_hint = " INDEXED BY idx_documents_doc_type_date" if "idx_documents_doc_type_date" in index_names else ""
+        usage_hint = (
+            " INDEXED BY idx_documents_doc_type_usage_role_date"
+            if "idx_documents_doc_type_usage_role_date" in index_names
+            else doc_type_hint
+        )
+        direct_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
+        direct_params = list(SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
+        has_route_tables = sqlite_table_exists(conn, "document_routes") and sqlite_table_exists(conn, "route_terms")
+        if not has_route_tables:
+            diagnostics.append("search_operational_direct_event_rollup_route_tables_missing_unrouted_only")
+        event_total_row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM documents{doc_type_hint} WHERE doc_type = 'event'"
+        ).fetchone()
+        direct_count_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS direct_event_count
+            FROM documents{usage_hint}
+            WHERE doc_type = 'event'
+              AND COALESCE(usage_role, '') IN ({direct_placeholders})
+            """,
+            direct_params,
+        ).fetchone()
+        route_bound_direct_event_count = 0
+        if has_route_tables:
+            route_bound_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM documents{usage_hint}
+                WHERE doc_type = 'event'
+                  AND COALESCE(usage_role, '') IN ({direct_placeholders})
+                  AND EXISTS (
+                    SELECT 1 FROM document_routes
+                    WHERE document_routes.doc_rowid = documents.rowid
+                    LIMIT 1
+                  )
+                """,
+                direct_params,
+            ).fetchone()
+            route_bound_direct_event_count = int_value(route_bound_row["count"] if route_bound_row else 0)
+        direct_event_count = int_value(direct_count_row["direct_event_count"] if direct_count_row else 0)
+        direct_refs_sql = f"""
+            SELECT COALESCE(documents.usage_role, '') AS usage_role,
+                   COALESCE(documents.event_type, '') AS event_type,
+                   COALESCE(documents.session_act, '') AS session_act,
+                   '' AS route_layer,
+                   '' AS route_key,
+                   '' AS route_signal,
+                   COALESCE(documents.session_id, '') AS session_id,
+                   COALESCE(documents.session_date, '') AS session_date,
+                   COALESCE(documents.raw_ref, '') AS raw_ref,
+                   COALESCE(documents.segment_ref, '') AS segment_ref,
+                   COALESCE(documents.event_id, '') AS event_id,
+                   printf('%020d', documents.rowid) AS sort_id
+            FROM documents{usage_hint}
+            WHERE documents.doc_type = 'event'
+              AND COALESCE(documents.usage_role, '') IN ({direct_placeholders})
+        """
+        aggregate_rows = conn.execute(
+            f"""
+            WITH direct_refs AS (
+                {direct_refs_sql}
+            )
+            SELECT usage_role,
+                   event_type,
+                   session_act,
+                   route_layer,
+                   route_key,
+                   route_signal,
+                   COUNT(*) AS posting_count,
+                   COUNT(DISTINCT session_id) AS session_count,
+                   MIN(session_date) AS first_session_date,
+                   MAX(session_date) AS last_session_date
+            FROM direct_refs
+            GROUP BY usage_role, event_type, session_act
+            ORDER BY posting_count DESC, usage_role ASC, event_type ASC, session_act ASC
+            """,
+            direct_params,
+        ).fetchall()
+        sample_limit = max(0, int(ref_sample_limit))
+        samples_by_term: dict[tuple[str, str, str, str, str, str], dict[str, list[str]]] = defaultdict(
+            lambda: {"raw_refs": [], "segment_refs": [], "session_ids": [], "event_ids": []}
+        )
+        if sample_limit > 0 and aggregate_rows:
+            sample_rows = conn.execute(
+                f"""
+                SELECT usage_role, event_type, session_act, route_layer, route_key, route_signal,
+                       session_id, raw_ref, segment_ref, event_id
+                FROM (
+                    WITH direct_refs AS (
+                        {direct_refs_sql}
+                    )
+                    SELECT usage_role,
+                           event_type,
+                           session_act,
+                           route_layer,
+                           route_key,
+                           route_signal,
+                           session_id,
+                           raw_ref,
+                           segment_ref,
+                           event_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY usage_role, event_type, session_act
+                               ORDER BY session_date DESC, sort_id DESC
+                           ) AS sample_rank
+                    FROM direct_refs
+                )
+                WHERE sample_rank <= ?
+                """,
+                [*direct_params, sample_limit],
+            ).fetchall()
+            for row in sample_rows:
+                token = (
+                    str(row["usage_role"] or ""),
+                    str(row["event_type"] or ""),
+                    str(row["session_act"] or ""),
+                    str(row["route_layer"] or ""),
+                    str(row["route_key"] or ""),
+                    str(row["route_signal"] or ""),
+                )
+                bucket = samples_by_term[token]
+                for source_key, target_key in (
+                    ("raw_ref", "raw_refs"),
+                    ("segment_ref", "segment_refs"),
+                    ("session_id", "session_ids"),
+                    ("event_id", "event_ids"),
+                ):
+                    value = str(row[source_key] or "")
+                    if value and value not in bucket[target_key]:
+                        bucket[target_key].append(value)
+        rows: list[dict[str, Any]] = []
+        for row in aggregate_rows:
+            token = (
+                str(row["usage_role"] or ""),
+                str(row["event_type"] or ""),
+                str(row["session_act"] or ""),
+                str(row["route_layer"] or ""),
+                str(row["route_key"] or ""),
+                str(row["route_signal"] or ""),
+            )
+            samples = samples_by_term.get(
+                token,
+                {"raw_refs": [], "segment_refs": [], "session_ids": [], "event_ids": []},
+            )
+            rows.append(
+                {
+                    "shard": shard,
+                    "usage_role": token[0],
+                    "event_type": token[1],
+                    "session_act": token[2],
+                    "route_layer": token[3],
+                    "route_key": token[4],
+                    "route_signal": token[5],
+                    "posting_count": int_value(row["posting_count"]),
+                    "session_count": int_value(row["session_count"]),
+                    "first_session_date": str(row["first_session_date"] or ""),
+                    "last_session_date": str(row["last_session_date"] or ""),
+                    "raw_refs": samples["raw_refs"][:sample_limit],
+                    "segment_refs": samples["segment_refs"][:sample_limit],
+                    "session_ids": samples["session_ids"][:sample_limit],
+                    "event_ids": samples["event_ids"][:sample_limit],
+                }
+            )
+        route_posting_count = sum(int_value(row.get("posting_count")) for row in rows if row.get("route_layer"))
+        return {
+            "ok": True,
+            "status": "sampled",
+            "shard": shard,
+            "db_path": str(db_path),
+            "summary": {
+                "event_total": int_value(event_total_row["count"] if event_total_row else 0),
+                "direct_event_count": direct_event_count,
+                "route_bound_direct_event_count": route_bound_direct_event_count,
+                "unrouted_direct_event_count": max(0, direct_event_count - route_bound_direct_event_count),
+                "direct_event_posting_count": sum(int_value(row.get("posting_count")) for row in rows),
+                "direct_route_posting_count": route_posting_count,
+                "direct_event_term_count": len(rows),
+            },
+            "rows": rows,
+            "diagnostics": diagnostics,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+    except sqlite3.Error as exc:
+        status = sqlite_error_status(exc)
+        diagnostics.append(f"search_operational_direct_event_rollup_shard_failed:{status}:{exc}")
+        payload.update(
+            {
+                "status": status,
+                "diagnostics": diagnostics,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+        return payload
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
+            conn.close()
+
+
+def insert_search_operational_direct_event_rollup_shard_result(
+    conn: sqlite3.Connection,
+    *,
+    generated_at: str,
+    item: dict[str, Any],
+) -> None:
+    db_path = Path(str(item.get("db_path") or ""))
+    source_size = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+    source_mtime_ns = db_path.stat().st_mtime_ns if db_path.exists() else 0
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO shards(
+            shard, shard_db_path, source_size_bytes, source_mtime_ns, generated_at,
+            status, event_total, direct_event_count, route_bound_direct_event_count,
+            unrouted_direct_event_count, direct_event_posting_count,
+            direct_event_term_count, elapsed_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(item.get("shard") or ""),
+            str(db_path),
+            source_size,
+            source_mtime_ns,
+            generated_at,
+            str(item.get("status") or ""),
+            int_value(summary.get("event_total")),
+            int_value(summary.get("direct_event_count")),
+            int_value(summary.get("route_bound_direct_event_count")),
+            int_value(summary.get("unrouted_direct_event_count")),
+            sum(int_value(row.get("posting_count")) for row in rows if isinstance(row, dict)),
+            len(rows),
+            int_value(item.get("elapsed_ms")),
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO direct_event_rollups(
+            shard, usage_role, event_type, session_act, route_layer, route_key,
+            route_signal, posting_count, session_count, first_session_date,
+            last_session_date, raw_refs_json, segment_refs_json, session_ids_json,
+            event_ids_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                str(row.get("shard") or ""),
+                str(row.get("usage_role") or ""),
+                str(row.get("event_type") or ""),
+                str(row.get("session_act") or ""),
+                str(row.get("route_layer") or ""),
+                str(row.get("route_key") or ""),
+                str(row.get("route_signal") or ""),
+                int_value(row.get("posting_count")),
+                int_value(row.get("session_count")),
+                str(row.get("first_session_date") or ""),
+                str(row.get("last_session_date") or ""),
+                json.dumps(row.get("raw_refs") if isinstance(row.get("raw_refs"), list) else [], ensure_ascii=False),
+                json.dumps(row.get("segment_refs") if isinstance(row.get("segment_refs"), list) else [], ensure_ascii=False),
+                json.dumps(row.get("session_ids") if isinstance(row.get("session_ids"), list) else [], ensure_ascii=False),
+                json.dumps(row.get("event_ids") if isinstance(row.get("event_ids"), list) else [], ensure_ascii=False),
+            )
+            for row in rows
+            if isinstance(row, dict)
+        ],
+    )
+
+
+def write_search_operational_direct_event_rollup_db(
+    *,
+    target_db: Path,
+    generated_at: str,
+    shard_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tmp_db = target_db.with_name(f".{target_db.name}.{compact_stamp()}__{os.getpid()}.tmp")
+    cleanup_sqlite_sidecars(tmp_db)
+    if tmp_db.exists():
+        tmp_db.unlink()
+    conn = init_search_operational_direct_event_rollup_db(tmp_db)
+    try:
+        conn.execute("DELETE FROM meta")
+        conn.execute("DELETE FROM shards")
+        conn.execute("DELETE FROM direct_event_rollups")
+        conn.executemany(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            [
+                ("schema_version", str(SCHEMA_VERSION)),
+                ("direct_event_rollup_schema_version", str(SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION)),
+                ("artifact_type", "session_memory_search_operational_direct_event_rollup"),
+                ("generated_at", generated_at),
+                ("authority_boundary", "generated direct operational event projection; raw transcripts and segment indexes remain authority"),
+            ],
+        )
+        for item in shard_results:
+            insert_search_operational_direct_event_rollup_shard_result(conn, generated_at=generated_at, item=item)
+        conn.commit()
+    finally:
+        conn.close()
+    replace_sqlite_db_with_temp(tmp_db, target_db)
+    return {
+        "path": str(target_db),
+        "size_bytes": path_total_size(target_db),
+        "size_human": human_size(path_total_size(target_db)),
+        "update_mode": "full_rebuild",
+        "replaced_shards": [str(item.get("shard") or "") for item in shard_results if isinstance(item, dict)],
+    }
+
+
+def merge_search_operational_direct_event_rollup_db(
+    *,
+    target_db: Path,
+    generated_at: str,
+    shard_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    tmp_db = target_db.with_name(f".{target_db.name}.{compact_stamp()}__{os.getpid()}.merge.tmp")
+    cleanup_sqlite_sidecars(tmp_db)
+    if tmp_db.exists():
+        tmp_db.unlink()
+    source_conn: sqlite3.Connection | None = None
+    conn: sqlite3.Connection | None = None
+    try:
+        source_conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+        conn = sqlite3.connect(tmp_db)
+        source_conn.backup(conn)
+        conn.close()
+        conn = init_search_operational_direct_event_rollup_db(tmp_db)
+        conn.executemany(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            [
+                ("schema_version", str(SCHEMA_VERSION)),
+                ("direct_event_rollup_schema_version", str(SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION)),
+                ("artifact_type", "session_memory_search_operational_direct_event_rollup"),
+                ("generated_at", generated_at),
+                ("authority_boundary", "generated direct operational event projection; raw transcripts and segment indexes remain authority"),
+                ("update_mode", "scoped_shard_replace"),
+            ],
+        )
+        for item in shard_results:
+            shard = str(item.get("shard") or "")
+            if not shard:
+                continue
+            conn.execute("DELETE FROM shards WHERE shard = ?", (shard,))
+            conn.execute("DELETE FROM direct_event_rollups WHERE shard = ?", (shard,))
+            insert_search_operational_direct_event_rollup_shard_result(conn, generated_at=generated_at, item=item)
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+        if source_conn is not None:
+            source_conn.close()
+    replace_sqlite_db_with_temp(tmp_db, target_db)
+    return {
+        "path": str(target_db),
+        "size_bytes": path_total_size(target_db),
+        "size_human": human_size(path_total_size(target_db)),
+        "update_mode": "scoped_shard_replace",
+        "replaced_shards": [str(item.get("shard") or "") for item in shard_results if isinstance(item, dict) and item.get("shard")],
+    }
+
+
+def session_memory_operational_direct_event_rollup_status(
+    *,
+    aoa_root: Path,
+    search_shards: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    search_shards = search_shards if isinstance(search_shards, dict) else {}
+    target_db = search_operational_direct_event_rollup_db_path(aoa_root)
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-direct-event-rollup",
+        "--workspace-root",
+        str(aoa_root.parent),
+        "--aoa-root",
+        str(aoa_root),
+        "--apply",
+        "--write-report",
+    ]
+    query_command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-direct-event-rollup-query",
+        "--workspace-root",
+        str(aoa_root.parent),
+        "--aoa-root",
+        str(aoa_root),
+        "--limit",
+        "12",
+        "--write-report",
+    ]
+    base: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_operational_direct_event_rollup_status",
+        "mutates": False,
+        "path": str(target_db),
+        "exists": target_db.exists(),
+        "size_bytes": path_total_size(target_db),
+        "size_human": human_size(path_total_size(target_db)),
+        "source_search_shards_status": search_shards.get("status") or "unknown",
+        "refresh_command": command,
+        "exact_refresh_command": shlex.join(command),
+        "query_command": query_command,
+        "exact_query_command": shlex.join(query_command),
+        "quality_boundary": "generated direct-event rollup is navigation only; raw transcripts and segment refs remain authority",
+        "truth_status": "generated_search_direct_event_rollup_projection_not_archive_truth",
+    }
+    if not target_db.exists():
+        return {
+            **base,
+            "status": "missing",
+            "needs_refresh": True,
+            "diagnostics": ["operational_direct_event_rollup_missing"],
+        }
+    diagnostics: list[str] = []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        if not sqlite_table_exists(conn, "meta") or not sqlite_table_exists(conn, "shards") or not sqlite_table_exists(conn, "direct_event_rollups"):
+            diagnostics.append("operational_direct_event_rollup_schema_tables_missing")
+            return {
+                **base,
+                "status": "invalid",
+                "needs_refresh": True,
+                "diagnostics": diagnostics,
+            }
+        meta = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM meta")}
+        if int_value(meta.get("direct_event_rollup_schema_version")) != SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION:
+            diagnostics.append("operational_direct_event_rollup_schema_version_mismatch")
+        if meta.get("artifact_type") != "session_memory_search_operational_direct_event_rollup":
+            diagnostics.append("operational_direct_event_rollup_artifact_type_mismatch")
+        shard_rows = [dict(row) for row in conn.execute("SELECT * FROM shards ORDER BY shard")]
+        total_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COALESCE(SUM(posting_count), 0) AS posting_count,
+                   COUNT(CASE WHEN route_layer != '' THEN 1 END) AS routed_group_count,
+                   COUNT(CASE WHEN raw_refs_json != '[]' THEN 1 END) AS sampled_raw_group_count,
+                   COUNT(CASE WHEN segment_refs_json != '[]' THEN 1 END) AS sampled_segment_group_count
+            FROM direct_event_rollups
+            """
+        ).fetchone()
+        direct_event_total_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(event_total), 0) AS event_total,
+                   COALESCE(SUM(direct_event_count), 0) AS direct_event_count,
+                   COALESCE(SUM(route_bound_direct_event_count), 0) AS route_bound_direct_event_count,
+                   COALESCE(SUM(unrouted_direct_event_count), 0) AS unrouted_direct_event_count
+            FROM shards
+            """
+        ).fetchone()
+        rollup_row_count = int_value(total_row["row_count"] if total_row else 0)
+        posting_count = int_value(total_row["posting_count"] if total_row else 0)
+        routed_group_count = int_value(total_row["routed_group_count"] if total_row else 0)
+        sampled_raw_group_count = int_value(total_row["sampled_raw_group_count"] if total_row else 0)
+        sampled_segment_group_count = int_value(total_row["sampled_segment_group_count"] if total_row else 0)
+        event_total = int_value(direct_event_total_row["event_total"] if direct_event_total_row else 0)
+        direct_event_count = int_value(direct_event_total_row["direct_event_count"] if direct_event_total_row else 0)
+        route_bound_direct_event_count = int_value(
+            direct_event_total_row["route_bound_direct_event_count"] if direct_event_total_row else 0
+        )
+        unrouted_direct_event_count = int_value(direct_event_total_row["unrouted_direct_event_count"] if direct_event_total_row else 0)
+    except sqlite3.Error as exc:
+        diagnostics.append(f"operational_direct_event_rollup_unreadable:{sqlite_error_diagnostic(exc)}")
+        return {
+            **base,
+            "status": "invalid",
+            "needs_refresh": True,
+            "diagnostics": diagnostics,
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    source_mismatches: list[dict[str, Any]] = []
+    selected_shards = [str(item.get("shard") or "") for item in shard_rows if isinstance(item, dict) and item.get("shard")]
+    for item in shard_rows:
+        db_path = Path(str(item.get("shard_db_path") or ""))
+        current_size = path_total_size(db_path) + path_total_size(Path(str(db_path) + "-wal")) + path_total_size(Path(str(db_path) + "-shm"))
+        current_mtime_ns = db_path.stat().st_mtime_ns if db_path.exists() else 0
+        if current_size != int_value(item.get("source_size_bytes")) or current_mtime_ns != int_value(item.get("source_mtime_ns")):
+            source_mismatches.append(
+                {
+                    "shard": item.get("shard"),
+                    "expected_size_bytes": item.get("source_size_bytes"),
+                    "current_size_bytes": current_size,
+                    "expected_mtime_ns": item.get("source_mtime_ns"),
+                    "current_mtime_ns": current_mtime_ns,
+                }
+            )
+    if source_mismatches:
+        diagnostics.append("operational_direct_event_rollup_source_shards_changed")
+    incremental_refresh_command: list[str] = []
+    incremental_refresh_route = ""
+    if len(source_mismatches) == 1 and source_mismatches[0].get("shard"):
+        incremental_refresh_command = [
+            *session_memory_cli_command(aoa_root),
+            "search-operational-direct-event-rollup",
+            "--workspace-root",
+            str(aoa_root.parent),
+            "--aoa-root",
+            str(aoa_root),
+            "--shard",
+            str(source_mismatches[0].get("shard") or ""),
+            "--apply",
+            "--write-report",
+        ]
+        incremental_refresh_route = "scoped_shard_replace"
+    elif source_mismatches:
+        incremental_refresh_route = "full_rebuild"
+    largest_shards = search_shards.get("largest_shards") if isinstance(search_shards.get("largest_shards"), list) else []
+    expected_selected_shards = [
+        str(item.get("shard") or "")
+        for item in largest_shards[: len(selected_shards)]
+        if isinstance(item, dict) and item.get("shard")
+    ]
+    if expected_selected_shards and selected_shards != sorted(expected_selected_shards):
+        diagnostics.append("operational_direct_event_rollup_selected_shards_changed")
+    source_status = str(search_shards.get("status") or "")
+    if source_status and source_status not in {"current", "current_with_deferred_live_updates", "empty"}:
+        diagnostics.append(f"operational_direct_event_rollup_search_shards_not_current:{source_status}")
+    if rollup_row_count <= 0:
+        status = "empty"
+        needs_refresh = True
+    elif source_status and source_status not in {"current", "current_with_deferred_live_updates", "empty"} and not source_mismatches:
+        status = "blocked_by_search_freshness"
+        needs_refresh = False
+    elif diagnostics:
+        status = "stale"
+        needs_refresh = True
+    else:
+        status = "current"
+        needs_refresh = False
+    return {
+        **base,
+        "status": status,
+        "needs_refresh": needs_refresh,
+        "generated_at": meta.get("generated_at"),
+        "direct_event_rollup_schema_version": meta.get("direct_event_rollup_schema_version"),
+        "shard_count": len(shard_rows),
+        "selected_shards": selected_shards,
+        "expected_selected_shards": expected_selected_shards,
+        "event_total": event_total,
+        "direct_event_count": direct_event_count,
+        "route_bound_direct_event_count": route_bound_direct_event_count,
+        "unrouted_direct_event_count": unrouted_direct_event_count,
+        "direct_event_rollup_row_count": rollup_row_count,
+        "direct_event_posting_count": posting_count,
+        "routed_group_count": routed_group_count,
+        "sampled_raw_group_count": sampled_raw_group_count,
+        "sampled_segment_group_count": sampled_segment_group_count,
+        "source_mismatch_count": len(source_mismatches),
+        "source_mismatches": source_mismatches[:5],
+        "incremental_refresh_command": incremental_refresh_command,
+        "exact_incremental_refresh_command": shlex.join(incremental_refresh_command) if incremental_refresh_command else "",
+        "incremental_refresh_route": incremental_refresh_route,
+        "diagnostics": diagnostics,
+    }
+
+
+def session_memory_search_operational_direct_event_rollup(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    max_shards: int = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS,
+    per_shard_timeout_seconds: float = SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS,
+    ref_sample_limit: int = SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+    shard: str = "",
+    apply: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    generated_at = utc_now()
+    started = time.monotonic()
+    requested_shard = str(shard or "").strip()
+    selected_shards, catalog, diagnostics = search_operational_event_projection_shard_candidates(
+        aoa_root,
+        max_shards=max_shards,
+        shard=requested_shard,
+    )
+    target_db = search_operational_direct_event_rollup_db_path(aoa_root)
+    scoped_update_requested = bool(requested_shard)
+    if scoped_update_requested and apply and not target_db.exists():
+        diagnostics.append("search_operational_direct_event_rollup_scoped_apply_requires_existing_rollup_db")
+    shard_results = [
+        search_operational_direct_event_rollup_shard_rows(
+            db_path=Path(str(item.get("db_path") or "")),
+            shard=str(item.get("shard") or ""),
+            per_shard_timeout_seconds=per_shard_timeout_seconds,
+            ref_sample_limit=ref_sample_limit,
+        )
+        for item in selected_shards
+    ]
+    diagnostics.extend(
+        str(diag)
+        for item in shard_results
+        for diag in (item.get("diagnostics") if isinstance(item.get("diagnostics"), list) else [])
+        if diag
+    )
+    successful = [item for item in shard_results if item.get("ok")]
+    rows = [row for item in successful for row in (item.get("rows") if isinstance(item.get("rows"), list) else []) if isinstance(row, dict)]
+    role_counts: Counter[str] = Counter()
+    event_type_counts: Counter[str] = Counter()
+    session_act_counts: Counter[str] = Counter()
+    route_counts: Counter[tuple[str, str, str]] = Counter()
+    for row in rows:
+        posting_count = int_value(row.get("posting_count"))
+        role_counts[str(row.get("usage_role") or "")] += posting_count
+        event_type_counts[str(row.get("event_type") or "")] += posting_count
+        session_act_counts[str(row.get("session_act") or "")] += posting_count
+        route_layer = str(row.get("route_layer") or "")
+        route_key = str(row.get("route_key") or "")
+        route_signal = str(row.get("route_signal") or "")
+        if route_layer or route_key:
+            route_counts[(route_layer, route_key, route_signal)] += posting_count
+    direct_event_posting_count = sum(int_value(row.get("posting_count")) for row in rows)
+    direct_event_count = sum(int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("direct_event_count")) for item in successful)
+    route_bound_direct_event_count = sum(
+        int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("route_bound_direct_event_count"))
+        for item in successful
+    )
+    unrouted_direct_event_count = sum(
+        int_value((item.get("summary") if isinstance(item.get("summary"), dict) else {}).get("unrouted_direct_event_count"))
+        for item in successful
+    )
+    write_result: dict[str, Any] = {}
+    if apply and successful and not (scoped_update_requested and not target_db.exists()):
+        if scoped_update_requested:
+            write_result = merge_search_operational_direct_event_rollup_db(
+                target_db=target_db,
+                generated_at=generated_at,
+                shard_results=successful,
+            )
+        else:
+            write_result = write_search_operational_direct_event_rollup_db(
+                target_db=target_db,
+                generated_at=generated_at,
+                shard_results=successful,
+            )
+    status = "current" if apply and successful and not diagnostics else "planned" if successful else "blocked"
+    if diagnostics and successful:
+        status = "degraded"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_direct_event_rollup",
+        "direct_event_rollup_schema_version": SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "mutates": bool(apply),
+        "apply": bool(apply),
+        "ok": bool(successful) and (not diagnostics or status == "degraded"),
+        "status": status,
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "catalog_status": catalog.get("status"),
+        "target_db": str(target_db),
+        "written": bool(write_result),
+        "write_result": write_result,
+        "update_mode": "scoped_shard_replace" if scoped_update_requested else "full_rebuild",
+        "requested_shard": requested_shard,
+        "sample": {
+            "selection": "requested_search_shard" if scoped_update_requested else "largest_existing_search_shards",
+            "max_shards": max(1, int(max_shards)),
+            "requested_shard": requested_shard,
+            "selected_shard_count": len(selected_shards),
+            "successful_shard_count": len(successful),
+            "per_shard_timeout_seconds": per_shard_timeout_seconds,
+            "ref_sample_limit": max(0, int(ref_sample_limit)),
+            "selected_shards": selected_shards,
+        },
+        "totals": {
+            "direct_event_count": direct_event_count,
+            "route_bound_direct_event_count": route_bound_direct_event_count,
+            "unrouted_direct_event_count": unrouted_direct_event_count,
+            "direct_event_rollup_row_count": len(rows),
+            "direct_event_posting_count": direct_event_posting_count,
+            "route_bound_direct_event_ratio": round(route_bound_direct_event_count / direct_event_count, 6)
+            if direct_event_count > 0
+            else 0.0,
+            "sampled_raw_ref_count": sum(len(row.get("raw_refs") if isinstance(row.get("raw_refs"), list) else []) for row in rows),
+            "sampled_segment_ref_count": sum(len(row.get("segment_refs") if isinstance(row.get("segment_refs"), list) else []) for row in rows),
+        },
+        "top_usage_roles": [
+            {"usage_role": role, "posting_count": count}
+            for role, count in role_counts.most_common(12)
+            if role
+        ],
+        "top_event_types": [
+            {"event_type": event_type, "posting_count": count}
+            for event_type, count in event_type_counts.most_common(12)
+            if event_type
+        ],
+        "top_session_acts": [
+            {"session_act": session_act, "posting_count": count}
+            for session_act, count in session_act_counts.most_common(12)
+            if session_act
+        ],
+        "top_route_terms": [
+            {"route_layer": layer, "route_key": key, "route_signal": signal, "posting_count": count}
+            for (layer, key, signal), count in route_counts.most_common(12)
+            if layer and key
+        ],
+        "shards": [
+            {
+                "shard": item.get("shard"),
+                "status": item.get("status"),
+                "ok": item.get("ok"),
+                "row_count": len(item.get("rows") if isinstance(item.get("rows"), list) else []),
+                "elapsed_ms": item.get("elapsed_ms"),
+                "summary": {
+                    key: (item.get("summary") if isinstance(item.get("summary"), dict) else {}).get(key)
+                    for key in (
+                        "event_total",
+                        "direct_event_count",
+                        "route_bound_direct_event_count",
+                        "unrouted_direct_event_count",
+                        "direct_event_posting_count",
+                        "direct_route_posting_count",
+                        "direct_event_term_count",
+                    )
+                },
+                "diagnostics": item.get("diagnostics", []),
+            }
+            for item in shard_results
+        ],
+        "cost_profile": {
+            "route_kind": "search_operational_direct_event_rollup",
+            "mutates": bool(apply),
+            "reads_structured_shards": True,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "bounded_by_per_shard_timeout": True,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+        "stop_lines": [
+            "generated_direct_event_rollup_is_navigation_not_authority",
+            "do_not_delete_or_compact_direct_event_rows_from_this_command",
+            "raw_and_segment_refs_remain_required_for_evidence",
+            "usage_consequence_semantics_remain_owned_by_usage_chain_until_replacement_is_proven",
+        ],
+        "next_routes": [
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-direct-event-rollup",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--max-shards",
+                str(max(1, int(max_shards))),
+                *(["--shard", requested_shard] if requested_shard else []),
+                "--apply",
+                "--write-report",
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-direct-event-rollup-query",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--limit",
+                str(SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_TOP_LIMIT),
+                "--write-report",
+            ],
+            [
+                *session_memory_cli_command(aoa_root),
+                "usage-chain",
+                "<anchor>",
+                "--kind",
+                "<kind>",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+            ],
+        ],
+        "diagnostics": diagnostics,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "quality_boundary": "direct-event rollup rows are compact navigation; open usage-chain/raw/segment refs for proof and keep owner authority outside session memory.",
+        "truth_status": "generated_search_direct_event_rollup_projection_not_archive_truth",
+    }
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-operational-direct-event-rollup",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_operational_direct_event_rollup_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_operational_direct_event_rollup_markdown(payload: dict[str, Any]) -> str:
+    sample = payload.get("sample") if isinstance(payload.get("sample"), dict) else {}
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    cost = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+    lines = [
+        "# Search Operational Direct Event Rollup",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- target_db: `{payload.get('target_db')}`",
+        f"- selected_shards: `{sample.get('selected_shard_count')}`",
+        f"- successful_shards: `{sample.get('successful_shard_count')}`",
+        f"- direct_event_count: `{totals.get('direct_event_count')}`",
+        f"- route_bound_direct_event_count: `{totals.get('route_bound_direct_event_count')}`",
+        f"- unrouted_direct_event_count: `{totals.get('unrouted_direct_event_count')}`",
+        f"- direct_event_rollup_row_count: `{totals.get('direct_event_rollup_row_count')}`",
+        f"- direct_event_posting_count: `{totals.get('direct_event_posting_count')}`",
+        f"- elapsed_ms: `{cost.get('elapsed_ms')}`",
+        "",
+        "## Top Usage Roles",
+        "",
+        "| role | postings |",
+        "| --- | ---: |",
+    ]
+    for item in payload.get("top_usage_roles", []) if isinstance(payload.get("top_usage_roles"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('usage_role')}` | `{item.get('posting_count')}` |")
+    lines.extend(["", "## Top Event Types", "", "| event_type | postings |", "| --- | ---: |"])
+    for item in payload.get("top_event_types", []) if isinstance(payload.get("top_event_types"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('event_type')}` | `{item.get('posting_count')}` |")
+    lines.extend(["", "## Top Route Terms", "", "| layer | key | postings |", "| --- | --- | ---: |"])
+    for item in payload.get("top_route_terms", []) if isinstance(payload.get("top_route_terms"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('route_layer')}` | `{item.get('route_key')}` | `{item.get('posting_count')}` |")
+    lines.extend(["", "## Shards", "", "| shard | status | rows | elapsed_ms |", "| --- | --- | ---: | ---: |"])
+    for item in payload.get("shards", []) if isinstance(payload.get("shards"), list) else []:
+        if isinstance(item, dict):
+            lines.append(f"| `{item.get('shard')}` | `{item.get('status')}` | `{item.get('row_count')}` | `{item.get('elapsed_ms')}` |")
+    lines.extend(["", "## Stop Lines", ""])
+    for item in payload.get("stop_lines", []) if isinstance(payload.get("stop_lines"), list) else []:
+        lines.append(f"- `{item}`")
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend(["", "## Diagnostics", ""])
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def search_operational_direct_event_rollup_normalized_filters(
+    *,
+    query: str = "",
+    usage_role: str = "",
+    event_type: str = "",
+    session_act: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+) -> dict[str, Any]:
+    normalized_usage_role = route_key_slug(usage_role, fallback="", max_chars=40) if usage_role else ""
+    normalized_event_type = str(event_type or "").strip().upper()
+    normalized_session_act = route_key_slug(session_act, fallback="", max_chars=80) if session_act else ""
+    route_filters = search_operational_route_rollup_normalized_filters(
+        query="",
+        layer=layer,
+        key=key,
+        route_signal=route_signal,
+    )
+    return {
+        "query_terms": search_operational_route_rollup_filter_terms(query) if query else [],
+        "usage_role": normalized_usage_role,
+        "event_type": normalized_event_type,
+        "session_act": normalized_session_act,
+        "route_layer": route_filters.get("layer") or "",
+        "route_key": route_filters.get("key") or "",
+        "route_signal": route_filters.get("route_signal") or "",
+    }
+
+
+def search_operational_direct_event_rollup_query_command(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    query: str = "",
+    usage_role: str = "",
+    event_type: str = "",
+    session_act: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+    limit: int = 12,
+    ref_limit: int = SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+    write_report: bool = False,
+) -> list[str]:
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-direct-event-rollup-query",
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+    if query:
+        command.append(str(query))
+    for flag, value in (
+        ("--usage-role", usage_role),
+        ("--event-type", event_type),
+        ("--session-act", session_act),
+        ("--layer", layer),
+        ("--key", key),
+        ("--route-signal", route_signal),
+    ):
+        if value:
+            command.extend([flag, str(value)])
+    command.extend(["--limit", str(max(1, int(limit))), "--ref-limit", str(max(0, int(ref_limit)))])
+    if write_report:
+        command.append("--write-report")
+    return command
+
+
+def session_memory_search_operational_direct_event_rollup_query(
+    *,
+    workspace_root: Path | str,
+    aoa_root: Path,
+    query: str = "",
+    usage_role: str = "",
+    event_type: str = "",
+    session_act: str = "",
+    layer: str = "",
+    key: str = "",
+    route_signal: str = "",
+    limit: int = 12,
+    ref_limit: int = SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    generated_at = utc_now()
+    target_db = search_operational_direct_event_rollup_db_path(aoa_root)
+    limit_value = max(1, min(100, int(limit)))
+    ref_limit_value = max(0, min(25, int(ref_limit)))
+    filters = {
+        "query": str(query or ""),
+        "usage_role": str(usage_role or ""),
+        "event_type": str(event_type or ""),
+        "session_act": str(session_act or ""),
+        "layer": str(layer or ""),
+        "key": str(key or ""),
+        "route_signal": str(route_signal or ""),
+        "limit": limit_value,
+        "ref_limit": ref_limit_value,
+    }
+    normalized_filters = search_operational_direct_event_rollup_normalized_filters(
+        query=filters["query"],
+        usage_role=filters["usage_role"],
+        event_type=filters["event_type"],
+        session_act=filters["session_act"],
+        layer=filters["layer"],
+        key=filters["key"],
+        route_signal=filters["route_signal"],
+    )
+    diagnostics: list[str] = []
+    rollup_status = session_memory_operational_direct_event_rollup_status(aoa_root=aoa_root)
+    rollup_state = str(rollup_status.get("status") or "missing")
+    base: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_search_operational_direct_event_rollup_query",
+        "direct_event_rollup_schema_version": SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "mutates": False,
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(aoa_root),
+        "target_db": str(target_db),
+        "filters": filters,
+        "normalized_filters": normalized_filters,
+        "rollup_status": {
+            key: rollup_status.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "generated_at",
+                "size_human",
+                "shard_count",
+                "event_total",
+                "direct_event_count",
+                "route_bound_direct_event_count",
+                "unrouted_direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
+                "source_mismatch_count",
+                "incremental_refresh_route",
+                "incremental_refresh_command",
+                "exact_incremental_refresh_command",
+                "diagnostics",
+                "refresh_command",
+                "query_command",
+            )
+            if key in rollup_status
+        },
+        "stop_lines": [
+            "generated_direct_event_rollup_is_navigation_not_authority",
+            "raw_and_segment_refs_remain_required_for_evidence",
+            "query_route_must_not_resample_search_shards",
+            "usage_chain_remains_the_behavior_evidence_route_until_replacement_is_proven",
+        ],
+        "quality_boundary": "direct-event rollup query is compact navigation over a generated projection; use usage-chain/raw/segment refs before proof claims.",
+        "truth_status": "generated_search_direct_event_rollup_query_not_archive_truth",
+    }
+    if rollup_state in {"missing", "invalid", "empty"} or not target_db.exists():
+        diagnostics.append(f"operational_direct_event_rollup_query_unavailable:{rollup_state}")
+        return {
+            **base,
+            "ok": False,
+            "status": "unavailable",
+            "results": [],
+            "result_count": 0,
+            "totals": {"matched_shard_row_count": 0, "matched_group_count": 0, "omitted_group_count": 0},
+            "quality": {
+                "uses_materialized_direct_event_rollup": True,
+                "raw_or_segment_ref_present": False,
+                "route_ref_present": False,
+                "freshness_status": rollup_state,
+                "needs_refresh": rollup_status.get("needs_refresh"),
+                "truncated": False,
+            },
+            "cost_profile": {
+                "uses_materialized_direct_event_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            },
+            "next_routes": [rollup_status.get("refresh_command")] if rollup_status.get("refresh_command") else [],
+            "diagnostics": diagnostics,
+        }
+
+    where: list[str] = []
+    params: list[Any] = []
+    for column, normalized_key in (
+        ("usage_role", "usage_role"),
+        ("event_type", "event_type"),
+        ("session_act", "session_act"),
+        ("route_layer", "route_layer"),
+        ("route_key", "route_key"),
+        ("route_signal", "route_signal"),
+    ):
+        value = normalized_filters.get(normalized_key)
+        if value:
+            where.append(f"{column} = ?")
+            params.append(value)
+    query_terms = normalized_filters.get("query_terms") if isinstance(normalized_filters.get("query_terms"), list) else []
+    if query_terms:
+        query_clauses: list[str] = []
+        for term in query_terms:
+            needle = f"%{str(term).lower()}%"
+            query_clauses.append(
+                "(lower(usage_role) LIKE ? OR lower(event_type) LIKE ? OR lower(session_act) LIKE ? OR lower(route_layer) LIKE ? OR lower(route_key) LIKE ? OR lower(route_signal) LIKE ?)"
+            )
+            params.extend([needle, needle, needle, needle, needle, needle])
+        where.append(f"({' OR '.join(query_clauses)})")
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    conn: sqlite3.Connection | None = None
+    bad_json_field_count = 0
+    try:
+        conn = sqlite3.connect(f"{target_db.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT shard, usage_role, event_type, session_act, route_layer, route_key,
+                   route_signal, posting_count, session_count, first_session_date,
+                   last_session_date, raw_refs_json, segment_refs_json, session_ids_json,
+                   event_ids_json
+            FROM direct_event_rollups
+            {where_sql}
+            ORDER BY posting_count DESC, usage_role ASC, event_type ASC, session_act ASC, route_layer ASC, route_key ASC
+            """,
+            params,
+        ).fetchall()
+        shard_summary_rows = conn.execute(
+            """
+            SELECT COUNT(*) AS shard_count,
+                   COALESCE(SUM(event_total), 0) AS event_total,
+                   COALESCE(SUM(direct_event_count), 0) AS direct_event_count,
+                   COALESCE(SUM(route_bound_direct_event_count), 0) AS route_bound_direct_event_count,
+                   COALESCE(SUM(unrouted_direct_event_count), 0) AS unrouted_direct_event_count,
+                   COALESCE(SUM(direct_event_posting_count), 0) AS direct_event_posting_count,
+                   COALESCE(SUM(direct_event_term_count), 0) AS direct_event_term_count
+            FROM shards
+            """
+        ).fetchone()
+    except sqlite3.Error as exc:
+        diagnostics.append(f"operational_direct_event_rollup_query_unreadable:{sqlite_error_diagnostic(exc)}")
+        return {
+            **base,
+            "ok": False,
+            "status": "unreadable",
+            "results": [],
+            "result_count": 0,
+            "totals": {"matched_shard_row_count": 0, "matched_group_count": 0, "omitted_group_count": 0},
+            "quality": {
+                "uses_materialized_direct_event_rollup": True,
+                "raw_or_segment_ref_present": False,
+                "route_ref_present": False,
+                "freshness_status": rollup_state,
+                "needs_refresh": rollup_status.get("needs_refresh"),
+                "truncated": False,
+            },
+            "cost_profile": {
+                "uses_materialized_direct_event_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            },
+            "diagnostics": diagnostics,
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    role_counts: Counter[str] = Counter()
+    event_type_counts: Counter[str] = Counter()
+    session_act_counts: Counter[str] = Counter()
+    route_counts: Counter[tuple[str, str, str]] = Counter()
+    for row in rows:
+        token = (
+            str(row["usage_role"] or ""),
+            str(row["event_type"] or ""),
+            str(row["session_act"] or ""),
+            str(row["route_layer"] or ""),
+            str(row["route_key"] or ""),
+            str(row["route_signal"] or ""),
+        )
+        bucket = grouped.setdefault(
+            token,
+            {
+                "usage_role": token[0],
+                "event_type": token[1],
+                "session_act": token[2],
+                "route_layer": token[3],
+                "route_key": token[4],
+                "route_signal": token[5],
+                "posting_count": 0,
+                "session_count": 0,
+                "first_session_date": "",
+                "last_session_date": "",
+                "source_shards": [],
+                "raw_refs": [],
+                "segment_refs": [],
+                "session_ids": [],
+                "event_ids": [],
+            },
+        )
+        posting_count = int_value(row["posting_count"])
+        bucket["posting_count"] += posting_count
+        bucket["session_count"] += int_value(row["session_count"])
+        role_counts[token[0]] += posting_count
+        event_type_counts[token[1]] += posting_count
+        session_act_counts[token[2]] += posting_count
+        if token[3] or token[4]:
+            route_counts[(token[3], token[4], token[5])] += posting_count
+        shard_name = str(row["shard"] or "")
+        if shard_name and shard_name not in bucket["source_shards"]:
+            bucket["source_shards"].append(shard_name)
+        first_date = str(row["first_session_date"] or "")
+        last_date = str(row["last_session_date"] or "")
+        if first_date and (not bucket["first_session_date"] or first_date < bucket["first_session_date"]):
+            bucket["first_session_date"] = first_date
+        if last_date and (not bucket["last_session_date"] or last_date > bucket["last_session_date"]):
+            bucket["last_session_date"] = last_date
+        for json_key, target_key in (
+            ("raw_refs_json", "raw_refs"),
+            ("segment_refs_json", "segment_refs"),
+            ("session_ids_json", "session_ids"),
+            ("event_ids_json", "event_ids"),
+        ):
+            values, valid_json = search_operational_route_rollup_string_list(row[json_key])
+            if not valid_json:
+                bad_json_field_count += 1
+                continue
+            for value in values:
+                if value and value not in bucket[target_key] and len(bucket[target_key]) < ref_limit_value:
+                    bucket[target_key].append(value)
+    if bad_json_field_count:
+        diagnostics.append(f"operational_direct_event_rollup_query_bad_json_fields:{bad_json_field_count}")
+    grouped_rows = sorted(
+        grouped.values(),
+        key=lambda item: (
+            -int_value(item.get("posting_count")),
+            str(item.get("usage_role") or ""),
+            str(item.get("event_type") or ""),
+            str(item.get("session_act") or ""),
+            str(item.get("route_layer") or ""),
+            str(item.get("route_key") or ""),
+        ),
+    )
+    results = grouped_rows[:limit_value]
+    raw_or_segment_ref_present = any((item.get("raw_refs") or item.get("segment_refs")) for item in results)
+    route_ref_present = any(item.get("route_layer") and item.get("route_key") for item in results)
+    query_more_command = search_operational_direct_event_rollup_query_command(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        query=filters["query"],
+        usage_role=filters["usage_role"],
+        event_type=filters["event_type"],
+        session_act=filters["session_act"],
+        layer=filters["layer"],
+        key=filters["key"],
+        route_signal=filters["route_signal"],
+        limit=min(100, max(limit_value + 1, limit_value * 2)),
+        ref_limit=ref_limit_value,
+    )
+    payload = {
+        **base,
+        "ok": rollup_state not in {"missing", "invalid", "empty"},
+        "status": "matched" if results else "no_matches",
+        "results": results,
+        "result_count": len(results),
+        "top_usage_roles": [
+            {"usage_role": role, "posting_count": posting_count}
+            for role, posting_count in role_counts.most_common(12)
+            if role
+        ],
+        "top_event_types": [
+            {"event_type": event_type_value, "posting_count": posting_count}
+            for event_type_value, posting_count in event_type_counts.most_common(12)
+            if event_type_value
+        ],
+        "top_session_acts": [
+            {"session_act": session_act_value, "posting_count": posting_count}
+            for session_act_value, posting_count in session_act_counts.most_common(12)
+            if session_act_value
+        ],
+        "top_route_terms": [
+            {"route_layer": layer_value, "route_key": key_value, "route_signal": signal_value, "posting_count": posting_count}
+            for (layer_value, key_value, signal_value), posting_count in route_counts.most_common(12)
+            if layer_value and key_value
+        ],
+        "totals": {
+            "matched_shard_row_count": len(rows),
+            "matched_group_count": len(grouped_rows),
+            "omitted_group_count": max(0, len(grouped_rows) - len(results)),
+            "source_shard_count": int_value(shard_summary_rows["shard_count"] if shard_summary_rows else 0),
+            "source_event_total": int_value(shard_summary_rows["event_total"] if shard_summary_rows else 0),
+            "source_direct_event_count": int_value(shard_summary_rows["direct_event_count"] if shard_summary_rows else 0),
+            "source_route_bound_direct_event_count": int_value(
+                shard_summary_rows["route_bound_direct_event_count"] if shard_summary_rows else 0
+            ),
+            "source_unrouted_direct_event_count": int_value(shard_summary_rows["unrouted_direct_event_count"] if shard_summary_rows else 0),
+            "source_direct_event_posting_count": int_value(shard_summary_rows["direct_event_posting_count"] if shard_summary_rows else 0),
+            "source_direct_event_term_count": int_value(shard_summary_rows["direct_event_term_count"] if shard_summary_rows else 0),
+        },
+        "quality": {
+            "uses_materialized_direct_event_rollup": True,
+            "raw_or_segment_ref_present": raw_or_segment_ref_present,
+            "route_ref_present": route_ref_present,
+            "freshness_status": rollup_state,
+            "needs_refresh": rollup_status.get("needs_refresh"),
+            "truncated": len(grouped_rows) > len(results),
+            "omitted_group_count": max(0, len(grouped_rows) - len(results)),
+            "ref_limit": ref_limit_value,
+            "usage_chain_required_for_behavior_proof": True,
+        },
+        "cost_profile": {
+            "uses_materialized_direct_event_rollup": True,
+            "resamples_shards": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+        "next_routes": [
+            query_more_command,
+            rollup_status.get("refresh_command") if rollup_status.get("needs_refresh") else None,
+            [
+                *session_memory_cli_command(aoa_root),
+                "usage-chain",
+                "<anchor>",
+                "--kind",
+                "<kind>",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+            ],
+        ],
+        "next_expansion_command": query_more_command,
+        "diagnostics": diagnostics,
+    }
+    payload["next_routes"] = [item for item in payload["next_routes"] if item]
+    if write_report:
+        report_json, report_md = reserve_diagnostic_report_paths(
+            aoa_root / DIAGNOSTICS_ROOT,
+            f"{compact_stamp()}__search-operational-direct-event-rollup-query",
+        )
+        write_json(report_json, payload)
+        write_markdown(report_md, search_operational_direct_event_rollup_query_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def search_operational_direct_event_rollup_query_markdown(payload: dict[str, Any]) -> str:
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    cost = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+    lines = [
+        "# Search Operational Direct Event Rollup Query",
+        "",
+        f"- status: `{payload.get('status')}`",
+        f"- ok: `{payload.get('ok')}`",
+        f"- mutates: `{payload.get('mutates')}`",
+        f"- target_db: `{payload.get('target_db')}`",
+        f"- matched_groups: `{totals.get('matched_group_count')}`",
+        f"- omitted_groups: `{totals.get('omitted_group_count')}`",
+        f"- freshness_status: `{quality.get('freshness_status')}`",
+        f"- raw_or_segment_ref_present: `{quality.get('raw_or_segment_ref_present')}`",
+        f"- route_ref_present: `{quality.get('route_ref_present')}`",
+        f"- elapsed_ms: `{cost.get('elapsed_ms')}`",
+        "",
+        "## Results",
+        "",
+        "| role | event_type | session_act | route | postings | sessions | refs |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: |",
+    ]
+    for item in payload.get("results", []) if isinstance(payload.get("results"), list) else []:
+        if isinstance(item, dict):
+            ref_count = len(item.get("raw_refs") if isinstance(item.get("raw_refs"), list) else []) + len(
+                item.get("segment_refs") if isinstance(item.get("segment_refs"), list) else []
+            )
+            route = f"{item.get('route_layer')}:{item.get('route_key')}" if item.get("route_layer") or item.get("route_key") else ""
+            lines.append(
+                f"| `{item.get('usage_role')}` | `{item.get('event_type')}` | `{item.get('session_act')}` | "
+                f"`{route}` | `{item.get('posting_count')}` | `{item.get('session_count')}` | `{ref_count}` |"
+            )
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    lines.extend(["", "## Diagnostics", ""])
+    if diagnostics:
+        for item in diagnostics:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def session_memory_search_projection_next_action(
     *,
     workspace_root: Path,
@@ -63272,6 +64969,16 @@ def session_memory_search_projection_next_action(
     operational_route_rollup = (
         search_pressure.get("operational_route_rollup")
         if isinstance(search_pressure.get("operational_route_rollup"), dict)
+        else {}
+    )
+    context_tail_rehome = (
+        search_pressure.get("context_tail_rehome_status")
+        if isinstance(search_pressure.get("context_tail_rehome_status"), dict)
+        else {}
+    )
+    direct_event_read_model = (
+        search_pressure.get("direct_operational_event_read_model")
+        if isinstance(search_pressure.get("direct_operational_event_read_model"), dict)
         else {}
     )
     route_rollup_status = str(operational_route_rollup.get("status") or "missing")
@@ -63333,6 +65040,79 @@ def session_memory_search_projection_next_action(
             "note": "Materialize the generated route-ref replacement projection before any context-tail shrinkage; raw/segment refs remain authority.",
         }
     if route_rollup_status == "current":
+        if context_tail_rehome.get("status") == "applied_current":
+            direct_model_status = str(direct_event_read_model.get("status") or "missing")
+            direct_model_refresh_command = [
+                *session_memory_cli_command(aoa_root),
+                "search-operational-direct-event-rollup",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--max-shards",
+                str(max(SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS, int_value(direct_event_read_model.get("shard_count")))),
+                "--apply",
+                "--write-report",
+            ]
+            direct_model_query_command = search_operational_direct_event_rollup_query_command(
+                workspace_root=workspace_root,
+                aoa_root=aoa_root,
+                limit=12,
+                ref_limit=SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT,
+                write_report=True,
+            )
+            if direct_model_status in {"missing", "stale", "invalid", "empty"} or bool(direct_event_read_model.get("needs_refresh")):
+                incremental_command = (
+                    direct_event_read_model.get("incremental_refresh_command")
+                    if direct_event_read_model.get("incremental_refresh_route") == "scoped_shard_replace"
+                    and isinstance(direct_event_read_model.get("incremental_refresh_command"), list)
+                    else []
+                )
+                refresh_command = incremental_command or direct_model_refresh_command
+                return {
+                    "id": "materialize_direct_operational_event_read_model",
+                    "reason": f"direct_operational_event_read_model_{direct_model_status}",
+                    "route_kind": (
+                        "search_operational_direct_event_rollup_scoped_shard_replace"
+                        if incremental_command
+                        else "search_operational_direct_event_rollup"
+                    ),
+                    "command": refresh_command,
+                    "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+                    "context_tail_rehome_status": context_tail_rehome.get("status"),
+                    "route_rollup_status": route_rollup_status,
+                    "direct_event_read_model_status": direct_model_status,
+                    "direct_event_count": direct_event_read_model.get("direct_event_count"),
+                    "direct_event_rollup_row_count": direct_event_read_model.get("direct_event_rollup_row_count"),
+                    "direct_event_posting_count": direct_event_read_model.get("direct_event_posting_count"),
+                    "note": "Context-tail route-backed rehome is already applied; materialize the generated direct-event read-model before any direct event physical shrinkage.",
+                }
+            return {
+                "id": "direct_operational_event_read_model_current",
+                "reason": "direct_operational_event_read_model_current_after_context_tail_rehome",
+                "route_kind": "search_operational_direct_event_rollup_query",
+                "advisory_only": True,
+                "command": direct_model_query_command,
+                "combined_search_projection_total_human": search_pressure.get("combined_search_projection_total_human"),
+                "context_tail_rehome_status": context_tail_rehome.get("status"),
+                "route_rollup_status": route_rollup_status,
+                "direct_event_read_model_status": direct_model_status,
+                "direct_event_count": direct_event_read_model.get("direct_event_count"),
+                "direct_event_rollup_row_count": direct_event_read_model.get("direct_event_rollup_row_count"),
+                "direct_event_posting_count": direct_event_read_model.get("direct_event_posting_count"),
+                "supporting_usage_chain_command": [
+                    *session_memory_cli_command(aoa_root),
+                    "usage-chain",
+                    "<anchor>",
+                    "--kind",
+                    "<kind>",
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--aoa-root",
+                    str(aoa_root),
+                ],
+                "note": "Direct-event read-model is current; use it as compact navigation, then prove behavior through usage-chain/raw/segment refs.",
+            }
         shrink_gate_freshness = session_memory_search_projection_shrink_gate_freshness(aoa_root)
         if shrink_gate_freshness.get("current"):
             latest_gate = shrink_gate_freshness.get("latest_gate") if isinstance(shrink_gate_freshness.get("latest_gate"), dict) else {}
@@ -64938,9 +66718,14 @@ def session_memory_maintenance_status(
                 "document_hotset_status",
                 "document_count",
                 "latest_event_document_count",
+                "context_tail_rehome_status",
                 "route_rollup_status",
                 "route_rollup_row_count",
                 "candidate_route_posting_count",
+                "direct_event_read_model_status",
+                "direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
                 "sampled_raw_term_count",
                 "sampled_segment_term_count",
                 "advisory_only",
@@ -65624,6 +67409,35 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 }
             }
             if isinstance(search_pressure.get("operational_route_rollup"), dict)
+            else {}
+        )
+        | (
+            {
+                "direct_operational_event_read_model": {
+                    key: (search_pressure.get("direct_operational_event_read_model") or {}).get(key)
+                    for key in (
+                        "status",
+                        "needs_refresh",
+                        "path",
+                        "size_human",
+                        "generated_at",
+                        "shard_count",
+                        "direct_event_count",
+                        "route_bound_direct_event_count",
+                        "unrouted_direct_event_count",
+                        "direct_event_rollup_row_count",
+                        "direct_event_posting_count",
+                        "source_mismatch_count",
+                        "exact_refresh_command",
+                        "exact_query_command",
+                        "quality_boundary",
+                        "truth_status",
+                    )
+                    if isinstance(search_pressure.get("direct_operational_event_read_model"), dict)
+                    and key in (search_pressure.get("direct_operational_event_read_model") or {})
+                }
+            }
+            if isinstance(search_pressure.get("direct_operational_event_read_model"), dict)
             else {}
         ),
         "graph_pressure": {
@@ -71268,6 +73082,64 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 quality_flags.append(f"route_rollup_query_{key}")
         if ok and quality_flags:
             result["status"] = "warn"
+    elif profile == "direct_event_rollup_query":
+        quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+        cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
+        totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+        counts = live_scenario_evidence_counts(payload)
+        result_count = int_value(payload.get("result_count"), len(payload.get("results") or []))
+        role_counts = Counter(
+            str(item.get("usage_role") or "")
+            for item in payload.get("results", [])
+            if isinstance(item, dict) and str(item.get("usage_role") or "")
+        )
+        event_type_counts = Counter(
+            str(item.get("event_type") or "")
+            for item in payload.get("results", [])
+            if isinstance(item, dict) and str(item.get("event_type") or "")
+        )
+        result.update(
+            {
+                "result_count": result_count,
+                "matched_group_count": int_value(totals.get("matched_group_count")),
+                "omitted_group_count": int_value(totals.get("omitted_group_count")),
+                "source_direct_event_count": int_value(totals.get("source_direct_event_count")),
+                "source_direct_event_term_count": int_value(totals.get("source_direct_event_term_count")),
+                "source_unrouted_direct_event_count": int_value(totals.get("source_unrouted_direct_event_count")),
+                "usage_role_counts": dict(sorted(role_counts.items())),
+                "event_type_counts": dict(sorted(event_type_counts.items())),
+                "raw_or_segment_ref_present": quality.get("raw_or_segment_ref_present"),
+                "route_ref_present": quality.get("route_ref_present"),
+                "freshness_status": quality.get("freshness_status"),
+                "needs_refresh": quality.get("needs_refresh"),
+                "usage_chain_required_for_behavior_proof": quality.get("usage_chain_required_for_behavior_proof"),
+                "uses_materialized_direct_event_rollup": cost_profile.get("uses_materialized_direct_event_rollup"),
+                "resamples_shards": cost_profile.get("resamples_shards"),
+                "opens_monolith": cost_profile.get("opens_monolith"),
+                "uses_fts": cost_profile.get("uses_fts"),
+                "hydrates_body": cost_profile.get("hydrates_body"),
+                "evidence_ref_counts": counts,
+                "first_ref": live_scenario_first_ref(payload),
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if result_count <= 0:
+            quality_flags.append("direct_event_rollup_query_no_results")
+        if quality.get("raw_or_segment_ref_present") is not True:
+            quality_flags.append("direct_event_rollup_query_missing_raw_or_segment_ref")
+        if str(quality.get("freshness_status") or "") != "current" or quality.get("needs_refresh") is True:
+            quality_flags.append("direct_event_rollup_query_not_current")
+        if cost_profile.get("uses_materialized_direct_event_rollup") is not True:
+            quality_flags.append("direct_event_rollup_query_not_materialized_rollup")
+        if quality.get("usage_chain_required_for_behavior_proof") is not True:
+            quality_flags.append("direct_event_rollup_query_missing_usage_chain_boundary")
+        if result["source_direct_event_count"] <= 0:
+            quality_flags.append("direct_event_rollup_query_empty_source")
+        for key in ("resamples_shards", "opens_monolith", "uses_fts", "hydrates_body"):
+            if cost_profile.get(key) is True:
+                quality_flags.append(f"direct_event_rollup_query_{key}")
+        if ok and quality_flags:
+            result["status"] = "warn"
     elif profile == "maintenance_status":
         next_action_lane_counts = payload.get("next_action_lane_counts") if isinstance(payload.get("next_action_lane_counts"), dict) else {}
         result.update(
@@ -71452,6 +73324,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run graph-entity-usage-replacement-proof for the same anchor, inspect proof_gates and edge_match, then widen only through reviewed live-scenario corpus cases."
     if profile == "route_rollup_query":
         return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
+    if profile == "direct_event_rollup_query":
+        return "Run search-operational-direct-event-rollup-query with the same filters, then use usage-chain and raw/segment refs before treating the direct rollup as behavior proof."
     if profile == "maintenance_status":
         return "Run maintenance-status --no-timers, inspect next_actions and exact_next_command, then run only the typed maintenance route it names."
     if first_ref:
@@ -71534,6 +73408,13 @@ def live_scenario_audit(
     graph_replacement_probes: list[dict[str, Any]] | None = None,
     route_rollup_query: str = "aoa-session-memory-mcp",
     route_rollup_layer: str = "mcp",
+    direct_event_rollup_query: str = "",
+    direct_event_rollup_usage_role: str = "result",
+    direct_event_rollup_event_type: str = "",
+    direct_event_rollup_session_act: str = "",
+    direct_event_rollup_layer: str = "",
+    direct_event_rollup_key: str = "",
+    direct_event_rollup_route_signal: str = "",
     write_report: bool = False,
 ) -> dict[str, Any]:
     allowed_profiles = {
@@ -71549,6 +73430,7 @@ def live_scenario_audit(
         "graph_bridge",
         "graph_high_fanout_replacement",
         "route_rollup_query",
+        "direct_event_rollup_query",
         "maintenance_status",
     }
     default_profiles = [
@@ -71741,6 +73623,25 @@ def live_scenario_audit(
                     ),
                 )
             )
+        elif profile == "direct_event_rollup_query":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: session_memory_search_operational_direct_event_rollup_query(
+                        workspace_root=aoa_root.parent,
+                        aoa_root=aoa_root,
+                        query=direct_event_rollup_query,
+                        usage_role=direct_event_rollup_usage_role,
+                        event_type=direct_event_rollup_event_type,
+                        session_act=direct_event_rollup_session_act,
+                        layer=direct_event_rollup_layer,
+                        key=direct_event_rollup_key,
+                        route_signal=direct_event_rollup_route_signal,
+                        limit=max(selected_limit, 3),
+                        ref_limit=3,
+                    ),
+                )
+            )
         elif profile == "maintenance_status":
             scenarios.append(
                 run(
@@ -71791,6 +73692,13 @@ def live_scenario_audit(
             "graph_replacement_probe_count": len(graph_replacement_probes or []),
             "route_rollup_query": str(route_rollup_query or ""),
             "route_rollup_layer": str(route_rollup_layer or ""),
+            "direct_event_rollup_query": str(direct_event_rollup_query or ""),
+            "direct_event_rollup_usage_role": str(direct_event_rollup_usage_role or ""),
+            "direct_event_rollup_event_type": str(direct_event_rollup_event_type or ""),
+            "direct_event_rollup_session_act": str(direct_event_rollup_session_act or ""),
+            "direct_event_rollup_layer": str(direct_event_rollup_layer or ""),
+            "direct_event_rollup_key": str(direct_event_rollup_key or ""),
+            "direct_event_rollup_route_signal": str(direct_event_rollup_route_signal or ""),
         },
         "quality": quality,
         "scenarios": scenarios,
@@ -71888,10 +73796,17 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "freshness_status": scenario.get("freshness_status"),
             "needs_refresh": scenario.get("needs_refresh"),
             "uses_materialized_route_rollup": scenario.get("uses_materialized_route_rollup"),
+            "uses_materialized_direct_event_rollup": scenario.get("uses_materialized_direct_event_rollup"),
             "resamples_shards": scenario.get("resamples_shards"),
             "opens_monolith": scenario.get("opens_monolith"),
             "uses_fts": scenario.get("uses_fts"),
             "hydrates_body": scenario.get("hydrates_body"),
+            "source_direct_event_count": scenario.get("source_direct_event_count"),
+            "source_direct_event_term_count": scenario.get("source_direct_event_term_count"),
+            "source_unrouted_direct_event_count": scenario.get("source_unrouted_direct_event_count"),
+            "usage_role_counts": scenario.get("usage_role_counts"),
+            "event_type_counts": scenario.get("event_type_counts"),
+            "usage_chain_required_for_behavior_proof": scenario.get("usage_chain_required_for_behavior_proof"),
             "status_packet_ok": scenario.get("status_packet_ok"),
             "recommendation": scenario.get("recommendation"),
             "agent_route_action": scenario.get("agent_route_action"),
@@ -72127,6 +74042,9 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_edge_count", "edge_count"),
         ("min_anchor_event_count", "anchor_event_count"),
         ("min_cooccurrence_count", "cooccurrence_count"),
+        ("min_matched_group_count", "matched_group_count"),
+        ("min_source_direct_event_count", "source_direct_event_count"),
+        ("min_source_direct_event_term_count", "source_direct_event_term_count"),
         ("min_work_chain_linked_count", "work_chain_linked_count"),
         ("min_work_chain_episode_count", "work_chain_episode_count"),
         ("min_work_chain_goal_event_ref_count", "work_chain_goal_event_ref_count"),
@@ -72204,6 +74122,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("kind_counts", "required_kinds", "min_kind_count", "kind"),
         ("layer_counts", "required_layers", "min_layer_count", "layer"),
         ("evidence_mode_counts", "required_evidence_modes", "min_evidence_mode_count", "evidence_mode"),
+        ("usage_role_counts", "required_usage_roles", "min_usage_role_count", "usage_role"),
+        ("event_type_counts", "required_event_types", "min_event_type_count", "event_type"),
     )
     for counts_key, required_key, minimum_key, label in count_expectations:
         observed_counts = scenario.get(counts_key) if isinstance(scenario.get(counts_key), dict) else {}
@@ -72281,6 +74201,31 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         failures.append(f"{profile}:mutates:{scenario.get('mutates')}")
     if expectation.get("require_bounded_store_query") is True and scenario.get("bounded_store_query") is not True:
         failures.append(f"{profile}:bounded_store_query:{scenario.get('bounded_store_query')}")
+    if (
+        expectation.get("require_direct_event_rollup_current") is True
+        and (scenario.get("freshness_status") != "current" or scenario.get("needs_refresh") is True)
+    ):
+        failures.append(
+            f"{profile}:direct_event_rollup_current:{scenario.get('freshness_status')}/needs_refresh={scenario.get('needs_refresh')}"
+        )
+    if (
+        expectation.get("require_materialized_direct_event_rollup") is True
+        and scenario.get("uses_materialized_direct_event_rollup") is not True
+    ):
+        failures.append(f"{profile}:uses_materialized_direct_event_rollup:{scenario.get('uses_materialized_direct_event_rollup')}")
+    if (
+        expectation.get("require_direct_event_rollup_usage_chain_boundary") is True
+        and scenario.get("usage_chain_required_for_behavior_proof") is not True
+    ):
+        failures.append(f"{profile}:usage_chain_required_for_behavior_proof:{scenario.get('usage_chain_required_for_behavior_proof')}")
+    for expectation_key, scenario_key in (
+        ("require_no_shard_resample", "resamples_shards"),
+        ("require_no_monolith_open", "opens_monolith"),
+        ("require_no_fts", "uses_fts"),
+        ("require_no_body_hydration", "hydrates_body"),
+    ):
+        if expectation.get(expectation_key) is True and scenario.get(scenario_key) is not False:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}")
     if (
         expectation.get("require_graph_queue_action_when_queued") is True
         and int_value(scenario.get("graph_queued_count")) > 0
@@ -72428,6 +74373,13 @@ def live_scenario_corpus_case_check(
         graph_replacement_probes=case.get("graph_replacement_probes") if isinstance(case.get("graph_replacement_probes"), list) else None,
         route_rollup_query=str(case.get("route_rollup_query") or "aoa-session-memory-mcp"),
         route_rollup_layer=str(case.get("route_rollup_layer") or "mcp"),
+        direct_event_rollup_query=str(case.get("direct_event_rollup_query") or ""),
+        direct_event_rollup_usage_role=str(case.get("direct_event_rollup_usage_role") or "result"),
+        direct_event_rollup_event_type=str(case.get("direct_event_rollup_event_type") or ""),
+        direct_event_rollup_session_act=str(case.get("direct_event_rollup_session_act") or ""),
+        direct_event_rollup_layer=str(case.get("direct_event_rollup_layer") or ""),
+        direct_event_rollup_key=str(case.get("direct_event_rollup_key") or ""),
+        direct_event_rollup_route_signal=str(case.get("direct_event_rollup_route_signal") or ""),
         write_report=False,
     )
     failures = live_scenario_expectation_failures(audit, expect)
@@ -73399,6 +75351,13 @@ def command_live_scenario_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         route_rollup_query=args.route_rollup_query,
         route_rollup_layer=args.route_rollup_layer,
+        direct_event_rollup_query=args.direct_event_rollup_query,
+        direct_event_rollup_usage_role=args.direct_event_rollup_usage_role,
+        direct_event_rollup_event_type=args.direct_event_rollup_event_type,
+        direct_event_rollup_session_act=args.direct_event_rollup_session_act,
+        direct_event_rollup_layer=args.direct_event_rollup_layer,
+        direct_event_rollup_key=args.direct_event_rollup_key,
+        direct_event_rollup_route_signal=args.direct_event_rollup_route_signal,
         write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -74589,6 +76548,46 @@ def command_search_operational_route_rollup_query(args: argparse.Namespace) -> i
         workspace_root=workspace,
         aoa_root=root,
         query=args.query or "",
+        layer=args.layer or "",
+        key=args.key or "",
+        route_signal=args.route_signal or "",
+        limit=args.limit,
+        ref_limit=args.ref_limit,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_search_operational_direct_event_rollup(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_operational_direct_event_rollup(
+        workspace_root=workspace,
+        aoa_root=root,
+        max_shards=args.max_shards,
+        per_shard_timeout_seconds=args.per_shard_timeout,
+        ref_sample_limit=args.ref_sample_limit,
+        shard=args.shard,
+        apply=args.apply,
+        write_report=args.write_report,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_search_operational_direct_event_rollup_query(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    workspace = explicit_workspace or root.parent
+    payload = session_memory_search_operational_direct_event_rollup_query(
+        workspace_root=workspace,
+        aoa_root=root,
+        query=args.query or "",
+        usage_role=args.usage_role or "",
+        event_type=args.event_type or "",
+        session_act=args.session_act or "",
         layer=args.layer or "",
         key=args.key or "",
         route_signal=args.route_signal or "",
@@ -80879,6 +82878,38 @@ def build_parser() -> argparse.ArgumentParser:
     search_operational_route_rollup_query.add_argument("--write-report", action="store_true", help="Write JSON and Markdown operational route-rollup query reports under .aoa/diagnostics.")
     search_operational_route_rollup_query.set_defaults(func=command_search_operational_route_rollup_query)
 
+    search_operational_direct_event_rollup = sub.add_parser(
+        "search-operational-direct-event-rollup",
+        help="Build the generated direct operational event rollup projection without mutating search/raw/session evidence.",
+    )
+    search_operational_direct_event_rollup.add_argument("--workspace-root")
+    search_operational_direct_event_rollup.add_argument("--aoa-root")
+    search_operational_direct_event_rollup.add_argument("--max-shards", type=int, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_MAX_SHARDS)
+    search_operational_direct_event_rollup.add_argument("--shard", default="", help="Refresh only one existing materialized shard contribution in the direct-event rollup DB.")
+    search_operational_direct_event_rollup.add_argument("--per-shard-timeout", type=float, default=SEARCH_OPERATIONAL_EVENT_PROJECTION_DEFAULT_TIMEOUT_SECONDS)
+    search_operational_direct_event_rollup.add_argument("--ref-sample-limit", type=int, default=SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT)
+    search_operational_direct_event_rollup.add_argument("--apply", action="store_true", help="Write search/operational-direct-event-rollup.sqlite3. Without this flag the command is read-only.")
+    search_operational_direct_event_rollup.add_argument("--write-report", action="store_true", help="Write JSON and Markdown direct-event rollup reports under .aoa/diagnostics.")
+    search_operational_direct_event_rollup.set_defaults(func=command_search_operational_direct_event_rollup)
+
+    search_operational_direct_event_rollup_query = sub.add_parser(
+        "search-operational-direct-event-rollup-query",
+        help="Read the generated direct operational event rollup projection without resampling search shards.",
+    )
+    search_operational_direct_event_rollup_query.add_argument("query", nargs="?", default="", help="Optional case-insensitive filter over role, event type, session act, route layer/key, or route_signal.")
+    search_operational_direct_event_rollup_query.add_argument("--workspace-root")
+    search_operational_direct_event_rollup_query.add_argument("--aoa-root")
+    search_operational_direct_event_rollup_query.add_argument("--usage-role", default="", choices=("", *SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES), help="Exact direct usage_role filter.")
+    search_operational_direct_event_rollup_query.add_argument("--event-type", default="", help="Exact event_type filter.")
+    search_operational_direct_event_rollup_query.add_argument("--session-act", default="", help="Exact session_act filter.")
+    search_operational_direct_event_rollup_query.add_argument("--layer", default="", help="Exact route layer filter.")
+    search_operational_direct_event_rollup_query.add_argument("--key", default="", help="Exact route key filter.")
+    search_operational_direct_event_rollup_query.add_argument("--route-signal", default="", help="Exact route_signal filter.")
+    search_operational_direct_event_rollup_query.add_argument("--limit", type=int, default=12, help="Maximum aggregated direct-event rows to return.")
+    search_operational_direct_event_rollup_query.add_argument("--ref-limit", type=int, default=SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT, help="Maximum sampled raw/segment/session refs per returned direct-event row.")
+    search_operational_direct_event_rollup_query.add_argument("--write-report", action="store_true", help="Write JSON and Markdown direct-event rollup query reports under .aoa/diagnostics.")
+    search_operational_direct_event_rollup_query.set_defaults(func=command_search_operational_direct_event_rollup_query)
+
     search_operational_shrink_gates = sub.add_parser(
         "search-operational-shrink-gates",
         aliases=["search-context-tail-shrink-gates", "search-shrink-gates"],
@@ -81692,12 +83723,19 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, graph_high_fanout_replacement, route_rollup_query, maintenance_status.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, graph_high_fanout_replacement, route_rollup_query, direct_event_rollup_query, maintenance_status.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)
     live_scenario.add_argument("--route-rollup-query", default="aoa-session-memory-mcp", help="Query anchor for the route_rollup_query profile.")
     live_scenario.add_argument("--route-rollup-layer", default="mcp", help="Exact layer for the route_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-query", default="", help="Query text for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-usage-role", default="result", help="Usage-role filter for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-event-type", default="", help="Event-type filter for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-session-act", default="", help="Session-act filter for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-layer", default="", help="Route-layer filter for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-key", default="", help="Route-key filter for the direct_event_rollup_query profile.")
+    live_scenario.add_argument("--direct-event-rollup-route-signal", default="", help="Route-signal filter for the direct_event_rollup_query profile.")
     live_scenario.add_argument("--write-report", action="store_true")
     live_scenario.set_defaults(func=command_live_scenario_audit)
 

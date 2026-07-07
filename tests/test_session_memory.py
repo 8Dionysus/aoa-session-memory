@@ -5663,6 +5663,75 @@ def test_live_scenario_result_enforces_route_rollup_query_cost_contract() -> Non
     assert "route_rollup_query_agent_route_summary_missing_or_empty" in no_summary_result["quality_flags"]
 
 
+def test_live_scenario_result_enforces_direct_event_rollup_query_cost_contract() -> None:
+    payload = {
+        "ok": True,
+        "result_count": 1,
+        "results": [
+            {
+                "usage_role": "result",
+                "event_type": "COMMAND_OUTPUT",
+                "raw_refs": ["raw:line:11"],
+                "segment_refs": ["001.md#event-11"],
+                "session_ids": ["session-11"],
+            }
+        ],
+        "totals": {
+            "matched_group_count": 1,
+            "omitted_group_count": 0,
+            "source_direct_event_count": 20,
+            "source_direct_event_term_count": 4,
+            "source_unrouted_direct_event_count": 0,
+        },
+        "quality": {
+            "raw_or_segment_ref_present": True,
+            "route_ref_present": False,
+            "freshness_status": "current",
+            "needs_refresh": False,
+            "usage_chain_required_for_behavior_proof": True,
+        },
+        "cost_profile": {
+            "uses_materialized_direct_event_rollup": True,
+            "resamples_shards": False,
+            "opens_monolith": False,
+            "uses_fts": False,
+            "hydrates_body": False,
+        },
+    }
+
+    result = module.live_scenario_result("direct_event_rollup_query", payload, elapsed_ms=5)
+
+    assert result["status"] == "passed"
+    assert result["result_count"] == 1
+    assert result["matched_group_count"] == 1
+    assert result["source_direct_event_count"] == 20
+    assert result["source_direct_event_term_count"] == 4
+    assert result["evidence_ref_counts"]["raw_ref"] == 1
+    assert result["evidence_ref_counts"]["segment_ref"] == 1
+    assert result["evidence_ref_counts"]["session_ref"] == 1
+    assert result["first_ref"]["raw"] == "raw:line:11"
+    assert result["uses_materialized_direct_event_rollup"] is True
+    assert result["usage_chain_required_for_behavior_proof"] is True
+    assert result["resamples_shards"] is False
+
+    bad_payload = {
+        **payload,
+        "quality": {
+            **payload["quality"],
+            "usage_chain_required_for_behavior_proof": False,
+        },
+        "cost_profile": {
+            **payload["cost_profile"],
+            "resamples_shards": True,
+        },
+    }
+    bad_result = module.live_scenario_result("direct_event_rollup_query", bad_payload, elapsed_ms=8)
+
+    assert bad_result["status"] == "warn"
+    assert "direct_event_rollup_query_missing_usage_chain_boundary" in bad_result["quality_flags"]
+    assert "direct_event_rollup_query_resamples_shards" in bad_result["quality_flags"]
+
+
 def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
     def fake_route_rollup_query(**kwargs: Any) -> dict[str, Any]:
         assert kwargs["query"] == "aoa-session-memory-mcp"
@@ -5720,6 +5789,68 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
     assert scenario["result_count"] == 1
     assert scenario["uses_materialized_route_rollup"] is True
     assert scenario["agent_route_summary_status"] == "covered"
+    assert scenario["opens_monolith"] is False
+
+
+def test_live_scenario_audit_routes_direct_event_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_direct_event_rollup_query(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["query"] == ""
+        assert kwargs["usage_role"] == "result"
+        assert kwargs["event_type"] == ""
+        assert kwargs["session_act"] == ""
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [
+                {
+                    "usage_role": "result",
+                    "event_type": "COMMAND_OUTPUT",
+                    "raw_refs": ["raw:line:13"],
+                    "segment_refs": ["001.md#event-13"],
+                    "session_ids": ["session-13"],
+                }
+            ],
+            "totals": {
+                "matched_group_count": 1,
+                "omitted_group_count": 0,
+                "source_direct_event_count": 20,
+                "source_direct_event_term_count": 4,
+                "source_unrouted_direct_event_count": 0,
+            },
+            "quality": {
+                "raw_or_segment_ref_present": True,
+                "route_ref_present": False,
+                "freshness_status": "current",
+                "needs_refresh": False,
+                "usage_chain_required_for_behavior_proof": True,
+            },
+            "cost_profile": {
+                "uses_materialized_direct_event_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+            },
+        }
+
+    monkeypatch.setattr(module, "session_memory_search_operational_direct_event_rollup_query", fake_direct_event_rollup_query)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["direct_event_rollup_query"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["scenario_count"] == 1
+    assert audit["quality"]["raw_or_segment_ref_scenario_count"] == 1
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "direct_event_rollup_query"
+    assert scenario["status"] == "passed"
+    assert scenario["result_count"] == 1
+    assert scenario["uses_materialized_direct_event_rollup"] is True
+    assert scenario["usage_chain_required_for_behavior_proof"] is True
     assert scenario["opens_monolith"] is False
 
 
@@ -6926,6 +7057,56 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_cooccurrence:evidence_ref_count:0<1" in cooccurrence_failures
     assert "graph_cooccurrence:bounded_store_query:False" in cooccurrence_failures
 
+    direct_event_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "direct_event_rollup_query",
+            "status": "passed",
+            "result_count": 0,
+            "matched_group_count": 0,
+            "source_direct_event_count": 0,
+            "source_direct_event_term_count": 0,
+            "usage_role_counts": {"result": 0},
+            "event_type_counts": {"COMMAND_OUTPUT": 0},
+            "freshness_status": "stale",
+            "needs_refresh": True,
+            "uses_materialized_direct_event_rollup": False,
+            "usage_chain_required_for_behavior_proof": False,
+            "resamples_shards": True,
+            "opens_monolith": True,
+            "uses_fts": True,
+            "hydrates_body": True,
+        },
+        {
+            "profile": "direct_event_rollup_query",
+            "min_result_count": 1,
+            "min_matched_group_count": 1,
+            "min_source_direct_event_count": 1,
+            "min_source_direct_event_term_count": 1,
+            "required_usage_roles": ["result"],
+            "required_event_types": ["COMMAND_OUTPUT"],
+            "require_direct_event_rollup_current": True,
+            "require_materialized_direct_event_rollup": True,
+            "require_direct_event_rollup_usage_chain_boundary": True,
+            "require_no_shard_resample": True,
+            "require_no_monolith_open": True,
+            "require_no_fts": True,
+            "require_no_body_hydration": True,
+        },
+    )
+
+    assert "direct_event_rollup_query:result_count:0<1" in direct_event_failures
+    assert "direct_event_rollup_query:matched_group_count:0<1" in direct_event_failures
+    assert "direct_event_rollup_query:source_direct_event_count:0<1" in direct_event_failures
+    assert "direct_event_rollup_query:source_direct_event_term_count:0<1" in direct_event_failures
+    assert "direct_event_rollup_query:missing_usage_role:result" in direct_event_failures
+    assert "direct_event_rollup_query:missing_event_type:COMMAND_OUTPUT" in direct_event_failures
+    assert "direct_event_rollup_query:uses_materialized_direct_event_rollup:False" in direct_event_failures
+    assert "direct_event_rollup_query:usage_chain_required_for_behavior_proof:False" in direct_event_failures
+    assert "direct_event_rollup_query:resamples_shards:True" in direct_event_failures
+    assert "direct_event_rollup_query:opens_monolith:True" in direct_event_failures
+    assert "direct_event_rollup_query:uses_fts:True" in direct_event_failures
+    assert "direct_event_rollup_query:hydrates_body:True" in direct_event_failures
+
     goal_failures = module.live_scenario_profile_expectation_failures(
         {
             "profile": "goal_lifecycle",
@@ -7109,6 +7290,17 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
                     "replacement_prune_open_count": 0,
                     "max_sample_elapsed_ms": 900,
                 },
+                {
+                    "profile": "direct_event_rollup_query",
+                    "status": "passed",
+                    "result_count": 3,
+                    "source_direct_event_count": 100,
+                    "source_direct_event_term_count": 9,
+                    "uses_materialized_direct_event_rollup": True,
+                    "usage_chain_required_for_behavior_proof": True,
+                    "usage_role_counts": {"result": 3},
+                    "event_type_counts": {"COMMAND_OUTPUT": 2, "VERIFICATION": 1},
+                },
             ],
         }
     )
@@ -7131,6 +7323,10 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     assert profiles["graph_high_fanout_replacement"]["target_projection_match_count"] == 3
     assert profiles["graph_high_fanout_replacement"]["replacement_prune_open_count"] == 0
     assert profiles["graph_high_fanout_replacement"]["max_sample_elapsed_ms"] == 900
+    assert profiles["direct_event_rollup_query"]["source_direct_event_count"] == 100
+    assert profiles["direct_event_rollup_query"]["uses_materialized_direct_event_rollup"] is True
+    assert profiles["direct_event_rollup_query"]["usage_chain_required_for_behavior_proof"] is True
+    assert profiles["direct_event_rollup_query"]["usage_role_counts"]["result"] == 3
 
 
 def test_trace_route_supports_agent_event_kind() -> None:
@@ -15773,6 +15969,87 @@ def test_index_maintenance_refreshes_missing_operational_route_rollup(tmp_path: 
     assert payload["final_operational_route_rollup"]["status"] == "current"
 
 
+def test_index_maintenance_refreshes_existing_stale_operational_direct_event_rollup(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-06-28__001__direct-rollup-maintenance"
+    session_dir.mkdir(parents=True)
+    write_json(session_dir / "session.manifest.json", {"archive_status": "indexed"})
+    record = {
+        "session_id": "direct-rollup-maintenance",
+        "session_label": "2026-06-28__001__direct-rollup-maintenance",
+        "path": str(session_dir),
+    }
+    refreshed = {"value": False}
+
+    def fake_direct_rollup_status(*, aoa_root: Path, search_shards: dict[str, Any] | None = None) -> dict[str, Any]:
+        if refreshed["value"]:
+            return {
+                "exists": True,
+                "status": "current",
+                "needs_refresh": False,
+                "shard_count": 2,
+                "direct_event_count": 20,
+                "direct_event_rollup_row_count": 6,
+                "direct_event_posting_count": 24,
+                "truth_status": "generated_search_direct_event_rollup_projection_not_archive_truth",
+            }
+        return {
+            "exists": True,
+            "status": "stale",
+            "needs_refresh": True,
+            "shard_count": 2,
+            "diagnostics": ["operational_direct_event_rollup_source_shards_changed"],
+            "truth_status": "generated_search_direct_event_rollup_projection_not_archive_truth",
+        }
+
+    def fake_refresh_direct_rollup(**_kwargs: Any) -> dict[str, Any]:
+        refreshed["value"] = True
+        return {
+            "ok": True,
+            "status": "current",
+            "written": True,
+            "target_db": str(aoa_root / "search" / "operational-direct-event-rollup.sqlite3"),
+            "write_result": {"size_human": "12.5 MiB"},
+            "totals": {"direct_event_count": 20, "direct_event_rollup_row_count": 6, "direct_event_posting_count": 24},
+            "elapsed_ms": 9,
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "latest_index_source_mtime", lambda *_args, **_kwargs: (1.0, []))
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", lambda _aoa_root: {"needs_refresh": False, "reasons": []})
+    monkeypatch.setattr(module, "atlas_index_hot_state", lambda _aoa_root: {"needs_refresh": False, "reasons": []})
+    monkeypatch.setattr(module, "sqlite_search_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_sessions": [], "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "atlas_index_state", lambda *_args, **_kwargs: {"status": "current", "needs_refresh": False, "dirty_sessions": [], "dirty_session_ids": [], "reasons": [], "diagnostics": []})
+    monkeypatch.setattr(module, "graph_store_state", lambda *_args, **_kwargs: {"status": "current", "needs_maintenance": False, "needs_full_rebuild": False, "diagnostics": []})
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", lambda _aoa_root: {"status": "current", "needs_maintenance": False, "diagnostics": []})
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", lambda _aoa_root: {"status": "current", "shard_count": 2, "largest_shards": []})
+    monkeypatch.setattr(module, "session_memory_operational_route_rollup_status", lambda **_kwargs: {"status": "current", "needs_refresh": False, "diagnostics": []})
+    monkeypatch.setattr(module, "session_memory_operational_direct_event_rollup_status", fake_direct_rollup_status)
+    monkeypatch.setattr(module, "session_memory_search_operational_direct_event_rollup", fake_refresh_direct_rollup)
+    monkeypatch.setattr(module, "route_layer_readiness", lambda **_kwargs: {"ok": True, "covered_requirement_count": 0, "required_requirement_count": 0, "remaining": [], "diagnostics": []})
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=True,
+        selected_records=[record],
+        budget_seconds=60,
+    )
+
+    actions = {str(action.get("id")): action for action in payload["actions"]}
+    assert payload["index_repair_needed"] is True
+    assert payload["operational_direct_event_rollup_repair_needed"] is True
+    assert actions["refresh_operational_direct_event_rollup"]["status"] == "applied"
+    assert actions["refresh_operational_direct_event_rollup"]["result"]["totals"]["direct_event_rollup_row_count"] == 6
+    assert actions["route_readiness"]["status"] == "applied"
+    assert payload["final_operational_direct_event_rollup"]["status"] == "current"
+
+
 def test_refresh_search_projection_states_skips_stale_document_refs(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -19963,6 +20240,68 @@ def test_search_projection_plan_promotes_remaining_pressure_after_context_tail_r
     assert lanes["direct_operational_event_read_model"]["status"] == "recommended"
 
 
+def test_search_projection_next_action_routes_to_direct_event_read_model_after_rehome(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    pressure = {
+        "status": "large_projection_stack",
+        "freshness_status": "current",
+        "combined_search_projection_total_human": "18 GiB",
+        "document_hotset": {
+            "status": "large_cardinality_dominates",
+            "document_count": 1_000_000,
+            "latest_materialization_event_document_count": 800_000,
+        },
+        "operational_route_rollup": {
+            "status": "current",
+            "shard_count": 3,
+            "route_rollup_row_count": 60_000,
+            "candidate_route_posting_count": 1_000_000,
+        },
+        "context_tail_rehome_status": {
+            "status": "applied_current",
+            "already_rehomed_route_ref_document_count": 390_000,
+        },
+        "direct_operational_event_read_model": {
+            "status": "missing",
+            "needs_refresh": True,
+            "direct_event_count": 1_300_000,
+        },
+    }
+    action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure=pressure,
+        search_shards={"status": "current"},
+    )
+
+    assert action is not None
+    assert action["id"] == "materialize_direct_operational_event_read_model"
+    assert action["route_kind"] == "search_operational_direct_event_rollup"
+    assert "search-operational-direct-event-rollup" in module.shlex.join(action["command"])
+    assert action["context_tail_rehome_status"] == "applied_current"
+
+    pressure["direct_operational_event_read_model"] = {
+        "status": "current",
+        "needs_refresh": False,
+        "direct_event_count": 1_300_000,
+        "direct_event_rollup_row_count": 80_000,
+        "direct_event_posting_count": 1_400_000,
+    }
+    ready_action = module.session_memory_search_projection_next_action(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        search_pressure=pressure,
+        search_shards={"status": "current"},
+    )
+
+    assert ready_action is not None
+    assert ready_action["id"] == "direct_operational_event_read_model_current"
+    assert ready_action["advisory_only"] is True
+    assert ready_action["route_kind"] == "search_operational_direct_event_rollup_query"
+    assert "search-operational-direct-event-rollup-query" in module.shlex.join(ready_action["command"])
+
+
 def test_search_hotset_audit_breaks_down_structured_shard_pressure_without_monolith(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -20414,7 +20753,7 @@ def test_search_operational_projection_plan_distinguishes_rehomed_tail_from_rema
     assert plan["projection_candidate"]["already_rehomed_route_ref_document_count"] == 3
     assert (
         plan["projection_candidate"]["next_design_route"]
-        == "design_direct_operational_event_read_model_before_more_physical_shrink"
+        == "materialize_direct_operational_event_read_model_before_more_physical_shrink"
     )
 
 
@@ -22112,6 +22451,178 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert "raw:line:answer-doc" in json.loads(answer_row["raw_refs_json"])
     assert goal_row is not None
     assert "raw:line:goal-doc" in json.loads(goal_row["raw_refs_json"])
+
+
+def test_search_operational_direct_event_rollup_materializes_and_queries_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    shard_key = "month/2026-06"
+    shard_db = module.search_shard_db_path(aoa_root, shard_key)
+    conn = module.init_search_db(shard_db, rebuild=True)
+
+    def insert_event(
+        doc_id: str,
+        *,
+        usage_role: str,
+        event_type: str,
+        session_act: str = "",
+        route_layer: str = "",
+        route_key: str = "",
+    ) -> None:
+        route_signal = module.route_signal_token(route_layer, route_key) if route_layer and route_key else ""
+        module.insert_search_document(
+            conn,
+            {
+                "id": doc_id,
+                "doc_type": "event",
+                "session_id": "direct-rollup-session",
+                "session_label": "2026-06-28__001__direct-rollup-session",
+                "session_title": "Direct rollup session",
+                "session_date": "2026-06-28",
+                "event_id": doc_id,
+                "event_type": event_type,
+                "session_act": session_act,
+                "usage_role": usage_role,
+                "route_layers": module.packed_route_values([route_layer]) if route_signal else "",
+                "route_signals": module.packed_route_values([route_signal]) if route_signal else "",
+                "title": doc_id,
+                "body": doc_id,
+                "raw_ref": f"raw:line:{doc_id}",
+                "segment_ref": "segments/000__initial-to-latest.md",
+                "payload_json": "{}",
+            },
+            store_raw_text=False,
+            storage_profile=module.search_document_storage_profile(store_raw_text=False),
+        )
+
+    insert_event(
+        "tool-call",
+        usage_role="usage",
+        event_type="TOOL_CALL",
+        session_act="tool_call",
+        route_layer="tool",
+        route_key="exec_command",
+    )
+    insert_event(
+        "tool-output",
+        usage_role="result",
+        event_type="TOOL_OUTPUT",
+        session_act="tool_result",
+        route_layer="tool",
+        route_key="exec_command",
+    )
+    insert_event(
+        "verification",
+        usage_role="outcome",
+        event_type="VERIFICATION",
+        session_act="verification",
+        route_layer="validator",
+        route_key="pytest",
+    )
+    insert_event("user-entry", usage_role="entrypoint", event_type="USER_INTENT", session_act="user_request")
+    insert_event("context-ignored", usage_role="context", event_type="CONTEXT_STATE")
+    conn.commit()
+    conn.close()
+
+    module.write_json(
+        module.search_catalog_path(aoa_root),
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_catalog",
+            "ok": True,
+            "status": "current",
+            "shard_strategy": module.SEARCH_SHARD_STRATEGY,
+            "active_projection": module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "session_count": 1,
+            "shard_count": 1,
+            "materialized_shard_count": 1,
+            "sessions": [],
+            "shards": [
+                {
+                    "shard": shard_key,
+                    "shard_db_path": str(shard_db),
+                    "materialized": True,
+                    "status": "current",
+                    "document_count": 5,
+                    "total_with_wal_bytes": shard_db.stat().st_size,
+                    "total_with_wal_human": module.human_size(shard_db.stat().st_size),
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    dry = module.session_memory_search_operational_direct_event_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=False,
+        write_report=True,
+    )
+    assert dry["ok"] is True
+    assert dry["mutates"] is False
+    assert dry["written"] is False
+    assert dry["cost_profile"]["opens_monolith"] is False
+    target_db = module.search_operational_direct_event_rollup_db_path(aoa_root)
+    assert not target_db.exists()
+
+    applied = module.session_memory_search_operational_direct_event_rollup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        max_shards=1,
+        apply=True,
+        write_report=True,
+    )
+    assert applied["ok"] is True
+    assert applied["status"] == "current"
+    assert applied["written"] is True
+    assert applied["totals"]["direct_event_count"] == 4
+    assert applied["totals"]["route_bound_direct_event_count"] == 3
+    assert applied["totals"]["unrouted_direct_event_count"] == 1
+    assert applied["totals"]["direct_event_rollup_row_count"] == 4
+    assert Path(applied["report_json"]).exists()
+    assert Path(applied["report_markdown"]).exists()
+
+    status = module.session_memory_operational_direct_event_rollup_status(aoa_root=aoa_root)
+    assert status["status"] == "current"
+    assert status["direct_event_count"] == 4
+    assert status["direct_event_rollup_row_count"] == 4
+
+    query = module.session_memory_search_operational_direct_event_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        usage_role="usage",
+        limit=5,
+        ref_limit=4,
+        write_report=True,
+    )
+    assert query["ok"] is True
+    assert query["status"] == "matched"
+    assert query["cost_profile"]["uses_materialized_direct_event_rollup"] is True
+    assert query["cost_profile"]["resamples_shards"] is False
+    assert query["cost_profile"]["opens_monolith"] is False
+    assert query["cost_profile"]["uses_fts"] is False
+    assert query["cost_profile"]["hydrates_body"] is False
+    assert query["quality"]["raw_or_segment_ref_present"] is True
+    assert query["quality"]["route_ref_present"] is False
+    assert query["quality"]["usage_chain_required_for_behavior_proof"] is True
+    assert query["normalized_filters"]["usage_role"] == "usage"
+    assert {item["event_type"] for item in query["results"]} == {"TOOL_CALL"}
+    assert any("raw:line:tool-call" in item["raw_refs"] for item in query["results"])
+    assert Path(query["report_json"]).exists()
+    assert Path(query["report_markdown"]).exists()
+
+    result_query = module.session_memory_search_operational_direct_event_rollup_query(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        usage_role="result",
+        event_type="tool_output",
+        limit=5,
+    )
+    assert result_query["ok"] is True
+    assert result_query["result_count"] == 1
+    assert result_query["results"][0]["event_type"] == "TOOL_OUTPUT"
+    assert result_query["results"][0]["raw_refs"] == ["raw:line:tool-output"]
 
 
 def test_search_operational_route_rollup_scoped_refresh_replaces_one_shard(tmp_path: Path) -> None:
