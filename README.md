@@ -793,7 +793,11 @@ This packet checks `usage-chain` refs against
 The `graph_high_fanout_replacement` live-scenario profile can also take
 reviewed `graph_replacement_probes` from the regression corpus, so dense
 tool/MCP/skill anchors are checked together with bounded per-anchor proof
-limits before any wider projection work.
+limits before any wider projection work. Run the corpus with `--write-report`
+when `graph-high-fanout-policy` should treat the latest entity-usage
+replacement proof as current diagnostic evidence; freshness is checked against
+the corpus definition and route code, while graph store `mtime` is reported as
+context and is not prune permission.
 
 ## Storage Audit
 

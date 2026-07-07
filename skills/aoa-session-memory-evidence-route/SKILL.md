@@ -163,7 +163,11 @@ Use these first routes when available:
   wider replacement or pruning plan. When several dense operational anchors
   matter, run the `graph_high_fanout_replacement` live-scenario corpus case
   with reviewed `graph_replacement_probes`; it should cover tool/MCP/skill
-  anchors together while keeping `prune_gate.apply_ready=false`.
+  anchors together while keeping `prune_gate.apply_ready=false`. Use
+  `live-scenario-corpus check --write-report` when high-fanout policy should
+  consume the latest entity-usage replacement proof as diagnostic evidence;
+  freshness is checked against the corpus definition and route code, while
+  graph store `mtime` is reported as context and is not prune permission.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
   the outer maintenance profile. Global fallbacks use the generated graph

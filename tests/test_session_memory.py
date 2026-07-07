@@ -23145,6 +23145,115 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
 
 
+def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    script_path = aoa_root / "scripts" / "aoa_session_memory.py"
+    graph_path = module.graph_paths(aoa_root)["store"]
+    corpus_path = module.live_scenario_corpus_default_path(aoa_root)
+    write_json(corpus_path, {"artifact_type": "session_memory_live_scenario_regression_corpus", "cases": []})
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("# fixture\n", encoding="utf-8")
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("fixture graph store marker\n", encoding="utf-8")
+    base_ts = time.time()
+    for path in (script_path, graph_path, corpus_path):
+        os.utime(path, (base_ts, base_ts))
+    report_path = aoa_root / "diagnostics" / "20260707T000000Z__live-scenario-corpus-check.json"
+    write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_check",
+            "generated_at": "2026-07-07T00:00:00Z",
+            "ok": True,
+            "corpus_path": str(corpus_path),
+            "case_count": 17,
+            "passed_count": 17,
+            "failed_count": 0,
+            "results": [
+                {
+                    "id": "graph_entity_usage_replacement_proof_contract",
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "graph_high_fanout_replacement",
+                                "status": "passed",
+                                "sample_count": 5,
+                                "anchor_count": 5,
+                                "anchor_counts": {
+                                    "exec_command": 1,
+                                    "apply_patch": 1,
+                                    "aoa-session-memory-mcp": 1,
+                                    "aoa-session-memory-evidence-route": 1,
+                                    "aoa-decision": 1,
+                                },
+                                "kind_counts": {"tool": 2, "mcp": 1, "skill": 2},
+                                "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+                                "replacement_scope": "multi_anchor_sample",
+                                "replacement_proof_ok": True,
+                                "usage_event_count": 5,
+                                "graph_event_edge_checked_count": 5,
+                                "graph_event_edge_match_count": 5,
+                                "graph_event_edge_missing_count": 0,
+                                "proof_failed_core_gate_count": 0,
+                                "replacement_prune_apply_ready": False,
+                                "max_sample_elapsed_ms": 900,
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    )
+    os.utime(report_path, (base_ts + 10, base_ts + 10))
+    os.utime(graph_path, (base_ts + 20, base_ts + 20))
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=12: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 2_000_000},
+                "edge": {
+                    "event_mentions_registered_entity": 3_700_000,
+                    "mentions_route_signal": 3_000_000,
+                    "has_event": 2_100_000,
+                    "session_has_route_signal": 1_400_000,
+                },
+            },
+            "top": {"node": [], "edge": []},
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
+
+    entity_plan = payload["edge_policies"][0]["replacement_plan"]
+    assert entity_plan["edge_type"] == "event_mentions_registered_entity"
+    assert entity_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
+    assert "entity_usage_rollup_samples_match_event_refs" in entity_plan["proven_proof_gates"]
+    assert "usage_chain_preserves_consequence_links" in entity_plan["proven_proof_gates"]
+    assert entity_plan["proof_evidence"]["status"] == "proven"
+    assert entity_plan["proof_evidence"]["freshness_basis"] == "corpus_and_route_code"
+    assert entity_plan["proof_evidence"]["graph_store_mtime_is_blocking"] is False
+    assert entity_plan["proof_evidence"]["sample_count"] == 5
+    assert payload["replacement_readiness"]["status"] == "not_ready_for_prune"
+    assert payload["replacement_readiness"]["proof_gap_count"] == 10
+    assert "entity_usage_rollup_samples_match_event_refs" not in payload["replacement_readiness"]["missing_proof_gates"]
+    assert "usage_chain_preserves_consequence_links" not in payload["replacement_readiness"]["missing_proof_gates"]
+    assert "route_signal_rollup_refs_match_edge_samples" in payload["replacement_readiness"]["missing_proof_gates"]
+    assert "timeline_packet_preserves_work_chain_order" in payload["replacement_readiness"]["missing_proof_gates"]
+    assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
+    assert payload["replacement_proof_states"][module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION]["status"] == "proven"
+
+
 def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edges(
     tmp_path: Path,
     monkeypatch: Any,
