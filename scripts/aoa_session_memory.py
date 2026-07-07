@@ -54606,6 +54606,383 @@ def graph_cooccurrence_from_packet(
     }
 
 
+def graph_route_node_signal(node_id: str, node: dict[str, Any] | None = None) -> dict[str, str]:
+    if isinstance(node, dict):
+        layer = route_key_slug(node.get("route_layer"), fallback="")
+        key = route_key_slug(node.get("route_key"), fallback="")
+        if layer and key:
+            return {
+                "layer": layer,
+                "key": key,
+                "route_signal": str(node.get("route_signal") or route_signal_token(layer, key)),
+            }
+    parts = str(node_id or "").split(":", 3)
+    if len(parts) == 4 and parts[0] == "route":
+        layer = route_key_slug(parts[2], fallback="")
+        key = route_key_slug(parts[3], fallback="")
+        if layer and key:
+            return {"layer": layer, "key": key, "route_signal": route_signal_token(layer, key)}
+    return {}
+
+
+def graph_segment_index_path_from_ref(
+    aoa_root: Path,
+    refs: dict[str, str],
+    *,
+    session_id: str = "",
+    segment_id: str = "",
+) -> Path | None:
+    segment_ref = str(refs.get("segment_index") or refs.get("segment") or "")
+    if segment_ref:
+        segment_path = path_without_anchor(segment_ref)
+        if not segment_path.is_absolute():
+            segment_path = aoa_root / segment_path
+        if segment_path.suffix == ".md":
+            candidate = segment_path.with_suffix(".index.json")
+            if candidate.exists():
+                return candidate
+        if segment_path.suffix == ".json" and segment_path.exists():
+            return segment_path
+    session_ref = str(refs.get("session") or "")
+    if session_ref and segment_id:
+        session_path = path_without_anchor(session_ref)
+        if not session_path.is_absolute():
+            session_path = aoa_root / session_path
+        session_dir = session_path.parent
+        for candidate in sorted((session_dir / "segments").glob(f"{segment_id}*.index.json")):
+            if candidate.exists():
+                return candidate
+    if session_id and segment_id:
+        session_dir = aoa_root / SESSION_ROOT / session_id
+        for candidate in sorted((session_dir / "segments").glob(f"{segment_id}*.index.json")):
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def graph_event_ref_from_segment_index_event(
+    *,
+    segment_index_path: Path,
+    segment_index: dict[str, Any],
+    edge_ref: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    refs = graph_ref_values(edge_ref)
+    source_block = segment_index.get("source_block") if isinstance(segment_index.get("source_block"), dict) else {}
+    markdown = str(segment_index.get("markdown") or refs.get("segment") or "")
+    md_anchor = str(event.get("md_anchor") or "")
+    if md_anchor:
+        segment_ref = md_anchor
+        if markdown and "#" not in md_anchor and Path(md_anchor).name == md_anchor:
+            segment_ref = md_anchor
+    else:
+        segment_ref = markdown
+    event_refs = {
+        "session": refs.get("session", ""),
+        "segment": segment_ref,
+        "segment_index": str(segment_index_path),
+        "raw": str(event.get("raw_ref") or ""),
+        "raw_block": str(source_block.get("rel") or source_block.get("path") or ""),
+    }
+    event_refs = {key: value for key, value in event_refs.items() if value}
+    return {
+        "session_id": refs.get("session_id") or edge_ref.get("session_id") or "",
+        "segment_id": refs.get("segment_id") or edge_ref.get("segment_id") or str(segment_index.get("segment_id") or ""),
+        "event_id": str(event.get("event_id") or ""),
+        "refs": event_refs,
+    }
+
+
+def graph_cooccurrence_hydrate_raw_refs_from_segments(
+    *,
+    aoa_root: Path,
+    route_node_ids: set[str],
+    context_edge_payloads: list[dict[str, Any]],
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    route_signals = {
+        node_id: graph_route_node_signal(node_id)
+        for node_id in route_node_ids
+    }
+    target_signals = {
+        (signal.get("layer"), signal.get("key"))
+        for signal in route_signals.values()
+        if signal.get("layer") and signal.get("key")
+    }
+    if not target_signals:
+        return []
+    selected: list[dict[str, Any]] = []
+    segment_cache: dict[Path, dict[str, Any]] = {}
+    for edge in context_edge_payloads:
+        if len(selected) >= limit:
+            break
+        if not isinstance(edge, dict) or str(edge.get("type") or "") != "segment_has_route_signal":
+            continue
+        source = str(edge.get("source") or "")
+        parts = source.split(":", 2)
+        session_id = parts[1] if len(parts) == 3 and parts[0] == "segment" else ""
+        segment_id = parts[2] if len(parts) == 3 and parts[0] == "segment" else ""
+        for edge_ref in edge.get("evidence_refs", []) if isinstance(edge.get("evidence_refs"), list) else []:
+            refs = graph_ref_values(edge_ref)
+            segment_index_path = graph_segment_index_path_from_ref(
+                aoa_root,
+                refs,
+                session_id=session_id,
+                segment_id=segment_id,
+            )
+            if segment_index_path is None:
+                continue
+            if segment_index_path not in segment_cache:
+                segment_cache[segment_index_path] = read_json(segment_index_path, {})
+            segment_index = segment_cache.get(segment_index_path, {})
+            events = segment_index.get("events") if isinstance(segment_index.get("events"), list) else []
+            for event in events:
+                if len(selected) >= limit:
+                    break
+                if not isinstance(event, dict):
+                    continue
+                event_signals = {
+                    (signal.get("layer"), signal.get("key"))
+                    for signal in graph_route_signals_from_event(event)
+                    if signal.get("layer") and signal.get("key")
+                }
+                if not (event_signals & target_signals):
+                    continue
+                ref = graph_event_ref_from_segment_index_event(
+                    segment_index_path=segment_index_path,
+                    segment_index=segment_index,
+                    edge_ref=edge_ref,
+                    event=event,
+                )
+                if graph_ref_values(ref).get("raw"):
+                    selected.append(ref)
+    return graph_unique_records(selected, limit=limit)
+
+
+def graph_cooccurrence_from_store_aggregate(
+    *,
+    aoa_root: Path,
+    anchor: str,
+    kind: str = "auto",
+    limit: int = 30,
+) -> dict[str, Any] | None:
+    state = graph_store_query_state(aoa_root)
+    if state.get("status") != "current":
+        return None
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    selected_limit = max(1, min(int_value(limit, 30), 100))
+    context_limit = max(40, min(selected_limit * 16, 320))
+    route_edge_limit = max(120, min(context_limit * 8, 2400))
+    aggregate_edge_types = ("segment_has_route_signal", "session_has_route_signal")
+    placeholders = ",".join("?" for _item in aggregate_edge_types)
+    paths = graph_paths(aoa_root)
+    diagnostics: list[str] = []
+    try:
+        conn = sqlite3.connect(str(paths["store"]))
+        conn.row_factory = sqlite3.Row
+        resolved = graph_store_resolve_anchor(conn, anchor, kind=route_kind, limit=max(10, selected_limit))
+        start_ids = [str(node_id) for node_id in resolved.get("start_node_ids", []) if node_id]
+        if not start_ids:
+            conn.close()
+            return None
+        context_rows: list[sqlite3.Row] = []
+        seen_context_edges: set[str] = set()
+        for node_id in start_ids:
+            if len(context_rows) >= context_limit:
+                break
+            remaining = max(1, context_limit - len(context_rows))
+            rows = conn.execute(
+                f"""
+                SELECT id, source_node, target_node, edge_type, count
+                FROM edges INDEXED BY idx_edges_target_type
+                WHERE target_node = ?
+                  AND edge_type IN ({placeholders})
+                LIMIT ?
+                """,
+                (node_id, *aggregate_edge_types, remaining),
+            ).fetchall()
+            for row in rows:
+                edge_id = str(row["id"])
+                if edge_id in seen_context_edges:
+                    continue
+                seen_context_edges.add(edge_id)
+                context_rows.append(row)
+                if len(context_rows) >= context_limit:
+                    break
+        if not context_rows:
+            conn.close()
+            return None
+        context_ids = [str(row["source_node"] or "") for row in context_rows if row["source_node"]]
+        context_id_set = set(context_ids)
+        route_counts: Counter[str] = Counter()
+        route_context_counts: dict[str, Counter[str]] = defaultdict(Counter)
+        samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        selected_route_edge_ids: list[str] = []
+        seen_route_edges: set[str] = set()
+        start_id_set = set(start_ids)
+        for offset in range(0, len(context_ids), 80):
+            if len(selected_route_edge_ids) >= route_edge_limit:
+                break
+            chunk = context_ids[offset : offset + 80]
+            if not chunk:
+                continue
+            context_placeholders = ",".join("?" for _item in chunk)
+            remaining_edges = max(1, route_edge_limit - len(selected_route_edge_ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, source_node, target_node, edge_type, count
+                FROM edges INDEXED BY idx_edges_source_type
+                WHERE source_node IN ({context_placeholders})
+                  AND edge_type IN ({placeholders})
+                LIMIT ?
+                """,
+                (*chunk, *aggregate_edge_types, remaining_edges),
+            ).fetchall()
+            for row in rows:
+                edge_id = str(row["id"])
+                route_id = str(row["target_node"] or "")
+                context_id = str(row["source_node"] or "")
+                if route_id in start_id_set:
+                    continue
+                route_counts[route_id] += max(1, int_value(row["count"], 1))
+                route_context_counts[route_id][context_id] += 1
+                if edge_id not in seen_route_edges and len(selected_route_edge_ids) < route_edge_limit:
+                    seen_route_edges.add(edge_id)
+                    selected_route_edge_ids.append(edge_id)
+                if len(samples[route_id]) < 5:
+                    samples[route_id].append(
+                        {
+                            "context_node_id": context_id,
+                            "context_type": context_id.split(":", 1)[0] if ":" in context_id else "unknown",
+                            "edge_id": edge_id,
+                        }
+                    )
+        route_ids = [route_id for route_id, _count in route_counts.most_common(selected_limit)]
+        context_nodes = graph_store_fetch_payloads(conn, "nodes", list(context_id_set)[: min(len(context_id_set), context_limit)])
+        route_nodes = graph_store_fetch_payloads(conn, "nodes", route_ids)
+        edge_payload_ids = [
+            *(str(row["id"]) for row in context_rows[: min(len(context_rows), selected_limit * 12)]),
+            *selected_route_edge_ids[: min(len(selected_route_edge_ids), selected_limit * 20)],
+        ]
+        selected_edge_payload_ids: list[str] = []
+        seen_edge_payload_ids: set[str] = set()
+        for edge_id in edge_payload_ids:
+            if not edge_id or edge_id in seen_edge_payload_ids:
+                continue
+            seen_edge_payload_ids.add(edge_id)
+            selected_edge_payload_ids.append(edge_id)
+            if len(selected_edge_payload_ids) >= route_edge_limit:
+                break
+        edge_payloads = graph_store_fetch_payloads(conn, "edges", selected_edge_payload_ids)
+        conn.close()
+    except sqlite3.Error:
+        return None
+    route_node_map = {str(node.get("id")): node for node in route_nodes if isinstance(node, dict)}
+    selected: list[dict[str, Any]] = []
+    for route_id, count in route_counts.most_common(selected_limit):
+        selected.append(
+            {
+                "node": graph_compact_node_for_packet(route_node_map.get(route_id, {"id": route_id})),
+                "count": count,
+                "context_count": len(route_context_counts.get(route_id, {})),
+                "samples": samples.get(route_id, []),
+            }
+        )
+    context_sample_truncated = len(context_rows) >= context_limit
+    route_edge_sample_truncated = len(selected_route_edge_ids) >= route_edge_limit
+    if context_rows and not selected:
+        diagnostics.append("graph_cooccurrence_no_route_neighbors_in_aggregate_store_sample")
+    if context_sample_truncated:
+        diagnostics.append("graph_cooccurrence_anchor_context_sample_truncated")
+    if route_edge_sample_truncated:
+        diagnostics.append("graph_cooccurrence_route_edge_sample_truncated")
+    raw_refs = graph_cooccurrence_hydrate_raw_refs_from_segments(
+        aoa_root=aoa_root,
+        route_node_ids=set(start_ids) | set(route_ids),
+        context_edge_payloads=edge_payloads,
+        limit=80,
+    )
+    evidence_refs = graph_unique_records(
+        [
+            *raw_refs,
+            *graph_collect_evidence(context_nodes, edge_payloads, limit=80),
+        ],
+        limit=80,
+    )
+    ref_counts = graph_ref_quality_counts(evidence_refs)
+    if selected and not ref_counts.get("has_raw_ref"):
+        diagnostics.append("graph_cooccurrence_aggregate_raw_refs_missing")
+    freshness_graph = {
+        "source": "sqlite_graph_store_aggregate_cooccurrence",
+        "generated_at": (state.get("metadata") or {}).get("updated_at") or (state.get("metadata") or {}).get("generated_at") or utc_now(),
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_cooccurrence",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": bool(selected) and ref_counts.get("has_segment_ref"),
+        "mutates": False,
+        "truth_status": "cooccurrence_packet_not_reviewed_truth",
+        "source": "sqlite_graph_store_aggregate_cooccurrence",
+        "cooccurrence_basis": "aggregate_segment_session_route_signal_edges",
+        "anchor": anchor,
+        **trace_kind_payload_fields(kind, route_kind),
+        "resolved": resolved,
+        "anchor_context_count": len(context_id_set),
+        "anchor_event_count": len(context_id_set),
+        "anchor_event_count_basis": "aggregate_route_contexts",
+        "anchor_context_sample_limit": context_limit,
+        "anchor_context_sample_truncated": context_sample_truncated,
+        "route_edge_sample_limit": route_edge_limit,
+        "route_edge_sample_truncated": route_edge_sample_truncated,
+        "cooccurrence_count": len(selected),
+        "cooccurrences": selected,
+        "evidence_refs": evidence_refs,
+        "freshness": graph_freshness(aoa_root, freshness_graph),
+        "quality": {
+            "one_short_route": True,
+            "bounded_store_query": True,
+            "aggregate_route_signal_query": True,
+            "uses_event_mentions_route_signal_edges": False,
+            "anchor_context_count": len(context_id_set),
+            "anchor_event_count": len(context_id_set),
+            "anchor_event_count_basis": "aggregate_route_contexts",
+            "cooccurrence_count": len(selected),
+            "evidence_ref_count": len(evidence_refs),
+            "raw_ref_count": ref_counts.get("raw_ref_count"),
+            "segment_ref_count": ref_counts.get("segment_ref_count"),
+            "anchor_context_sample_truncated": context_sample_truncated,
+            "route_edge_sample_truncated": route_edge_sample_truncated,
+        },
+        "diagnostics": diagnostics,
+        "next_route": (
+            "verify aggregate cooccurrence claims through raw_ref, segment_ref, and session_ref before promotion"
+            if selected
+            else "fall back to event-level graph cooccurrence or route-rollup query when aggregate cooccurrence has no neighboring routes"
+        ),
+        "next_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=selected_limit,
+        ),
+        "next_expansion_command": graph_packet_command_line(
+            aoa_root=aoa_root,
+            command_name="graph-cooccurrence",
+            anchors=[anchor],
+            kind=kind,
+            route_kind=route_kind,
+            limit=graph_packet_expanded_limit(selected_limit, default=selected_limit, maximum=100),
+        ),
+        "next_expansion_reason": "Increase the bounded cooccurrence limit when more neighboring route signals are needed.",
+        "authority_boundary": "graph cooccurrence routes relation evidence only; raw/segment refs and owner source surfaces remain stronger.",
+    }
+
+
 def graph_cooccurrence_from_store(
     *,
     aoa_root: Path,
@@ -54809,8 +55186,18 @@ def graph_cooccurrence(
 ) -> dict[str, Any]:
     normalized_kind = normalize_trace_route_kind(kind)
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
+    aggregate_packet = graph_cooccurrence_from_store_aggregate(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=limit)
+    if aggregate_packet is not None and aggregate_packet.get("ok"):
+        return aggregate_packet
     store_packet = graph_cooccurrence_from_store(aoa_root=aoa_root, anchor=anchor, kind=kind, limit=limit)
     if store_packet is not None:
+        if aggregate_packet is not None:
+            store_packet.setdefault("diagnostics", []).extend(
+                str(item)
+                for item in aggregate_packet.get("diagnostics", [])
+                if item
+            )
+            store_packet["aggregate_cooccurrence_fallback_status"] = aggregate_packet.get("ok")
         return store_packet
     packet = graph_neighborhood(aoa_root=aoa_root, anchor=anchor, kind=route_kind, depth=1, limit=max(limit * 6, 60))
     return graph_cooccurrence_from_packet(

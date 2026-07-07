@@ -9355,6 +9355,161 @@ def test_graph_cooccurrence_uses_direct_store_for_dense_route_anchor(tmp_path: P
     assert anchor_node not in cooccurring_ids
 
 
+def test_graph_cooccurrence_prefers_aggregate_store_with_raw_ref_hydration(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_id = "session-cooccurrence-aggregate"
+    session_label = "2026-07-07__002__cooccurrence-aggregate"
+    segment_id = "000"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    segment_dir = session_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    manifest_path = session_dir / "session.manifest.json"
+    segment_markdown = segment_dir / "000__initial-to-latest.md"
+    segment_index_path = segment_dir / "000__initial-to-latest.index.json"
+    anchor_node = module.graph_route_node_id("tool", "exec_command")
+    apply_node = module.graph_route_node_id("tool", "apply_patch")
+    skill_node = module.graph_route_node_id("skill", "aoa_decision")
+    segment_node = f"segment:{session_id}:{segment_id}"
+
+    def signal(layer: str, key: str) -> dict[str, str]:
+        return {"layer": layer, "key": key}
+
+    write_json(
+        segment_index_path,
+        {
+            "segment_id": segment_id,
+            "markdown": str(segment_markdown),
+            "source_block": {"rel": "raw/blocks/000.jsonl"},
+            "events": [
+                {
+                    "event_id": "000001",
+                    "title": "Tool call: exec_command + apply_patch",
+                    "raw_ref": "raw:line:10",
+                    "md_anchor": f"{segment_markdown}#event-000001",
+                    "facets": {
+                        "route_signals": [
+                            signal("tool", "exec_command"),
+                            signal("tool", "apply_patch"),
+                        ]
+                    },
+                },
+                {
+                    "event_id": "000002",
+                    "title": "Tool call: exec_command after aoa_decision route",
+                    "raw_ref": "raw:line:20",
+                    "md_anchor": f"{segment_markdown}#event-000002",
+                    "facets": {
+                        "route_signals": [
+                            signal("tool", "exec_command"),
+                            signal("skill", "aoa_decision"),
+                        ]
+                    },
+                },
+            ],
+        },
+    )
+
+    def evidence() -> list[dict[str, Any]]:
+        return [
+            {
+                "session_id": session_id,
+                "segment_id": segment_id,
+                "refs": {
+                    "session": str(manifest_path),
+                    "segment": str(segment_markdown),
+                    "segment_index": str(segment_index_path),
+                },
+            }
+        ]
+
+    def route_node(layer: str, key: str) -> dict[str, Any]:
+        return {
+            "id": module.graph_route_node_id(layer, key),
+            "type": module.graph_route_node_type(layer, key),
+            "label": f"{layer}:{key}",
+            "route_layer": layer,
+            "route_key": key,
+            "route_signal": f"{layer}:{key}",
+            "evidence_refs": evidence(),
+        }
+
+    def segment_route_edge(route_id: str, count: int) -> dict[str, Any]:
+        return {
+            "id": module.graph_edge_id(segment_node, route_id, "segment_has_route_signal"),
+            "source": segment_node,
+            "target": route_id,
+            "type": "segment_has_route_signal",
+            "session_id": session_id,
+            "segment_id": segment_id,
+            "count": count,
+            "evidence_refs": evidence(),
+        }
+
+    contribution = {
+        "source": {
+            "source_key": f"segment:{session_id}:{segment_id}",
+            "source_type": "segment",
+            "session_id": session_id,
+            "session_label": session_label,
+            "segment_id": segment_id,
+            "source_path": str(segment_index_path),
+            "source_paths": [str(segment_index_path)],
+            "source_sha": "sha-cooccurrence-aggregate",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {
+                "id": segment_node,
+                "type": "segment",
+                "label": f"{session_label} segment {segment_id}",
+                "session_id": session_id,
+                "session_label": session_label,
+                "segment_id": segment_id,
+                "evidence_refs": evidence(),
+            },
+            route_node("tool", "exec_command"),
+            route_node("tool", "apply_patch"),
+            route_node("skill", "aoa_decision"),
+        ],
+        "edges": [
+            segment_route_edge(anchor_node, 2),
+            segment_route_edge(apply_node, 1),
+            segment_route_edge(skill_node, 1),
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        edge_types = {
+            str(row["edge_type"])
+            for row in store.conn.execute("SELECT DISTINCT edge_type FROM edges").fetchall()
+        }
+    finally:
+        store.close()
+
+    payload = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool", limit=5)
+
+    assert "mentions_route_signal" not in edge_types
+    assert payload["ok"] is True
+    assert payload["source"] == "sqlite_graph_store_aggregate_cooccurrence"
+    assert payload["cooccurrence_basis"] == "aggregate_segment_session_route_signal_edges"
+    assert payload["anchor_context_count"] == 1
+    assert payload["anchor_event_count_basis"] == "aggregate_route_contexts"
+    assert payload["quality"]["aggregate_route_signal_query"] is True
+    assert payload["quality"]["uses_event_mentions_route_signal_edges"] is False
+    assert payload["quality"]["raw_ref_count"] >= 1
+    assert payload["quality"]["segment_ref_count"] >= 1
+    assert any(str(ref["refs"].get("raw", "")).startswith("raw:line:") for ref in payload["evidence_refs"])
+    cooccurring_ids = {item["node"]["id"] for item in payload["cooccurrences"]}
+    assert apply_node in cooccurring_ids
+    assert skill_node in cooccurring_ids
+    assert anchor_node not in cooccurring_ids
+
+
 def test_graph_cooccurrence_packet_diagnoses_truncated_empty_routes() -> None:
     anchor_node = module.graph_route_node_id("tool", "exec_command")
     event_node = {
