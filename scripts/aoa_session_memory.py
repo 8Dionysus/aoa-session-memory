@@ -405,6 +405,14 @@ GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES = frozenset({"next_event", "previous_ev
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT = 8
 GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT = 8
 GRAPH_SEGMENT_ROUTE_SIGNAL_EDGE_LIMIT = 64
+GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
+    "raw_or_segment_refs_preserved",
+    "freshness_current_or_stale_flag_visible",
+    "fallback_route_named",
+    "bounded_packet_default",
+    "live_scenario_case_present",
+    "before_after_cardinality_comparison",
+)
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS = frozenset(
     {
         "skill",
@@ -50314,6 +50322,207 @@ def graph_high_fanout_edge_policy_row(
     }
 
 
+def graph_high_fanout_replacement_plan_for_edge(
+    *,
+    aoa_root: Path,
+    edge_policy: dict[str, Any],
+) -> dict[str, Any]:
+    edge_type = str(edge_policy.get("edge_type") or "")
+    edge_class = str(edge_policy.get("class") or "")
+    compact_route = str(edge_policy.get("compact_query_route") or "")
+    replacement_layers = [
+        str(layer)
+        for layer in edge_policy.get("replacement_layers", [])
+        if layer
+    ] if isinstance(edge_policy.get("replacement_layers"), list) else []
+    common = list(GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES)
+    if edge_type == "event_mentions_registered_entity":
+        missing_gates = common + [
+            "usage_chain_preserves_consequence_links",
+            "entity_usage_rollup_samples_match_event_refs",
+        ]
+        return {
+            "edge_type": edge_type,
+            "status": "replacement_projection_required",
+            "candidate_for_cardinality_reduction": True,
+            "target_projection": "entity_usage_rollup_by_anchor_session_segment",
+            "existing_compact_routes": ["usage-chain", "entity-usage-audit", "entity-registry"],
+            "replacement_layers": replacement_layers,
+            "missing_proof_gates": missing_gates,
+            "proof_commands": [
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} usage-chain <anchor> --aoa-root {aoa_root} --kind <kind>",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} entity-usage-audit <anchor> --aoa-root {aoa_root} --kind <kind>",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check --aoa-root {aoa_root} --case-limit 1",
+            ],
+            "promotion_rule": "promote only after usage/consequence packets preserve raw/segment refs and route freshness on reviewed live cases",
+            "can_prune_now": False,
+        }
+    if edge_type == "mentions_route_signal":
+        missing_gates = common + [
+            "route_signal_rollup_refs_match_edge_samples",
+            "cooccurrence_packet_preserves_dense_anchor_neighbors",
+        ]
+        return {
+            "edge_type": edge_type,
+            "status": "compact_layers_exist_replacement_projection_unproven",
+            "candidate_for_cardinality_reduction": True,
+            "target_projection": "route_signal_cooccurrence_rollup_by_segment_session",
+            "existing_compact_routes": ["graph-cooccurrence", "search-operational-route-rollup-query"],
+            "replacement_layers": replacement_layers,
+            "missing_proof_gates": missing_gates,
+            "proof_commands": [
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cooccurrence <anchor> --aoa-root {aoa_root} --kind <kind> --limit 30",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} search-operational-route-rollup-query <query> --aoa-root {aoa_root} --layer <layer> --limit 12 --ref-limit 3",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} live-scenario-corpus check --aoa-root {aoa_root} --case-limit 1",
+            ],
+            "promotion_rule": "promote only after cooccurrence and rollup packets preserve bounded neighbors, refs, freshness, and exact next expansion",
+            "can_prune_now": False,
+        }
+    if edge_class == "structural_event_chain":
+        missing_gates = common + [
+            "answer_goal_task_episode_coverage",
+            "timeline_packet_preserves_work_chain_order",
+        ]
+        return {
+            "edge_type": edge_type,
+            "status": "typed_event_routes_exist_structural_replacement_unproven",
+            "candidate_for_cardinality_reduction": edge_type == "has_event",
+            "target_projection": "task_answer_goal_timeline_rollup",
+            "existing_compact_routes": ["agent-responses", "goal-lifecycles", "graph-timeline"],
+            "replacement_layers": replacement_layers,
+            "missing_proof_gates": missing_gates,
+            "proof_commands": [
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} agent-responses --aoa-root {aoa_root} --limit 12",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} goal-lifecycles --aoa-root {aoa_root} --limit 12",
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-timeline <anchor> --aoa-root {aoa_root} --kind <kind> --limit 40",
+            ],
+            "promotion_rule": "promote only after answer/goal/task packets prove the same work-chain navigation without unbounded structural expansion",
+            "can_prune_now": False,
+        }
+    if edge_class == "aggregate_summary_layer":
+        return {
+            "edge_type": edge_type,
+            "status": "keep_as_replacement_layer",
+            "candidate_for_cardinality_reduction": False,
+            "target_projection": "existing_aggregate_summary_layer",
+            "existing_compact_routes": [compact_route] if compact_route else [],
+            "replacement_layers": replacement_layers,
+            "missing_proof_gates": [],
+            "proof_commands": [
+                f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} search-operational-route-rollup-query <query> --aoa-root {aoa_root} --layer <layer> --limit 12 --ref-limit 3",
+            ],
+            "promotion_rule": "keep as compact navigation unless a stronger route-rollup with refs replaces it",
+            "can_prune_now": False,
+        }
+    missing_gates = common + ["targeted_edge_policy_written"]
+    return {
+        "edge_type": edge_type,
+        "status": "targeted_policy_required",
+        "candidate_for_cardinality_reduction": bool(edge_policy.get("high_fanout")),
+        "target_projection": "unknown_until_edge_policy_is_written",
+        "existing_compact_routes": [compact_route] if compact_route else [],
+        "replacement_layers": replacement_layers,
+        "missing_proof_gates": missing_gates,
+        "proof_commands": [
+            f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cardinality --aoa-root {aoa_root} --limit 20",
+        ],
+        "promotion_rule": "measure and write a targeted compact route before any pruning",
+        "can_prune_now": False,
+    }
+
+
+def graph_high_fanout_replacement_readiness(
+    *,
+    aoa_root: Path,
+    edge_policies: list[dict[str, Any]],
+    projection_status: str,
+    status: str,
+) -> dict[str, Any]:
+    candidate_plans = [
+        row.get("replacement_plan")
+        for row in edge_policies
+        if isinstance(row.get("replacement_plan"), dict)
+        and row["replacement_plan"].get("candidate_for_cardinality_reduction")
+    ]
+    missing_gate_ids = sorted(
+        {
+            str(gate)
+            for plan in candidate_plans
+            for gate in plan.get("missing_proof_gates", [])
+            if gate
+        }
+    )
+    candidate_edge_types = [
+        str(plan.get("edge_type") or "")
+        for plan in candidate_plans
+        if plan.get("edge_type")
+    ]
+    target_projections = sorted(
+        {
+            str(plan.get("target_projection") or "")
+            for plan in candidate_plans
+            if plan.get("target_projection")
+        }
+    )
+    proof_commands = []
+    seen_commands: set[str] = set()
+    for plan in candidate_plans:
+        for command in plan.get("proof_commands", []):
+            command_text = str(command)
+            if command_text and command_text not in seen_commands:
+                proof_commands.append(command_text)
+                seen_commands.add(command_text)
+    if projection_status != "current":
+        readiness_status = "blocked_cardinality_projection_not_current"
+    elif not candidate_plans:
+        readiness_status = "not_needed"
+    elif missing_gate_ids:
+        readiness_status = "not_ready_for_prune"
+    else:
+        readiness_status = "ready_for_reviewed_apply_route"
+    apply_ready = False
+    if status == "normal" and not candidate_plans:
+        gate_status = "not_needed"
+        reason = "no high-fanout cardinality replacement is needed"
+    elif projection_status != "current":
+        gate_status = "blocked_cardinality_projection_not_current"
+        reason = "graph cardinality projection must be current before replacement readiness can be trusted"
+    else:
+        gate_status = "blocked_replacement_projection_not_proven"
+        reason = "replacement projections must prove refs, freshness, fallback, live scenario quality, and before/after cardinality before any graph-row pruning"
+    required_before_apply = sorted(
+        set(missing_gate_ids)
+        | {
+            "explicit_apply_route_with_before_after_report",
+            "operator_reviewed_mutation_boundary",
+        }
+    ) if candidate_plans else []
+    return {
+        "status": readiness_status,
+        "apply_ready": apply_ready,
+        "candidate_count": len(candidate_plans),
+        "candidate_edge_types": candidate_edge_types,
+        "target_projections": target_projections,
+        "proof_gap_count": len(missing_gate_ids),
+        "missing_proof_gates": missing_gate_ids,
+        "proof_commands": proof_commands[:12],
+        "next_route": (
+            "prove replacement projections on live scenarios before any graph prune or physical compaction route"
+            if candidate_plans
+            else "no replacement projection route is needed for the current high-fanout packet"
+        ),
+        "prune_gate": {
+            "status": gate_status,
+            "apply_ready": apply_ready,
+            "can_prune_now": False,
+            "reason": reason,
+            "required_before_apply": required_before_apply,
+            "mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
+        },
+        "authority_boundary": "replacement readiness is generated route guidance; raw/segment refs and owner source surfaces remain stronger",
+    }
+
+
 def graph_high_fanout_policy_from_projection(
     *,
     aoa_root: Path,
@@ -50343,6 +50552,11 @@ def graph_high_fanout_policy_from_projection(
         )
         for edge_type, count in edge_rows[:selected_limit]
     ]
+    for row in edge_policies:
+        row["replacement_plan"] = graph_high_fanout_replacement_plan_for_edge(
+            aoa_root=aoa_root,
+            edge_policy=row,
+        )
     dominant_edges = [
         row
         for row in edge_policies
@@ -50398,6 +50612,12 @@ def graph_high_fanout_policy_from_projection(
                 "replacement_layers": sorted({layer for row in edge_policies for layer in row.get("replacement_layers", []) if layer}),
             }
         )
+    replacement_readiness = graph_high_fanout_replacement_readiness(
+        aoa_root=aoa_root,
+        edge_policies=edge_policies,
+        projection_status=projection_status,
+        status=status,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_graph_high_fanout_policy",
@@ -50419,6 +50639,8 @@ def graph_high_fanout_policy_from_projection(
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "graph_event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
         "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
+        "replacement_readiness": replacement_readiness,
+        "prune_gate": replacement_readiness.get("prune_gate"),
         "next_actions": next_actions,
         "exact_read_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-high-fanout-policy --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit {selected_limit}",
         "exact_cardinality_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cardinality --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit {selected_limit}",
@@ -62081,6 +62303,8 @@ def session_memory_graph_pressure_summary(
                 "dominant_edge_types",
                 "edge_warning_count",
                 "high_fanout_edge_warning_count",
+                "replacement_readiness",
+                "prune_gate",
                 "mutation_boundary",
                 "next_route",
                 "exact_read_command",
@@ -69904,6 +70128,11 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
                 "graph_high_fanout_policy_status": payload.get("graph_high_fanout_policy_status"),
                 "graph_high_fanout_dominant_edge_count": payload.get("graph_high_fanout_dominant_edge_count"),
                 "graph_high_fanout_mutation_boundary": payload.get("graph_high_fanout_mutation_boundary"),
+                "graph_high_fanout_replacement_status": payload.get("graph_high_fanout_replacement_status"),
+                "graph_high_fanout_replacement_candidate_count": payload.get("graph_high_fanout_replacement_candidate_count"),
+                "graph_high_fanout_replacement_proof_gap_count": payload.get("graph_high_fanout_replacement_proof_gap_count"),
+                "graph_high_fanout_prune_apply_ready": payload.get("graph_high_fanout_prune_apply_ready"),
+                "graph_high_fanout_prune_gate_status": payload.get("graph_high_fanout_prune_gate_status"),
                 "entity_count": payload.get("entity_count"),
             }
         )
@@ -70421,6 +70650,15 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "graph_actionable_count": scenario.get("graph_actionable_count"),
             "graph_queued_count": scenario.get("graph_queued_count"),
             "graph_deferred_live_source_count": scenario.get("graph_deferred_live_source_count"),
+            "graph_pressure_status": scenario.get("graph_pressure_status"),
+            "graph_high_fanout_policy_status": scenario.get("graph_high_fanout_policy_status"),
+            "graph_high_fanout_dominant_edge_count": scenario.get("graph_high_fanout_dominant_edge_count"),
+            "graph_high_fanout_mutation_boundary": scenario.get("graph_high_fanout_mutation_boundary"),
+            "graph_high_fanout_replacement_status": scenario.get("graph_high_fanout_replacement_status"),
+            "graph_high_fanout_replacement_candidate_count": scenario.get("graph_high_fanout_replacement_candidate_count"),
+            "graph_high_fanout_replacement_proof_gap_count": scenario.get("graph_high_fanout_replacement_proof_gap_count"),
+            "graph_high_fanout_prune_apply_ready": scenario.get("graph_high_fanout_prune_apply_ready"),
+            "graph_high_fanout_prune_gate_status": scenario.get("graph_high_fanout_prune_gate_status"),
             "entity_count": scenario.get("entity_count"),
         }
         profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
@@ -70479,6 +70717,16 @@ def live_scenario_maintenance_status_audit(
     high_fanout_policy = (
         graph_pressure.get("high_fanout_policy")
         if isinstance(graph_pressure.get("high_fanout_policy"), dict)
+        else {}
+    )
+    graph_replacement_readiness = (
+        high_fanout_policy.get("replacement_readiness")
+        if isinstance(high_fanout_policy.get("replacement_readiness"), dict)
+        else {}
+    )
+    graph_prune_gate = (
+        high_fanout_policy.get("prune_gate")
+        if isinstance(high_fanout_policy.get("prune_gate"), dict)
         else {}
     )
     agent_route = packet.get("agent_route") if isinstance(packet.get("agent_route"), dict) else {}
@@ -70558,6 +70806,11 @@ def live_scenario_maintenance_status_audit(
         "graph_high_fanout_policy_status": high_fanout_policy.get("status"),
         "graph_high_fanout_dominant_edge_count": high_fanout_policy.get("dominant_edge_count"),
         "graph_high_fanout_mutation_boundary": high_fanout_policy.get("mutation_boundary"),
+        "graph_high_fanout_replacement_status": graph_replacement_readiness.get("status"),
+        "graph_high_fanout_replacement_candidate_count": graph_replacement_readiness.get("candidate_count"),
+        "graph_high_fanout_replacement_proof_gap_count": graph_replacement_readiness.get("proof_gap_count"),
+        "graph_high_fanout_prune_apply_ready": graph_prune_gate.get("apply_ready"),
+        "graph_high_fanout_prune_gate_status": graph_prune_gate.get("status"),
         "entity_count": entity_registry.get("entity_count"),
         "elapsed_ms": elapsed_ms,
         "diagnostics": diagnostics,
@@ -70708,6 +70961,8 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_route_lane_count", "route_lane_count"),
         ("min_graph_queued_count", "graph_queued_count"),
         ("min_graph_high_fanout_dominant_edge_count", "graph_high_fanout_dominant_edge_count"),
+        ("min_graph_high_fanout_replacement_candidate_count", "graph_high_fanout_replacement_candidate_count"),
+        ("min_graph_high_fanout_replacement_proof_gap_count", "graph_high_fanout_replacement_proof_gap_count"),
     ):
         minimum = int_value(expectation.get(expectation_key))
         if minimum and int_value(scenario.get(scenario_key)) < minimum:
@@ -70736,6 +70991,18 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         and scenario.get("graph_high_fanout_mutation_boundary") != "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
     ):
         failures.append(f"{profile}:graph_high_fanout_mutation_boundary:{scenario.get('graph_high_fanout_mutation_boundary')}")
+    if (
+        expectation.get("require_graph_high_fanout_replacement_status") is True
+        and scenario.get("graph_pressure_status") == "large_cardinality_dominates"
+        and not scenario.get("graph_high_fanout_replacement_status")
+    ):
+        failures.append(f"{profile}:graph_high_fanout_replacement_status_missing_for_pressure")
+    if (
+        expectation.get("require_graph_high_fanout_prune_gate_closed") is True
+        and scenario.get("graph_high_fanout_policy_status")
+        and scenario.get("graph_high_fanout_prune_apply_ready") is not False
+    ):
+        failures.append(f"{profile}:graph_high_fanout_prune_apply_ready:{scenario.get('graph_high_fanout_prune_apply_ready')}")
     next_action_ids = {str(item) for item in scenario.get("next_action_ids", []) if item} if isinstance(scenario.get("next_action_ids"), list) else set()
     for action_id in expectation.get("required_next_action_ids", []) if isinstance(expectation.get("required_next_action_ids"), list) else []:
         if str(action_id) not in next_action_ids:

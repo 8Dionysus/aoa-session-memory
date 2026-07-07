@@ -152,8 +152,11 @@ Use these first routes when available:
   If `operations.graph_pressure` reports large cardinality or dominant edge
   classes, use `graph-high-fanout-policy` as the read-only policy packet before
   proposing graph compaction or pruning. It names dense edge classes, compact
-  query routes, replacement layers, and the mutation boundary; it is not
-  permission to delete graph rows.
+  query routes, replacement layers, `replacement_readiness`, `prune_gate`, and
+  the mutation boundary; it is not permission to delete graph rows. Treat
+  `prune_gate.apply_ready=false` as the normal state until replacement
+  projections prove raw/segment refs, freshness, fallback, live-scenario
+  quality, and before/after cardinality.
   For resource-blocked catchup/backlog/deep profiles, `fallback_graph_drip`
   should be interpreted as bounded generated-graph progress, not completion of
   the outer maintenance profile. Global fallbacks use the generated graph

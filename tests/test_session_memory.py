@@ -5747,6 +5747,15 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
                         "status": "large_cardinality_dominates",
                         "dominant_edge_count": 3,
                         "mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
+                        "replacement_readiness": {
+                            "status": "not_ready_for_prune",
+                            "candidate_count": 3,
+                            "proof_gap_count": 8,
+                        },
+                        "prune_gate": {
+                            "status": "blocked_replacement_projection_not_proven",
+                            "apply_ready": False,
+                        },
                     },
                 }
             },
@@ -5799,6 +5808,11 @@ def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, m
     assert scenario["graph_high_fanout_policy_status"] == "large_cardinality_dominates"
     assert scenario["graph_high_fanout_dominant_edge_count"] == 3
     assert scenario["graph_high_fanout_mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"
+    assert scenario["graph_high_fanout_replacement_status"] == "not_ready_for_prune"
+    assert scenario["graph_high_fanout_replacement_candidate_count"] == 3
+    assert scenario["graph_high_fanout_replacement_proof_gap_count"] == 8
+    assert scenario["graph_high_fanout_prune_apply_ready"] is False
+    assert scenario["graph_high_fanout_prune_gate_status"] == "blocked_replacement_projection_not_proven"
 
 
 def test_live_scenario_audit_counts_wait_live_tail_as_deferred_graph_queue(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5886,6 +5900,11 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "graph_high_fanout_policy_status": "large_cardinality_dominates",
             "graph_high_fanout_dominant_edge_count": 3,
             "graph_high_fanout_mutation_boundary": "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt",
+            "graph_high_fanout_replacement_status": "not_ready_for_prune",
+            "graph_high_fanout_replacement_candidate_count": 3,
+            "graph_high_fanout_replacement_proof_gap_count": 8,
+            "graph_high_fanout_prune_apply_ready": False,
+            "graph_high_fanout_prune_gate_status": "blocked_replacement_projection_not_proven",
         },
         {
             "profile": "maintenance_status",
@@ -5899,7 +5918,11 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "require_graph_queue_action_when_queued": True,
             "require_graph_high_fanout_policy_when_pressure": True,
             "require_graph_high_fanout_no_mutation_boundary": True,
+            "require_graph_high_fanout_replacement_status": True,
+            "require_graph_high_fanout_prune_gate_closed": True,
             "min_graph_high_fanout_dominant_edge_count": 1,
+            "min_graph_high_fanout_replacement_candidate_count": 1,
+            "min_graph_high_fanout_replacement_proof_gap_count": 1,
             "required_next_action_ids": ["repair_graph_queue_drip"],
             "required_next_action_lanes": ["graph"],
         },
@@ -5924,6 +5947,10 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "graph_high_fanout_policy_status": "",
             "graph_high_fanout_dominant_edge_count": 0,
             "graph_high_fanout_mutation_boundary": "",
+            "graph_high_fanout_replacement_status": "",
+            "graph_high_fanout_replacement_candidate_count": 0,
+            "graph_high_fanout_replacement_proof_gap_count": 0,
+            "graph_high_fanout_prune_apply_ready": True,
         },
         {
             "profile": "maintenance_status",
@@ -5936,7 +5963,11 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
             "require_graph_queue_action_when_queued": True,
             "require_graph_high_fanout_policy_when_pressure": True,
             "require_graph_high_fanout_no_mutation_boundary": True,
+            "require_graph_high_fanout_replacement_status": True,
+            "require_graph_high_fanout_prune_gate_closed": True,
             "min_graph_high_fanout_dominant_edge_count": 1,
+            "min_graph_high_fanout_replacement_candidate_count": 1,
+            "min_graph_high_fanout_replacement_proof_gap_count": 1,
             "required_next_action_lanes": ["graph"],
         },
     )
@@ -5948,6 +5979,9 @@ def test_live_scenario_profile_expectations_enforce_maintenance_status_routes() 
     assert "maintenance_status:missing_next_action_lane:graph" in failing
     assert "maintenance_status:graph_high_fanout_policy_missing_for_pressure" in failing
     assert "maintenance_status:graph_high_fanout_dominant_edge_count:0<1" in failing
+    assert "maintenance_status:graph_high_fanout_replacement_status_missing_for_pressure" in failing
+    assert "maintenance_status:graph_high_fanout_replacement_candidate_count:0<1" in failing
+    assert "maintenance_status:graph_high_fanout_replacement_proof_gap_count:0<1" in failing
 
 
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
@@ -22734,6 +22768,9 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
         "event_mentions_registered_entity",
         "mentions_route_signal",
     ]
+    assert summary["high_fanout_policy"]["replacement_readiness"]["status"] == "not_ready_for_prune"
+    assert summary["high_fanout_policy"]["replacement_readiness"]["candidate_count"] == 3
+    assert summary["high_fanout_policy"]["prune_gate"]["apply_ready"] is False
     assert "graph-high-fanout-policy" in summary["high_fanout_policy"]["exact_read_command"]
     assert "physical SQLite compaction is not the primary fix" in summary["next_route"]
 
@@ -22776,10 +22813,24 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["edge_policies"][0]["can_prune_now"] is False
     assert payload["edge_policies"][0]["replacement_required_before_prune"] is True
     assert payload["edge_policies"][0]["compact_query_route"] == "usage-chain"
+    assert payload["edge_policies"][0]["replacement_plan"]["status"] == "replacement_projection_required"
+    assert payload["edge_policies"][0]["replacement_plan"]["target_projection"] == "entity_usage_rollup_by_anchor_session_segment"
+    assert "raw_or_segment_refs_preserved" in payload["edge_policies"][0]["replacement_plan"]["missing_proof_gates"]
     assert payload["edge_policies"][1]["edge_type"] == "mentions_route_signal"
     assert payload["edge_policies"][1]["current_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
     assert "segment_has_route_signal" in payload["edge_policies"][1]["replacement_layers"]
+    assert payload["edge_policies"][1]["replacement_plan"]["status"] == "compact_layers_exist_replacement_projection_unproven"
+    assert payload["edge_policies"][2]["replacement_plan"]["status"] == "typed_event_routes_exist_structural_replacement_unproven"
     assert payload["high_fanout_nodes"][0]["node_type"] == "event"
+    assert payload["replacement_readiness"]["status"] == "not_ready_for_prune"
+    assert payload["replacement_readiness"]["candidate_edge_types"] == [
+        "event_mentions_registered_entity",
+        "mentions_route_signal",
+        "has_event",
+    ]
+    assert payload["replacement_readiness"]["proof_gap_count"] >= 6
+    assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
+    assert payload["prune_gate"]["status"] == "blocked_replacement_projection_not_proven"
     assert payload["next_actions"][0]["id"] == "use_compact_graph_routes_for_dense_anchors"
     assert "graph-cooccurrence" in payload["next_actions"][0]["example_command"]
     assert payload["mutation_boundary"] == "read_only_policy_packet_no_graph_rows_are_deleted_or_rebuilt"

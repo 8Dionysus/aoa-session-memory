@@ -731,6 +731,8 @@
             "require_graph_queue_action_when_queued": true,
             "require_graph_high_fanout_policy_when_pressure": true,
             "require_graph_high_fanout_no_mutation_boundary": true,
+            "require_graph_high_fanout_replacement_status": true,
+            "require_graph_high_fanout_prune_gate_closed": true,
             "max_elapsed_ms": 30000
           }
         ]

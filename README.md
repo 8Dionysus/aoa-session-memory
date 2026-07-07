@@ -772,7 +772,10 @@ python3 scripts/aoa_session_memory.py graph-high-fanout-policy \
 
 This packet classifies dominant edge types, names the compact query route that
 should be used first for dense anchors, and keeps `can_prune_now=false` until a
-replacement projection preserves refs, freshness, and fallback behavior.
+replacement projection preserves refs, freshness, and fallback behavior. Read
+`replacement_readiness` and `prune_gate` before planning any graph-row pruning:
+they name the candidate replacement projections, missing proof gates, live
+proof commands, and the read-only mutation boundary.
 
 ## Storage Audit
 
