@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 18,
+  "case_count": 19,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -883,6 +883,47 @@
             "min_graph_replacement_session_aggregate_edge_count": 1,
             "max_graph_replacement_sample_elapsed_ms": 30000,
             "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph_timeline_goal_completed_contract",
+      "profiles": [
+        "graph_timeline"
+      ],
+      "seed": "corpus-graph-timeline-goal-completed",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 10,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-07",
+        "note": "Graph timeline must expose a bounded ordered goal-event chain with raw or segment refs and an explicit freshness status before structural event-chain fanout can be treated as replaceable."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "graph_timeline",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_event_count": 8,
+            "min_evidence_ref_count": 8,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "required_timeline_sources": [
+              "sqlite_graph_store_direct_timeline"
+            ],
+            "require_timeline_ordered": true,
+            "require_graph_timeline_current": true,
+            "max_elapsed_ms": 10000
           }
         ]
       }

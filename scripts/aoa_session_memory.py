@@ -426,9 +426,11 @@ GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS = (
 GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION = "task_answer_goal_timeline_rollup"
 GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID = "goal_lifecycle_refs_contract"
 GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID = "agent_closeout_refs_contract"
+GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID = "graph_timeline_goal_completed_contract"
 GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS = (
     GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID,
     GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID,
+    GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID,
 )
 GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES = frozenset(
     {
@@ -458,7 +460,9 @@ GRAPH_STRUCTURAL_EVENT_CHAIN_PROVEN_GATES = frozenset(
         "fallback_route_named",
         "bounded_packet_default",
         "live_scenario_case_present",
+        "freshness_current_or_stale_flag_visible",
         "answer_goal_task_episode_coverage",
+        "timeline_packet_preserves_work_chain_order",
     }
 )
 GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
@@ -50825,11 +50829,13 @@ def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, An
         }
         goal_result = result_by_id.get(GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID)
         closeout_result = result_by_id.get(GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID)
-        if not isinstance(goal_result, dict) or not isinstance(closeout_result, dict):
+        timeline_result = result_by_id.get(GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID)
+        if not isinstance(goal_result, dict) or not isinstance(closeout_result, dict) or not isinstance(timeline_result, dict):
             incomplete_reports += 1
             continue
         goal_profile = live_scenario_result_profile(goal_result, "goal_lifecycle")
         closeout_profile = live_scenario_result_profile(closeout_result, "agent_closeout")
+        timeline_profile = live_scenario_result_profile(timeline_result, "graph_timeline")
         goal_refs = (
             goal_profile.get("evidence_ref_counts")
             if isinstance(goal_profile.get("evidence_ref_counts"), dict)
@@ -50838,6 +50844,11 @@ def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, An
         closeout_refs = (
             closeout_profile.get("evidence_ref_counts")
             if isinstance(closeout_profile.get("evidence_ref_counts"), dict)
+            else {}
+        )
+        timeline_refs = (
+            timeline_profile.get("evidence_ref_counts")
+            if isinstance(timeline_profile.get("evidence_ref_counts"), dict)
             else {}
         )
         work_chain_routes = (
@@ -50871,16 +50882,25 @@ def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, An
             and int_value(closeout_refs.get("raw_ref")) > 0
             and int_value(closeout_refs.get("segment_ref")) > 0
         )
-        if goal_ok and closeout_ok:
+        timeline_ok = (
+            timeline_result.get("ok") is True
+            and timeline_profile.get("status") == "passed"
+            and int_value(timeline_profile.get("event_count")) > 0
+            and int_value(timeline_profile.get("evidence_ref_count")) > 0
+            and int_value(timeline_refs.get("raw_ref")) > 0
+            and int_value(timeline_refs.get("segment_ref")) > 0
+            and timeline_profile.get("timeline_ordered") is True
+            and str(timeline_profile.get("timeline_source") or "") == "sqlite_graph_store_direct_timeline"
+            and bool(timeline_profile.get("freshness_status"))
+        )
+        if goal_ok and closeout_ok and timeline_ok:
             return {
                 "status": "proven",
                 "case_ids": list(GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS),
                 "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
                 "proven_gates": sorted(GRAPH_STRUCTURAL_EVENT_CHAIN_PROVEN_GATES),
                 "still_missing_gates": [
-                    "freshness_current_or_stale_flag_visible",
                     "before_after_cardinality_comparison",
-                    "timeline_packet_preserves_work_chain_order",
                 ],
                 "source": source,
                 "freshness_basis": "corpus_and_route_code",
@@ -50898,6 +50918,12 @@ def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, An
                 "work_chain_opens_raw": goal_profile.get("work_chain_opens_raw"),
                 "work_chain_hydrates_body": goal_profile.get("work_chain_hydrates_body"),
                 "agent_closeout_result_count": int_value(closeout_profile.get("result_count")),
+                "timeline_event_count": int_value(timeline_profile.get("event_count")),
+                "timeline_evidence_ref_count": int_value(timeline_profile.get("evidence_ref_count")),
+                "timeline_source": timeline_profile.get("timeline_source"),
+                "timeline_ordered": timeline_profile.get("timeline_ordered"),
+                "timeline_freshness_status": timeline_profile.get("freshness_status"),
+                "timeline_needs_maintenance": timeline_profile.get("needs_maintenance"),
                 "fallback_routes": ["goal-lifecycles", "task-episodes", "answer-neighborhood", "agent-reasoning-windows", "agent-closeouts"],
                 "truth_status": "generated_live_scenario_corpus_evidence_not_prune_permission",
             }
@@ -50912,10 +50938,17 @@ def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, An
             "graph_store_mtime_is_blocking": False,
             "goal_ok": goal_ok,
             "agent_closeout_ok": closeout_ok,
+            "timeline_ok": timeline_ok,
             "goal_status": goal_profile.get("status"),
             "agent_closeout_status": closeout_profile.get("status"),
+            "timeline_status": timeline_profile.get("status"),
+            "timeline_event_count": int_value(timeline_profile.get("event_count")),
+            "timeline_source": timeline_profile.get("timeline_source"),
+            "timeline_ordered": timeline_profile.get("timeline_ordered"),
+            "timeline_freshness_status": timeline_profile.get("freshness_status"),
             "goal_failures": goal_result.get("failures") if isinstance(goal_result.get("failures"), list) else [],
             "agent_closeout_failures": closeout_result.get("failures") if isinstance(closeout_result.get("failures"), list) else [],
+            "timeline_failures": timeline_result.get("failures") if isinstance(timeline_result.get("failures"), list) else [],
             "truth_status": "latest_live_scenario_corpus_cases_do_not_prove_structural_event_chain_replacement",
         }
     return {
@@ -51119,6 +51152,7 @@ def graph_high_fanout_replacement_plan_for_edge(
             for gate in proof_state.get("proven_gates", [])
             if gate
         } if proof_state.get("status") == "proven" else set()
+        timeline_proven = "timeline_packet_preserves_work_chain_order" in proven_gates
         missing_gates = common + [
             "answer_goal_task_episode_coverage",
             "timeline_packet_preserves_work_chain_order",
@@ -51127,7 +51161,9 @@ def graph_high_fanout_replacement_plan_for_edge(
         return {
             "edge_type": edge_type,
             "status": (
-                "typed_event_routes_quality_partially_proven_timeline_unproven"
+                "typed_event_routes_quality_proven_cardinality_unproven"
+                if timeline_proven
+                else "typed_event_routes_quality_partially_proven_timeline_unproven"
                 if proven_gates
                 else "typed_event_routes_exist_structural_replacement_unproven"
             ),
@@ -73696,6 +73732,49 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         )
         if ok and not result["evidence_ref_count"]:
             result["status"] = "warn"
+    elif profile == "graph_timeline":
+        events = payload.get("events") if isinstance(payload.get("events"), list) else []
+        timeline_keys = [
+            (
+                str(event.get("timestamp") or ""),
+                str(event.get("session_label") or ""),
+                int_value(event.get("line")),
+                str(event.get("event_id") or event.get("id") or ""),
+            )
+            for event in events
+            if isinstance(event, dict)
+        ]
+        freshness = payload.get("freshness") if isinstance(payload.get("freshness"), dict) else {}
+        event_count = int_value(payload.get("event_count"), len(events))
+        evidence_ref_count = int_value(payload.get("evidence_ref_count"), len(payload.get("evidence_refs") or []))
+        timeline_ordered = all(
+            timeline_keys[index] <= timeline_keys[index + 1]
+            for index in range(max(0, len(timeline_keys) - 1))
+        )
+        result.update(
+            {
+                "event_count": event_count,
+                "evidence_ref_count": evidence_ref_count,
+                "timeline_source": payload.get("timeline_source"),
+                "timeline_ordered": timeline_ordered,
+                "freshness_status": freshness.get("status"),
+                "graph_source": freshness.get("graph_source"),
+                "hot_gate_status": freshness.get("hot_gate_status"),
+                "needs_maintenance": freshness.get("needs_maintenance"),
+                "needs_full_rebuild": freshness.get("needs_full_rebuild"),
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if event_count <= 0:
+            quality_flags.append("graph_timeline_no_events")
+        if evidence_ref_count <= 0:
+            quality_flags.append("graph_timeline_missing_evidence_refs")
+        if not freshness.get("status"):
+            quality_flags.append("graph_timeline_missing_freshness_status")
+        if timeline_ordered is not True:
+            quality_flags.append("graph_timeline_unordered")
+        if ok and quality_flags:
+            result["status"] = "warn"
     elif profile == "route_rollup_query":
         quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
         cost_profile = payload.get("cost_profile") if isinstance(payload.get("cost_profile"), dict) else {}
@@ -73992,7 +74071,7 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run live-scenario-audit --profile literal_planner with the same seed and inspect failed route samples before changing planner rules."
     if profile == "hook_failure":
         return "Open the receipt ref, then rerun hook-receipts with the same event/date filter."
-    if profile in {"graph_neighborhood", "graph_cooccurrence", "graph_bridge"}:
+    if profile in {"graph_neighborhood", "graph_cooccurrence", "graph_bridge", "graph_timeline"}:
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
     if profile == "graph_high_fanout_replacement":
         return "Run graph-entity-usage-replacement-proof for the same anchor, inspect proof_gates and edge_match, then widen only through reviewed live-scenario corpus cases."
@@ -74102,6 +74181,7 @@ def live_scenario_audit(
         "graph_neighborhood",
         "graph_cooccurrence",
         "graph_bridge",
+        "graph_timeline",
         "graph_high_fanout_replacement",
         "route_rollup_query",
         "direct_event_rollup_query",
@@ -74266,6 +74346,18 @@ def live_scenario_audit(
                         target_kind="tool",
                         limit=max(selected_limit, 4),
                         max_depth=4,
+                    ),
+                )
+            )
+        elif profile == "graph_timeline":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_timeline(
+                        aoa_root=aoa_root,
+                        anchor="goal_completed",
+                        kind="goal",
+                        limit=max(selected_limit, 8),
                     ),
                 )
             )
@@ -74493,6 +74585,7 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "work_chain_hydrates_body": scenario.get("work_chain_hydrates_body"),
             "total_receipt_count": scenario.get("total_receipt_count"),
             "returned_receipt_count": scenario.get("returned_receipt_count"),
+            "event_count": scenario.get("event_count"),
             "node_count": scenario.get("node_count"),
             "edge_count": scenario.get("edge_count"),
             "evidence_ref_count": scenario.get("evidence_ref_count"),
@@ -74502,6 +74595,12 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "anchor_event_sample_truncated": scenario.get("anchor_event_sample_truncated"),
             "route_edge_sample_truncated": scenario.get("route_edge_sample_truncated"),
             "path_found": scenario.get("path_found"),
+            "timeline_source": scenario.get("timeline_source"),
+            "timeline_ordered": scenario.get("timeline_ordered"),
+            "graph_source": scenario.get("graph_source"),
+            "hot_gate_status": scenario.get("hot_gate_status"),
+            "needs_maintenance": scenario.get("needs_maintenance"),
+            "needs_full_rebuild": scenario.get("needs_full_rebuild"),
             "matched_group_count": scenario.get("matched_group_count"),
             "omitted_group_count": scenario.get("omitted_group_count"),
             "raw_or_segment_ref_present": scenario.get("raw_or_segment_ref_present"),
@@ -74754,6 +74853,7 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         ("min_result_count", "result_count"),
         ("min_total_receipt_count", "total_receipt_count"),
         ("min_returned_receipt_count", "returned_receipt_count"),
+        ("min_event_count", "event_count"),
         ("min_node_count", "node_count"),
         ("min_edge_count", "edge_count"),
         ("min_anchor_event_count", "anchor_event_count"),
@@ -74925,6 +75025,19 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         failures.append(f"{profile}:mutates:{scenario.get('mutates')}")
     if expectation.get("require_bounded_store_query") is True and scenario.get("bounded_store_query") is not True:
         failures.append(f"{profile}:bounded_store_query:{scenario.get('bounded_store_query')}")
+    for source in expectation.get("required_timeline_sources", []) if isinstance(expectation.get("required_timeline_sources"), list) else []:
+        if scenario.get("timeline_source") != str(source):
+            failures.append(f"{profile}:timeline_source:{scenario.get('timeline_source')}")
+            break
+    if expectation.get("require_timeline_ordered") is True and scenario.get("timeline_ordered") is not True:
+        failures.append(f"{profile}:timeline_ordered:{scenario.get('timeline_ordered')}")
+    if (
+        expectation.get("require_graph_timeline_current") is True
+        and (scenario.get("freshness_status") != "graph_store_current" or scenario.get("needs_maintenance") is True)
+    ):
+        failures.append(
+            f"{profile}:graph_timeline_current:{scenario.get('freshness_status')}/needs_maintenance={scenario.get('needs_maintenance')}"
+        )
     if (
         expectation.get("require_direct_event_rollup_current") is True
         and (scenario.get("freshness_status") != "current" or scenario.get("needs_refresh") is True)
@@ -84447,7 +84560,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_scenario.add_argument("--workspace-root")
     live_scenario.add_argument("--aoa-root")
     live_scenario.add_argument("--seed", default="live-scenario-audit")
-    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_bridge, graph_high_fanout_replacement, route_rollup_query, direct_event_rollup_query, maintenance_status.")
+    live_scenario.add_argument("--profile", action="append", help="Repeatable profile: entity_registry_lookup, entity_dossier, entity_usage, hook_failure, goal_lifecycle, agent_closeout, literal_planner, graph_neighborhood, graph_cooccurrence, graph_bridge, graph_timeline, graph_high_fanout_replacement, route_rollup_query, direct_event_rollup_query, maintenance_status.")
     live_scenario.add_argument("--sample-size", type=int, default=4)
     live_scenario.add_argument("--recent-days", type=int, default=7)
     live_scenario.add_argument("--limit", type=int, default=3)

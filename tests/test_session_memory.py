@@ -5854,6 +5854,74 @@ def test_live_scenario_audit_routes_direct_event_rollup_query_profile(tmp_path: 
     assert scenario["opens_monolith"] is False
 
 
+def test_live_scenario_audit_routes_graph_timeline_profile(tmp_path: Path, monkeypatch: Any) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def fake_graph_timeline(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["aoa_root"] == aoa_root
+        assert kwargs["anchor"] == "goal_completed"
+        assert kwargs["kind"] == "goal"
+        assert kwargs["limit"] == 8
+        return {
+            "ok": True,
+            "timeline_source": "sqlite_graph_store_direct_timeline",
+            "event_count": 2,
+            "events": [
+                {
+                    "id": "event:first",
+                    "type": "event",
+                    "timestamp": "2026-05-14T07:06:14.313Z",
+                    "session_label": "2026-05-14__001__sample",
+                    "line": 12,
+                    "raw_ref": "raw:line:12",
+                    "segment_ref": "001.md#event-12",
+                },
+                {
+                    "id": "event:second",
+                    "type": "event",
+                    "timestamp": "2026-05-14T07:07:14.313Z",
+                    "session_label": "2026-05-14__001__sample",
+                    "line": 24,
+                    "raw_ref": "raw:line:24",
+                    "segment_ref": "001.md#event-24",
+                },
+            ],
+            "evidence_refs": [
+                {"kind": "raw_line", "value": "raw:line:12"},
+                {"kind": "segment_markdown", "value": "001.md#event-12"},
+            ],
+            "freshness": {
+                "status": "graph_store_current",
+                "graph_source": "sqlite_graph_store_direct_timeline",
+                "hot_gate_status": "current_with_deferred_live_sources",
+                "needs_maintenance": False,
+                "needs_full_rebuild": False,
+            },
+        }
+
+    monkeypatch.setattr(module, "graph_timeline", fake_graph_timeline)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["graph_timeline"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["scenario_count"] == 1
+    assert audit["quality"]["raw_or_segment_ref_scenario_count"] == 1
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "graph_timeline"
+    assert scenario["status"] == "passed"
+    assert scenario["event_count"] == 2
+    assert scenario["evidence_ref_count"] == 2
+    assert scenario["timeline_source"] == "sqlite_graph_store_direct_timeline"
+    assert scenario["timeline_ordered"] is True
+    assert scenario["freshness_status"] == "graph_store_current"
+    assert scenario["needs_maintenance"] is False
+
+
 def test_live_scenario_audit_routes_maintenance_status_profile(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path
     aoa_root = workspace / ".aoa"
@@ -7057,6 +7125,33 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "graph_cooccurrence:evidence_ref_count:0<1" in cooccurrence_failures
     assert "graph_cooccurrence:bounded_store_query:False" in cooccurrence_failures
 
+    timeline_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_timeline",
+            "status": "passed",
+            "event_count": 0,
+            "evidence_ref_count": 0,
+            "timeline_source": "graph_neighborhood",
+            "timeline_ordered": False,
+            "freshness_status": "graph_store_stale",
+            "needs_maintenance": True,
+        },
+        {
+            "profile": "graph_timeline",
+            "min_event_count": 1,
+            "min_evidence_ref_count": 1,
+            "required_timeline_sources": ["sqlite_graph_store_direct_timeline"],
+            "require_timeline_ordered": True,
+            "require_graph_timeline_current": True,
+        },
+    )
+
+    assert "graph_timeline:event_count:0<1" in timeline_failures
+    assert "graph_timeline:evidence_ref_count:0<1" in timeline_failures
+    assert "graph_timeline:timeline_source:graph_neighborhood" in timeline_failures
+    assert "graph_timeline:timeline_ordered:False" in timeline_failures
+    assert "graph_timeline:graph_timeline_current:graph_store_stale/needs_maintenance=True" in timeline_failures
+
     direct_event_failures = module.live_scenario_profile_expectation_failures(
         {
             "profile": "direct_event_rollup_query",
@@ -7280,6 +7375,19 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
                     "evidence_ref_count": 7,
                 },
                 {
+                    "profile": "graph_timeline",
+                    "status": "passed",
+                    "event_count": 10,
+                    "evidence_ref_count": 24,
+                    "timeline_source": "sqlite_graph_store_direct_timeline",
+                    "timeline_ordered": True,
+                    "freshness_status": "graph_store_current",
+                    "graph_source": "sqlite_graph_store_direct_timeline",
+                    "hot_gate_status": "current_with_deferred_live_sources",
+                    "needs_maintenance": False,
+                    "needs_full_rebuild": False,
+                },
+                {
                     "profile": "graph_high_fanout_replacement",
                     "status": "passed",
                     "sample_count": 3,
@@ -7318,6 +7426,11 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     assert profiles["goal_lifecycle"]["work_chain_uses_search"] is False
     assert profiles["graph_neighborhood"]["node_count"] == 4
     assert profiles["graph_neighborhood"]["edge_count"] == 12
+    assert profiles["graph_timeline"]["event_count"] == 10
+    assert profiles["graph_timeline"]["timeline_source"] == "sqlite_graph_store_direct_timeline"
+    assert profiles["graph_timeline"]["timeline_ordered"] is True
+    assert profiles["graph_timeline"]["freshness_status"] == "graph_store_current"
+    assert profiles["graph_timeline"]["needs_maintenance"] is False
     assert profiles["graph_high_fanout_replacement"]["anchor_count"] == 3
     assert profiles["graph_high_fanout_replacement"]["kind_counts"]["tool"] == 1
     assert profiles["graph_high_fanout_replacement"]["target_projection_match_count"] == 3
@@ -24210,6 +24323,7 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
             "cases": [
                 {"id": module.GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID, "profiles": ["goal_lifecycle"]},
                 {"id": module.GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID, "profiles": ["agent_closeout"]},
+                {"id": module.GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID, "profiles": ["graph_timeline"]},
             ],
         },
     )
@@ -24225,8 +24339,8 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
             "generated_at": "2026-07-07T02:00:00Z",
             "ok": True,
             "corpus_path": str(corpus_path),
-            "case_count": 2,
-            "passed_count": 2,
+            "case_count": 3,
+            "passed_count": 3,
             "failed_count": 0,
             "results": [
                 {
@@ -24277,6 +24391,28 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
                         ]
                     },
                 },
+                {
+                    "id": module.GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID,
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "graph_timeline",
+                                "status": "passed",
+                                "elapsed_ms": 531,
+                                "evidence_ref_counts": {"session_ref": 9, "segment_ref": 21, "raw_ref": 12},
+                                "first_ref": {"raw": "raw:line:1914"},
+                                "event_count": 10,
+                                "evidence_ref_count": 24,
+                                "timeline_source": "sqlite_graph_store_direct_timeline",
+                                "timeline_ordered": True,
+                                "freshness_status": "graph_store_current",
+                                "needs_maintenance": False,
+                            }
+                        ]
+                    },
+                },
             ],
         },
     )
@@ -24309,18 +24445,21 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
         for row in payload["edge_policies"]
         if row["edge_type"] == "has_event"
     )
-    assert structural_plan["status"] == "typed_event_routes_quality_partially_proven_timeline_unproven"
+    assert structural_plan["status"] == "typed_event_routes_quality_proven_cardinality_unproven"
     assert structural_plan["missing_proof_gates"] == [
-        "freshness_current_or_stale_flag_visible",
         "before_after_cardinality_comparison",
-        "timeline_packet_preserves_work_chain_order",
     ]
     assert "answer_goal_task_episode_coverage" in structural_plan["proven_proof_gates"]
-    assert "timeline_packet_preserves_work_chain_order" not in structural_plan["proven_proof_gates"]
+    assert "freshness_current_or_stale_flag_visible" in structural_plan["proven_proof_gates"]
+    assert "timeline_packet_preserves_work_chain_order" in structural_plan["proven_proof_gates"]
     assert structural_plan["proof_evidence"]["status"] == "proven"
     assert structural_plan["proof_evidence"]["work_chain_uses_search"] is False
     assert structural_plan["proof_evidence"]["work_chain_uses_graph"] is False
-    assert structural_plan["proof_commands"][-1].endswith("--case-limit 2 --write-report")
+    assert structural_plan["proof_evidence"]["timeline_event_count"] == 10
+    assert structural_plan["proof_evidence"]["timeline_source"] == "sqlite_graph_store_direct_timeline"
+    assert structural_plan["proof_evidence"]["timeline_ordered"] is True
+    assert structural_plan["proof_evidence"]["timeline_freshness_status"] == "graph_store_current"
+    assert structural_plan["proof_commands"][-1].endswith("--case-limit 3 --write-report")
     assert structural_plan["can_prune_now"] is False
     assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
     assert payload["replacement_proof_states"][module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION]["status"] == "proven"
