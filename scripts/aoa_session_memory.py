@@ -423,6 +423,13 @@ GRAPH_ROUTE_SIGNAL_REPLACEMENT_CORPUS_CASE_IDS = (
     GRAPH_ROUTE_SIGNAL_COOCCURRENCE_CORPUS_CASE_ID,
     GRAPH_ROUTE_SIGNAL_ROLLUP_CORPUS_CASE_ID,
 )
+GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION = "task_answer_goal_timeline_rollup"
+GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID = "goal_lifecycle_refs_contract"
+GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID = "agent_closeout_refs_contract"
+GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS = (
+    GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID,
+    GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID,
+)
 GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES = frozenset(
     {
         "raw_or_segment_refs_preserved",
@@ -443,6 +450,15 @@ GRAPH_ROUTE_SIGNAL_REPLACEMENT_PROVEN_GATES = frozenset(
         "live_scenario_case_present",
         "route_signal_rollup_refs_match_edge_samples",
         "cooccurrence_packet_preserves_dense_anchor_neighbors",
+    }
+)
+GRAPH_STRUCTURAL_EVENT_CHAIN_PROVEN_GATES = frozenset(
+    {
+        "raw_or_segment_refs_preserved",
+        "fallback_route_named",
+        "bounded_packet_default",
+        "live_scenario_case_present",
+        "answer_goal_task_episode_coverage",
     }
 )
 GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
@@ -50790,6 +50806,137 @@ def graph_route_signal_replacement_corpus_evidence(aoa_root: Path) -> dict[str, 
     }
 
 
+def graph_structural_event_chain_corpus_evidence(aoa_root: Path) -> dict[str, Any]:
+    required_mtime = graph_entity_usage_replacement_report_min_source_mtime(aoa_root)
+    graph_store_mtime = path_mtime(graph_paths(aoa_root)["store"])
+    stale_reports = 0
+    incomplete_reports = 0
+    for report in diagnostic_json_payloads(aoa_root, "*__live-scenario-corpus-check.json", limit=20):
+        source = diagnostic_report_source(report)
+        report_mtime = ops_float_value(report.get("_diagnostic_mtime"))
+        if required_mtime and report_mtime < required_mtime:
+            stale_reports += 1
+            continue
+        results = report.get("results") if isinstance(report.get("results"), list) else []
+        result_by_id = {
+            str(item.get("id") or ""): item
+            for item in results
+            if isinstance(item, dict) and item.get("id")
+        }
+        goal_result = result_by_id.get(GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID)
+        closeout_result = result_by_id.get(GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID)
+        if not isinstance(goal_result, dict) or not isinstance(closeout_result, dict):
+            incomplete_reports += 1
+            continue
+        goal_profile = live_scenario_result_profile(goal_result, "goal_lifecycle")
+        closeout_profile = live_scenario_result_profile(closeout_result, "agent_closeout")
+        goal_refs = (
+            goal_profile.get("evidence_ref_counts")
+            if isinstance(goal_profile.get("evidence_ref_counts"), dict)
+            else {}
+        )
+        closeout_refs = (
+            closeout_profile.get("evidence_ref_counts")
+            if isinstance(closeout_profile.get("evidence_ref_counts"), dict)
+            else {}
+        )
+        work_chain_routes = (
+            goal_profile.get("work_chain_next_route_counts")
+            if isinstance(goal_profile.get("work_chain_next_route_counts"), dict)
+            else {}
+        )
+        goal_ok = (
+            goal_result.get("ok") is True
+            and goal_profile.get("status") == "passed"
+            and int_value(goal_profile.get("result_count")) > 0
+            and int_value(goal_profile.get("work_chain_linked_count")) > 0
+            and int_value(goal_profile.get("work_chain_episode_count")) > 0
+            and int_value(goal_profile.get("work_chain_goal_event_ref_count")) > 0
+            and int_value(goal_profile.get("work_chain_answer_ref_count")) > 0
+            and int_value(goal_profile.get("work_chain_closeout_ref_count")) > 0
+            and int_value(work_chain_routes.get("task-episodes")) > 0
+            and int_value(work_chain_routes.get("answer-neighborhood")) > 0
+            and int_value(work_chain_routes.get("agent-reasoning-windows")) > 0
+            and goal_profile.get("work_chain_uses_search") is False
+            and goal_profile.get("work_chain_uses_graph") is False
+            and goal_profile.get("work_chain_opens_raw") is False
+            and goal_profile.get("work_chain_hydrates_body") is False
+            and int_value(goal_refs.get("raw_ref")) > 0
+            and int_value(goal_refs.get("segment_ref")) > 0
+        )
+        closeout_ok = (
+            closeout_result.get("ok") is True
+            and closeout_profile.get("status") == "passed"
+            and int_value(closeout_profile.get("result_count")) > 0
+            and int_value(closeout_refs.get("raw_ref")) > 0
+            and int_value(closeout_refs.get("segment_ref")) > 0
+        )
+        if goal_ok and closeout_ok:
+            return {
+                "status": "proven",
+                "case_ids": list(GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS),
+                "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+                "proven_gates": sorted(GRAPH_STRUCTURAL_EVENT_CHAIN_PROVEN_GATES),
+                "still_missing_gates": [
+                    "freshness_current_or_stale_flag_visible",
+                    "before_after_cardinality_comparison",
+                    "timeline_packet_preserves_work_chain_order",
+                ],
+                "source": source,
+                "freshness_basis": "corpus_and_route_code",
+                "graph_store_mtime_observed": graph_store_mtime,
+                "graph_store_mtime_is_blocking": False,
+                "goal_result_count": int_value(goal_profile.get("result_count")),
+                "work_chain_linked_count": int_value(goal_profile.get("work_chain_linked_count")),
+                "work_chain_episode_count": int_value(goal_profile.get("work_chain_episode_count")),
+                "work_chain_goal_event_ref_count": int_value(goal_profile.get("work_chain_goal_event_ref_count")),
+                "work_chain_answer_ref_count": int_value(goal_profile.get("work_chain_answer_ref_count")),
+                "work_chain_closeout_ref_count": int_value(goal_profile.get("work_chain_closeout_ref_count")),
+                "work_chain_next_route_counts": dict(work_chain_routes),
+                "work_chain_uses_search": goal_profile.get("work_chain_uses_search"),
+                "work_chain_uses_graph": goal_profile.get("work_chain_uses_graph"),
+                "work_chain_opens_raw": goal_profile.get("work_chain_opens_raw"),
+                "work_chain_hydrates_body": goal_profile.get("work_chain_hydrates_body"),
+                "agent_closeout_result_count": int_value(closeout_profile.get("result_count")),
+                "fallback_routes": ["goal-lifecycles", "task-episodes", "answer-neighborhood", "agent-reasoning-windows", "agent-closeouts"],
+                "truth_status": "generated_live_scenario_corpus_evidence_not_prune_permission",
+            }
+        return {
+            "status": "not_proven",
+            "case_ids": list(GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS),
+            "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            "proven_gates": [],
+            "source": source,
+            "freshness_basis": "corpus_and_route_code",
+            "graph_store_mtime_observed": graph_store_mtime,
+            "graph_store_mtime_is_blocking": False,
+            "goal_ok": goal_ok,
+            "agent_closeout_ok": closeout_ok,
+            "goal_status": goal_profile.get("status"),
+            "agent_closeout_status": closeout_profile.get("status"),
+            "goal_failures": goal_result.get("failures") if isinstance(goal_result.get("failures"), list) else [],
+            "agent_closeout_failures": closeout_result.get("failures") if isinstance(closeout_result.get("failures"), list) else [],
+            "truth_status": "latest_live_scenario_corpus_cases_do_not_prove_structural_event_chain_replacement",
+        }
+    return {
+        "status": "stale_or_missing",
+        "case_ids": list(GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS),
+        "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+        "proven_gates": [],
+        "stale_report_count": stale_reports,
+        "incomplete_report_count": incomplete_reports,
+        "required_min_source_mtime": required_mtime,
+        "freshness_basis": "corpus_and_route_code",
+        "graph_store_mtime_observed": graph_store_mtime,
+        "graph_store_mtime_is_blocking": False,
+        "exact_refresh_command": live_scenario_corpus_check_command_for_cases(
+            aoa_root,
+            GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS,
+        ),
+        "truth_status": "missing_current_live_scenario_corpus_evidence",
+    }
+
+
 def graph_entity_usage_replacement_corpus_evidence(aoa_root: Path) -> dict[str, Any]:
     required_mtime = graph_entity_usage_replacement_report_min_source_mtime(aoa_root)
     graph_store_mtime = path_mtime(graph_paths(aoa_root)["store"])
@@ -50964,22 +51111,41 @@ def graph_high_fanout_replacement_plan_for_edge(
             "can_prune_now": False,
         }
     if edge_class == "structural_event_chain":
+        proof_state = (proof_states or {}).get(GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION)
+        if not isinstance(proof_state, dict):
+            proof_state = {}
+        proven_gates = {
+            str(gate)
+            for gate in proof_state.get("proven_gates", [])
+            if gate
+        } if proof_state.get("status") == "proven" else set()
         missing_gates = common + [
             "answer_goal_task_episode_coverage",
             "timeline_packet_preserves_work_chain_order",
         ]
+        missing_gates = [gate for gate in missing_gates if gate not in proven_gates]
         return {
             "edge_type": edge_type,
-            "status": "typed_event_routes_exist_structural_replacement_unproven",
+            "status": (
+                "typed_event_routes_quality_partially_proven_timeline_unproven"
+                if proven_gates
+                else "typed_event_routes_exist_structural_replacement_unproven"
+            ),
             "candidate_for_cardinality_reduction": edge_type == "has_event",
-            "target_projection": "task_answer_goal_timeline_rollup",
+            "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
             "existing_compact_routes": ["agent-responses", "goal-lifecycles", "graph-timeline"],
             "replacement_layers": replacement_layers,
+            "proven_proof_gates": sorted(proven_gates),
             "missing_proof_gates": missing_gates,
+            "proof_evidence": proof_state,
             "proof_commands": [
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} agent-responses --aoa-root {aoa_root} --limit 12",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} goal-lifecycles --aoa-root {aoa_root} --limit 12",
                 f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-timeline <anchor> --aoa-root {aoa_root} --kind <kind> --limit 40",
+                live_scenario_corpus_check_command_for_cases(
+                    aoa_root,
+                    GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS,
+                ),
             ],
             "promotion_rule": "promote only after answer/goal/task packets prove the same work-chain navigation without unbounded structural expansion",
             "can_prune_now": False,
@@ -51154,6 +51320,7 @@ def graph_high_fanout_policy_from_projection(
     proof_states = {
         GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION: graph_entity_usage_replacement_corpus_evidence(aoa_root),
         GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION: graph_route_signal_replacement_corpus_evidence(aoa_root),
+        GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION: graph_structural_event_chain_corpus_evidence(aoa_root),
     }
     for row in edge_policies:
         row["replacement_plan"] = graph_high_fanout_replacement_plan_for_edge(

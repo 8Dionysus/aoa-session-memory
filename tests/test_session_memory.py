@@ -24189,6 +24189,143 @@ def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence
     assert payload["replacement_proof_states"][module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION]["status"] == "proven"
 
 
+def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    script_path = aoa_root / "scripts" / "aoa_session_memory.py"
+    graph_path = module.graph_paths(aoa_root)["store"]
+    corpus_path = module.live_scenario_corpus_default_path(aoa_root)
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("# fixture\n", encoding="utf-8")
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("fixture graph store marker\n", encoding="utf-8")
+    write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {"id": module.GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID, "profiles": ["goal_lifecycle"]},
+                {"id": module.GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID, "profiles": ["agent_closeout"]},
+            ],
+        },
+    )
+    base_ts = time.time()
+    for path in (script_path, graph_path, corpus_path):
+        os.utime(path, (base_ts, base_ts))
+    report_path = aoa_root / "diagnostics" / "20260707T020000Z__live-scenario-corpus-check.json"
+    write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_check",
+            "generated_at": "2026-07-07T02:00:00Z",
+            "ok": True,
+            "corpus_path": str(corpus_path),
+            "case_count": 2,
+            "passed_count": 2,
+            "failed_count": 0,
+            "results": [
+                {
+                    "id": module.GRAPH_STRUCTURAL_GOAL_LIFECYCLE_CORPUS_CASE_ID,
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "goal_lifecycle",
+                                "status": "passed",
+                                "elapsed_ms": 110,
+                                "evidence_ref_counts": {"raw_ref": 226, "segment_ref": 412},
+                                "first_ref": {"raw": "raw:line:33815"},
+                                "result_count": 3,
+                                "work_chain_linked_count": 3,
+                                "work_chain_episode_count": 9,
+                                "work_chain_goal_event_ref_count": 17,
+                                "work_chain_answer_ref_count": 22,
+                                "work_chain_closeout_ref_count": 6,
+                                "work_chain_next_route_counts": {
+                                    "agent-reasoning-windows": 9,
+                                    "answer-neighborhood": 9,
+                                    "task-episodes": 9,
+                                },
+                                "work_chain_uses_search": False,
+                                "work_chain_uses_graph": False,
+                                "work_chain_opens_raw": False,
+                                "work_chain_hydrates_body": False,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": module.GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID,
+                    "ok": True,
+                    "failures": [],
+                    "observed": {
+                        "profiles": [
+                            {
+                                "profile": "agent_closeout",
+                                "status": "passed",
+                                "elapsed_ms": 525,
+                                "evidence_ref_counts": {"session_ref": 3, "segment_ref": 19, "raw_ref": 7},
+                                "first_ref": {"raw": "raw:line:2041"},
+                                "result_count": 3,
+                            }
+                        ]
+                    },
+                },
+            ],
+        },
+    )
+    os.utime(report_path, (base_ts + 10, base_ts + 10))
+    os.utime(graph_path, (base_ts + 20, base_ts + 20))
+
+    monkeypatch.setattr(
+        module,
+        "graph_cardinality_projection_read",
+        lambda _aoa_root, limit=12: {
+            "status": "current",
+            "counts": {
+                "node": {"event": 2_000_000},
+                "edge": {
+                    "event_mentions_registered_entity": 3_700_000,
+                    "mentions_route_signal": 3_000_000,
+                    "has_event": 2_100_000,
+                    "session_has_route_signal": 1_400_000,
+                },
+            },
+            "top": {"node": [], "edge": []},
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
+
+    structural_plan = next(
+        row["replacement_plan"]
+        for row in payload["edge_policies"]
+        if row["edge_type"] == "has_event"
+    )
+    assert structural_plan["status"] == "typed_event_routes_quality_partially_proven_timeline_unproven"
+    assert structural_plan["missing_proof_gates"] == [
+        "freshness_current_or_stale_flag_visible",
+        "before_after_cardinality_comparison",
+        "timeline_packet_preserves_work_chain_order",
+    ]
+    assert "answer_goal_task_episode_coverage" in structural_plan["proven_proof_gates"]
+    assert "timeline_packet_preserves_work_chain_order" not in structural_plan["proven_proof_gates"]
+    assert structural_plan["proof_evidence"]["status"] == "proven"
+    assert structural_plan["proof_evidence"]["work_chain_uses_search"] is False
+    assert structural_plan["proof_evidence"]["work_chain_uses_graph"] is False
+    assert structural_plan["proof_commands"][-1].endswith("--case-limit 2 --write-report")
+    assert structural_plan["can_prune_now"] is False
+    assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
+    assert payload["replacement_proof_states"][module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION]["status"] == "proven"
+
+
 def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edges(
     tmp_path: Path,
     monkeypatch: Any,
