@@ -25379,6 +25379,119 @@ def test_projection_status_refreshes_maintenance_only_when_requested(tmp_path: P
     assert status["current_maintenance_freshness"]["refresh_required_for_current_truth"] is False
 
 
+def test_projection_status_refresh_promotes_fresh_maintenance_over_stale_catchup(tmp_path: Path, monkeypatch: Any) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir(parents=True)
+    write_json(
+        diagnostics / "20260526T000200Z__projection-catchup-catchup.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_projection_catchup",
+            "generated_at": "2026-05-26T00:02:00Z",
+            "ok": True,
+            "mutates": False,
+            "projection_completeness": {
+                "schema_version": module.SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_completeness",
+                "status": "plan_ready",
+                "actionable_surface_ids": [],
+                "deferred_surface_ids": [],
+                "surfaces": {
+                    "raw_authority": {
+                        "status": "source_truth_not_projection",
+                        "needs_maintenance": False,
+                    },
+                    "search_index": {"status": "current", "needs_maintenance": False},
+                    "entity_registry": {
+                        "status": "current",
+                        "needs_maintenance": False,
+                        "entity_count": 99,
+                    },
+                },
+            },
+            "next_route": {
+                "id": "verify_projection_status",
+                "status": "ready",
+                "reason": "dry_run_found_no_projection_work",
+                "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status"],
+            },
+        },
+    )
+
+    def fake_maintenance(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "generated_at": "2026-05-26T00:04:00Z",
+            "ok": True,
+            "mutates": False,
+            "mode": "hot",
+            "recommendation": "wait_live_catchup",
+            "agent_route": {
+                "maintenance_required": False,
+                "live_catchup_pending": True,
+                "can_use_graph_search": True,
+            },
+            "search": {
+                "status": "current_with_deferred_live_updates",
+                "actionable_dirty_session_count": 0,
+                "deferred_live_session_count": 1,
+            },
+            "graph": {
+                "status": "current_with_deferred_live_sources",
+                "needs_maintenance": False,
+                "actionable_count": 0,
+                "dirty_count": 0,
+                "missing_count": 0,
+                "deferred_live_source_count": 3,
+            },
+            "route": {"status": "current", "needs_index_maintenance": False, "needs_graph_maintenance": False},
+            "entity_registry": {"status": "current", "needs_maintenance": False, "entity_count": 12},
+            "live_tail": {
+                "status": "waiting_for_quiet_window",
+                "deferred_count": 4,
+                "search_deferred_session_count": 1,
+                "graph_deferred_source_count": 3,
+            },
+            "operations": {
+                "search_shards": {
+                    "status": "current_with_deferred_live_updates",
+                    "actionable_noncurrent_shard_count": 0,
+                    "deferred_live_session_count": 1,
+                }
+            },
+            "next_actions": [
+                {
+                    "id": "wait_live_catchup",
+                    "reason": "recent_live_graph_sources_deferred_until_quiet_window",
+                    "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", "--no-timers"],
+                }
+            ],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance)
+
+    status = module.session_memory_projection_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        refresh_maintenance=True,
+    )
+
+    assert status["ok"] is True
+    assert status["status"] == "current_with_deferred_live"
+    assert status["source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness_source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness"]["surfaces"]["entity_registry"]["entity_count"] == 12
+    assert status["projection_completeness"]["deferred_surface_ids"] == ["live_tail"]
+    assert status["next_operator_route"]["id"] == "wait_live_catchup"
+    assert status["latest_projection_catchup"]["used_as_current_basis"] is False
+    assert status["latest_projection_catchup"]["payload"] is None
+    assert status["diagnostics"] == []
+
+
 def test_projection_status_treats_plan_ready_verify_route_as_current(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

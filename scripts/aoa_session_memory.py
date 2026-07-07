@@ -22139,6 +22139,161 @@ def projection_status_refresh_route(*, workspace_root: Path, aoa_root: Path) -> 
     }
 
 
+def projection_status_verify_route(*, workspace_root: Path, aoa_root: Path, reason: str) -> dict[str, Any]:
+    return {
+        "id": "verify_projection_status",
+        "status": "ready",
+        "reason": reason,
+        "command": [
+            "python3",
+            "scripts/aoa_session_memory.py",
+            "maintenance-status",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--full",
+            "--no-timers",
+        ],
+    }
+
+
+def projection_status_bool(value: Any) -> bool:
+    return bool(value) and str(value).lower() not in {"0", "false", "none", "null", ""}
+
+
+def projection_status_refreshed_maintenance_completeness(maintenance: dict[str, Any]) -> dict[str, Any]:
+    search = maintenance.get("search") if isinstance(maintenance.get("search"), dict) else {}
+    graph = maintenance.get("graph") if isinstance(maintenance.get("graph"), dict) else {}
+    route = maintenance.get("route") if isinstance(maintenance.get("route"), dict) else {}
+    entity_registry = maintenance.get("entity_registry") if isinstance(maintenance.get("entity_registry"), dict) else {}
+    live_tail = maintenance.get("live_tail") if isinstance(maintenance.get("live_tail"), dict) else {}
+    operations = maintenance.get("operations") if isinstance(maintenance.get("operations"), dict) else {}
+    search_shards = operations.get("search_shards") if isinstance(operations.get("search_shards"), dict) else {}
+
+    route_needs = any(
+        projection_status_bool(route.get(key))
+        for key in (
+            "needs_index_maintenance",
+            "needs_graph_maintenance",
+            "needs_sidecar_export",
+            "needs_offline_graph_build",
+            "entity_registry_repair_needed",
+        )
+    )
+    search_needs = (
+        int_value(search.get("actionable_dirty_session_count")) > 0
+        or int_value(search.get("missing_freshness_state_count")) > 0
+        or projection_status_bool(search.get("needs_storage_policy_rebuild"))
+    )
+    search_shards_needs = int_value(search_shards.get("actionable_noncurrent_shard_count")) > 0
+    graph_needs = (
+        projection_status_bool(graph.get("needs_maintenance"))
+        or projection_status_bool(graph.get("needs_full_rebuild"))
+        or int_value(graph.get("actionable_count")) > 0
+        or int_value(graph.get("dirty_count")) > 0
+        or int_value(graph.get("missing_count")) > 0
+        or int_value(graph.get("blocked_count")) > 0
+    )
+    entity_needs = (
+        projection_status_bool(entity_registry.get("needs_maintenance"))
+        or str(entity_registry.get("status") or "") not in {"", "current"}
+    )
+    live_deferred_count = max(
+        int_value(live_tail.get("deferred_count")),
+        int_value(live_tail.get("search_deferred_session_count")),
+        int_value(live_tail.get("graph_deferred_source_count")),
+    )
+    live_deferred = str(live_tail.get("status") or "") not in {"", "current"} and live_deferred_count > 0
+
+    surfaces = {
+        "raw_authority": {
+            "status": "source_truth_not_projection",
+            "needs_maintenance": False,
+            "truth_boundary": "raw transcripts, raw blocks, manifests, and segment indexes remain authority; projection-status only reports generated projection readiness",
+        },
+        "route_indexes": {
+            "status": "needs_maintenance" if route_needs else str(route.get("status") or "current"),
+            "needs_maintenance": route_needs,
+            "route_drift_count": route.get("route_drift_count"),
+        },
+        "search_index": {
+            "status": "needs_maintenance" if search_needs else str(search.get("status") or "current"),
+            "needs_maintenance": search_needs,
+            "dirty_count": search.get("actionable_dirty_session_count", search.get("dirty_session_count", 0)),
+            "deferred_live_session_count": search.get("deferred_live_session_count", 0),
+        },
+        "search_shards": {
+            "status": "needs_maintenance" if search_shards_needs else str(search_shards.get("status") or "unknown"),
+            "needs_maintenance": search_shards_needs,
+            "shard_count": search_shards.get("shard_count"),
+            "materialized_shard_count": search_shards.get("materialized_shard_count"),
+            "deferred_live_session_count": search_shards.get("deferred_live_session_count", 0),
+        },
+        "entity_registry": {
+            "status": "needs_maintenance" if entity_needs else str(entity_registry.get("status") or "current"),
+            "needs_maintenance": entity_needs,
+            "entity_count": entity_registry.get("entity_count"),
+        },
+        "graph": {
+            "status": "needs_maintenance" if graph_needs else str(graph.get("status") or "current"),
+            "needs_maintenance": graph_needs,
+            "actionable_count": graph.get("actionable_count", 0),
+            "deferred_live_source_count": graph.get("deferred_live_source_count", 0),
+            "source_count": graph.get("source_count"),
+        },
+        "live_tail": {
+            "status": "deferred_live" if live_deferred else str(live_tail.get("status") or "current"),
+            "needs_maintenance": False,
+            "deferred_live_selection_count": live_deferred_count,
+            "next_route": "wait_for_quiet_window_then_targeted_catchup" if live_deferred else "",
+        },
+    }
+    actionable_surface_ids = [
+        surface_id
+        for surface_id, surface in surfaces.items()
+        if surface_id not in {"raw_authority", "live_tail"} and bool(surface.get("needs_maintenance"))
+    ]
+    deferred_surface_ids = ["live_tail"] if live_deferred else []
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_projection_completeness",
+        "status": (
+            "needs_maintenance"
+            if actionable_surface_ids
+            else ("current_with_deferred_live" if live_deferred else "current")
+        ),
+        "plan_only": False,
+        "freshness_before_after": True,
+        "source": "refreshed_maintenance_status",
+        "actionable_surface_ids": actionable_surface_ids,
+        "deferred_surface_ids": deferred_surface_ids,
+        "surfaces": surfaces,
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+    }
+
+
+def projection_status_route_from_refreshed_maintenance(
+    maintenance: dict[str, Any],
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    completeness: dict[str, Any],
+) -> dict[str, Any]:
+    next_actions = maintenance.get("next_actions") if isinstance(maintenance.get("next_actions"), list) else []
+    if next_actions and isinstance(next_actions[0], dict):
+        action = dict(next_actions[0])
+        action.setdefault("status", "ready" if isinstance(action.get("command"), list) and action.get("command") else "available")
+        action.setdefault("reason", "refreshed_maintenance_status_next_action")
+        return action
+    reason = (
+        "refreshed_maintenance_status_needs_followup"
+        if completeness.get("actionable_surface_ids")
+        else "refreshed_maintenance_status_current"
+    )
+    return projection_status_verify_route(workspace_root=workspace_root, aoa_root=aoa_root, reason=reason)
+
+
 def maintenance_status_refresh_route(*, workspace_root: Path, aoa_root: Path) -> dict[str, Any]:
     command = [
         *session_memory_cli_command(aoa_root),
@@ -22266,32 +22421,52 @@ def session_memory_projection_status(
         )
     else:
         maintenance = cached_maintenance_status_snapshot(workspace_root=workspace_root, aoa_root=aoa_root)
-    source = (
-        "latest_projection_catchup_diagnostic"
-        if is_current
-        else (
-            "noncurrent_projection_catchup_diagnostic"
-            if has_schema
-            else ("legacy_projection_catchup_diagnostic" if completeness else "missing_projection_catchup_diagnostic")
+    if refresh_maintenance:
+        effective_completeness = projection_status_refreshed_maintenance_completeness(maintenance)
+        effective_ok = not bool(effective_completeness.get("actionable_surface_ids"))
+        source = "refreshed_maintenance_status"
+        next_operator_route = projection_status_route_from_refreshed_maintenance(
+            maintenance,
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            completeness=effective_completeness,
         )
-    )
-    diagnostic_reason = "" if is_current else str(next_operator_route.get("reason") or fallback_route["reason"])
+        diagnostic_reason = (
+            ""
+            if effective_ok
+            else str(next_operator_route.get("reason") or "refreshed_maintenance_status_needs_followup")
+        )
+    else:
+        effective_completeness = completeness
+        effective_ok = is_current
+        source = (
+            "latest_projection_catchup_diagnostic"
+            if is_current
+            else (
+                "noncurrent_projection_catchup_diagnostic"
+                if has_schema
+                else ("legacy_projection_catchup_diagnostic" if completeness else "missing_projection_catchup_diagnostic")
+            )
+        )
+        diagnostic_reason = "" if is_current else str(next_operator_route.get("reason") or fallback_route["reason"])
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": "aoa_session_memory_projection_status_v1",
         "artifact_type": "session_memory_projection_status",
         "generated_at": utc_now(),
-        "ok": is_current,
-        "status": completeness.get("status") if isinstance(completeness, dict) and completeness else "missing",
+        "ok": effective_ok,
+        "status": effective_completeness.get("status") if isinstance(effective_completeness, dict) and effective_completeness else "missing",
         "mutates": False,
         "source": source,
-        "projection_completeness": completeness,
+        "projection_completeness": effective_completeness,
+        "projection_completeness_source": source,
         "latest_projection_catchup": {
             **diagnostic_report_source(latest_payload),
             "payload": latest_payload if include_payload else None,
+            "used_as_current_basis": not refresh_maintenance,
         }
         if latest_payload
-        else {"path": None, "payload": None},
+        else {"path": None, "payload": None, "used_as_current_basis": False},
         "current_maintenance": maintenance,
         "current_maintenance_freshness": {
             "snapshot_mode": maintenance.get("snapshot_mode"),
@@ -22304,7 +22479,7 @@ def session_memory_projection_status(
         "exact_next_command": shlex.join(str(part) for part in next_operator_route.get("command", []))
         if isinstance(next_operator_route.get("command"), list)
         else "",
-        "diagnostics": [] if is_current else [diagnostic_reason],
+        "diagnostics": [] if effective_ok else [diagnostic_reason],
         "mcp_access": {
             "mutates": False,
             "archive_command": None,
