@@ -191,6 +191,7 @@ query is fuzzy:
 - hook receipts and hook failures: `aoa_session_hook_receipts`
 - graph topology: `aoa_session_graph_neighborhood`
 - graph relation bridge: `aoa_session_graph_bridge`
+- dense-anchor graph cooccurrence: `aoa_session_graph_cooccurrence`
 - operational route-rollup projection:
   `aoa_session_route_rollup_query`
 - bounded live quality loop: `aoa_session_live_scenario_audit`
@@ -199,7 +200,9 @@ query is fuzzy:
 
 Then call the MCP tool with the same typed anchor/kind that the CLI route would
 use. For graph/topology questions, search `aoa_session_graph_neighborhood`
-directly if a broad "graph route" tool search does not surface it.
+directly if a broad "graph route" tool search does not surface it. For common
+tools, MCP services, hooks, or skills with too many direct hits, search
+`aoa_session_graph_cooccurrence` directly before widening into raw text.
 
 If an exact MCP tool is discovered but the call returns `Transport closed`,
 treat it as a Codex/MCP transport reload gate, not as evidence failure and not
