@@ -432,6 +432,8 @@ GRAPH_STRUCTURAL_EVENT_CHAIN_CORPUS_CASE_IDS = (
     GRAPH_STRUCTURAL_AGENT_CLOSEOUT_CORPUS_CASE_ID,
     GRAPH_STRUCTURAL_TIMELINE_CORPUS_CASE_ID,
 )
+GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE = "before_after_cardinality_comparison"
+GRAPH_HIGH_FANOUT_CARDINALITY_COMPARISON_CORPUS_CASE_ID = "graph_high_fanout_cardinality_comparison_contract"
 GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES = frozenset(
     {
         "raw_or_segment_refs_preserved",
@@ -471,7 +473,37 @@ GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES = (
     "fallback_route_named",
     "bounded_packet_default",
     "live_scenario_case_present",
-    "before_after_cardinality_comparison",
+    GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE,
+)
+GRAPH_HIGH_FANOUT_CARDINALITY_TARGETS = (
+    {
+        "target_projection": GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+        "before_edge_types": (GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,),
+        "after_edge_types": (GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE,),
+        "comparison_basis": "event_entity_edges_to_session_entity_aggregate_edges",
+        "replacement_read_model": "usage-chain plus session_has_registered_entity aggregate refs",
+    },
+    {
+        "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+        "before_edge_types": ("mentions_route_signal",),
+        "after_edge_types": ("segment_has_route_signal", "session_has_route_signal"),
+        "comparison_basis": "event_route_signal_edges_to_segment_and_session_route_signal_aggregates",
+        "replacement_read_model": "graph-cooccurrence plus operational route-rollup refs",
+    },
+    {
+        "target_projection": GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+        "before_edge_types": ("has_event",),
+        "after_edge_types": (
+            "answered_by",
+            "responds_to",
+            "has_task_episode",
+            "goal_lifecycle_has_event",
+            "goal_lifecycle_in_task_episode",
+            "has_goal_lifecycle",
+        ),
+        "comparison_basis": "broad_session_has_event_edges_to_typed_answer_goal_task_edges",
+        "replacement_read_model": "agent-responses, goal-lifecycles, task-episodes, answer-neighborhood, graph-timeline",
+    },
 )
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LAYERS = frozenset(
     {
@@ -50683,6 +50715,208 @@ def graph_entity_usage_replacement_report_min_source_mtime(aoa_root: Path) -> fl
     return max((path_mtime(path) for path in paths if path.exists()), default=0.0)
 
 
+def graph_high_fanout_cardinality_edge_counts(
+    edge_counts: dict[str, Any],
+    edge_types: Sequence[str],
+) -> dict[str, int]:
+    return {
+        str(edge_type): int_value(edge_counts.get(str(edge_type)))
+        for edge_type in edge_types
+        if str(edge_type)
+    }
+
+
+def graph_high_fanout_cardinality_target_comparison(
+    *,
+    edge_counts: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    target_projection = str(target.get("target_projection") or "")
+    before_edge_types = tuple(str(item) for item in target.get("before_edge_types", ()) if item)
+    after_edge_types = tuple(str(item) for item in target.get("after_edge_types", ()) if item)
+    before_counts = graph_high_fanout_cardinality_edge_counts(edge_counts, before_edge_types)
+    after_counts = graph_high_fanout_cardinality_edge_counts(edge_counts, after_edge_types)
+    before_total = sum(before_counts.values())
+    after_total = sum(after_counts.values())
+    missing_before = [edge_type for edge_type in before_edge_types if int_value(before_counts.get(edge_type)) <= 0]
+    missing_after = [edge_type for edge_type in after_edge_types if int_value(after_counts.get(edge_type)) <= 0]
+    delta = before_total - after_total
+    reduction_ratio = round(delta / before_total, 6) if before_total > 0 else 0.0
+    if before_total <= 0:
+        status = "failed"
+        reason = "source high-fanout edge count is missing"
+    elif after_total <= 0 or missing_after:
+        status = "failed"
+        reason = "replacement route edge counts are missing"
+    elif after_total >= before_total:
+        status = "failed"
+        reason = "replacement route cardinality is not smaller than source edge cardinality"
+    else:
+        status = "passed"
+        reason = "replacement route cardinality is smaller than source edge cardinality"
+    return {
+        "target_projection": target_projection,
+        "status": status,
+        "passed": status == "passed",
+        "proof_gate": GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE,
+        "before_edge_types": list(before_edge_types),
+        "after_edge_types": list(after_edge_types),
+        "before_edge_counts": before_counts,
+        "after_edge_counts": after_counts,
+        "before_edge_count": before_total,
+        "after_edge_count": after_total,
+        "delta": delta,
+        "reduction_ratio": reduction_ratio,
+        "missing_before_edge_types": missing_before,
+        "missing_after_edge_types": missing_after,
+        "comparison_basis": target.get("comparison_basis"),
+        "replacement_read_model": target.get("replacement_read_model"),
+        "reason": reason,
+    }
+
+
+def graph_high_fanout_cardinality_comparison(
+    *,
+    aoa_root: Path,
+    projection: dict[str, Any] | None = None,
+    limit: int = 12,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    selected_limit = max(1, min(int_value(limit, 12), 80))
+    projection_payload = projection if isinstance(projection, dict) else graph_cardinality_projection_read(aoa_root, limit=selected_limit)
+    counts = projection_payload.get("counts") if isinstance(projection_payload.get("counts"), dict) else {}
+    edge_counts = counts.get("edge") if isinstance(counts.get("edge"), dict) else {}
+    projection_status = str(projection_payload.get("status") or "unknown")
+    target_comparisons = [
+        graph_high_fanout_cardinality_target_comparison(
+            edge_counts=edge_counts,
+            target=target,
+        )
+        for target in GRAPH_HIGH_FANOUT_CARDINALITY_TARGETS
+    ]
+    passed_targets = [item for item in target_comparisons if item.get("passed") is True]
+    failed_targets = [item for item in target_comparisons if item.get("passed") is not True]
+    before_total = sum(int_value(item.get("before_edge_count")) for item in target_comparisons)
+    after_total = sum(int_value(item.get("after_edge_count")) for item in target_comparisons)
+    delta = before_total - after_total
+    reduction_ratio = round(delta / before_total, 6) if before_total > 0 else 0.0
+    if projection_status != "current":
+        status = "blocked_cardinality_projection_not_current"
+        ok = False
+        gate_status = "blocked"
+        reason = "graph cardinality projection must be current before before/after comparison can be trusted"
+    elif not target_comparisons:
+        status = "not_needed"
+        ok = True
+        gate_status = "not_needed"
+        reason = "no high-fanout cardinality target projections are configured"
+    elif failed_targets:
+        status = "not_proven"
+        ok = False
+        gate_status = "failed"
+        reason = "one or more target projections do not yet prove lower cardinality"
+    else:
+        status = "proven"
+        ok = True
+        gate_status = "passed"
+        reason = "all configured high-fanout replacement projections prove lower cardinality"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_graph_high_fanout_cardinality_comparison",
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": ok,
+        "mutates": False,
+        "status": status,
+        "projection_status": projection_status,
+        "target_count": len(target_comparisons),
+        "passed_target_count": len(passed_targets),
+        "failed_target_count": len(failed_targets),
+        "target_projections": [str(item.get("target_projection") or "") for item in target_comparisons if item.get("target_projection")],
+        "proven_target_projections": [str(item.get("target_projection") or "") for item in passed_targets if item.get("target_projection")],
+        "failed_target_projections": [str(item.get("target_projection") or "") for item in failed_targets if item.get("target_projection")],
+        "target_comparisons": target_comparisons,
+        "before_edge_count": before_total,
+        "after_edge_count": after_total,
+        "delta": delta,
+        "reduction_ratio": reduction_ratio,
+        "comparison_gate": {
+            "id": GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE,
+            "status": gate_status,
+            "passed": gate_status == "passed",
+            "reason": reason,
+        },
+        "prune_gate": {
+            "status": "blocked_read_only_cardinality_proof_not_apply_route",
+            "apply_ready": False,
+            "can_prune_now": False,
+            "reason": "cardinality comparison is route evidence only; graph-row pruning still requires an explicit reviewed apply route and before/after mutation report",
+            "required_before_apply": [
+                "explicit_apply_route_with_before_after_report",
+                "operator_reviewed_mutation_boundary",
+            ],
+            "mutation_boundary": "read_only_cardinality_comparison_no_graph_rows_are_deleted_or_rebuilt",
+        },
+        "projection_metadata": {
+            "generated_at": projection_payload.get("generated_at"),
+            "updated_at": projection_payload.get("updated_at"),
+            "graph_updated_at": projection_payload.get("graph_updated_at"),
+            "row_count": projection_payload.get("row_count"),
+        },
+        "storage_scope": "cardinality_projection_only_not_physical_sqlite_shrink",
+        "truth_status": "generated_cardinality_comparison_not_prune_permission",
+        "exact_read_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-high-fanout-cardinality-comparison --workspace-root {aoa_root.parent} --aoa-root {aoa_root} --limit {selected_limit}",
+        "authority_boundary": "cardinality comparison is generated route guidance; raw/segment refs and owner source surfaces remain stronger",
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "diagnostics": projection_payload.get("diagnostics", []) if isinstance(projection_payload.get("diagnostics"), list) else [],
+    }
+    if write_report:
+        stem = f"{compact_stamp()}__graph-high-fanout-cardinality-comparison"
+        report_json, report_md = reserve_diagnostic_report_paths(aoa_root / DIAGNOSTICS_ROOT, stem)
+        write_json(report_json, payload)
+        write_markdown(report_md, json_markdown_report("Graph High-Fanout Cardinality Comparison", payload))
+        payload["report_json"] = str(report_json)
+        payload["report_md"] = str(report_md)
+    return payload
+
+
+def graph_high_fanout_merge_cardinality_comparison(
+    proof_states: dict[str, Any],
+    comparison: dict[str, Any],
+) -> dict[str, Any]:
+    target_by_projection = {
+        str(item.get("target_projection") or ""): item
+        for item in comparison.get("target_comparisons", [])
+        if isinstance(item, dict) and item.get("target_projection")
+    } if isinstance(comparison.get("target_comparisons"), list) else {}
+    merged: dict[str, Any] = {}
+    for target_projection, proof_state in proof_states.items():
+        if not isinstance(proof_state, dict):
+            merged[target_projection] = proof_state
+            continue
+        updated = dict(proof_state)
+        target_comparison = target_by_projection.get(str(target_projection))
+        if isinstance(target_comparison, dict):
+            updated["cardinality_comparison"] = target_comparison
+            if proof_state.get("status") == "proven" and target_comparison.get("passed") is True:
+                gates = {
+                    str(gate)
+                    for gate in updated.get("proven_gates", [])
+                    if gate
+                }
+                gates.add(GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE)
+                updated["proven_gates"] = sorted(gates)
+                if isinstance(updated.get("still_missing_gates"), list):
+                    updated["still_missing_gates"] = [
+                        str(gate)
+                        for gate in updated.get("still_missing_gates", [])
+                        if str(gate) != GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE
+                    ]
+        merged[target_projection] = updated
+    return merged
+
+
 def graph_route_signal_replacement_corpus_evidence(aoa_root: Path) -> dict[str, Any]:
     required_mtime = graph_entity_usage_replacement_report_min_source_mtime(aoa_root)
     graph_store_mtime = path_mtime(graph_paths(aoa_root)["store"])
@@ -51082,9 +51316,14 @@ def graph_high_fanout_replacement_plan_for_edge(
             "entity_usage_rollup_samples_match_event_refs",
         ]
         missing_gates = [gate for gate in missing_gates if gate not in proven_gates]
+        status = (
+            "replacement_projection_quality_and_cardinality_proven"
+            if not missing_gates
+            else "replacement_projection_required"
+        )
         return {
             "edge_type": edge_type,
-            "status": "replacement_projection_required",
+            "status": status,
             "candidate_for_cardinality_reduction": True,
             "target_projection": "entity_usage_rollup_by_anchor_session_segment",
             "existing_compact_routes": ["usage-chain", "entity-usage-audit", "entity-registry"],
@@ -51121,6 +51360,9 @@ def graph_high_fanout_replacement_plan_for_edge(
         return {
             "edge_type": edge_type,
             "status": (
+                "compact_layers_exist_replacement_quality_and_cardinality_proven"
+                if not missing_gates
+                else
                 "compact_layers_exist_replacement_quality_proven_cardinality_unproven"
                 if proven_gates
                 else "compact_layers_exist_replacement_projection_unproven"
@@ -51161,6 +51403,9 @@ def graph_high_fanout_replacement_plan_for_edge(
         return {
             "edge_type": edge_type,
             "status": (
+                "typed_event_routes_quality_and_cardinality_proven"
+                if not missing_gates
+                else
                 "typed_event_routes_quality_proven_cardinality_unproven"
                 if timeline_proven
                 else "typed_event_routes_quality_partially_proven_timeline_unproven"
@@ -51282,6 +51527,9 @@ def graph_high_fanout_replacement_readiness(
     elif projection_status != "current":
         gate_status = "blocked_cardinality_projection_not_current"
         reason = "graph cardinality projection must be current before replacement readiness can be trusted"
+    elif not missing_gate_ids:
+        gate_status = "blocked_explicit_apply_route_required"
+        reason = "replacement projections are proven, but graph-row pruning still requires an explicit reviewed apply route and mutation before/after report"
     else:
         gate_status = "blocked_replacement_projection_not_proven"
         reason = "replacement projections must prove refs, freshness, fallback, live scenario quality, and before/after cardinality before any graph-row pruning"
@@ -51358,6 +51606,13 @@ def graph_high_fanout_policy_from_projection(
         GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION: graph_route_signal_replacement_corpus_evidence(aoa_root),
         GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION: graph_structural_event_chain_corpus_evidence(aoa_root),
     }
+    cardinality_comparison = graph_high_fanout_cardinality_comparison(
+        aoa_root=aoa_root,
+        projection=projection,
+        limit=selected_limit,
+        write_report=False,
+    )
+    proof_states = graph_high_fanout_merge_cardinality_comparison(proof_states, cardinality_comparison)
     for row in edge_policies:
         row["replacement_plan"] = graph_high_fanout_replacement_plan_for_edge(
             aoa_root=aoa_root,
@@ -51410,6 +51665,22 @@ def graph_high_fanout_policy_from_projection(
             ],
         },
     ]
+    if cardinality_comparison.get("status") != "proven":
+        next_actions.append(
+            {
+                "id": "prove_high_fanout_before_after_cardinality",
+                "reason": "replacement projections need a current before/after cardinality comparison before any reviewed apply route",
+                "mutates": False,
+                "command": [
+                    *session_memory_cli_command(aoa_root),
+                    "graph-high-fanout-cardinality-comparison",
+                    "--aoa-root",
+                    str(aoa_root),
+                    "--limit",
+                    str(selected_limit),
+                ],
+            }
+        )
     if status == "large_cardinality_dominates":
         next_actions.append(
             {
@@ -51446,6 +51717,7 @@ def graph_high_fanout_policy_from_projection(
         "graph_event_route_signal_edge_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
         "graph_event_relationship_edge_policy": GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY,
         "graph_route_signal_materialization_limits": graph_route_signal_materialization_limits(),
+        "replacement_cardinality_comparison": cardinality_comparison,
         "replacement_proof_states": proof_states,
         "replacement_readiness": replacement_readiness,
         "prune_gate": replacement_readiness.get("prune_gate"),
@@ -73925,6 +74197,47 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
         if ok and not payload.get("exact_next_command_present"):
             result["status"] = "warn"
             result.setdefault("quality_flags", []).append("maintenance_status_missing_exact_next_command")
+    elif profile == "graph_high_fanout_cardinality_comparison":
+        comparison_gate = payload.get("comparison_gate") if isinstance(payload.get("comparison_gate"), dict) else {}
+        prune_gate = payload.get("prune_gate") if isinstance(payload.get("prune_gate"), dict) else {}
+        target_comparisons = [
+            item
+            for item in payload.get("target_comparisons", [])
+            if isinstance(item, dict)
+        ] if isinstance(payload.get("target_comparisons"), list) else []
+        result.update(
+            {
+                "comparison_status": payload.get("status"),
+                "projection_status": payload.get("projection_status"),
+                "mutates": payload.get("mutates"),
+                "target_count": int_value(payload.get("target_count"), len(target_comparisons)),
+                "passed_target_count": int_value(payload.get("passed_target_count")),
+                "failed_target_count": int_value(payload.get("failed_target_count")),
+                "target_projections": payload.get("target_projections"),
+                "proven_target_projections": payload.get("proven_target_projections"),
+                "before_edge_count": int_value(payload.get("before_edge_count")),
+                "after_edge_count": int_value(payload.get("after_edge_count")),
+                "reduction_ratio": payload.get("reduction_ratio"),
+                "comparison_gate_status": comparison_gate.get("status"),
+                "comparison_gate_passed": comparison_gate.get("passed"),
+                "replacement_prune_apply_ready": prune_gate.get("apply_ready"),
+                "replacement_prune_gate_status": prune_gate.get("status"),
+                "storage_scope": payload.get("storage_scope"),
+            }
+        )
+        quality_flags = result.setdefault("quality_flags", [])
+        if payload.get("status") != "proven":
+            quality_flags.append("graph_cardinality_comparison_not_proven")
+        if comparison_gate.get("passed") is not True:
+            quality_flags.append("graph_cardinality_comparison_gate_not_passed")
+        if int_value(payload.get("failed_target_count")) > 0:
+            quality_flags.append("graph_cardinality_comparison_failed_targets")
+        if payload.get("mutates") is not False:
+            quality_flags.append("graph_cardinality_comparison_mutates")
+        if prune_gate.get("apply_ready") is not False:
+            quality_flags.append("graph_cardinality_comparison_prune_gate_not_closed")
+        if ok and quality_flags:
+            result["status"] = "warn"
     elif profile == "graph_high_fanout_replacement":
         if payload.get("artifact_type") == "session_memory_graph_high_fanout_replacement_scenario_audit":
             quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
@@ -74012,7 +74325,13 @@ def live_scenario_result(profile: str, payload: dict[str, Any], *, elapsed_ms: i
             result["status"] = "warn"
     if not ok:
         result["status"] = "failed"
-    if not counts and profile not in {"literal_planner", "entity_registry_lookup", "maintenance_status", "graph_high_fanout_replacement"}:
+    if not counts and profile not in {
+        "literal_planner",
+        "entity_registry_lookup",
+        "maintenance_status",
+        "graph_high_fanout_replacement",
+        "graph_high_fanout_cardinality_comparison",
+    }:
         result.setdefault("quality_flags", []).append("no_raw_or_segment_refs_detected")
         if result["status"] == "passed":
             result["status"] = "warn"
@@ -74075,6 +74394,8 @@ def live_scenario_profile_next_route(profile: str, first_ref: dict[str, Any]) ->
         return "Run graph-freshness-check, then reopen graph route evidence refs before trusting graph synthesis."
     if profile == "graph_high_fanout_replacement":
         return "Run graph-entity-usage-replacement-proof for the same anchor, inspect proof_gates and edge_match, then widen only through reviewed live-scenario corpus cases."
+    if profile == "graph_high_fanout_cardinality_comparison":
+        return "Run graph-high-fanout-cardinality-comparison --write-report, inspect target_comparisons, then use graph-high-fanout-policy for the reviewed apply-route boundary."
     if profile == "route_rollup_query":
         return "Run search-operational-route-rollup-query with the same query/layer, then open returned raw/segment refs before treating the rollup as proof."
     if profile == "direct_event_rollup_query":
@@ -74183,6 +74504,7 @@ def live_scenario_audit(
         "graph_bridge",
         "graph_timeline",
         "graph_high_fanout_replacement",
+        "graph_high_fanout_cardinality_comparison",
         "route_rollup_query",
         "direct_event_rollup_query",
         "maintenance_status",
@@ -74372,6 +74694,17 @@ def live_scenario_audit(
                         per_route_limit=max(selected_limit * 4, 4),
                         consequence_window=4,
                         sample_limit=selected_limit,
+                    ),
+                )
+            )
+        elif profile == "graph_high_fanout_cardinality_comparison":
+            scenarios.append(
+                run(
+                    profile,
+                    lambda: graph_high_fanout_cardinality_comparison(
+                        aoa_root=aoa_root,
+                        limit=max(selected_limit, 12),
+                        write_report=False,
                     ),
                 )
             )
@@ -74674,6 +75007,19 @@ def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
             "max_sample_elapsed_ms": scenario.get("max_sample_elapsed_ms"),
             "replacement_prune_apply_ready": scenario.get("replacement_prune_apply_ready"),
             "replacement_prune_gate_status": scenario.get("replacement_prune_gate_status"),
+            "comparison_status": scenario.get("comparison_status"),
+            "projection_status": scenario.get("projection_status"),
+            "target_count": scenario.get("target_count"),
+            "passed_target_count": scenario.get("passed_target_count"),
+            "failed_target_count": scenario.get("failed_target_count"),
+            "target_projections": scenario.get("target_projections"),
+            "proven_target_projections": scenario.get("proven_target_projections"),
+            "before_edge_count": scenario.get("before_edge_count"),
+            "after_edge_count": scenario.get("after_edge_count"),
+            "reduction_ratio": scenario.get("reduction_ratio"),
+            "comparison_gate_status": scenario.get("comparison_gate_status"),
+            "comparison_gate_passed": scenario.get("comparison_gate_passed"),
+            "storage_scope": scenario.get("storage_scope"),
             "entity_count": scenario.get("entity_count"),
         }
         profiles.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
@@ -75118,6 +75464,54 @@ def live_scenario_profile_expectation_failures(scenario: dict[str, Any], expecta
         and int_value(scenario.get("proof_failed_core_gate_count")) > 0
     ):
         failures.append(f"{profile}:proof_failed_core_gate_count:{scenario.get('proof_failed_core_gate_count')}")
+    if (
+        expectation.get("require_graph_cardinality_comparison_proven") is True
+        and (
+            scenario.get("comparison_status") != "proven"
+            or scenario.get("comparison_gate_passed") is not True
+        )
+    ):
+        failures.append(
+            f"{profile}:comparison:{scenario.get('comparison_status')}/gate_passed={scenario.get('comparison_gate_passed')}"
+        )
+    if (
+        expectation.get("require_graph_cardinality_prune_gate_closed") is True
+        and scenario.get("replacement_prune_apply_ready") is not False
+    ):
+        failures.append(f"{profile}:replacement_prune_apply_ready:{scenario.get('replacement_prune_apply_ready')}")
+    for expectation_key, scenario_key in (
+        ("min_graph_cardinality_target_count", "target_count"),
+        ("min_graph_cardinality_passed_target_count", "passed_target_count"),
+        ("min_graph_cardinality_before_edge_count", "before_edge_count"),
+        ("min_graph_cardinality_after_edge_count", "after_edge_count"),
+    ):
+        minimum = int_value(expectation.get(expectation_key))
+        if minimum and int_value(scenario.get(scenario_key)) < minimum:
+            failures.append(f"{profile}:{scenario_key}:{scenario.get(scenario_key)}<{minimum}")
+    max_graph_cardinality_failed_target_count = expectation.get("max_graph_cardinality_failed_target_count")
+    if (
+        max_graph_cardinality_failed_target_count is not None
+        and int_value(scenario.get("failed_target_count")) > int_value(max_graph_cardinality_failed_target_count)
+    ):
+        failures.append(
+            f"{profile}:failed_target_count:{scenario.get('failed_target_count')}>{int_value(max_graph_cardinality_failed_target_count)}"
+        )
+    min_graph_cardinality_reduction_ratio = expectation.get("min_graph_cardinality_reduction_ratio")
+    if (
+        min_graph_cardinality_reduction_ratio is not None
+        and ops_float_value(scenario.get("reduction_ratio")) < ops_float_value(min_graph_cardinality_reduction_ratio)
+    ):
+        failures.append(
+            f"{profile}:reduction_ratio:{scenario.get('reduction_ratio')}<{ops_float_value(min_graph_cardinality_reduction_ratio)}"
+        )
+    target_projections = {str(item) for item in scenario.get("target_projections", []) if item} if isinstance(scenario.get("target_projections"), list) else set()
+    proven_target_projections = {str(item) for item in scenario.get("proven_target_projections", []) if item} if isinstance(scenario.get("proven_target_projections"), list) else set()
+    for target_projection in expectation.get("required_graph_cardinality_target_projections", []) if isinstance(expectation.get("required_graph_cardinality_target_projections"), list) else []:
+        if str(target_projection) not in target_projections:
+            failures.append(f"{profile}:missing_cardinality_target_projection:{target_projection}")
+    for target_projection in expectation.get("required_graph_cardinality_proven_target_projections", []) if isinstance(expectation.get("required_graph_cardinality_proven_target_projections"), list) else []:
+        if str(target_projection) not in proven_target_projections:
+            failures.append(f"{profile}:missing_cardinality_proven_target_projection:{target_projection}")
     next_action_ids = {str(item) for item in scenario.get("next_action_ids", []) if item} if isinstance(scenario.get("next_action_ids"), list) else set()
     for action_id in expectation.get("required_next_action_ids", []) if isinstance(expectation.get("required_next_action_ids"), list) else []:
         if str(action_id) not in next_action_ids:
@@ -78219,6 +78613,18 @@ def command_graph_cardinality(args: argparse.Namespace) -> int:
         aoa_root=root,
         refresh=args.refresh,
         limit=args.limit,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_graph_high_fanout_cardinality_comparison(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = graph_high_fanout_cardinality_comparison(
+        aoa_root=root,
+        limit=args.limit,
+        write_report=args.write_report,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -84235,6 +84641,17 @@ def build_parser() -> argparse.ArgumentParser:
     graph_cardinality_parser.add_argument("--refresh", action="store_true", help="Recompute the graph_type_counts projection from graph.sqlite3.")
     graph_cardinality_parser.add_argument("--limit", type=int, default=40, help="Top type rows to include for each graph kind.")
     graph_cardinality_parser.set_defaults(func=command_graph_cardinality)
+
+    graph_high_fanout_cardinality_parser = sub.add_parser(
+        "graph-high-fanout-cardinality-comparison",
+        aliases=["graph-high-fanout-before-after-cardinality"],
+        help="Read cached graph cardinality counts and prove before/after replacement projection cardinality without mutating graph rows.",
+    )
+    graph_high_fanout_cardinality_parser.add_argument("--workspace-root")
+    graph_high_fanout_cardinality_parser.add_argument("--aoa-root")
+    graph_high_fanout_cardinality_parser.add_argument("--limit", type=int, default=12, help="Top edge/node type row budget to keep in related packets.")
+    graph_high_fanout_cardinality_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown comparison reports under .aoa/diagnostics.")
+    graph_high_fanout_cardinality_parser.set_defaults(func=command_graph_high_fanout_cardinality_comparison)
 
     graph_high_fanout_policy_parser = sub.add_parser(
         "graph-high-fanout-policy",

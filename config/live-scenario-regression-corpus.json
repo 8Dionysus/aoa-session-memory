@@ -888,6 +888,55 @@
       }
     },
     {
+      "id": "graph_high_fanout_cardinality_comparison_contract",
+      "profiles": [
+        "graph_high_fanout_cardinality_comparison"
+      ],
+      "seed": "corpus-graph-high-fanout-cardinality-comparison",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 12,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-07",
+        "note": "High-fanout replacement readiness may only close the before/after cardinality gate after a current read-only projection comparison proves lower cardinality for every configured replacement route while keeping graph-row pruning closed."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "graph_high_fanout_cardinality_comparison",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "require_graph_cardinality_comparison_proven": true,
+            "require_graph_cardinality_prune_gate_closed": true,
+            "min_graph_cardinality_target_count": 3,
+            "min_graph_cardinality_passed_target_count": 3,
+            "max_graph_cardinality_failed_target_count": 0,
+            "min_graph_cardinality_before_edge_count": 1,
+            "min_graph_cardinality_after_edge_count": 1,
+            "min_graph_cardinality_reduction_ratio": 0.1,
+            "required_graph_cardinality_target_projections": [
+              "entity_usage_rollup_by_anchor_session_segment",
+              "route_signal_cooccurrence_rollup_by_segment_session",
+              "task_answer_goal_timeline_rollup"
+            ],
+            "required_graph_cardinality_proven_target_projections": [
+              "entity_usage_rollup_by_anchor_session_segment",
+              "route_signal_cooccurrence_rollup_by_segment_session",
+              "task_answer_goal_timeline_rollup"
+            ],
+            "max_elapsed_ms": 10000
+          }
+        ]
+      }
+    },
+    {
       "id": "graph_timeline_goal_completed_contract",
       "profiles": [
         "graph_timeline"

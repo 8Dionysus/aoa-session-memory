@@ -6078,6 +6078,74 @@ def test_live_scenario_audit_routes_graph_high_fanout_replacement_profile(tmp_pa
     assert scenario["replacement_prune_apply_ready"] is False
 
 
+def test_live_scenario_audit_routes_graph_high_fanout_cardinality_profile(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def fake_cardinality_comparison(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["aoa_root"] == aoa_root
+        assert kwargs["limit"] == 12
+        assert kwargs["write_report"] is False
+        return {
+            "artifact_type": "session_memory_graph_high_fanout_cardinality_comparison",
+            "ok": True,
+            "mutates": False,
+            "status": "proven",
+            "projection_status": "current",
+            "target_count": 3,
+            "passed_target_count": 3,
+            "failed_target_count": 0,
+            "target_projections": [
+                module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            ],
+            "proven_target_projections": [
+                module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            ],
+            "before_edge_count": 2500,
+            "after_edge_count": 471,
+            "reduction_ratio": 0.8116,
+            "comparison_gate": {
+                "id": "before_after_cardinality_comparison",
+                "status": "passed",
+                "passed": True,
+            },
+            "prune_gate": {
+                "status": "blocked_read_only_cardinality_proof_not_apply_route",
+                "apply_ready": False,
+            },
+            "storage_scope": "cardinality_projection_only_not_physical_sqlite_shrink",
+        }
+
+    monkeypatch.setattr(module, "graph_high_fanout_cardinality_comparison", fake_cardinality_comparison)
+
+    audit = module.live_scenario_audit(
+        aoa_root=aoa_root,
+        profiles=["graph_high_fanout_cardinality_comparison"],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "graph_high_fanout_cardinality_comparison"
+    assert scenario["status"] == "passed"
+    assert scenario["comparison_status"] == "proven"
+    assert scenario["projection_status"] == "current"
+    assert scenario["target_count"] == 3
+    assert scenario["passed_target_count"] == 3
+    assert scenario["failed_target_count"] == 0
+    assert scenario["comparison_gate_passed"] is True
+    assert scenario["replacement_prune_apply_ready"] is False
+    assert scenario["storage_scope"] == "cardinality_projection_only_not_physical_sqlite_shrink"
+
+
 def test_live_scenario_audit_routes_graph_replacement_probes(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir(parents=True)
@@ -6420,6 +6488,96 @@ def test_live_scenario_profile_expectations_enforce_graph_replacement_proof() ->
     assert "graph_high_fanout_replacement:missing_graph_replacement_anchor:aoa-decision" in failing
     assert "graph_high_fanout_replacement:missing_graph_replacement_kind:skill" in failing
     assert "graph_high_fanout_replacement:max_sample_elapsed_ms:1200>1000" in failing
+
+
+def test_live_scenario_profile_expectations_enforce_graph_cardinality_comparison() -> None:
+    expectation = {
+        "profile": "graph_high_fanout_cardinality_comparison",
+        "allowed_statuses": ["passed"],
+        "require_graph_cardinality_comparison_proven": True,
+        "require_graph_cardinality_prune_gate_closed": True,
+        "min_graph_cardinality_target_count": 3,
+        "min_graph_cardinality_passed_target_count": 3,
+        "max_graph_cardinality_failed_target_count": 0,
+        "min_graph_cardinality_before_edge_count": 1,
+        "min_graph_cardinality_after_edge_count": 1,
+        "min_graph_cardinality_reduction_ratio": 0.1,
+        "required_graph_cardinality_target_projections": [
+            module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+            module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+        ],
+        "required_graph_cardinality_proven_target_projections": [
+            module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+            module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+        ],
+    }
+
+    failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_high_fanout_cardinality_comparison",
+            "status": "passed",
+            "comparison_status": "proven",
+            "comparison_gate_passed": True,
+            "replacement_prune_apply_ready": False,
+            "target_count": 3,
+            "passed_target_count": 3,
+            "failed_target_count": 0,
+            "before_edge_count": 2500,
+            "after_edge_count": 471,
+            "reduction_ratio": 0.8116,
+            "target_projections": [
+                module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            ],
+            "proven_target_projections": [
+                module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+                module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            ],
+        },
+        expectation,
+    )
+
+    assert failures == []
+
+    failing = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "graph_high_fanout_cardinality_comparison",
+            "status": "passed",
+            "comparison_status": "not_proven",
+            "comparison_gate_passed": False,
+            "replacement_prune_apply_ready": True,
+            "target_count": 2,
+            "passed_target_count": 1,
+            "failed_target_count": 2,
+            "before_edge_count": 0,
+            "after_edge_count": 0,
+            "reduction_ratio": 0.01,
+            "target_projections": [module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION],
+            "proven_target_projections": [],
+        },
+        expectation,
+    )
+
+    assert "graph_high_fanout_cardinality_comparison:comparison:not_proven/gate_passed=False" in failing
+    assert "graph_high_fanout_cardinality_comparison:replacement_prune_apply_ready:True" in failing
+    assert "graph_high_fanout_cardinality_comparison:target_count:2<3" in failing
+    assert "graph_high_fanout_cardinality_comparison:passed_target_count:1<3" in failing
+    assert "graph_high_fanout_cardinality_comparison:failed_target_count:2>0" in failing
+    assert "graph_high_fanout_cardinality_comparison:before_edge_count:0<1" in failing
+    assert "graph_high_fanout_cardinality_comparison:after_edge_count:0<1" in failing
+    assert "graph_high_fanout_cardinality_comparison:reduction_ratio:0.01<0.1" in failing
+    assert (
+        "graph_high_fanout_cardinality_comparison:missing_cardinality_target_projection:"
+        f"{module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION}"
+    ) in failing
+    assert (
+        "graph_high_fanout_cardinality_comparison:missing_cardinality_proven_target_projection:"
+        f"{module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION}"
+    ) in failing
 
 
 def test_live_scenario_result_exposes_entity_usage_spread_counts() -> None:
@@ -8293,6 +8451,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     high_fanout_args = parser.parse_args(["graph-high-fanout-policy", "--limit", "7"])
     assert high_fanout_args.func == module.command_graph_high_fanout_policy
     assert high_fanout_args.limit == 7
+    high_fanout_cardinality_args = parser.parse_args(
+        ["graph-high-fanout-cardinality-comparison", "--limit", "9", "--write-report"]
+    )
+    assert high_fanout_cardinality_args.func == module.command_graph_high_fanout_cardinality_comparison
+    assert high_fanout_cardinality_args.limit == 9
+    assert high_fanout_cardinality_args.write_report is True
     replacement_proof_args = parser.parse_args(
         ["graph-entity-usage-replacement-proof", "aoa-session-memory-mcp", "--kind", "mcp", "--sample-limit", "4"]
     )
@@ -24463,6 +24627,135 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
     assert structural_plan["can_prune_now"] is False
     assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
     assert payload["replacement_proof_states"][module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION]["status"] == "proven"
+
+
+def test_graph_high_fanout_cardinality_comparison_proves_configured_targets(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    projection = {
+        "status": "current",
+        "row_count": 16,
+        "generated_at": "2026-07-07T00:00:00Z",
+        "updated_at": "2026-07-07T00:01:00Z",
+        "graph_updated_at": "2026-07-07T00:00:30Z",
+        "counts": {
+            "node": {"event": 700},
+            "edge": {
+                "event_mentions_registered_entity": 1000,
+                "session_has_registered_entity": 50,
+                "mentions_route_signal": 800,
+                "segment_has_route_signal": 120,
+                "session_has_route_signal": 80,
+                "has_event": 700,
+                "answered_by": 100,
+                "responds_to": 100,
+                "has_task_episode": 5,
+                "goal_lifecycle_has_event": 10,
+                "goal_lifecycle_in_task_episode": 4,
+                "has_goal_lifecycle": 2,
+            },
+        },
+        "diagnostics": [],
+    }
+
+    payload = module.graph_high_fanout_cardinality_comparison(aoa_root=aoa_root, projection=projection, limit=12)
+
+    assert payload["artifact_type"] == "session_memory_graph_high_fanout_cardinality_comparison"
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["status"] == "proven"
+    assert payload["target_count"] == 3
+    assert payload["passed_target_count"] == 3
+    assert payload["failed_target_count"] == 0
+    assert payload["before_edge_count"] == 2500
+    assert payload["after_edge_count"] == 471
+    assert payload["comparison_gate"]["id"] == "before_after_cardinality_comparison"
+    assert payload["comparison_gate"]["passed"] is True
+    assert payload["prune_gate"]["apply_ready"] is False
+    assert payload["storage_scope"] == "cardinality_projection_only_not_physical_sqlite_shrink"
+    assert payload["proven_target_projections"] == [
+        module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+        module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+        module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+    ]
+
+
+def test_graph_high_fanout_policy_closes_cardinality_gate_but_not_prune_apply(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    projection = {
+        "status": "current",
+        "counts": {
+            "node": {"event": 2_000_000},
+            "edge": {
+                "event_mentions_registered_entity": 3_700_000,
+                "session_has_registered_entity": 58_000,
+                "mentions_route_signal": 3_000_000,
+                "segment_has_route_signal": 340_000,
+                "session_has_route_signal": 810_000,
+                "has_event": 2_100_000,
+                "answered_by": 450_000,
+                "responds_to": 450_000,
+                "has_task_episode": 8_000,
+                "goal_lifecycle_has_event": 1_000,
+                "goal_lifecycle_in_task_episode": 600,
+                "has_goal_lifecycle": 250,
+            },
+        },
+        "top": {"node": [], "edge": []},
+        "diagnostics": [],
+    }
+    monkeypatch.setattr(
+        module,
+        "graph_entity_usage_replacement_corpus_evidence",
+        lambda _aoa_root: {
+            "status": "proven",
+            "target_projection": module.GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION,
+            "proven_gates": sorted(module.GRAPH_ENTITY_USAGE_REPLACEMENT_PROVEN_GATES),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_route_signal_replacement_corpus_evidence",
+        lambda _aoa_root: {
+            "status": "proven",
+            "target_projection": module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
+            "proven_gates": sorted(module.GRAPH_ROUTE_SIGNAL_REPLACEMENT_PROVEN_GATES),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_structural_event_chain_corpus_evidence",
+        lambda _aoa_root: {
+            "status": "proven",
+            "target_projection": module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION,
+            "proven_gates": sorted(module.GRAPH_STRUCTURAL_EVENT_CHAIN_PROVEN_GATES),
+            "still_missing_gates": ["before_after_cardinality_comparison"],
+        },
+    )
+
+    payload = module.graph_high_fanout_policy_from_projection(aoa_root=aoa_root, projection=projection, limit=6)
+
+    assert payload["replacement_cardinality_comparison"]["status"] == "proven"
+    assert payload["replacement_readiness"]["status"] == "ready_for_reviewed_apply_route"
+    assert payload["replacement_readiness"]["proof_gap_count"] == 0
+    assert payload["replacement_readiness"]["missing_proof_gates"] == []
+    assert "before_after_cardinality_comparison" in payload["replacement_readiness"]["proven_proof_gates"]
+    assert payload["replacement_readiness"]["prune_gate"]["status"] == "blocked_explicit_apply_route_required"
+    assert payload["replacement_readiness"]["prune_gate"]["apply_ready"] is False
+    assert "prove_high_fanout_before_after_cardinality" not in {
+        str(action.get("id"))
+        for action in payload["next_actions"]
+        if isinstance(action, dict)
+    }
+    for edge_type in ("event_mentions_registered_entity", "mentions_route_signal", "has_event"):
+        plan = next(row["replacement_plan"] for row in payload["edge_policies"] if row["edge_type"] == edge_type)
+        assert plan["missing_proof_gates"] == []
+        assert "before_after_cardinality_comparison" in plan["proven_proof_gates"]
+        assert plan["can_prune_now"] is False
 
 
 def test_graph_entity_usage_replacement_proof_matches_usage_events_to_graph_edges(
