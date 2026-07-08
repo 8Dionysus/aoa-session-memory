@@ -58863,6 +58863,139 @@ def search_document_hotset_pressure(search_shards: dict[str, Any]) -> dict[str, 
     }
 
 
+def latest_search_operational_projection_plan_summary(aoa_root: Path) -> dict[str, Any]:
+    reports = diagnostic_json_payloads(aoa_root, "*__search-operational-projection-plan.json", limit=1)
+    command = [
+        *session_memory_cli_command(aoa_root),
+        "search-operational-projection-plan",
+        "--workspace-root",
+        str(aoa_root.parent),
+        "--aoa-root",
+        str(aoa_root),
+        "--write-report",
+    ]
+    if not reports:
+        return {
+            "exists": False,
+            "status": "missing",
+            "exact_refresh_command": shlex.join(command),
+            "next_route": "run_search_operational_projection_plan_for_fresh_remaining_pressure",
+            "truth_status": "diagnostic_projection_pointer_not_archive_truth",
+        }
+
+    report = reports[0]
+    remaining = (
+        report.get("remaining_projection_pressure")
+        if isinstance(report.get("remaining_projection_pressure"), dict)
+        else {}
+    )
+    context_tail = (
+        report.get("context_tail_rehome_status")
+        if isinstance(report.get("context_tail_rehome_status"), dict)
+        else {}
+    )
+    direct_model = (
+        report.get("direct_operational_event_read_model")
+        if isinstance(report.get("direct_operational_event_read_model"), dict)
+        else {}
+    )
+    physical = report.get("physical_shrink_plan") if isinstance(report.get("physical_shrink_plan"), dict) else {}
+    counts = remaining.get("counts") if isinstance(remaining.get("counts"), dict) else {}
+    return {
+        "exists": True,
+        "source": diagnostic_report_source(report),
+        "status": report.get("status"),
+        "ok": report.get("ok"),
+        "generated_at": report.get("generated_at"),
+        "sample": {
+            key: (report.get("sample") or {}).get(key)
+            for key in (
+                "selection",
+                "max_shards",
+                "target_shard",
+                "selected_shard_count",
+                "successful_shard_count",
+            )
+            if isinstance(report.get("sample"), dict) and key in (report.get("sample") or {})
+        },
+        "remaining_projection_pressure": {
+            "status": remaining.get("status"),
+            "event_total": remaining.get("event_total"),
+            "counts": {
+                key: counts.get(key)
+                for key in (
+                    "direct_operational_event_count",
+                    "protected_agent_or_task_context_count",
+                    "active_context_tail_candidate_count",
+                    "active_route_ref_backed_candidate_count",
+                    "unrouted_context_tail_keep_count",
+                    "already_rehomed_context_tail_ref_count",
+                )
+                if key in counts
+            },
+            "dominant_classes": [
+                {key: item.get(key) for key in ("id", "count") if key in item}
+                for item in (remaining.get("dominant_classes") or [])[:5]
+                if isinstance(item, dict)
+            ],
+            "role_counts": remaining.get("role_counts") if isinstance(remaining.get("role_counts"), dict) else {},
+            "raw_text_fallback_status": remaining.get("raw_text_fallback_status"),
+            "next_design_route": remaining.get("next_design_route"),
+            "quality_boundary": remaining.get("quality_boundary"),
+        },
+        "context_tail_rehome_status": {
+            key: context_tail.get(key)
+            for key in (
+                "status",
+                "applied",
+                "already_rehomed_route_ref_document_count",
+                "already_rehomed_route_ref_row_count",
+                "active_route_ref_backed_candidate_count",
+                "active_unrouted_keep_candidate_count",
+                "next_route",
+            )
+            if key in context_tail
+        },
+        "direct_operational_event_read_model": {
+            key: direct_model.get(key)
+            for key in (
+                "status",
+                "needs_refresh",
+                "size_human",
+                "generated_at",
+                "direct_event_count",
+                "route_bound_direct_event_count",
+                "unrouted_direct_event_count",
+                "direct_event_rollup_row_count",
+                "direct_event_posting_count",
+                "source_mismatch_count",
+                "exact_query_command",
+            )
+            if key in direct_model
+        },
+        "physical_shrink_plan": {
+            key: physical.get(key)
+            for key in (
+                "status",
+                "safe_to_apply_physical_compaction",
+                "apply_status",
+                "blocked_reason",
+                "next_implementation_route",
+            )
+            if key in physical
+        },
+        "elapsed_ms": report.get("elapsed_ms"),
+        "exact_refresh_command": shlex.join(command),
+        "next_route": (
+            remaining.get("next_design_route")
+            or physical.get("next_implementation_route")
+            or "use_latest_operational_projection_plan_as_search_pressure_context"
+        ),
+        "quality_boundary": "latest operational projection plan is generated planning evidence; raw and segment refs remain authority",
+        "truth_status": "diagnostic_projection_for_operator_routing_not_archive_truth",
+    }
+
+
 def session_memory_operational_route_rollup_status(
     *,
     aoa_root: Path,
@@ -59070,6 +59203,7 @@ def session_memory_search_pressure_summary(
     actionable_noncurrent_shard_count = int_value(search_shards.get("actionable_noncurrent_shard_count"))
     deferred_live_session_count = int_value(search_shards.get("deferred_live_session_count"))
     document_hotset = search_document_hotset_pressure(search_shards)
+    latest_operational_projection_plan = latest_search_operational_projection_plan_summary(aoa_root)
     operational_route_rollup = session_memory_operational_route_rollup_status(
         aoa_root=aoa_root,
         search_shards=search_shards,
@@ -59222,6 +59356,7 @@ def session_memory_search_pressure_summary(
         "raw_text_query_route": search_shards.get("raw_text_query_route"),
         "raw_text_fallback_next_route": raw_text_fallback.get("next_route"),
         "document_hotset": document_hotset,
+        "latest_operational_projection_plan": latest_operational_projection_plan,
         "operational_route_rollup": operational_route_rollup,
         "direct_operational_event_read_model": direct_event_rollup,
         "context_tail_rehome_status": context_tail_rehome_status,
@@ -68740,6 +68875,31 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         ]
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
+    latest_operational_projection = (
+        search_pressure.get("latest_operational_projection_plan")
+        if isinstance(search_pressure.get("latest_operational_projection_plan"), dict)
+        else {}
+    )
+    latest_remaining_pressure = (
+        latest_operational_projection.get("remaining_projection_pressure")
+        if isinstance(latest_operational_projection.get("remaining_projection_pressure"), dict)
+        else {}
+    )
+    latest_context_tail_rehome = (
+        latest_operational_projection.get("context_tail_rehome_status")
+        if isinstance(latest_operational_projection.get("context_tail_rehome_status"), dict)
+        else {}
+    )
+    latest_projection_direct_model = (
+        latest_operational_projection.get("direct_operational_event_read_model")
+        if isinstance(latest_operational_projection.get("direct_operational_event_read_model"), dict)
+        else {}
+    )
+    latest_projection_physical_shrink = (
+        latest_operational_projection.get("physical_shrink_plan")
+        if isinstance(latest_operational_projection.get("physical_shrink_plan"), dict)
+        else {}
+    )
     recent_problem_jobs = (
         operations.get("recent_problem_jobs") if isinstance(operations.get("recent_problem_jobs"), list) else []
     )
@@ -68881,6 +69041,106 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
                 }
             }
             if isinstance(search_pressure.get("physical_compaction"), dict)
+            else {}
+        )
+        | (
+            {
+                "latest_operational_projection_plan": {
+                    key: latest_operational_projection.get(key)
+                    for key in (
+                        "exists",
+                        "status",
+                        "ok",
+                        "generated_at",
+                        "elapsed_ms",
+                        "exact_refresh_command",
+                        "next_route",
+                        "quality_boundary",
+                        "truth_status",
+                    )
+                    if key in latest_operational_projection
+                }
+                | (
+                    {
+                        "remaining_projection_pressure": {
+                            key: latest_remaining_pressure.get(key)
+                            for key in (
+                                "status",
+                                "event_total",
+                                "counts",
+                                "dominant_classes",
+                                "role_counts",
+                                "raw_text_fallback_status",
+                                "next_design_route",
+                                "quality_boundary",
+                            )
+                            if key in latest_remaining_pressure
+                        }
+                    }
+                    if latest_remaining_pressure
+                    else {}
+                )
+                | (
+                    {
+                        "context_tail_rehome_status": {
+                            key: latest_context_tail_rehome.get(key)
+                            for key in (
+                                "status",
+                                "applied",
+                                "already_rehomed_route_ref_document_count",
+                                "already_rehomed_route_ref_row_count",
+                                "active_route_ref_backed_candidate_count",
+                                "active_unrouted_keep_candidate_count",
+                                "next_route",
+                            )
+                            if key in latest_context_tail_rehome
+                        }
+                    }
+                    if latest_context_tail_rehome
+                    else {}
+                )
+                | (
+                    {
+                        "direct_operational_event_read_model": {
+                            key: latest_projection_direct_model.get(key)
+                            for key in (
+                                "status",
+                                "needs_refresh",
+                                "size_human",
+                                "generated_at",
+                                "direct_event_count",
+                                "route_bound_direct_event_count",
+                                "unrouted_direct_event_count",
+                                "direct_event_rollup_row_count",
+                                "direct_event_posting_count",
+                                "source_mismatch_count",
+                                "exact_query_command",
+                            )
+                            if key in latest_projection_direct_model
+                        }
+                    }
+                    if latest_projection_direct_model
+                    else {}
+                )
+                | (
+                    {
+                        "physical_shrink_plan": {
+                            key: latest_projection_physical_shrink.get(key)
+                            for key in (
+                                "status",
+                                "safe_to_apply_physical_compaction",
+                                "apply_status",
+                                "blocked_reason",
+                                "next_implementation_route",
+                            )
+                            if key in latest_projection_physical_shrink
+                        }
+                    }
+                    if latest_projection_physical_shrink
+                    else {}
+                )
+            }
+            if latest_operational_projection
             else {}
         )
         | (

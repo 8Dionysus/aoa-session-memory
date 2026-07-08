@@ -25544,6 +25544,73 @@ def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(
 def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
+    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
+    diagnostics.mkdir()
+    module.write_json(
+        diagnostics / "20260621T001000Z__search-operational-projection-plan.json",
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_search_operational_event_projection_plan",
+            "generated_at": "2026-06-21T00:10:00Z",
+            "ok": True,
+            "status": "remaining_pressure_measured",
+            "sample": {
+                "selection": "largest_existing_search_shards",
+                "max_shards": 3,
+                "selected_shard_count": 2,
+                "successful_shard_count": 2,
+            },
+            "remaining_projection_pressure": {
+                "status": "direct_operational_event_pressure_active",
+                "event_total": 2000,
+                "counts": {
+                    "direct_operational_event_count": 1200,
+                    "protected_agent_or_task_context_count": 250,
+                    "active_context_tail_candidate_count": 75,
+                    "active_route_ref_backed_candidate_count": 0,
+                    "unrouted_context_tail_keep_count": 75,
+                    "already_rehomed_context_tail_ref_count": 475,
+                },
+                "dominant_classes": [
+                    {"id": "direct_operational_event_count", "count": 1200},
+                    {"id": "already_rehomed_context_tail_ref_count", "count": 475},
+                ],
+                "role_counts": {"usage": 500, "result": 400},
+                "raw_text_fallback_status": "monolith_required_for_raw_text_query",
+                "next_design_route": "prove_direct_operational_event_read_model_before_more_physical_shrink",
+                "quality_boundary": "planning evidence only",
+            },
+            "context_tail_rehome_status": {
+                "status": "applied_current",
+                "applied": True,
+                "already_rehomed_route_ref_document_count": 475,
+                "already_rehomed_route_ref_row_count": 1200,
+                "active_route_ref_backed_candidate_count": 0,
+                "active_unrouted_keep_candidate_count": 75,
+                "next_route": "design_remaining_operational_event_read_models",
+            },
+            "direct_operational_event_read_model": {
+                "status": "current",
+                "needs_refresh": False,
+                "size_human": "88.0 MiB",
+                "direct_event_count": 1200,
+                "route_bound_direct_event_count": 1200,
+                "unrouted_direct_event_count": 0,
+                "direct_event_rollup_row_count": 100,
+                "direct_event_posting_count": 1200,
+                "source_mismatch_count": 0,
+                "exact_query_command": "python3 scripts/aoa_session_memory.py search-operational-direct-event-rollup-query",
+            },
+            "physical_shrink_plan": {
+                "status": "route_backed_context_tail_rehomed_with_unrouted_tail_kept",
+                "safe_to_apply_physical_compaction": False,
+                "apply_status": "not_needed_for_route_backed_tail",
+                "blocked_reason": "remaining context-tail rows lack route refs",
+                "next_implementation_route": "design_remaining_operational_event_read_models",
+            },
+            "elapsed_ms": 1200,
+        },
+    )
 
     monkeypatch.setattr(module, "SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT", 1_000)
     monkeypatch.setattr(module, "SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT", 500)
@@ -25609,6 +25676,24 @@ def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, 
     assert summary["document_hotset"]["latest_materialization_document_counts"]["event"] == 700
     assert summary["document_hotset"]["latest_slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
     assert "operational-event projection" in summary["document_hotset"]["next_route"]
+    latest_plan = summary["latest_operational_projection_plan"]
+    assert latest_plan["status"] == "remaining_pressure_measured"
+    assert latest_plan["remaining_projection_pressure"]["status"] == "direct_operational_event_pressure_active"
+    assert latest_plan["remaining_projection_pressure"]["counts"]["unrouted_context_tail_keep_count"] == 75
+    assert latest_plan["context_tail_rehome_status"]["status"] == "applied_current"
+    assert latest_plan["direct_operational_event_read_model"]["status"] == "current"
+    assert latest_plan["physical_shrink_plan"]["status"] == "route_backed_context_tail_rehomed_with_unrouted_tail_kept"
+    compact = module.compact_maintenance_status_payload(
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "operations": {"search_pressure": summary, "warnings": []},
+        }
+    )
+    compact_latest_plan = compact["operations"]["search_pressure"]["latest_operational_projection_plan"]
+    assert compact_latest_plan["remaining_projection_pressure"]["counts"]["direct_operational_event_count"] == 1200
+    assert compact_latest_plan["context_tail_rehome_status"]["active_unrouted_keep_candidate_count"] == 75
+    assert compact_latest_plan["direct_operational_event_read_model"]["direct_event_rollup_row_count"] == 100
     assert summary["operational_route_rollup"]["status"] == "missing"
     assert "operational route-rollup" in summary["next_route"]
     assert summary["physical_compaction"]["status"] == "requires_explicit_plan"
