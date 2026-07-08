@@ -75659,6 +75659,68 @@ def load_live_scenario_corpus(path: Path) -> tuple[dict[str, Any], list[str]]:
     return payload, []
 
 
+def live_scenario_corpus_inventory(
+    *,
+    aoa_root: Path,
+    corpus_path: Path | None = None,
+    full: bool = False,
+) -> dict[str, Any]:
+    target = corpus_path or live_scenario_corpus_default_path(aoa_root)
+    corpus, diagnostics = load_live_scenario_corpus(target)
+    cases = [case for case in corpus.get("cases", []) if isinstance(case, dict)] if isinstance(corpus.get("cases"), list) else []
+    profile_counts: Counter[str] = Counter()
+    rows: list[dict[str, Any]] = []
+    probe_keys = (
+        "literal_probes",
+        "entity_usage_probes",
+        "graph_replacement_probes",
+        "route_rollup_queries",
+        "direct_event_rollup_queries",
+        "goal_lifecycle_queries",
+    )
+    for index, case in enumerate(cases, start=1):
+        profiles = [str(item) for item in case.get("profiles", []) if str(item)] if isinstance(case.get("profiles"), list) else []
+        profile_counts.update(profiles)
+        expect = case.get("expect") if isinstance(case.get("expect"), dict) else {}
+        row = {
+            "index": index,
+            "id": case.get("id"),
+            "profiles": profiles,
+            "seed": case.get("seed"),
+            "sample_size": case.get("sample_size"),
+            "limit": case.get("limit"),
+            "has_expect": bool(expect),
+            "profile_expectation_count": len(expect.get("profile_expectations", [])) if isinstance(expect.get("profile_expectations"), list) else 0,
+            "probe_counts": {
+                key: len(case.get(key, []))
+                for key in probe_keys
+                if isinstance(case.get(key), list)
+            },
+            "exact_check_command": live_scenario_corpus_check_command_for_cases(
+                aoa_root,
+                [str(case.get("id") or "")],
+            ),
+        }
+        if full:
+            row["case"] = case
+        rows.append(row)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_live_scenario_regression_corpus_inventory",
+        "generated_at": utc_now(),
+        "ok": not diagnostics and bool(cases),
+        "mutates": False,
+        "corpus_path": str(target),
+        "case_count": len(cases),
+        "profile_counts": dict(sorted(profile_counts.items())),
+        "cases": rows,
+        "diagnostics": diagnostics,
+        "next_route": "Run live-scenario-corpus check for regression proof; this inventory is route coverage only.",
+        "authority_boundary": "Corpus inventory lists source-owned cases; live scenario check results and raw/segment refs remain stronger evidence.",
+        "truth_status": "source_corpus_inventory_not_live_route_proof",
+    }
+
+
 def live_scenario_compact_observed(audit: dict[str, Any]) -> dict[str, Any]:
     profiles: list[dict[str, Any]] = []
     for scenario in audit.get("scenarios", []) if isinstance(audit.get("scenarios"), list) else []:
@@ -77391,6 +77453,14 @@ def command_live_scenario_audit(args: argparse.Namespace) -> int:
 def command_live_scenario_corpus(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    if args.live_scenario_corpus_action == "list":
+        payload = live_scenario_corpus_inventory(
+            aoa_root=root,
+            corpus_path=Path(args.corpus) if args.corpus else None,
+            full=args.full,
+        )
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if payload.get("ok") else 1
     payload = live_scenario_corpus_check(
         aoa_root=root,
         corpus_path=Path(args.corpus) if args.corpus else None,
@@ -85792,6 +85862,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check a source-owned live-scenario regression corpus against current route behavior.",
     )
     live_scenario_corpus_sub = live_scenario_corpus.add_subparsers(dest="live_scenario_corpus_action", required=True)
+    live_scenario_corpus_list = live_scenario_corpus_sub.add_parser("list", help="List source-owned live-scenario corpus cases without running them.")
+    live_scenario_corpus_list.add_argument("--workspace-root")
+    live_scenario_corpus_list.add_argument("--aoa-root")
+    live_scenario_corpus_list.add_argument("--corpus", help="Corpus path. Defaults to config/live-scenario-regression-corpus.json.")
+    live_scenario_corpus_list.add_argument("--full", action="store_true", help="Include source case definitions.")
+    live_scenario_corpus_list.set_defaults(func=command_live_scenario_corpus)
     live_scenario_corpus_check = live_scenario_corpus_sub.add_parser("check", help="Run reviewed live-scenario cases against the current archive.")
     live_scenario_corpus_check.add_argument("--workspace-root")
     live_scenario_corpus_check.add_argument("--aoa-root")

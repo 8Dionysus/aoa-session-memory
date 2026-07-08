@@ -7024,6 +7024,47 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
     assert payload["actionable_gaps"][0]["case_id"] == "entity_usage_refs_contract"
 
 
+def test_live_scenario_corpus_inventory_lists_cases_without_running(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    corpus_path.parent.mkdir(parents=True)
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "literal_planner_route_contract",
+                    "profiles": ["literal_planner"],
+                    "literal_probes": [{"name": "skill_anchor"}],
+                    "expect": {"profile_expectations": [{"profile": "literal_planner"}]},
+                },
+                {
+                    "id": "entity_usage_refs_contract",
+                    "profiles": ["entity_usage", "graph_bridge"],
+                    "entity_usage_probes": [{"anchor": "aoa-session-memory-mcp"}],
+                    "limit": 3,
+                    "expect": {"max_failed_count": 0},
+                },
+            ],
+        },
+    )
+
+    payload = module.live_scenario_corpus_inventory(aoa_root=aoa_root, corpus_path=corpus_path)
+
+    assert payload["ok"] is True
+    assert payload["mutates"] is False
+    assert payload["case_count"] == 2
+    assert payload["profile_counts"] == {"entity_usage": 1, "graph_bridge": 1, "literal_planner": 1}
+    assert payload["cases"][0]["index"] == 1
+    assert payload["cases"][0]["probe_counts"] == {"literal_probes": 1}
+    assert payload["cases"][0]["profile_expectation_count"] == 1
+    assert payload["cases"][1]["probe_counts"] == {"entity_usage_probes": 1}
+    assert "--case-limit 2" in payload["cases"][1]["exact_check_command"]
+    assert payload["authority_boundary"].startswith("Corpus inventory")
+
+
 def test_live_scenario_corpus_check_fails_missing_required_route(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
