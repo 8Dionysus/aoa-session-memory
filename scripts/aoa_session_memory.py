@@ -68254,6 +68254,91 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
             if key in item
         }
 
+    def compact_recent_problem_job(item: dict[str, Any]) -> dict[str, Any]:
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+
+        def compact_fallback(value: Any) -> dict[str, Any]:
+            if not isinstance(value, dict):
+                return {}
+            compact = {
+                key: value.get(key)
+                for key in (
+                    "ok",
+                    "status",
+                    "repair_limit",
+                    "batch_limit",
+                    "budget_seconds",
+                    "refresh_chunk_size",
+                    "max_refresh_nodes",
+                    "max_refresh_edges",
+                    "candidate_pool_limit",
+                    "elapsed_ms",
+                    "resource_ok",
+                )
+                if key in value
+            }
+            if isinstance(value.get("blocked_reasons"), list):
+                compact["blocked_reasons"] = value["blocked_reasons"][:4]
+            if value.get("execution_stderr_tail"):
+                compact["execution_stderr_tail"] = str(value.get("execution_stderr_tail"))[-500:]
+            return compact
+
+        compact = {
+            key: item.get(key)
+            for key in (
+                "ok",
+                "status",
+                "profile",
+                "target",
+                "budget_seconds",
+                "budget_exhausted",
+                "maintenance_status",
+                "maintenance_budget_exhausted",
+                "resource_ok",
+                "resource_class",
+                "resource_kind",
+                "elapsed_ms",
+            )
+            if key in item
+        }
+        if source:
+            compact["source"] = {
+                key: source.get(key)
+                for key in ("path", "markdown", "mtime", "artifact_type", "generated_at")
+                if key in source
+            }
+        for key in ("blocked_reasons", "denied_reasons", "diagnostics", "hard_diagnostics"):
+            if isinstance(item.get(key), list):
+                compact[key] = item[key][:6]
+        if isinstance(item.get("execution"), dict):
+            compact["execution"] = {
+                key: item["execution"].get(key)
+                for key in ("elapsed_ms", "returncode", "resource_class", "resource_kind", "timeout_sec")
+                if key in item["execution"]
+            }
+        for key in ("fallback_index_drip", "fallback_graph_drip"):
+            fallback = compact_fallback(item.get(key))
+            if fallback:
+                compact[key] = fallback
+        if isinstance(item.get("coordinator"), dict):
+            compact["coordinator"] = {
+                key: item["coordinator"].get(key)
+                for key in (
+                    "job_id",
+                    "status",
+                    "owner_job",
+                    "mode",
+                    "profile",
+                    "finished_at",
+                    "elapsed_ms",
+                    "lock_wait_ms",
+                    "target",
+                    "reason",
+                )
+                if key in item["coordinator"]
+            }
+        return compact
+
     search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
     compact_search = {
         key: search.get(key)
@@ -68655,6 +68740,9 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         ]
     graph_pressure = operations.get("graph_pressure") if isinstance(operations.get("graph_pressure"), dict) else {}
     search_pressure = operations.get("search_pressure") if isinstance(operations.get("search_pressure"), dict) else {}
+    recent_problem_jobs = (
+        operations.get("recent_problem_jobs") if isinstance(operations.get("recent_problem_jobs"), list) else []
+    )
     compact_operations = {
         "warning_count": operations.get("warning_count"),
         "warnings": [
@@ -69060,7 +69148,10 @@ def compact_maintenance_status_payload(payload: dict[str, Any]) -> dict[str, Any
         }
         if isinstance(operations.get("last_auto_maintenance_resource_launch"), dict)
         else {},
-        "recent_problem_job_count": len(operations.get("recent_problem_jobs", [])) if isinstance(operations.get("recent_problem_jobs"), list) else 0,
+        "recent_problem_jobs": [
+            compact_recent_problem_job(item) for item in recent_problem_jobs[:4] if isinstance(item, dict)
+        ],
+        "recent_problem_job_count": len(recent_problem_jobs),
         "why_maintenance_long": operations.get("why_maintenance_long", [])[:8] if isinstance(operations.get("why_maintenance_long"), list) else [],
         "truth_status": operations.get("truth_status"),
     }

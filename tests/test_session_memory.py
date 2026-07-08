@@ -19709,6 +19709,19 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["last_auto_maintenance_resource_launch"]["backlog"]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
     assert ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
     assert ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
+    compact = module.compact_maintenance_status_payload(
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": "session_memory_maintenance_status",
+            "operations": ops,
+        }
+    )
+    compact_ops = compact["operations"]
+    assert compact_ops["recent_problem_job_count"] == len(ops["recent_problem_jobs"])
+    assert compact_ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
+    assert compact_ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
+    assert compact_ops["recent_problem_jobs"][0]["source"]["artifact_type"] == "auto_maintenance_resource_launch"
+    assert compact_ops["recent_problem_jobs"][0]["diagnostics"] == ["resource_blocked:indexing_unattended_swap_used_pressure"]
     assert ops["search_shards"]["status"] == "incomplete"
     assert ops["search_shards"]["materialized_shard_count"] == 1
     assert ops["search_shards"]["noncurrent_shards"][0]["shard"] == "month/2026-06"
