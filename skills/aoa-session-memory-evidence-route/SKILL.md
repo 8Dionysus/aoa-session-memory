@@ -111,7 +111,15 @@ Use these first routes when available:
   proof. For “how was this entity used and what happened after,” expand
   through `usage-chain <anchor> --kind <kind>` and then raw/segment refs.
 - search projection weight, context-tail pressure, or a
-  `search_projection_combined_large` warning: use
+  `search_projection_combined_large` warning: read the compact
+  `maintenance-status` packet first when available. Its
+  `operations.search_pressure.latest_operational_projection_plan` should expose
+  `remaining_projection_pressure`, `context_tail_rehome_status`,
+  `direct_operational_event_read_model`, `physical_shrink_plan`, and
+  `next_route` without resampling shards or rebuilding search. Use that packet
+  as the first route selector; run the heavier
+  `search-operational-projection-plan --write-report` route only when the
+  compact packet is missing, stale, or needs fresh shard/tail counts. Use
   `search-operational-shrink-gates --write-report` when the operational
   route-rollup is current. The gate packet reads `route_ref_rollup_plan` and
   `physical_shrink_plan`, checks route-rollup refs/cost, literal exact-recall
@@ -191,13 +199,17 @@ Use these first routes when available:
   `waiting_for_quiet_window` packet means the immediate command should be the
   status retry route, while the graph catch-up command is only the post-window
   expansion.
-- live route-quality regression proof: `live-scenario-corpus check` first when
-  the question is whether current entity/search/literal/graph consumer routes
-  still satisfy reviewed cases. Use `live-scenario-audit` for one-off
-  diagnostics; use the corpus check when the result should be treated as a
-  regression gate. The corpus includes `maintenance_status` as a read-only
-  route-guidance profile: it proves typed next actions and exact next commands,
-  not that the maintenance repair itself has completed.
+- live route-quality regression proof: `live-scenario-corpus list` is the
+  inventory route for choosing a case/profile and explaining current reviewed
+  route coverage. It is read-only source corpus inventory, not live route
+  proof; respect `truth_status=source_corpus_inventory_not_live_route_proof`.
+  Run `live-scenario-corpus check` when the question is whether current
+  entity/search/literal/graph consumer routes still satisfy reviewed cases. Use
+  `live-scenario-audit` for one-off diagnostics; use the corpus check when the
+  result should be treated as a regression gate. The corpus includes
+  `maintenance_status` as a read-only route-guidance profile: it proves typed
+  next actions and exact next commands, not that the maintenance repair itself
+  has completed.
 
 ## MCP Preference
 
@@ -234,6 +246,9 @@ use. For graph/topology questions, search `aoa_session_graph_neighborhood`
 directly if a broad "graph route" tool search does not surface it. For common
 tools, MCP services, hooks, or skills with too many direct hits, search
 `aoa_session_graph_cooccurrence` directly before widening into raw text.
+For live corpus inventory, use an exact MCP inventory tool if the live registry
+exposes one; otherwise use CLI `live-scenario-corpus list` before choosing a
+case for `aoa_session_live_scenario_corpus_check`.
 Treat projection status as a fast cached diagnostic route by default; run the
 archive `projection-status --refresh-maintenance` only when the task needs a
 fresh runtime maintenance packet in the same response.
@@ -276,6 +291,7 @@ python3 scripts/aoa_session_memory.py search-operational-shrink-apply --apply --
 python3 scripts/aoa_session_memory.py graph-high-fanout-policy --limit 12
 python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source-anchor> <target-anchor> --source-kind <kind> --target-kind <kind>
+python3 scripts/aoa_session_memory.py live-scenario-corpus list
 python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1
 ```
 
@@ -299,6 +315,11 @@ Prefer packets that expose:
   load; if `scoped_full_text_strategy.status` is
   `materialize_scoped_full_text_first`, run its first materialization command
   only as an explicit heavy/operator route and then repeat its scoped query;
+- route-readiness shortcuts such as `latest_operational_projection_plan` under
+  `operations.search_pressure`; prefer these compact packets before running a
+  heavier plan whose only purpose would be to rediscover the same next route;
+- corpus inventories with explicit `truth_status`, case/profile counts, and
+  exact check commands; treat them as coverage maps, not live proof;
 - `raw`, `segment`, `segment_index`, and `session` refs;
 - `next_command` or next expansion route.
 

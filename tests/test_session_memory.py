@@ -32941,6 +32941,19 @@ def test_installable_user_skill_states_report_sources_and_install_status(tmp_pat
     assert complete["all_installed"] is True
 
 
+def test_evidence_route_skill_names_current_compact_routes() -> None:
+    source_aoa = SCRIPT.parents[1]
+    skill_text = (
+        source_aoa / "skills" / "aoa-session-memory-evidence-route" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "operations.search_pressure.latest_operational_projection_plan" in skill_text
+    assert "remaining_projection_pressure" in skill_text
+    assert "live-scenario-corpus list" in skill_text
+    assert "truth_status=source_corpus_inventory_not_live_route_proof" in skill_text
+    assert "search-operational-projection-plan --write-report" in skill_text
+
+
 def test_install_user_skill_backs_up_conflicting_target_on_force(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     skills_dir = tmp_path / "skills"
