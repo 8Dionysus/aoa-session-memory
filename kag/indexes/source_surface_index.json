@@ -1,4 +1,46 @@
 {
+  "classification_summary": {
+    "artifact_kind": {
+      "config": 14,
+      "directory_marker": 52,
+      "document": 96,
+      "index": 1,
+      "manifest": 1,
+      "owner_metadata": 1,
+      "projection": 1,
+      "receipt": 1,
+      "schema": 6,
+      "source_code": 1,
+      "test": 1
+    },
+    "command_role": {
+      "none": 174,
+      "test": 1
+    },
+    "document_role": {
+      "agents": 11,
+      "audit": 1,
+      "design": 1,
+      "design_agents": 1,
+      "none": 79,
+      "readme": 56,
+      "unknown_document": 26
+    },
+    "mechanics_role": {
+      "none": 175
+    },
+    "primary_kind": {
+      "artifact": 56,
+      "command": 1,
+      "document": 96,
+      "surface": 22
+    },
+    "surface_state": {
+      "authored_source": 172,
+      "generated_readmodel": 2,
+      "receipt": 1
+    }
+  },
   "coverage_summary": {
     "command_count": 1,
     "document_count": 96,
@@ -9,12 +51,12 @@
     "schema_count": 6,
     "script_count": 0,
     "test_count": 1,
-    "unknown_count": 53,
+    "unknown_count": 0,
     "validator_count": 0
   },
   "index_identity": {
     "artifact_kind": "source_surface_index",
-    "content_digest": "ef86ff7323f75b8cb94892a805ea02d6d0f47787a425b48cdd1478df4dd0c989",
+    "content_digest": "39fc4b853887657fb4961d01b3f02d7ce9cf4a43d0c0bb0d017272e878d2a273",
     "local_id": "index:repo-local:source-surfaces",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-index.schema.json"
   },
@@ -22,8 +64,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "owner_metadata",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -31,10 +73,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "owner_metadata",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -1080,13 +1122,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "7d1aa90d4646f6d8df936fc3ba7fd152e5563bd8130a62c95c4c7a0bff2f073b",
+        "content_hash": "32c46b06d38d5f22a98cfd00912af9033267d6b723ea3085d052c8c545c7a91a",
         "git_ref": "git-index-source-tree",
         "id": "file:pipeline.md:f9097f67d8",
         "mime": "text/markdown",
         "path": "PIPELINE.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 95577
+        "size_bytes": 101207
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1164,147 +1206,147 @@
           {
             "anchor": "precompact",
             "level": 3,
-            "line": 110,
+            "line": 112,
             "ref": "PIPELINE.md#precompact",
             "title": "PreCompact"
           },
           {
             "anchor": "token-accounting-route",
             "level": 2,
-            "line": 127,
+            "line": 129,
             "ref": "PIPELINE.md#token-accounting-route",
             "title": "Token Accounting Route"
           },
           {
             "anchor": "entity-usage-retrieval-route",
             "level": 2,
-            "line": 167,
+            "line": 169,
             "ref": "PIPELINE.md#entity-usage-retrieval-route",
             "title": "Entity Usage Retrieval Route"
           },
           {
             "anchor": "session-evidence-consumer-route",
             "level": 2,
-            "line": 242,
+            "line": 247,
             "ref": "PIPELINE.md#session-evidence-consumer-route",
             "title": "Session Evidence Consumer Route"
           },
           {
             "anchor": "agent-event-and-task-episode-route",
             "level": 2,
-            "line": 278,
+            "line": 283,
             "ref": "PIPELINE.md#agent-event-and-task-episode-route",
             "title": "Agent Event And Task Episode Route"
           },
           {
             "anchor": "postcompact",
             "level": 3,
-            "line": 466,
+            "line": 514,
             "ref": "PIPELINE.md#postcompact",
             "title": "PostCompact"
           },
           {
             "anchor": "stop",
             "level": 3,
-            "line": 484,
+            "line": 532,
             "ref": "PIPELINE.md#stop",
             "title": "Stop"
           },
           {
             "anchor": "segment-rule",
             "level": 2,
-            "line": 512,
+            "line": 560,
             "ref": "PIPELINE.md#segment-rule",
             "title": "Segment Rule"
           },
           {
             "anchor": "storage-weight-rule",
             "level": 2,
-            "line": 538,
+            "line": 586,
             "ref": "PIPELINE.md#storage-weight-rule",
             "title": "Storage Weight Rule"
           },
           {
             "anchor": "index-rule",
             "level": 2,
-            "line": 659,
+            "line": 708,
             "ref": "PIPELINE.md#index-rule",
             "title": "Index Rule"
           },
           {
             "anchor": "navigation-commands",
             "level": 2,
-            "line": 1167,
+            "line": 1238,
             "ref": "PIPELINE.md#navigation-commands",
             "title": "Navigation Commands"
           },
           {
             "anchor": "graph-and-graphrag",
             "level": 2,
-            "line": 1282,
+            "line": 1356,
             "ref": "PIPELINE.md#graph-and-graphrag",
             "title": "Graph And GraphRAG"
           },
           {
             "anchor": "failure-modes",
             "level": 2,
-            "line": 1905,
+            "line": 1992,
             "ref": "PIPELINE.md#failure-modes",
             "title": "Failure Modes"
           },
           {
             "anchor": "invalid-hook-json",
             "level": 3,
-            "line": 1907,
+            "line": 1994,
             "ref": "PIPELINE.md#invalid-hook-json",
             "title": "Invalid Hook JSON"
           },
           {
             "anchor": "raw-session-unavailable",
             "level": 3,
-            "line": 1916,
+            "line": 2003,
             "ref": "PIPELINE.md#raw-session-unavailable",
             "title": "Raw Session Unavailable"
           },
           {
             "anchor": "duplicate-hook-receipts",
             "level": 3,
-            "line": 1924,
+            "line": 2011,
             "ref": "PIPELINE.md#duplicate-hook-receipts",
             "title": "Duplicate Hook Receipts"
           },
           {
             "anchor": "untrusted-native-hooks",
             "level": 3,
-            "line": 1931,
+            "line": 2018,
             "ref": "PIPELINE.md#untrusted-native-hooks",
             "title": "Untrusted Native Hooks"
           },
           {
             "anchor": "premature-or-repeated-compaction",
             "level": 3,
-            "line": 1939,
+            "line": 2026,
             "ref": "PIPELINE.md#premature-or-repeated-compaction",
             "title": "Premature or Repeated Compaction"
           },
           {
             "anchor": "unindexed-bulk-markdown",
             "level": 3,
-            "line": 1945,
+            "line": 2032,
             "ref": "PIPELINE.md#unindexed-bulk-markdown",
             "title": "Unindexed Bulk Markdown"
           },
           {
             "anchor": "verification-gates",
             "level": 2,
-            "line": 1952,
+            "line": 2039,
             "ref": "PIPELINE.md#verification-gates",
             "title": "Verification Gates"
           },
           {
             "anchor": "distillation-boundary",
             "level": 2,
-            "line": 1985,
+            "line": 2072,
             "ref": "PIPELINE.md#distillation-boundary",
             "title": "Distillation Boundary"
           }
@@ -1316,7 +1358,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "7d1aa90d4646f6d8df936fc3ba7fd152e5563bd8130a62c95c4c7a0bff2f073b",
+        "digest": "32c46b06d38d5f22a98cfd00912af9033267d6b723ea3085d052c8c545c7a91a",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -1364,13 +1406,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "fe22c78109202f52789dbb408153eea30499b308761f4fd4dd5ce8346b8bd0d4",
+        "content_hash": "b63d3d17bb2c7b728e2a7858a92124e68750775b7aac3071374c76630c7d5e9e",
         "git_ref": "git-index-source-tree",
         "id": "file:readiness.md:2b8090cf72",
         "mime": "text/markdown",
         "path": "READINESS.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 156288
+        "size_bytes": 174519
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1427,35 +1469,35 @@
           {
             "anchor": "current-green-gates",
             "level": 2,
-            "line": 301,
+            "line": 312,
             "ref": "READINESS.md#current-green-gates",
             "title": "Current Green Gates"
           },
           {
             "anchor": "coverage-map",
             "level": 2,
-            "line": 1400,
+            "line": 1440,
             "ref": "READINESS.md#coverage-map",
             "title": "Coverage Map"
           },
           {
             "anchor": "remaining-gates",
             "level": 2,
-            "line": 1468,
+            "line": 1509,
             "ref": "READINESS.md#remaining-gates",
             "title": "Remaining Gates"
           },
           {
             "anchor": "probe-notes",
             "level": 2,
-            "line": 2170,
+            "line": 2445,
             "ref": "READINESS.md#probe-notes",
             "title": "Probe Notes"
           },
           {
             "anchor": "rule",
             "level": 2,
-            "line": 2184,
+            "line": 2459,
             "ref": "READINESS.md#rule",
             "title": "Rule"
           }
@@ -1467,7 +1509,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "fe22c78109202f52789dbb408153eea30499b308761f4fd4dd5ce8346b8bd0d4",
+        "digest": "b63d3d17bb2c7b728e2a7858a92124e68750775b7aac3071374c76630c7d5e9e",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -1515,13 +1557,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "02be27f8bdf94386ca7d8b64c8c93d791b6ffbfdb1a38cb090d746c906c47fb0",
+        "content_hash": "034445d31f04f78ac9792550823376cf4ae8b0fc5feb6660114759fb3cb141b4",
         "git_ref": "git-index-source-tree",
         "id": "file:readme.md:b335630551",
         "mime": "text/markdown",
         "path": "README.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 74590
+        "size_bytes": 82830
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1592,49 +1634,49 @@
           {
             "anchor": "session-evidence-consumer-route",
             "level": 2,
-            "line": 203,
+            "line": 214,
             "ref": "README.md#session-evidence-consumer-route",
             "title": "Session Evidence Consumer Route"
           },
           {
             "anchor": "agent-atlas",
             "level": 2,
-            "line": 227,
+            "line": 238,
             "ref": "README.md#agent-atlas",
             "title": "Agent Atlas"
           },
           {
             "anchor": "graph-store-and-sidecar",
             "level": 2,
-            "line": 254,
+            "line": 265,
             "ref": "README.md#graph-store-and-sidecar",
             "title": "Graph Store And Sidecar"
           },
           {
             "anchor": "storage-audit",
             "level": 2,
-            "line": 724,
+            "line": 802,
             "ref": "README.md#storage-audit",
             "title": "Storage Audit"
           },
           {
             "anchor": "portable-route",
             "level": 2,
-            "line": 796,
+            "line": 874,
             "ref": "README.md#portable-route",
             "title": "Portable Route"
           },
           {
             "anchor": "skill-shape",
             "level": 2,
-            "line": 1593,
+            "line": 1743,
             "ref": "README.md#skill-shape",
             "title": "Skill Shape"
           },
           {
             "anchor": "core-rule",
             "level": 2,
-            "line": 1608,
+            "line": 1758,
             "ref": "README.md#core-rule",
             "title": "Core Rule"
           }
@@ -1646,7 +1688,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "02be27f8bdf94386ca7d8b64c8c93d791b6ffbfdb1a38cb090d746c906c47fb0",
+        "digest": "034445d31f04f78ac9792550823376cf4ae8b0fc5feb6660114759fb3cb141b4",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -2262,13 +2304,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "2c48fffae2dd02135080b4fa326b19e126aa3a247e5e2ddd79eb0c311a79aa4c",
+        "content_hash": "097215281e664fcb9981b91ce9cf683fa1a96d7f4ab2749519d73891fe43716b",
         "git_ref": "git-index-source-tree",
         "id": "file:config/live-scenario-regression-corpus.json:5c9c552c08",
         "mime": "application/json",
         "path": "config/live-scenario-regression-corpus.json",
         "repo": "aoa-session-memory",
-        "size_bytes": 18656
+        "size_bytes": 34701
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -2301,7 +2343,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "2c48fffae2dd02135080b4fa326b19e126aa3a247e5e2ddd79eb0c311a79aa4c",
+        "digest": "097215281e664fcb9981b91ce9cf683fa1a96d7f4ab2749519d73891fe43716b",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -2741,13 +2783,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "d269bae264953af47afffc4d105112d1902a92f08eee158acf9667712a86d7d6",
+        "content_hash": "42658ce8d8d2e5d74c46f28045ba8daac4e69c5f9a6d8cbed5e459b895982de2",
         "git_ref": "git-index-source-tree",
         "id": "file:hooks/readme.md:24bd0eaed6",
         "mime": "text/markdown",
         "path": "hooks/README.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 4157
+        "size_bytes": 4405
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -2795,7 +2837,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "d269bae264953af47afffc4d105112d1902a92f08eee158acf9667712a86d7d6",
+        "digest": "42658ce8d8d2e5d74c46f28045ba8daac4e69c5f9a6d8cbed5e459b895982de2",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -3193,7 +3235,7 @@
         "surface": "kag/edges/kernel_routes_to_manifest_schema.json"
       },
       "provenance": {
-        "generated_by": "",
+        "generated_by": "kag/manifest.json",
         "materials": [],
         "observed_by": "aoa-kag:scripts/generate_repo_local_kag_index.py",
         "source_refs": [
@@ -3282,7 +3324,7 @@
         "surface": "kag/indexes/session_memory_source_inventory.json"
       },
       "provenance": {
-        "generated_by": "",
+        "generated_by": "kag/manifest.json",
         "materials": [],
         "observed_by": "aoa-kag:scripts/generate_repo_local_kag_index.py",
         "source_refs": [
@@ -3910,13 +3952,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "52874507c556ec2bdf53ac1a802db2f580fa85522213713c37171f360890c0c9",
+        "content_hash": "6afff75a95c67049ed7205239196dd8006255e5e875574533e1b64f0e58e7f8b",
         "git_ref": "git-index-source-tree",
         "id": "file:manifests/artifact_bundles/portable_bundle.bundle.json:7189ad2fbc",
         "mime": "application/json",
         "path": "manifests/artifact_bundles/portable_bundle.bundle.json",
         "repo": "aoa-session-memory",
-        "size_bytes": 3497
+        "size_bytes": 4002
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -3949,7 +3991,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "52874507c556ec2bdf53ac1a802db2f580fa85522213713c37171f360890c0c9",
+        "digest": "6afff75a95c67049ed7205239196dd8006255e5e875574533e1b64f0e58e7f8b",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -4668,8 +4710,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -4677,10 +4719,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -4850,8 +4892,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -4859,10 +4901,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5032,8 +5074,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5041,10 +5083,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5212,8 +5254,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5221,10 +5263,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5392,8 +5434,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5401,10 +5443,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5595,8 +5637,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5604,10 +5646,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5777,8 +5819,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5786,10 +5828,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -5980,8 +6022,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -5989,10 +6031,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -6162,8 +6204,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -6171,10 +6213,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -6344,8 +6386,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -6353,10 +6395,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -6526,8 +6568,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -6535,10 +6577,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -6727,8 +6769,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -6736,10 +6778,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -6909,8 +6951,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -6918,10 +6960,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -7091,8 +7133,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -7100,10 +7142,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -7294,8 +7336,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -7303,10 +7345,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -7476,8 +7518,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -7485,10 +7527,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -7656,8 +7698,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -7665,10 +7707,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -7838,8 +7880,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -7847,10 +7889,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8018,8 +8060,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8027,10 +8069,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8200,8 +8242,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8209,10 +8251,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8380,8 +8422,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8389,10 +8431,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8562,8 +8604,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8571,10 +8613,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8744,8 +8786,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8753,10 +8795,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -8924,8 +8966,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -8933,10 +8975,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -9104,8 +9146,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -9113,10 +9155,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -9307,8 +9349,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -9316,10 +9358,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -9489,8 +9531,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -9498,10 +9540,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -9692,8 +9734,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -9701,10 +9743,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -9874,8 +9916,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -9883,10 +9925,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10077,8 +10119,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10086,10 +10128,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10259,8 +10301,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10268,10 +10310,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10441,8 +10483,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10450,10 +10492,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10623,8 +10665,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10632,10 +10674,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10803,8 +10845,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10812,10 +10854,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -10983,8 +11025,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -10992,10 +11034,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -11165,8 +11207,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -11174,10 +11216,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -11368,8 +11410,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -11377,10 +11419,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -11550,8 +11592,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -11559,10 +11601,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -11732,8 +11774,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -11741,10 +11783,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -11914,8 +11956,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -11923,10 +11965,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -12117,8 +12159,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -12126,10 +12168,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -12299,8 +12341,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -12308,10 +12350,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -12481,8 +12523,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -12490,10 +12532,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -12661,8 +12703,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -12670,10 +12712,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -12843,8 +12885,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -12852,10 +12894,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13023,8 +13065,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13032,10 +13074,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13203,8 +13245,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13212,10 +13254,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13383,8 +13425,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13392,10 +13434,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13565,8 +13607,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13574,10 +13616,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13747,8 +13789,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13756,10 +13798,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -13927,8 +13969,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -13936,10 +13978,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -14109,8 +14151,8 @@
     {
       "abi": {
         "abi_epoch": "source",
-        "artifact_class": "unknown",
-        "compatibility": "unknown",
+        "artifact_class": "directory_marker",
+        "compatibility": "stable",
         "contract_version": "none",
         "schema_version": "none"
       },
@@ -14118,10 +14160,10 @@
         "scope": "public",
         "secrets_risk": "none"
       },
-      "artifact_kind": "unknown",
+      "artifact_kind": "directory_marker",
       "classification": {
-        "confidence": "low",
-        "primary_kind": "unknown"
+        "confidence": "high",
+        "primary_kind": "artifact"
       },
       "code_role": "none",
       "command_role": "none",
@@ -15003,13 +15045,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "67028ad45ff55b5344821cb77aff0489a66410df91f8911eae9bd6c3af0b67e1",
+        "content_hash": "383bdaa057df499247b208db3cdff6d0f2df3e860fb309fc2634a77a831394f3",
         "git_ref": "git-index-source-tree",
         "id": "file:scripts/aoa_session_memory.py:b3e675a74e",
         "mime": "text/x-python",
         "path": "scripts/aoa_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 3605424
+        "size_bytes": 4088341
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -15042,7 +15084,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "67028ad45ff55b5344821cb77aff0489a66410df91f8911eae9bd6c3af0b67e1",
+        "digest": "383bdaa057df499247b208db3cdff6d0f2df3e860fb309fc2634a77a831394f3",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -16459,13 +16501,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "ac3a229412966fa426f951f15ae0c32c209721c3328551b83b5c17e34677198a",
+        "content_hash": "5a5c0e76328eb6f672445c53771b1210d682144ee8e6cfc3d369d0c9a6c9f236",
         "git_ref": "git-index-source-tree",
         "id": "file:skills/aoa-session-memory-doctor/skill.md:fc03ee6d84",
         "mime": "text/markdown",
         "path": "skills/aoa-session-memory-doctor/SKILL.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 1556
+        "size_bytes": 2092
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -16515,14 +16557,14 @@
           {
             "anchor": "verification",
             "level": 2,
-            "line": 45,
+            "line": 59,
             "ref": "skills/aoa-session-memory-doctor/SKILL.md#verification",
             "title": "Verification"
           },
           {
             "anchor": "stop-line",
             "level": 2,
-            "line": 54,
+            "line": 69,
             "ref": "skills/aoa-session-memory-doctor/SKILL.md#stop-line",
             "title": "Stop Line"
           }
@@ -16534,7 +16576,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "ac3a229412966fa426f951f15ae0c32c209721c3328551b83b5c17e34677198a",
+        "digest": "5a5c0e76328eb6f672445c53771b1210d682144ee8e6cfc3d369d0c9a6c9f236",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -16582,13 +16624,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "2ad6faa985042fc7254147eb2cba7e865fe759916d5764ed6e808377b9986a48",
+        "content_hash": "29bd48e2380d0b6811cf201298064e5c1b2758bd82f562987b0070df670253b8",
         "git_ref": "git-index-source-tree",
         "id": "file:skills/aoa-session-memory-evidence-route/skill.md:312ad35fe8",
         "mime": "text/markdown",
         "path": "skills/aoa-session-memory-evidence-route/SKILL.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 13555
+        "size_bytes": 21194
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -16638,28 +16680,28 @@
           {
             "anchor": "mcp-preference",
             "level": 2,
-            "line": 127,
+            "line": 214,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#mcp-preference",
             "title": "MCP Preference"
           },
           {
             "anchor": "reading-packets",
             "level": 2,
-            "line": 196,
+            "line": 301,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#reading-packets",
             "title": "Reading Packets"
           },
           {
             "anchor": "authority-boundary",
             "level": 2,
-            "line": 219,
+            "line": 329,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#authority-boundary",
             "title": "Authority Boundary"
           },
           {
             "anchor": "verification",
             "level": 2,
-            "line": 233,
+            "line": 343,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#verification",
             "title": "Verification"
           }
@@ -16671,7 +16713,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "2ad6faa985042fc7254147eb2cba7e865fe759916d5764ed6e808377b9986a48",
+        "digest": "29bd48e2380d0b6811cf201298064e5c1b2758bd82f562987b0070df670253b8",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -17601,13 +17643,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "55cebc9622617ae751cfb55f785dd7a2f96426ed1c38c25f30bcf0adb3077138",
+        "content_hash": "bdcf6c3e849fce0a7836e7c7ec9f56fe0063def643c75efe380df0c327390dc5",
         "git_ref": "git-index-source-tree",
         "id": "file:skills/aoa-session-reindex/skill.md:bc8898188d",
         "mime": "text/markdown",
         "path": "skills/aoa-session-reindex/SKILL.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 2391
+        "size_bytes": 2603
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -17664,7 +17706,7 @@
           {
             "anchor": "stop-line",
             "level": 2,
-            "line": 77,
+            "line": 80,
             "ref": "skills/aoa-session-reindex/SKILL.md#stop-line",
             "title": "Stop Line"
           }
@@ -17676,7 +17718,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "55cebc9622617ae751cfb55f785dd7a2f96426ed1c38c25f30bcf0adb3077138",
+        "digest": "bdcf6c3e849fce0a7836e7c7ec9f56fe0063def643c75efe380df0c327390dc5",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -17963,13 +18005,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "4a6955e4a1229be042c63caa24e562b0c721934795e0f946deed5b43ee8e566e",
+        "content_hash": "8a6359d3a2d40d8151eeefba617ac13a3c8ac9ff8e65ac66d1e73627d50262b5",
         "git_ref": "git-index-source-tree",
         "id": "file:tests/test_session_memory.py:97b303350c",
         "mime": "text/x-python",
         "path": "tests/test_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 1306364
+        "size_bytes": 1602286
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -18002,7 +18044,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "4a6955e4a1229be042c63caa24e562b0c721934795e0f946deed5b43ee8e566e",
+        "digest": "8a6359d3a2d40d8151eeefba617ac13a3c8ac9ff8e65ac66d1e73627d50262b5",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
