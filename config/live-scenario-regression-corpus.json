@@ -7,7 +7,7 @@
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 21,
+  "case_count": 27,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -54,6 +54,54 @@
               "command",
               "session_id"
             ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "search_pressure_decision_packet_contract",
+      "profiles": [
+        "search_pressure_packet"
+      ],
+      "seed": "corpus-search-pressure-decision-packet",
+      "sample_size": 1,
+      "recent_days": 7,
+      "limit": 1,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Search pressure packet must stay the fast route-first handoff that combines hotset, projection, rollup, direct-event, literal fallback, and live-scenario guidance without shard resampling, monolith reads, FTS, body hydration, or archive-truth claims."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "search_pressure_packet",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "require_search_pressure_packet_no_mutation": true,
+            "require_search_pressure_packet_route_first": true,
+            "require_search_pressure_packet_routes": true,
+            "require_search_pressure_reads_diagnostics": true,
+            "required_search_pressure_phase_ids": [
+              "search_weight_cardinality",
+              "search_physical_compaction",
+              "context_tail_rehome",
+              "operational_route_rollup",
+              "direct_operational_event_read_model",
+              "raw_text_fallback",
+              "live_scenario_quality"
+            ],
+            "require_no_shard_resample": true,
+            "require_no_monolith_open": true,
+            "require_no_fts": true,
+            "require_no_body_hydration": true,
+            "max_elapsed_ms": 10000
           }
         ]
       }
@@ -194,6 +242,78 @@
             ],
             "required_match_relations": [
               "boundary"
+            ],
+            "max_elapsed_ms": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "literal_session_answer_and_path_anchor_contract",
+      "profiles": [
+        "literal_planner"
+      ],
+      "seed": "corpus-literal-session-answer-path-anchor",
+      "sample_size": 7,
+      "recent_days": 7,
+      "limit": 7,
+      "literal_probes": [
+        {
+          "name": "session_label_answer_intent_uses_agent_event_route",
+          "query": "найди ответы агента по сессии 2026-07-07__003__ноут-показывал-13-заряда-затем-резко",
+          "expected_shape": "session_id",
+          "expected_primary_route": "agent_event_route",
+          "expected_route_anchor": "2026-07-07__003__ноут-показывал-13-заряда-затем-резко",
+          "expected_route_anchor_source": "session_target"
+        },
+        {
+          "name": "path_inside_human_phrase_uses_path_anchor",
+          "query": "как агент использовал validate_session_memory_mcp.py и что потом сломалось",
+          "expected_shape": "path",
+          "expected_primary_route": "route_signal_structured_search",
+          "expected_route_anchor": "validate_session_memory_mcp.py",
+          "expected_route_anchor_source": "path_anchor"
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Session labels embedded in natural-language answer queries must outrank accidental numeric/entity matches, and file-like paths embedded in human phrases must stay path anchors before raw text fallback."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 10000,
+        "profile_expectations": [
+          {
+            "profile": "literal_planner",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 7,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "required_primary_routes": [
+              "agent_event_route",
+              "route_signal_structured_search"
+            ],
+            "forbidden_primary_routes": [
+              "monolith_raw_text_fallback",
+              "scoped_shard_full_text"
+            ],
+            "required_shape_counts": [
+              "session_id",
+              "path"
+            ],
+            "required_route_anchors": [
+              "2026-07-07__003__ноут-показывал-13-заряда-затем-резко",
+              "validate_session_memory_mcp.py"
+            ],
+            "required_route_anchor_sources": [
+              "session_target",
+              "path_anchor"
             ],
             "max_elapsed_ms": 10000
           }
@@ -382,6 +502,98 @@
       }
     },
     {
+      "id": "entity_usage_chain_action_semantics_contract",
+      "profiles": [
+        "entity_usage_chain"
+      ],
+      "seed": "corpus-entity-usage-chain-action-semantics",
+      "sample_size": 3,
+      "recent_days": 14,
+      "limit": 4,
+      "usage_chain_probes": [
+        {
+          "name": "mcp_session_memory",
+          "anchor": "aoa-session-memory-mcp",
+          "kind": "mcp",
+          "required_usage_actions": [
+            "called",
+            "read",
+            "used",
+            "validated",
+            "observed"
+          ]
+        },
+        {
+          "name": "validator_session_memory_mcp",
+          "anchor": "validate_session_memory_mcp",
+          "kind": "validator",
+          "required_usage_actions": [
+            "called",
+            "read",
+            "used",
+            "validated",
+            "observed"
+          ]
+        },
+        {
+          "name": "error_timeout",
+          "anchor": "timeout",
+          "kind": "error",
+          "require_direct_usage": false,
+          "required_usage_actions": [
+            "failed",
+            "observed"
+          ]
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Usage-chain must expose normalized action semantics over live operational entities so agents can distinguish invocation, inspection, validation, failure, and observed consequences without reading every event first."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "entity_usage_chain",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 3,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "min_result_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_raw_or_segment_ref_sample_count": 3,
+            "min_direct_usage_sample_count": 2,
+            "min_usage_chain_usage_event_count": 8,
+            "min_usage_chain_result_or_consequence_count": 1,
+            "min_usage_action_count": 6,
+            "required_kinds": [
+              "mcp",
+              "validator",
+              "error"
+            ],
+            "required_usage_actions": [
+              "called",
+              "read",
+              "used",
+              "validated",
+              "failed",
+              "observed"
+            ],
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
       "id": "hook_failure_receipt_contract",
       "profiles": [
         "hook_failure"
@@ -394,7 +606,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-06-28",
-        "note": "Hook failure audit must prove the route can find recent failing UserPromptSubmit receipts and return receipt/session refs without opening raw transcript text."
+        "note": "Hook failure audit must prove the route can find recent failing UserPromptSubmit receipts and return receipt/session refs when failures exist; a healthy no-recent-errors window must stay explicit and non-actionable."
       },
       "expect": {
         "max_failed_count": 0,
@@ -408,6 +620,7 @@
             "allowed_statuses": [
               "passed"
             ],
+            "allow_no_recent_hook_errors": true,
             "min_total_receipt_count": 1,
             "min_returned_receipt_count": 1,
             "min_receipt_ref_count": 1,
@@ -495,6 +708,113 @@
             "min_result_count": 1,
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "agent_event_route_matrix_contract",
+      "profiles": [
+        "agent_event_routes"
+      ],
+      "seed": "corpus-agent-event-route-matrix",
+      "sample_size": 4,
+      "recent_days": 7,
+      "limit": 2,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Agent-event routes must separately find answers, progress updates, final closeouts, and reasoning windows with raw/segment refs and raw-backed previews, without FTS or body hydration."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "agent_event_routes",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 4,
+            "min_agent_event_route_count": 4,
+            "min_agent_event_route_result_count": 4,
+            "min_agent_event_raw_preview_result_count": 6,
+            "min_agent_event_boundary_preview_result_count": 1,
+            "min_agent_event_semantic_or_boundary_preview_result_count": 8,
+            "min_agent_event_raw_ref_present_count": 4,
+            "min_agent_event_segment_ref_present_count": 4,
+            "min_agent_event_reasoning_window_count": 1,
+            "required_agent_event_routes": [
+              "agent-responses",
+              "agent-progress-updates",
+              "agent-closeouts",
+              "agent-reasoning-windows"
+            ],
+            "required_agent_event_classes": [
+              "assistant_answer",
+              "assistant_progress_update",
+              "assistant_final_closeout",
+              "assistant_reasoning_boundary"
+            ],
+            "require_agent_event_no_fts": true,
+            "require_agent_event_no_body_hydration": true,
+            "require_agent_event_raw_ref_preview": true,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "task_answer_chain_refs_contract",
+      "profiles": [
+        "task_answer_chain"
+      ],
+      "seed": "corpus-task-answer-chain",
+      "sample_size": 3,
+      "recent_days": 7,
+      "limit": 3,
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Task-answer chain route must find task intervals with user, reasoning-boundary, answer, and expansion refs directly from session indexes without requiring a goal lifecycle anchor."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "task_answer_chain",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_result_count": 1,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_task_answer_chain_episode_count": 1,
+            "min_task_answer_chain_start_user_ref_count": 1,
+            "min_task_answer_chain_reasoning_ref_count": 1,
+            "min_task_answer_chain_answer_ref_count": 1,
+            "required_task_answer_chain_next_routes": [
+              "task-episodes",
+              "answer-neighborhood",
+              "agent-reasoning-windows",
+              "agent-closeouts"
+            ],
+            "require_task_answer_chain_no_search": true,
+            "require_task_answer_chain_no_graph": true,
+            "require_task_answer_chain_no_raw_open": true,
+            "require_task_answer_chain_no_body_hydration": true,
             "max_elapsed_ms": 30000
           }
         ]
@@ -805,6 +1125,182 @@
       }
     },
     {
+      "id": "route_rollup_core_operational_lane_matrix_contract",
+      "profiles": [
+        "route_rollup_query"
+      ],
+      "seed": "corpus-route-rollup-core-operational-lane-matrix",
+      "sample_size": 1,
+      "recent_days": 14,
+      "limit": 2,
+      "route_rollup_queries": [
+        {
+          "name": "tool_exec_command",
+          "query": "exec_command",
+          "layer": "tool",
+          "expected_route_signal": "tool:exec_command"
+        },
+        {
+          "name": "mcp_session_memory",
+          "query": "aoa-session-memory-mcp",
+          "layer": "mcp",
+          "expected_route_signal": "mcp:aoa_session_memory_mcp"
+        },
+        {
+          "name": "skill_session_memory_evidence_route",
+          "query": "aoa-session-memory-evidence-route",
+          "layer": "skill",
+          "expected_route_signal": "skill:aoa_session_memory_evidence_route"
+        },
+        {
+          "name": "hook_user_prompt_submit",
+          "query": "userpromptsubmit",
+          "layer": "hook",
+          "expected_route_signal": "hook:userpromptsubmit"
+        },
+        {
+          "name": "script_session_memory",
+          "query": "aoa_session_memory",
+          "layer": "script",
+          "expected_route_signal": "script:aoa_session_memory"
+        },
+        {
+          "name": "validator_session_memory_mcp",
+          "query": "validate_session_memory_mcp",
+          "layer": "validator",
+          "expected_route_signal": "validator:validate_session_memory_mcp"
+        },
+        {
+          "name": "test_session_memory",
+          "query": "test_session_memory",
+          "layer": "test",
+          "expected_route_signal": "test:test_session_memory"
+        },
+        {
+          "name": "memory_session_memory",
+          "query": "session_memory",
+          "layer": "memory",
+          "expected_route_signal": "memory:aoa_session_memory"
+        },
+        {
+          "name": "graph_session_memory_graph",
+          "query": "graph",
+          "layer": "graph",
+          "expected_route_signal": "graph:session_memory_graph"
+        },
+        {
+          "name": "goal_inspected",
+          "query": "goal_inspected",
+          "layer": "goal",
+          "expected_route_signal": "goal:goal_inspected"
+        },
+        {
+          "name": "answer_assistant_answer",
+          "query": "assistant_answer",
+          "layer": "agent_event",
+          "expected_route_signal": "agent_event:assistant_answer"
+        },
+        {
+          "name": "failure_timeout",
+          "query": "timeout",
+          "layer": "failure_mode",
+          "expected_route_signal": "failure_mode:timeout"
+        },
+        {
+          "name": "decision_thread_decision",
+          "query": "decision",
+          "layer": "decision_thread",
+          "expected_route_signal": "decision_thread:decision"
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-08",
+        "note": "Core operational route-rollup coverage must prove the recurring agent-work lanes through a materialized projection matrix, not a single convenient anchor. The packet remains navigation only; raw, segment, and session refs stay the evidence handoff."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "route_rollup_query",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 13,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "min_result_count": 13,
+            "min_raw_ref_count": 13,
+            "min_segment_ref_count": 13,
+            "min_session_ref_count": 13,
+            "min_layer_count": 13,
+            "min_key_count": 12,
+            "min_route_signal_count": 13,
+            "required_probe_statuses": [
+              "passed"
+            ],
+            "required_query_route_advice_statuses": [
+              "explicit_filter_supplied"
+            ],
+            "required_layers": [
+              "tool",
+              "mcp",
+              "skill",
+              "hook",
+              "script",
+              "validator",
+              "test",
+              "memory",
+              "graph",
+              "goal",
+              "agent_event",
+              "failure_mode",
+              "decision_thread"
+            ],
+            "required_keys": [
+              "exec_command",
+              "aoa_session_memory_mcp",
+              "aoa_session_memory_evidence_route",
+              "userpromptsubmit",
+              "aoa_session_memory",
+              "validate_session_memory_mcp",
+              "test_session_memory",
+              "session_memory_graph",
+              "goal_inspected",
+              "assistant_answer",
+              "timeout",
+              "decision"
+            ],
+            "required_route_signals": [
+              "tool:exec_command",
+              "mcp:aoa_session_memory_mcp",
+              "skill:aoa_session_memory_evidence_route",
+              "hook:userpromptsubmit",
+              "script:aoa_session_memory",
+              "validator:validate_session_memory_mcp",
+              "test:test_session_memory",
+              "memory:aoa_session_memory",
+              "graph:session_memory_graph",
+              "goal:goal_inspected",
+              "agent_event:assistant_answer",
+              "failure_mode:timeout",
+              "decision_thread:decision"
+            ],
+            "require_no_shard_resample": true,
+            "require_no_monolith_open": true,
+            "require_no_fts": true,
+            "require_no_body_hydration": true,
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
       "id": "maintenance_status_next_action_contract",
       "profiles": [
         "maintenance_status"
@@ -899,7 +1395,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-07",
-        "note": "Dense registered-entity graph edges may only be treated as replaceable after a live proof matches usage-chain event refs to graph edges and keeps the prune gate closed."
+        "note": "Dense registered-entity graph edges may only be treated as replaceable after a live proof matches usage-chain event refs to event edges or reviewed post-prune aggregate refs and keeps the prune gate closed."
       },
       "expect": {
         "max_failed_count": 0,
@@ -956,7 +1452,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-07",
-        "note": "High-fanout replacement readiness may only close the before/after cardinality gate after a current read-only projection comparison proves lower cardinality for every configured replacement route while keeping graph-row pruning closed."
+        "note": "High-fanout replacement readiness may only close the before/after cardinality gate after a current read-only projection comparison proves lower cardinality or verified post-prune replacement coverage for every configured replacement route while keeping graph-row pruning closed."
       },
       "expect": {
         "max_failed_count": 0,

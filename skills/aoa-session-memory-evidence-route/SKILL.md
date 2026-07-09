@@ -57,6 +57,10 @@ Use these first routes when available:
   `state_observations` from `get_goal` output as observed state evidence, not
   as proof that a `create_goal` raw event exists; keep `missing_create` visible
   when present.
+- task to answer/outcome chain: `task-answer-chain` first when the task interval
+  itself is the anchor. Follow `next_expansion` only for the needed task,
+  answer, reasoning-boundary, or closeout lane; raw and segment refs remain
+  authority.
 - agent answers, closeouts, progress, or reasoning boundaries:
   `agent-responses`, `agent-closeouts`, `agent-progress-updates`,
   `agent-reasoning-windows`, or `answer-neighborhood`.
@@ -111,13 +115,20 @@ Use these first routes when available:
   proof. For “how was this entity used and what happened after,” expand
   through `usage-chain <anchor> --kind <kind>` and then raw/segment refs.
 - search projection weight, context-tail pressure, or a
-  `search_projection_combined_large` warning: read the compact
-  `maintenance-status` packet first when available. Its
-  `operations.search_pressure.latest_operational_projection_plan` should expose
+  `search_projection_combined_large` warning: read
+  `search-pressure-decision-packet` first when available, or the MCP
+  `aoa_session_search_pressure_decision_packet` tool in MCP-first contexts.
+  The packet exposes the current route-first decision, raw-text fallback
+  boundary, operational route-rollup posture, direct-event read-model posture,
+  default consumer routes, and next live scenario without rebuilding
+  maintenance, resampling shards, opening the monolith, using FTS, or hydrating
+  raw body text. If that route is unavailable, fall back to the compact
+  `maintenance-status` packet and inspect
+  `operations.search_pressure.latest_operational_projection_plan`, including
   `remaining_projection_pressure`, `context_tail_rehome_status`,
   `direct_operational_event_read_model`, `physical_shrink_plan`, and
-  `next_route` without resampling shards or rebuilding search. Use that packet
-  as the first route selector; run the heavier
+  `next_route`. Run the
+  heavier
   `search-operational-projection-plan --write-report` route only when the
   compact packet is missing, stale, or needs fresh shard/tail counts. Use
   `search-operational-shrink-gates --write-report` when the operational
@@ -221,6 +232,8 @@ For Codex tool discovery, search exact MCP tool names first when the general
 query is fuzzy:
 
 - transport/runtime preflight: `aoa_session_transport_preflight`
+- frequent MCP access-plane/read-model health packet:
+  `aoa_session_access_plane_preflight`
 - literal planner: `aoa_session_literal_query_plan`
 - entity usage dossier: `aoa_session_entity_dossier`
 - entity usage-to-consequence chain: `aoa_session_entity_usage_chain`
@@ -233,6 +246,8 @@ query is fuzzy:
 - graph relation bridge: `aoa_session_graph_bridge`
 - dense-anchor graph cooccurrence: `aoa_session_graph_cooccurrence`
 - projection/readiness status: `aoa_session_projection_status`
+- search pressure decision packet:
+  `aoa_session_search_pressure_decision_packet`
 - operational route-rollup projection:
   `aoa_session_route_rollup_query`
 - direct operational-event rollup projection:

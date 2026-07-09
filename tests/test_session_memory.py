@@ -6,6 +6,7 @@ import fcntl
 import io
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -850,12 +851,15 @@ def test_agent_event_route_prefers_session_index_and_keeps_multi_class_shard_sql
     assert route["uses_fts"] is False
     assert route["elapsed_ms"] >= 0
     assert route["cost_profile"]["uses_session_segment_indexes"] is True
+    assert route["cost_profile"]["raw_ref_preview"] is True
     assert route["cost_profile"]["multi_class_structured_sql"] is False
     assert route["cost_profile"]["class_query_count"] == 1
     assert route["cost_profile"]["agent_event_class_count"] == 2
     assert route["search_projection"]["route_kind"] == "agent_event_session_segment_index"
     assert route["provider"]["authoritative_result_provider"] == "session_segment_index"
     assert all(item["refs"]["raw"] for item in route["results"])
+    assert all(str(item["preview_source"]).startswith("raw") for item in route["results"])
+    assert any("Shard route" in item["bounded_preview"] for item in route["results"])
     assert {item["agent_event"] for item in route["results"]} == {"assistant_answer", "assistant_final_closeout"}
 
     shard_route = module.agent_event_route_search(
@@ -869,8 +873,11 @@ def test_agent_event_route_prefers_session_index_and_keeps_multi_class_shard_sql
     assert shard_route["uses_shards"] is True
     assert shard_route["uses_fts"] is False
     assert shard_route["cost_profile"]["multi_class_structured_sql"] is True
+    assert shard_route["cost_profile"]["raw_ref_preview"] is True
     assert shard_route["cost_profile"]["class_query_count"] == 1
     assert shard_route["search_projection"]["route_kind"] == "agent_event_structured_multi_class_shard_sql"
+    assert all(str(item["preview_source"]).startswith("raw") for item in shard_route["results"])
+    assert any("Shard route" in item["bounded_preview"] for item in shard_route["results"])
     assert {item["agent_event"] for item in shard_route["results"]} == {"assistant_answer", "assistant_final_closeout"}
 
 
@@ -4347,7 +4354,15 @@ def test_entity_usage_chain_builds_compact_sequence_without_graph_packets(tmp_pa
     assert payload["counts"]["usage_event_count"] == 1
     assert payload["counts"]["chain_with_result_or_consequence_count"] == 1
     assert payload["usage_chain"]["chains"][0]["usage_event"]["title"] == "Tool call: aoa_session_entity_usage_audit"
+    assert payload["usage_chain"]["chains"][0]["usage_event"]["primary_usage_action"] == "called"
+    assert "used" in payload["usage_chain"]["chains"][0]["usage_event"]["usage_actions"]
     assert payload["usage_chain"]["chains"][0]["result_or_consequence_events"][0]["title"] == "Event message: mcp_tool_call_end"
+    assert payload["usage_chain"]["chains"][0]["result_or_consequence_events"][0]["primary_usage_action"] == "observed"
+    assert payload["usage_action_counts"]["called"] == 1
+    assert payload["usage_action_counts"]["used"] == 1
+    assert payload["usage_action_counts"]["observed"] == 1
+    assert payload["primary_usage_action_counts"] == {"called": 1, "observed": 1}
+    assert payload["quality"]["usage_action_count"] == 3
     assert payload["quality"]["skipped_graph_rag_packet"] is True
     assert payload["quality"]["skipped_graph_neighborhood"] is True
     assert payload["quality"]["raw_or_segment_ref_present"] is True
@@ -4358,6 +4373,80 @@ def test_entity_usage_chain_builds_compact_sequence_without_graph_packets(tmp_pa
     assert any(item["kind"] == "raw_line" and item["value"] == "raw:line:10" for item in payload["evidence_refs"])
     assert "source_audit" not in payload
     assert payload["next_expansion"][0]["id"] == "usage_neighborhood"
+
+
+def test_entity_usage_event_action_semantics_classifies_operational_actions() -> None:
+    samples = {
+        "called": {"event_type": "TOOL_CALL", "action": "call_tool", "role": "usage"},
+        "read": {"event_type": "FILE_READ", "action": "read", "role": "usage"},
+        "edited": {"event_type": "DIFF", "action": "mutate_workspace", "role": "usage"},
+        "configured": {"event_type": "FILE_WRITE", "title": "Updated config.toml settings", "role": "usage"},
+        "validated": {"event_type": "COMMAND", "title": "python3 validate_session_memory_mcp.py", "role": "usage"},
+        "failed": {"event_type": "ERROR", "outcome": "failed", "role": "result"},
+        "repaired": {"event_type": "COMMAND", "title": "repair stale index refs", "role": "usage"},
+    }
+
+    for expected, event in samples.items():
+        assert expected in module.entity_usage_event_action_semantics(event)
+
+
+def test_live_scenario_usage_chain_audit_tracks_action_semantics(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_entity_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        anchor = str(kwargs["anchor"])
+        if anchor == "missing-action":
+            actions = {"called": 1, "used": 1}
+            ok = True
+        else:
+            actions = {"called": 1, "read": 1, "used": 1, "validated": 1, "observed": 1}
+            ok = True
+        return {
+            "ok": ok,
+            "kind": kwargs["kind"],
+            "requested_kind": kwargs["kind"],
+            "counts": {
+                "event_count": 3,
+                "usage_event_count": 1,
+                "result_event_count": 1,
+                "outcome_event_count": 0,
+                "consequence_event_count": 1,
+            },
+            "usage_action_counts": actions,
+            "primary_usage_action_counts": {"called": 1, "observed": 1},
+            "quality": {
+                "skipped_graph_rag_packet": True,
+                "skipped_graph_neighborhood": True,
+                "skipped_raw_preview_neighborhood": True,
+            },
+            "evidence_refs": [{"kind": "raw_line", "value": f"raw:{anchor}:1"}],
+            "first_ref": {"raw": f"raw:{anchor}:1"},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "entity_usage_chain", fake_entity_usage_chain)
+
+    audit = module.live_scenario_usage_chain_audit(
+        aoa_root=tmp_path / ".aoa",
+        probes=[
+            {
+                "name": "happy",
+                "anchor": "aoa-session-memory-mcp",
+                "kind": "mcp",
+                "required_usage_actions": ["called", "read", "used", "validated", "observed"],
+            },
+            {
+                "name": "missing",
+                "anchor": "missing-action",
+                "kind": "tool",
+                "required_usage_actions": ["validated"],
+            },
+        ],
+    )
+
+    assert audit["ok"] is False
+    assert audit["quality"]["sample_count"] == 2
+    assert audit["quality"]["failed_count"] == 1
+    assert audit["quality"]["usage_action_counts"]["called"] == 2
+    assert audit["samples"][1]["quality_flags"] == ["usage_chain_probe_missing_action:validated"]
 
 
 def test_entity_usage_chain_first_ref_skips_manifest_only_until_material_ref() -> None:
@@ -5307,6 +5396,7 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     def fake_goals(**_kwargs: Any) -> dict[str, Any]:
         return {
             "ok": True,
+            "status": "matched",
             "result_count": 1,
             "results": [
                 {
@@ -5473,6 +5563,99 @@ def test_live_scenario_audit_runs_cli_fallback_profiles(tmp_path: Path, monkeypa
     assert scenarios["graph_cooccurrence"]["cooccurrence_count"] == 2
     assert scenarios["graph_cooccurrence"]["bounded_store_query"] is True
     assert scenarios["hook_failure"]["first_ref"]["receipt"] == "hooks/receipts.jsonl#L1"
+
+
+def test_live_scenario_audit_routes_agent_event_route_matrix(tmp_path: Path, monkeypatch: Any) -> None:
+    def route_payload(agent_class: str, *, count: int = 2) -> dict[str, Any]:
+        results = [
+            {
+                "agent_event": agent_class,
+                "refs": {
+                    "raw": f"raw:line:{index + 1}",
+                    "segment": "segment.md",
+                    "session": "session.manifest.json",
+                },
+                "preview_source": "raw_semantic_text",
+            }
+            for index in range(count)
+        ]
+        return {
+            "ok": True,
+            "artifact_type": "agent_event_route_results",
+            "result_count": count,
+            "results": results,
+            "cost_profile": {
+                "lightweight_route": True,
+                "uses_shards": True,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "semantic_preview": False,
+                "raw_ref_preview": True,
+            },
+            "quality": {
+                "raw_preview_result_count": count,
+                "raw_ref_present_count": count,
+                "segment_ref_present_count": count,
+                "preview_source_counts": {"raw_semantic_text": count},
+            },
+        }
+
+    def fake_agent_events(**kwargs: Any) -> dict[str, Any]:
+        agent_class = (kwargs.get("agent_events") or ["assistant_answer"])[0]
+        return route_payload(str(agent_class), count=2)
+
+    def fake_reasoning_windows(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "artifact_type": "agent_event_windows",
+            "window_count": 1,
+            "windows": [
+                {
+                    "agent_event": "assistant_reasoning_boundary",
+                    "refs": {
+                        "raw": "raw:line:9",
+                        "segment": "segment.md",
+                        "session": "session.manifest.json",
+                    },
+                    "preview_source": "encrypted_reasoning_boundary",
+                }
+            ],
+            "cost_profile": {
+                "lightweight_route": True,
+                "uses_shards": True,
+                "uses_fts": False,
+                "hydrates_body": False,
+                "semantic_preview": False,
+                "raw_ref_preview": True,
+            },
+        }
+
+    monkeypatch.setattr(module, "agent_event_route_search", fake_agent_events)
+    monkeypatch.setattr(module, "agent_event_windows", fake_reasoning_windows)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["agent_event_routes"],
+        limit=2,
+    )
+
+    assert audit["ok"] is True
+    scenario = audit["scenarios"][0]
+    assert scenario["profile"] == "agent_event_routes"
+    assert scenario["status"] == "passed"
+    assert scenario["agent_event_route_count"] == 4
+    assert scenario["agent_event_route_result_count"] == 7
+    assert scenario["agent_event_raw_preview_result_count"] == 6
+    assert scenario["agent_event_boundary_preview_result_count"] == 1
+    assert scenario["agent_event_semantic_or_boundary_preview_result_count"] == 7
+    assert scenario["agent_event_raw_ref_present_count"] == 7
+    assert scenario["agent_event_segment_ref_present_count"] == 7
+    assert scenario["agent_event_reasoning_window_count"] == 1
+    assert scenario["agent_event_uses_fts"] is False
+    assert scenario["agent_event_hydrates_body"] is False
+    assert scenario["agent_event_raw_ref_preview"] is True
+    assert scenario["agent_event_route_counts"]["agent-reasoning-windows"] == 1
+    assert scenario["agent_event_class_counts"]["assistant_reasoning_boundary"] == 1
 
 
 def test_live_scenario_literal_planner_accepts_case_specific_exact_probe(
@@ -5738,9 +5921,13 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
         assert kwargs["layer"] == "mcp"
         return {
             "ok": True,
+            "status": "matched",
             "result_count": 1,
             "results": [
                 {
+                    "layer": "mcp",
+                    "key": "aoa_session_memory_mcp",
+                    "route_signal": "mcp:aoa_session_memory_mcp",
                     "raw_refs": ["raw:line:7"],
                     "segment_refs": ["001.md#event-7"],
                     "session_ids": ["session-7"],
@@ -5787,9 +5974,100 @@ def test_live_scenario_audit_routes_route_rollup_query_profile(tmp_path: Path, m
     assert scenario["profile"] == "route_rollup_query"
     assert scenario["status"] == "passed"
     assert scenario["result_count"] == 1
+    assert scenario["sample_count"] == 1
+    assert scenario["passed_count"] == 1
     assert scenario["uses_materialized_route_rollup"] is True
     assert scenario["agent_route_summary_status"] == "covered"
     assert scenario["opens_monolith"] is False
+    assert scenario["layer_counts"]["mcp"] == 1
+    assert scenario["key_counts"]["aoa_session_memory_mcp"] == 1
+    assert scenario["route_signal_counts"]["mcp:aoa_session_memory_mcp"] == 1
+
+
+def test_live_scenario_audit_routes_route_rollup_query_probe_matrix(tmp_path: Path, monkeypatch: Any) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_route_rollup_query(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        layer = str(kwargs["layer"])
+        key_by_layer = {
+            "tool": "exec_command",
+            "skill": "aoa_session_memory_evidence_route",
+        }
+        key = key_by_layer[layer]
+        return {
+            "ok": True,
+            "status": "matched",
+            "result_count": 1,
+            "results": [
+                {
+                    "layer": layer,
+                    "key": key,
+                    "route_signal": f"{layer}:{key}",
+                    "raw_refs": [f"raw:{layer}:7"],
+                    "segment_refs": [f"segments/{layer}.md"],
+                    "session_ids": [f"session-{layer}"],
+                }
+            ],
+            "totals": {"matched_group_count": 1, "omitted_group_count": 0},
+            "quality": {
+                "raw_or_segment_ref_present": True,
+                "freshness_status": "current",
+                "needs_refresh": False,
+                "query_route_advice_status": "explicit_filter_supplied",
+            },
+            "cost_profile": {
+                "uses_materialized_route_rollup": True,
+                "resamples_shards": False,
+                "opens_monolith": False,
+                "uses_fts": False,
+                "hydrates_body": False,
+            },
+            "agent_route_summary": {
+                "status": "covered",
+                "covered_lane_count": 3,
+                "missing_lane_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(module, "session_memory_search_operational_route_rollup_query", fake_route_rollup_query)
+
+    audit = module.live_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        profiles=["route_rollup_query"],
+        route_rollup_probes=[
+            {
+                "name": "tool_exec_command",
+                "query": "exec_command",
+                "layer": "tool",
+                "expected_route_signal": "tool:exec_command",
+            },
+            {
+                "name": "skill_evidence_route",
+                "query": "aoa-session-memory-evidence-route",
+                "layer": "skill",
+                "expected_route_signal": "skill:aoa_session_memory_evidence_route",
+            },
+        ],
+        sample_size=1,
+        limit=1,
+    )
+
+    assert audit["ok"] is True
+    scenario = audit["scenarios"][0]
+    assert scenario["status"] == "passed"
+    assert scenario["sample_count"] == 2
+    assert scenario["passed_count"] == 2
+    assert scenario["failed_count"] == 0
+    assert scenario["result_count"] == 2
+    assert scenario["layer_counts"] == {"skill": 1, "tool": 1}
+    assert scenario["key_counts"]["exec_command"] == 1
+    assert scenario["key_counts"]["aoa_session_memory_evidence_route"] == 1
+    assert scenario["route_signal_counts"]["tool:exec_command"] == 1
+    assert scenario["route_signal_counts"]["skill:aoa_session_memory_evidence_route"] == 1
+    assert scenario["probe_status_counts"] == {"passed": 2}
+    assert scenario["query_route_advice_status_counts"] == {"explicit_filter_supplied": 2}
+    assert [call["layer"] for call in calls] == ["tool", "skill"]
 
 
 def test_live_scenario_audit_routes_direct_event_rollup_query_profile(tmp_path: Path, monkeypatch: Any) -> None:
@@ -7024,47 +7302,6 @@ def test_live_scenario_corpus_check_tracks_allowed_warnings(tmp_path: Path, monk
     assert payload["actionable_gaps"][0]["case_id"] == "entity_usage_refs_contract"
 
 
-def test_live_scenario_corpus_inventory_lists_cases_without_running(tmp_path: Path) -> None:
-    aoa_root = tmp_path / ".aoa"
-    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
-    corpus_path.parent.mkdir(parents=True)
-    module.write_json(
-        corpus_path,
-        {
-            "schema_version": 1,
-            "artifact_type": "session_memory_live_scenario_regression_corpus",
-            "cases": [
-                {
-                    "id": "literal_planner_route_contract",
-                    "profiles": ["literal_planner"],
-                    "literal_probes": [{"name": "skill_anchor"}],
-                    "expect": {"profile_expectations": [{"profile": "literal_planner"}]},
-                },
-                {
-                    "id": "entity_usage_refs_contract",
-                    "profiles": ["entity_usage", "graph_bridge"],
-                    "entity_usage_probes": [{"anchor": "aoa-session-memory-mcp"}],
-                    "limit": 3,
-                    "expect": {"max_failed_count": 0},
-                },
-            ],
-        },
-    )
-
-    payload = module.live_scenario_corpus_inventory(aoa_root=aoa_root, corpus_path=corpus_path)
-
-    assert payload["ok"] is True
-    assert payload["mutates"] is False
-    assert payload["case_count"] == 2
-    assert payload["profile_counts"] == {"entity_usage": 1, "graph_bridge": 1, "literal_planner": 1}
-    assert payload["cases"][0]["index"] == 1
-    assert payload["cases"][0]["probe_counts"] == {"literal_probes": 1}
-    assert payload["cases"][0]["profile_expectation_count"] == 1
-    assert payload["cases"][1]["probe_counts"] == {"entity_usage_probes": 1}
-    assert "--case-limit 2" in payload["cases"][1]["exact_check_command"]
-    assert payload["authority_boundary"].startswith("Corpus inventory")
-
-
 def test_live_scenario_corpus_check_fails_missing_required_route(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
@@ -7281,6 +7518,88 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "hook_failure:session_ref:0<1" in failures
     assert "hook_failure:elapsed_ms:2500>1000" in failures
 
+    no_recent_scenario = module.live_scenario_result(
+        "hook_failure",
+        {
+            "ok": True,
+            "date_from": "2026-07-02",
+            "total_receipt_count": 0,
+            "returned_receipt_count": 0,
+            "scanned_line_count": 12064,
+            "date_semantics": {"filter_basis": "hook_receipt_timestamp"},
+        },
+        elapsed_ms=178,
+    )
+
+    assert no_recent_scenario["status"] == "passed"
+    assert no_recent_scenario["hook_failure_no_recent_errors"] is True
+    assert no_recent_scenario["quality_flags"] == ["route_ok_no_recent_hook_errors"]
+
+    no_recent_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "hook_failure",
+            "status": "passed",
+            "elapsed_ms": 500,
+            "hook_failure_no_recent_errors": True,
+            "total_receipt_count": 0,
+            "returned_receipt_count": 0,
+            "evidence_ref_counts": {"receipt_ref": 0, "session_ref": 0},
+        },
+        {
+            "profile": "hook_failure",
+            "allowed_statuses": ["passed"],
+            "allow_no_recent_hook_errors": True,
+            "min_total_receipt_count": 1,
+            "min_returned_receipt_count": 1,
+            "min_receipt_ref_count": 1,
+            "min_session_ref_count": 1,
+            "max_elapsed_ms": 1000,
+        },
+    )
+
+    assert no_recent_failures == []
+
+    no_recent_case_failures = module.live_scenario_expectation_failures(
+        {
+            "ok": True,
+            "quality": {
+                "failed_count": 0,
+                "warn_count": 0,
+                "actionable_gap_count": 0,
+                "raw_or_segment_ref_scenario_count": 0,
+            },
+            "scenarios": [
+                {
+                    "profile": "hook_failure",
+                    "status": "passed",
+                    "hook_failure_no_recent_errors": True,
+                    "total_receipt_count": 0,
+                    "returned_receipt_count": 0,
+                    "evidence_ref_counts": {"receipt_ref": 0, "session_ref": 0},
+                }
+            ],
+        },
+        {
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "max_actionable_gap_count": 0,
+            "min_raw_or_segment_ref_scenario_count": 1,
+            "profile_expectations": [
+                {
+                    "profile": "hook_failure",
+                    "allowed_statuses": ["passed"],
+                    "allow_no_recent_hook_errors": True,
+                    "min_total_receipt_count": 1,
+                    "min_returned_receipt_count": 1,
+                    "min_receipt_ref_count": 1,
+                    "min_session_ref_count": 1,
+                }
+            ],
+        },
+    )
+
+    assert no_recent_case_failures == []
+
     graph_failures = module.live_scenario_profile_expectation_failures(
         {
             "profile": "graph_neighborhood",
@@ -7400,6 +7719,77 @@ def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> N
     assert "direct_event_rollup_query:opens_monolith:True" in direct_event_failures
     assert "direct_event_rollup_query:uses_fts:True" in direct_event_failures
     assert "direct_event_rollup_query:hydrates_body:True" in direct_event_failures
+
+    agent_event_failures = module.live_scenario_profile_expectation_failures(
+        {
+            "profile": "agent_event_routes",
+            "status": "passed",
+            "sample_count": 3,
+            "agent_event_route_count": 3,
+            "agent_event_route_result_count": 2,
+            "agent_event_raw_preview_result_count": 1,
+            "agent_event_boundary_preview_result_count": 0,
+            "agent_event_semantic_or_boundary_preview_result_count": 1,
+            "agent_event_raw_ref_present_count": 1,
+            "agent_event_segment_ref_present_count": 1,
+            "agent_event_reasoning_window_count": 0,
+            "agent_event_route_counts": {
+                "agent-responses": 1,
+                "agent-progress-updates": 1,
+                "agent-closeouts": 1,
+            },
+            "agent_event_class_counts": {
+                "assistant_answer": 1,
+                "assistant_progress_update": 1,
+                "assistant_final_closeout": 1,
+            },
+            "agent_event_uses_fts": True,
+            "agent_event_hydrates_body": True,
+            "agent_event_raw_ref_preview": False,
+        },
+        {
+            "profile": "agent_event_routes",
+            "min_sample_count": 4,
+            "min_agent_event_route_count": 4,
+            "min_agent_event_route_result_count": 4,
+            "min_agent_event_raw_preview_result_count": 4,
+            "min_agent_event_boundary_preview_result_count": 1,
+            "min_agent_event_semantic_or_boundary_preview_result_count": 4,
+            "min_agent_event_raw_ref_present_count": 4,
+            "min_agent_event_segment_ref_present_count": 4,
+            "min_agent_event_reasoning_window_count": 1,
+            "required_agent_event_routes": [
+                "agent-responses",
+                "agent-progress-updates",
+                "agent-closeouts",
+                "agent-reasoning-windows",
+            ],
+            "required_agent_event_classes": [
+                "assistant_answer",
+                "assistant_progress_update",
+                "assistant_final_closeout",
+                "assistant_reasoning_boundary",
+            ],
+            "require_agent_event_no_fts": True,
+            "require_agent_event_no_body_hydration": True,
+            "require_agent_event_raw_ref_preview": True,
+        },
+    )
+
+    assert "agent_event_routes:sample_count:3<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_route_count:3<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_route_result_count:2<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_raw_preview_result_count:1<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_boundary_preview_result_count:0<1" in agent_event_failures
+    assert "agent_event_routes:agent_event_semantic_or_boundary_preview_result_count:1<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_raw_ref_present_count:1<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_segment_ref_present_count:1<4" in agent_event_failures
+    assert "agent_event_routes:agent_event_reasoning_window_count:0<1" in agent_event_failures
+    assert "agent_event_routes:missing_agent_event_route:agent-reasoning-windows" in agent_event_failures
+    assert "agent_event_routes:missing_agent_event_class:assistant_reasoning_boundary" in agent_event_failures
+    assert "agent_event_routes:agent_event_uses_fts:True" in agent_event_failures
+    assert "agent_event_routes:agent_event_hydrates_body:True" in agent_event_failures
+    assert "agent_event_routes:agent_event_raw_ref_preview:False" in agent_event_failures
 
     goal_failures = module.live_scenario_profile_expectation_failures(
         {
@@ -7608,6 +7998,33 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
                     "usage_role_counts": {"result": 3},
                     "event_type_counts": {"COMMAND_OUTPUT": 2, "VERIFICATION": 1},
                 },
+                {
+                    "profile": "agent_event_routes",
+                    "status": "passed",
+                    "agent_event_route_count": 4,
+                    "agent_event_route_result_count": 7,
+                    "agent_event_route_counts": {
+                        "agent-responses": 1,
+                        "agent-progress-updates": 1,
+                        "agent-closeouts": 1,
+                        "agent-reasoning-windows": 1,
+                    },
+                    "agent_event_class_counts": {
+                        "assistant_answer": 1,
+                        "assistant_progress_update": 1,
+                        "assistant_final_closeout": 1,
+                        "assistant_reasoning_boundary": 1,
+                    },
+                    "agent_event_raw_preview_result_count": 7,
+                    "agent_event_boundary_preview_result_count": 1,
+                    "agent_event_semantic_or_boundary_preview_result_count": 8,
+                    "agent_event_raw_ref_present_count": 7,
+                    "agent_event_segment_ref_present_count": 7,
+                    "agent_event_reasoning_window_count": 1,
+                    "agent_event_uses_fts": False,
+                    "agent_event_hydrates_body": False,
+                    "agent_event_raw_ref_preview": True,
+                },
             ],
         }
     )
@@ -7639,6 +8056,14 @@ def test_live_scenario_compact_observed_keeps_profile_specific_metrics() -> None
     assert profiles["direct_event_rollup_query"]["uses_materialized_direct_event_rollup"] is True
     assert profiles["direct_event_rollup_query"]["usage_chain_required_for_behavior_proof"] is True
     assert profiles["direct_event_rollup_query"]["usage_role_counts"]["result"] == 3
+    assert profiles["agent_event_routes"]["agent_event_route_count"] == 4
+    assert profiles["agent_event_routes"]["agent_event_route_counts"]["agent-reasoning-windows"] == 1
+    assert profiles["agent_event_routes"]["agent_event_class_counts"]["assistant_reasoning_boundary"] == 1
+    assert profiles["agent_event_routes"]["agent_event_raw_preview_result_count"] == 7
+    assert profiles["agent_event_routes"]["agent_event_boundary_preview_result_count"] == 1
+    assert profiles["agent_event_routes"]["agent_event_semantic_or_boundary_preview_result_count"] == 8
+    assert profiles["agent_event_routes"]["agent_event_uses_fts"] is False
+    assert profiles["agent_event_routes"]["agent_event_raw_ref_preview"] is True
 
 
 def test_trace_route_supports_agent_event_kind() -> None:
@@ -8354,6 +8779,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         query=graph_session_id,
         doc_type="event",
     )
+    session_answer_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query=f"найди ответы агента по сессии {archived_session_label}",
+        doc_type="event",
+    )
+    path_phrase_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="как агент использовал validate_session_memory_mcp.py и что потом сломалось",
+        doc_type="event",
+    )
     typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
     storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
@@ -8708,7 +9143,32 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert session_strategy["primary_route_id"] == "session_rehydrate"
     assert session_strategy["route_sequence"][0]["route_id"] == "session_rehydrate"
     assert session_strategy["route_sequence"][1]["route_id"] == "session_structured_search"
-    assert session_strategy["monolith_fallback_position"] > 1
+    assert session_strategy["raw_text_fallback_position"] > 1
+    assert session_answer_literal_plan["query_shape"]["primary"] == "session_id"
+    assert session_answer_literal_plan["query_shape"]["session_target"] == archived_session_label
+    assert session_answer_literal_plan["query_shape"]["inferred_agent_event"] == "assistant_answer"
+    assert session_answer_literal_plan["route_anchor"] == archived_session_label
+    assert session_answer_literal_plan["route_anchor_source"] == "session_target"
+    assert session_answer_literal_plan["embedded_entity_anchor"] == {}
+    assert session_answer_literal_plan["primary_route"]["route_id"] == "agent_event_route"
+    assert "agent-responses" in session_answer_literal_plan["next_command"]
+    assert f"--session {shlex.quote(archived_session_label)}" in session_answer_literal_plan["next_command"]
+    assert session_answer_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert session_answer_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert session_answer_literal_plan["ordered_routes"][1]["route_id"] == "session_rehydrate"
+    assert session_answer_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "agent_event_route"
+    assert path_phrase_literal_plan["query_shape"]["primary"] == "path"
+    assert path_phrase_literal_plan["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
+    assert path_phrase_literal_plan["route_anchor"] == "validate_session_memory_mcp.py"
+    assert path_phrase_literal_plan["route_anchor_source"] == "path_anchor"
+    assert path_phrase_literal_plan["route_anchor_kind"] == "auto"
+    assert path_phrase_literal_plan["embedded_entity_anchor"] == {}
+    assert path_phrase_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
+    assert "--route-signal validator:validate_session_memory_mcp_py" in path_phrase_literal_plan["next_command"]
+    assert path_phrase_literal_plan["ordered_routes"][1]["route_id"] == "entity_usage_chain"
+    assert "--kind auto" in path_phrase_literal_plan["ordered_routes"][1]["command"]
+    assert path_phrase_literal_plan["cost_profile"]["uses_fts_first"] is False
+    assert path_phrase_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert not any(
         item.get("key") == "namespace_tool"
         for item in exact_tool_timeline["resolved"].get("route_candidates", [])
@@ -19750,19 +20210,6 @@ def test_maintenance_operations_summary_reads_diagnostic_evidence(tmp_path: Path
     assert ops["last_auto_maintenance_resource_launch"]["backlog"]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
     assert ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
     assert ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
-    compact = module.compact_maintenance_status_payload(
-        {
-            "schema_version": module.SCHEMA_VERSION,
-            "artifact_type": "session_memory_maintenance_status",
-            "operations": ops,
-        }
-    )
-    compact_ops = compact["operations"]
-    assert compact_ops["recent_problem_job_count"] == len(ops["recent_problem_jobs"])
-    assert compact_ops["recent_problem_jobs"][0]["status"] == "resource_blocked"
-    assert compact_ops["recent_problem_jobs"][0]["blocked_reasons"] == ["indexing_unattended_swap_used_pressure"]
-    assert compact_ops["recent_problem_jobs"][0]["source"]["artifact_type"] == "auto_maintenance_resource_launch"
-    assert compact_ops["recent_problem_jobs"][0]["diagnostics"] == ["resource_blocked:indexing_unattended_swap_used_pressure"]
     assert ops["search_shards"]["status"] == "incomplete"
     assert ops["search_shards"]["materialized_shard_count"] == 1
     assert ops["search_shards"]["noncurrent_shards"][0]["shard"] == "month/2026-06"
@@ -25585,73 +26032,6 @@ def test_search_pressure_summary_surfaces_near_warning_without_storage_mutation(
 def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
-    diagnostics = aoa_root / module.DIAGNOSTICS_ROOT
-    diagnostics.mkdir()
-    module.write_json(
-        diagnostics / "20260621T001000Z__search-operational-projection-plan.json",
-        {
-            "schema_version": module.SCHEMA_VERSION,
-            "artifact_type": "session_memory_search_operational_event_projection_plan",
-            "generated_at": "2026-06-21T00:10:00Z",
-            "ok": True,
-            "status": "remaining_pressure_measured",
-            "sample": {
-                "selection": "largest_existing_search_shards",
-                "max_shards": 3,
-                "selected_shard_count": 2,
-                "successful_shard_count": 2,
-            },
-            "remaining_projection_pressure": {
-                "status": "direct_operational_event_pressure_active",
-                "event_total": 2000,
-                "counts": {
-                    "direct_operational_event_count": 1200,
-                    "protected_agent_or_task_context_count": 250,
-                    "active_context_tail_candidate_count": 75,
-                    "active_route_ref_backed_candidate_count": 0,
-                    "unrouted_context_tail_keep_count": 75,
-                    "already_rehomed_context_tail_ref_count": 475,
-                },
-                "dominant_classes": [
-                    {"id": "direct_operational_event_count", "count": 1200},
-                    {"id": "already_rehomed_context_tail_ref_count", "count": 475},
-                ],
-                "role_counts": {"usage": 500, "result": 400},
-                "raw_text_fallback_status": "monolith_required_for_raw_text_query",
-                "next_design_route": "prove_direct_operational_event_read_model_before_more_physical_shrink",
-                "quality_boundary": "planning evidence only",
-            },
-            "context_tail_rehome_status": {
-                "status": "applied_current",
-                "applied": True,
-                "already_rehomed_route_ref_document_count": 475,
-                "already_rehomed_route_ref_row_count": 1200,
-                "active_route_ref_backed_candidate_count": 0,
-                "active_unrouted_keep_candidate_count": 75,
-                "next_route": "design_remaining_operational_event_read_models",
-            },
-            "direct_operational_event_read_model": {
-                "status": "current",
-                "needs_refresh": False,
-                "size_human": "88.0 MiB",
-                "direct_event_count": 1200,
-                "route_bound_direct_event_count": 1200,
-                "unrouted_direct_event_count": 0,
-                "direct_event_rollup_row_count": 100,
-                "direct_event_posting_count": 1200,
-                "source_mismatch_count": 0,
-                "exact_query_command": "python3 scripts/aoa_session_memory.py search-operational-direct-event-rollup-query",
-            },
-            "physical_shrink_plan": {
-                "status": "route_backed_context_tail_rehomed_with_unrouted_tail_kept",
-                "safe_to_apply_physical_compaction": False,
-                "apply_status": "not_needed_for_route_backed_tail",
-                "blocked_reason": "remaining context-tail rows lack route refs",
-                "next_implementation_route": "design_remaining_operational_event_read_models",
-            },
-            "elapsed_ms": 1200,
-        },
-    )
 
     monkeypatch.setattr(module, "SEARCH_SHARD_DOCUMENT_HOTSET_WARNING_COUNT", 1_000)
     monkeypatch.setattr(module, "SEARCH_SHARD_EVENT_HOTSET_WARNING_COUNT", 500)
@@ -25717,24 +26097,6 @@ def test_search_pressure_summary_surfaces_document_hotset_route(tmp_path: Path, 
     assert summary["document_hotset"]["latest_materialization_document_counts"]["event"] == 700
     assert summary["document_hotset"]["latest_slow_sessions"][0]["session_label"] == "2026-06-21__002__slow-shard-session"
     assert "operational-event projection" in summary["document_hotset"]["next_route"]
-    latest_plan = summary["latest_operational_projection_plan"]
-    assert latest_plan["status"] == "remaining_pressure_measured"
-    assert latest_plan["remaining_projection_pressure"]["status"] == "direct_operational_event_pressure_active"
-    assert latest_plan["remaining_projection_pressure"]["counts"]["unrouted_context_tail_keep_count"] == 75
-    assert latest_plan["context_tail_rehome_status"]["status"] == "applied_current"
-    assert latest_plan["direct_operational_event_read_model"]["status"] == "current"
-    assert latest_plan["physical_shrink_plan"]["status"] == "route_backed_context_tail_rehomed_with_unrouted_tail_kept"
-    compact = module.compact_maintenance_status_payload(
-        {
-            "schema_version": module.SCHEMA_VERSION,
-            "artifact_type": "session_memory_maintenance_status",
-            "operations": {"search_pressure": summary, "warnings": []},
-        }
-    )
-    compact_latest_plan = compact["operations"]["search_pressure"]["latest_operational_projection_plan"]
-    assert compact_latest_plan["remaining_projection_pressure"]["counts"]["direct_operational_event_count"] == 1200
-    assert compact_latest_plan["context_tail_rehome_status"]["active_unrouted_keep_candidate_count"] == 75
-    assert compact_latest_plan["direct_operational_event_read_model"]["direct_event_rollup_row_count"] == 100
     assert summary["operational_route_rollup"]["status"] == "missing"
     assert "operational route-rollup" in summary["next_route"]
     assert summary["physical_compaction"]["status"] == "requires_explicit_plan"
@@ -28526,9 +28888,13 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert answers["cost_profile"]["uses_shards"] is True
     assert answers["cost_profile"]["uses_fts"] is False
     assert answers["cost_profile"]["hydrates_body"] is False
+    assert answers["cost_profile"]["raw_ref_preview"] is True
     assert answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_SHARD
+    assert str(answers["results"][0]["preview_source"]).startswith("raw")
+    assert "Here is the later ordinary routed answer" in answers["results"][0]["bounded_preview"]
     assert answers["quality"]["ordered_by"] == "query_rank_then_session_date_then_event_position_desc"
     assert answers["quality"]["raw_ref_present_count"] == answers["result_count"]
+    assert answers["quality"]["raw_preview_result_count"] == answers["result_count"]
     monolith_answers = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
@@ -28539,7 +28905,11 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert monolith_answers["ok"] is True
     assert monolith_answers["search_projection"] == {}
     assert monolith_answers["cost_profile"].get("uses_shards") is not True
+    assert monolith_answers["cost_profile"]["hydrates_body"] is False
+    assert monolith_answers["cost_profile"]["raw_ref_preview"] is True
     assert monolith_answers["results"][0]["search_catalog"]["active_projection"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert str(monolith_answers["results"][0]["preview_source"]).startswith("raw")
+    assert "Here is the later ordinary routed answer" in monolith_answers["results"][0]["bounded_preview"]
 
     latest_session_answers = module.agent_event_route_search(
         aoa_root=aoa_root,
@@ -28571,6 +28941,8 @@ def test_agent_event_route_uses_search_shards_without_stream_copy_limit_noise(tm
     assert progress["cost_profile"]["uses_shards"] is True
     assert progress["cost_profile"]["uses_fts"] is False
     assert progress["cost_profile"]["semantic_preview"] is False
+    assert progress["cost_profile"]["raw_ref_preview"] is True
+    assert all(str(item["preview_source"]).startswith("raw") for item in progress["results"])
     assert all(item["agent_event_source"] != "event_msg_stream" for item in progress["results"])
     assert {item["event_id"] for item in progress["results"]} == {"000003", "000004"}
 
@@ -28796,11 +29168,15 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
         raise AssertionError("agent event structured route must not read document_bodies")
 
-    def fail_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("agent event structured route must not open raw semantic preview")
+    raw_preview_calls = 0
+
+    def counted_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal raw_preview_calls
+        raw_preview_calls += 1
+        return {"status": "raw_semantic_text", "text": "Agent response route stays lightweight."}
 
     monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
-    monkeypatch.setattr(module, "route_raw_semantic_preview", fail_raw_preview)
+    monkeypatch.setattr(module, "route_raw_semantic_preview", counted_raw_preview)
     route = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
@@ -28814,7 +29190,10 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     assert route["cost_profile"]["uses_fts"] is False
     assert route["cost_profile"]["hydrates_body"] is False
     assert route["cost_profile"]["semantic_preview"] is False
-    assert route["results"][0]["preview_source"] == "search_body"
+    assert route["cost_profile"]["raw_ref_preview"] is True
+    assert raw_preview_calls == 1
+    assert route["results"][0]["preview_source"] == "raw_semantic_text"
+    assert route["results"][0]["bounded_preview"] == "Agent response route stays lightweight."
     assert route["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
 
 
@@ -32765,6 +33144,24 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
+def test_copy_portable_bundle_keeps_hook_example_portable(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    target = tmp_path / "aoa-session-memory"
+
+    payload = module.copy_portable_bundle(
+        source_aoa_root=source_aoa,
+        target_aoa_root=target,
+        overwrite=True,
+    )
+
+    assert payload["target_aoa_root"] == str(target.resolve())
+    hook_example = json.loads((target / "hooks" / "codex-hooks.user.example.json").read_text(encoding="utf-8"))
+    rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
+    assert str(module.default_source_aoa_root()) not in rendered_hooks
+    assert str(target.resolve()) not in rendered_hooks
+    assert "/path/to/workspace/.aoa/scripts/aoa_session_memory.py" in rendered_hooks
+
+
 def test_agent_atlas_policy_matches_source_skeleton() -> None:
     source_aoa = SCRIPT.parents[1]
     policy = json.loads((source_aoa / "config" / "atlas-policy.json").read_text(encoding="utf-8"))
@@ -32939,19 +33336,6 @@ def test_installable_user_skill_states_report_sources_and_install_status(tmp_pat
 
     assert complete["source_ok"] is True
     assert complete["all_installed"] is True
-
-
-def test_evidence_route_skill_names_current_compact_routes() -> None:
-    source_aoa = SCRIPT.parents[1]
-    skill_text = (
-        source_aoa / "skills" / "aoa-session-memory-evidence-route" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-
-    assert "operations.search_pressure.latest_operational_projection_plan" in skill_text
-    assert "remaining_projection_pressure" in skill_text
-    assert "live-scenario-corpus list" in skill_text
-    assert "truth_status=source_corpus_inventory_not_live_route_proof" in skill_text
-    assert "search-operational-projection-plan --write-report" in skill_text
 
 
 def test_install_user_skill_backs_up_conflicting_target_on_force(tmp_path: Path) -> None:
