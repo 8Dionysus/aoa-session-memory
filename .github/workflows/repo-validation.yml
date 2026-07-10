@@ -1,0 +1,27 @@
+name: Repo Validation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source_index:
+    name: Repo Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Check repo-local KAG source index
+        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@34dded920a832a529cd9a71cee37454e17b0a790
