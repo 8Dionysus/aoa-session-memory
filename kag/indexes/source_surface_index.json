@@ -1,7 +1,7 @@
 {
   "classification_summary": {
     "artifact_kind": {
-      "config": 14,
+      "config": 15,
       "directory_marker": 52,
       "document": 96,
       "index": 1,
@@ -14,7 +14,7 @@
       "test": 1
     },
     "command_role": {
-      "none": 174,
+      "none": 175,
       "test": 1
     },
     "document_role": {
@@ -22,21 +22,21 @@
       "audit": 1,
       "design": 1,
       "design_agents": 1,
-      "none": 79,
+      "none": 80,
       "readme": 56,
       "unknown_document": 26
     },
     "mechanics_role": {
-      "none": 175
+      "none": 176
     },
     "primary_kind": {
       "artifact": 56,
       "command": 1,
       "document": 96,
-      "surface": 22
+      "surface": 23
     },
     "surface_state": {
-      "authored_source": 172,
+      "authored_source": 173,
       "generated_readmodel": 2,
       "receipt": 1
     }
@@ -47,7 +47,7 @@
     "generated_count": 2,
     "heading_count": 380,
     "mechanics_count": 0,
-    "record_count": 175,
+    "record_count": 176,
     "schema_count": 6,
     "script_count": 0,
     "test_count": 1,
@@ -56,11 +56,100 @@
   },
   "index_identity": {
     "artifact_kind": "source_surface_index",
-    "content_digest": "39fc4b853887657fb4961d01b3f02d7ce9cf4a43d0c0bb0d017272e878d2a273",
+    "content_digest": "f4b84df6118fdc8d94d2930816e4e0ddc6b092905876e00e0699164922469623",
     "local_id": "index:repo-local:source-surfaces",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-index.schema.json"
   },
   "records": [
+    {
+      "abi": {
+        "abi_epoch": "source",
+        "artifact_class": "config",
+        "compatibility": "stable",
+        "contract_version": "none",
+        "schema_version": "none"
+      },
+      "access": {
+        "scope": "public",
+        "secrets_risk": "none"
+      },
+      "artifact_kind": "config",
+      "classification": {
+        "confidence": "high",
+        "primary_kind": "surface"
+      },
+      "code_role": "none",
+      "command_role": "none",
+      "consumer_route": {
+        "route_kind": "resource",
+        "surface": "aoa-kag-mcp"
+      },
+      "document_role": "none",
+      "freshness": {
+        "checked_ref": "git-index-source-tree",
+        "mode": "source_snapshot",
+        "state": "current"
+      },
+      "identity": {
+        "content_hash": "e8b9bdd88385fa6f66e703724d8bbb17364885afa0c71b2a00c6c95ddd209ee6",
+        "git_ref": "git-index-source-tree",
+        "id": "file:.github/workflows/repo-validation.yml:3affb923d0",
+        "mime": "application/yaml",
+        "path": ".github/workflows/repo-validation.yml",
+        "repo": "aoa-session-memory",
+        "size_bytes": 602
+      },
+      "mechanics_role": "none",
+      "observed_form": "file",
+      "owner_return_route": {
+        "route_kind": "source_owner",
+        "surface": ".github/workflows/repo-validation.yml"
+      },
+      "provenance": {
+        "generated_by": "",
+        "materials": [],
+        "observed_by": "aoa-kag:scripts/generate_repo_local_kag_index.py",
+        "source_refs": [
+          {
+            "authority": "authored_source",
+            "path": ".github/workflows/repo-validation.yml",
+            "repo": "aoa-session-memory",
+            "role": "primary"
+          }
+        ],
+        "validated_by": [
+          "aoa-kag:scripts/validate_kag.py"
+        ]
+      },
+      "refs": {
+        "heading_refs": [],
+        "line_refs": [
+          ".github/workflows/repo-validation.yml:1"
+        ],
+        "path_ref": ".github/workflows/repo-validation.yml"
+      },
+      "signs": {
+        "attestation_ref": "",
+        "digest": "e8b9bdd88385fa6f66e703724d8bbb17364885afa0c71b2a00c6c95ddd209ee6",
+        "signature_ref": "",
+        "verification_state": "digest-only"
+      },
+      "surface_state": "authored_source",
+      "toolchain": {
+        "detected_tools": [
+          "git",
+          "python"
+        ],
+        "owner_commands": [],
+        "required_tools": [
+          "jq"
+        ]
+      },
+      "validator_route": {
+        "route_kind": "source_fast",
+        "surface": "aoa-kag:scripts/validate_kag.py"
+      }
+    },
     {
       "abi": {
         "abi_epoch": "source",
@@ -94,7 +183,7 @@
         "content_hash": "360d659b5a8a98455b1753b9e4b028fbb8bf2ce790a07dc5e030c08dd566c5a9",
         "git_ref": "git-index-source-tree",
         "id": "file:.gitignore:bc37d034ba",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": ".gitignore",
         "repo": "aoa-session-memory",
         "size_bytes": 345
@@ -2304,13 +2393,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "097215281e664fcb9981b91ce9cf683fa1a96d7f4ab2749519d73891fe43716b",
+        "content_hash": "bfd17d63ca76fff0f90ac13866c95d5d421e0535049d5c59c0655e605e3eab2b",
         "git_ref": "git-index-source-tree",
         "id": "file:config/live-scenario-regression-corpus.json:5c9c552c08",
         "mime": "application/json",
         "path": "config/live-scenario-regression-corpus.json",
         "repo": "aoa-session-memory",
-        "size_bytes": 34701
+        "size_bytes": 52172
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -2343,7 +2432,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "097215281e664fcb9981b91ce9cf683fa1a96d7f4ab2749519d73891fe43716b",
+        "digest": "bfd17d63ca76fff0f90ac13866c95d5d421e0535049d5c59c0655e605e3eab2b",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -3952,13 +4041,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "6afff75a95c67049ed7205239196dd8006255e5e875574533e1b64f0e58e7f8b",
+        "content_hash": "52874507c556ec2bdf53ac1a802db2f580fa85522213713c37171f360890c0c9",
         "git_ref": "git-index-source-tree",
         "id": "file:manifests/artifact_bundles/portable_bundle.bundle.json:7189ad2fbc",
         "mime": "application/json",
         "path": "manifests/artifact_bundles/portable_bundle.bundle.json",
         "repo": "aoa-session-memory",
-        "size_bytes": 4002
+        "size_bytes": 3497
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -3991,7 +4080,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "6afff75a95c67049ed7205239196dd8006255e5e875574533e1b64f0e58e7f8b",
+        "digest": "52874507c556ec2bdf53ac1a802db2f580fa85522213713c37171f360890c0c9",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -4740,7 +4829,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-access-boundary/entries/.gitkeep:821438061b",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-access-boundary/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -4922,7 +5011,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-agent-event/entries/.gitkeep:226839c4fd",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-agent-event/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -5104,7 +5193,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-agent/entries/.gitkeep:ab8b132c8c",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-agent/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -5284,7 +5373,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-api/entries/.gitkeep:0fab01deed",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-api/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -5464,7 +5553,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-authority-surface/entries/.gitkeep:34382a3b9d",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-authority-surface/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -5667,7 +5756,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-confidence/entries/.gitkeep:b80bf45f1d",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-confidence/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -5849,7 +5938,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-conversation-act/entries/.gitkeep:a38003aed3",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-conversation-act/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -6052,7 +6141,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-correlation/entries/.gitkeep:5a245632ce",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-correlation/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -6234,7 +6323,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-delivery-state/entries/.gitkeep:4cde60ebee",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-delivery-state/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -6416,7 +6505,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-entity/entries/.gitkeep:ae5818fa97",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-entity/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -6598,7 +6687,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-eval/entries/.gitkeep:45af1a4934",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-eval/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -6799,7 +6888,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-evidence-provenance/entries/.gitkeep:42a17d1033",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-evidence-provenance/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -6981,7 +7070,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-external-snapshot/entries/.gitkeep:c257462779",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-external-snapshot/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -7163,7 +7252,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-failure-mode/entries/.gitkeep:f763010c4b",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-failure-mode/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -7366,7 +7455,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-freshness/entries/.gitkeep:7bb7741af0",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-freshness/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -7548,7 +7637,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-git/entries/.gitkeep:4bc6ddd9ff",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-git/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -7728,7 +7817,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-goal/entries/.gitkeep:43ab4168c5",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-goal/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -7910,7 +7999,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-graph/entries/.gitkeep:7e9980ea0e",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-graph/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -8090,7 +8179,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-hook-health/entries/.gitkeep:a97c60f33c",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-hook-health/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -8272,7 +8361,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-hook/entries/.gitkeep:4a0920368e",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-hook/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -8452,7 +8541,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-index-health/entries/.gitkeep:4b7b713a05",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-index-health/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -8634,7 +8723,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-mcp/entries/.gitkeep:127eb412fd",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-mcp/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -8816,7 +8905,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-mechanic/entries/.gitkeep:7a7f4e9511",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-mechanic/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -8996,7 +9085,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-memory-entity/entries/.gitkeep:7becef4231",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-memory-entity/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -9176,7 +9265,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-memory-surface/entries/.gitkeep:b34363f8f9",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-memory-surface/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -9379,7 +9468,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-mutation-surface/entries/.gitkeep:762e4074f4",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-mutation-surface/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -9561,7 +9650,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-open-thread/entries/.gitkeep:989c96b1f0",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-open-thread/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -9764,7 +9853,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-operator-preference/entries/.gitkeep:a693314039",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-operator-preference/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -9946,7 +10035,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-operator-request/entries/.gitkeep:55f623261b",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-operator-request/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -10149,7 +10238,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-owner-route/entries/.gitkeep:12a3153239",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-owner-route/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -10331,7 +10420,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-path/entries/.gitkeep:c1814bf329",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-path/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -10513,7 +10602,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-phase-topic/entries/.gitkeep:8897943fcf",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-phase-topic/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -10695,7 +10784,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-playbook/entries/.gitkeep:07e13080d9",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-playbook/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -10875,7 +10964,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-plugin/entries/.gitkeep:ce40be4782",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-plugin/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -11055,7 +11144,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-promotion-candidate/entries/.gitkeep:fe0dd19003",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-promotion-candidate/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -11237,7 +11326,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-repo-family/entries/.gitkeep:65829ee0bc",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-repo-family/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -11440,7 +11529,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-resource-profile/entries/.gitkeep:0ff3f9720d",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-resource-profile/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -11622,7 +11711,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-review-state/entries/.gitkeep:bb59a392b2",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-review-state/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -11804,7 +11893,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-risk/entries/.gitkeep:ffac50fcbf",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-risk/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -11986,7 +12075,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-route-next-action/entries/.gitkeep:b3695c1439",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-route-next-action/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -12189,7 +12278,7 @@
         "content_hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-runtime-environment/entries/.gitkeep:b74b13a50f",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-runtime-environment/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 1
@@ -12371,7 +12460,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-scope-contract/entries/.gitkeep:16e060d65c",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-scope-contract/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -12553,7 +12642,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-script/entries/.gitkeep:68947c55cb",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-script/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -12733,7 +12822,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-session-act/entries/.gitkeep:b59ece5a6e",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-session-act/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -12915,7 +13004,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-skill/entries/.gitkeep:e8b537c744",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-skill/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -13095,7 +13184,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-technique/entries/.gitkeep:271dff265b",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-technique/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -13275,7 +13364,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-test/entries/.gitkeep:99e31bafe4",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-test/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -13455,7 +13544,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-time/entries/.gitkeep:90d29df6a1",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-time/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -13637,7 +13726,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-tool/entries/.gitkeep:9bb9e5c950",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-tool/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -13819,7 +13908,7 @@
         "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-validator/entries/.gitkeep:3cd7644fac",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-validator/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 0
@@ -13999,7 +14088,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-verification-state/entries/.gitkeep:3a4654592d",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-verification-state/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -14181,7 +14270,7 @@
         "content_hash": "4d8200ebb96bd74df5387011d5dc912901b0f76a6188d7e135b4a76215a98b75",
         "git_ref": "git-index-source-tree",
         "id": "file:maps/by-work-context/entries/.gitkeep:b9dc421083",
-        "mime": "application/octet-stream",
+        "mime": "text/plain",
         "path": "maps/by-work-context/entries/.gitkeep",
         "repo": "aoa-session-memory",
         "size_bytes": 30
@@ -15045,13 +15134,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "383bdaa057df499247b208db3cdff6d0f2df3e860fb309fc2634a77a831394f3",
+        "content_hash": "60885402649f1b95225c53bd6b1143ece912caef22aa43e898281c24e7fa22fd",
         "git_ref": "git-index-source-tree",
         "id": "file:scripts/aoa_session_memory.py:b3e675a74e",
         "mime": "text/x-python",
         "path": "scripts/aoa_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 4088341
+        "size_bytes": 4246236
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -15084,7 +15173,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "383bdaa057df499247b208db3cdff6d0f2df3e860fb309fc2634a77a831394f3",
+        "digest": "60885402649f1b95225c53bd6b1143ece912caef22aa43e898281c24e7fa22fd",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -16624,13 +16713,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "29bd48e2380d0b6811cf201298064e5c1b2758bd82f562987b0070df670253b8",
+        "content_hash": "9629508596c27f470fdeb0654ae70f7224ce798cf120a340d4ae42468456a985",
         "git_ref": "git-index-source-tree",
         "id": "file:skills/aoa-session-memory-evidence-route/skill.md:312ad35fe8",
         "mime": "text/markdown",
         "path": "skills/aoa-session-memory-evidence-route/SKILL.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 21194
+        "size_bytes": 22011
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -16680,28 +16769,28 @@
           {
             "anchor": "mcp-preference",
             "level": 2,
-            "line": 214,
+            "line": 225,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#mcp-preference",
             "title": "MCP Preference"
           },
           {
             "anchor": "reading-packets",
             "level": 2,
-            "line": 301,
+            "line": 316,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#reading-packets",
             "title": "Reading Packets"
           },
           {
             "anchor": "authority-boundary",
             "level": 2,
-            "line": 329,
+            "line": 344,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#authority-boundary",
             "title": "Authority Boundary"
           },
           {
             "anchor": "verification",
             "level": 2,
-            "line": 343,
+            "line": 358,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#verification",
             "title": "Verification"
           }
@@ -16713,7 +16802,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "29bd48e2380d0b6811cf201298064e5c1b2758bd82f562987b0070df670253b8",
+        "digest": "9629508596c27f470fdeb0654ae70f7224ce798cf120a340d4ae42468456a985",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -18005,13 +18094,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "8a6359d3a2d40d8151eeefba617ac13a3c8ac9ff8e65ac66d1e73627d50262b5",
+        "content_hash": "c5ee54b66cd67c609f48abbca0cfc76c17d50de4e0119b176a65d88dc89f067a",
         "git_ref": "git-index-source-tree",
         "id": "file:tests/test_session_memory.py:97b303350c",
         "mime": "text/x-python",
         "path": "tests/test_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 1602286
+        "size_bytes": 1619224
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -18044,7 +18133,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "8a6359d3a2d40d8151eeefba617ac13a3c8ac9ff8e65ac66d1e73627d50262b5",
+        "digest": "c5ee54b66cd67c609f48abbca0cfc76c17d50de4e0119b176a65d88dc89f067a",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
