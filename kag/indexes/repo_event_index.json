@@ -39,7 +39,7 @@
   ],
   "index_identity": {
     "artifact_kind": "repository_event_index",
-    "content_digest": "9fb9367bdefecd397818f737c3c6280875f06b7ceb25eef7e36734a471d49bc7",
+    "content_digest": "bf5e2fcec9b61d104c49bdeffa2d223c697f45b814c7d75cfd947c03e448899f",
     "index_kind": "event",
     "local_id": "index:repo-local:events",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-repository-index.schema.json"
@@ -64,7 +64,7 @@
   },
   "schema_version": "aoa-repo-local-kag-repository-index-v1",
   "source_index": {
-    "content_digest": "7be6870dada8a1c890140fa7a7a294722cae4a249d0b84c504f97bad2c4b2264",
+    "content_digest": "761d22944c958f8a674ce0d964bc5ba3a67e9b902227853da28920d46bfb4c1a",
     "local_id": "index:repo-local:source-surfaces",
     "path": "kag/indexes/source_surface_index.json"
   },
