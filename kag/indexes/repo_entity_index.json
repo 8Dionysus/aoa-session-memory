@@ -1,0 +1,2524 @@
+{
+  "entries": [
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:.github/workflows/repo-validation.yml:3affb923d0",
+      "label": ".github/workflows/repo-validation.yml",
+      "source_record_id": "file:.github/workflows/repo-validation.yml:3affb923d0"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "owner_metadata",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "owner_surface",
+      "id": "entity:file:.gitignore:bc37d034ba",
+      "label": ".gitignore",
+      "source_record_id": "file:.gitignore:bc37d034ba"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:agents.md:a54ff182c7",
+      "label": "AGENTS.md",
+      "source_record_id": "file:agents.md:a54ff182c7"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "design_agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:design.agents.md:42d9f271de",
+      "label": "DESIGN.AGENTS.md",
+      "source_record_id": "file:design.agents.md:42d9f271de"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "design",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:design.md:3dc5dd454e",
+      "label": "DESIGN.md",
+      "source_record_id": "file:design.md:3dc5dd454e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:install.md:09b140a43e",
+      "label": "INSTALL.md",
+      "source_record_id": "file:install.md:09b140a43e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:naming.md:b0fb73ae9e",
+      "label": "NAMING.md",
+      "source_record_id": "file:naming.md:b0fb73ae9e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:pipeline.md:f9097f67d8",
+      "label": "PIPELINE.md",
+      "source_record_id": "file:pipeline.md:f9097f67d8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:readiness.md:2b8090cf72",
+      "label": "READINESS.md",
+      "source_record_id": "file:readiness.md:2b8090cf72"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:readme.md:b335630551",
+      "label": "README.md",
+      "source_record_id": "file:readme.md:b335630551"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:config/agents.md:e0bf6e3214",
+      "label": "config/AGENTS.md",
+      "source_record_id": "file:config/agents.md:e0bf6e3214"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/atlas-policy.json:f50c7b7171",
+      "label": "config/atlas-policy.json",
+      "source_record_id": "file:config/atlas-policy.json:f50c7b7171"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/batch-distillation-policy.json:92850ce3b5",
+      "label": "config/batch-distillation-policy.json",
+      "source_record_id": "file:config/batch-distillation-policy.json:92850ce3b5"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/event-distillation-routes.json:d5f81b167b",
+      "label": "config/event-distillation-routes.json",
+      "source_record_id": "file:config/event-distillation-routes.json:d5f81b167b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/event-taxonomy.json:d7c8024fa7",
+      "label": "config/event-taxonomy.json",
+      "source_record_id": "file:config/event-taxonomy.json:d7c8024fa7"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/graph-quality-regression-corpus.json:5d68f5b7c3",
+      "label": "config/graph-quality-regression-corpus.json",
+      "source_record_id": "file:config/graph-quality-regression-corpus.json:5d68f5b7c3"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/live-scenario-regression-corpus.json:5c9c552c08",
+      "label": "config/live-scenario-regression-corpus.json",
+      "source_record_id": "file:config/live-scenario-regression-corpus.json:5c9c552c08"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/naming-golden-set.json:3db56a4d76",
+      "label": "config/naming-golden-set.json",
+      "source_record_id": "file:config/naming-golden-set.json:3db56a4d76"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/naming-policy.json:473eb73294",
+      "label": "config/naming-policy.json",
+      "source_record_id": "file:config/naming-policy.json:473eb73294"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:config/search-providers.json:58090fffe8",
+      "label": "config/search-providers.json",
+      "source_record_id": "file:config/search-providers.json:58090fffe8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:hooks/agents.md:3d84a11850",
+      "label": "hooks/AGENTS.md",
+      "source_record_id": "file:hooks/agents.md:3d84a11850"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:hooks/readme.md:24bd0eaed6",
+      "label": "hooks/README.md",
+      "source_record_id": "file:hooks/readme.md:24bd0eaed6"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:hooks/codex-hooks.user.example.json:295d793521",
+      "label": "hooks/codex-hooks.user.example.json",
+      "source_record_id": "file:hooks/codex-hooks.user.example.json:295d793521"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:kag/agents.md:f80d68b85b",
+      "label": "kag/AGENTS.md",
+      "source_record_id": "file:kag/agents.md:f80d68b85b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:kag/readme.md:213631cc86",
+      "label": "kag/README.md",
+      "source_record_id": "file:kag/readme.md:213631cc86"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "generated_readmodel"
+      },
+      "entity_kind": "readmodel",
+      "id": "entity:file:kag/edges/kernel_routes_to_manifest_schema.json:b7f0a0d2ca",
+      "label": "kag/edges/kernel_routes_to_manifest_schema.json",
+      "source_record_id": "file:kag/edges/kernel_routes_to_manifest_schema.json:b7f0a0d2ca"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "index",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/indexes/domain_index_catalog.json:62255b2313",
+      "label": "kag/indexes/domain_index_catalog.json",
+      "source_record_id": "file:kag/indexes/domain_index_catalog.json:62255b2313"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "index",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "generated_readmodel"
+      },
+      "entity_kind": "readmodel",
+      "id": "entity:file:kag/indexes/session_memory_source_inventory.json:414c2d55b9",
+      "label": "kag/indexes/session_memory_source_inventory.json",
+      "source_record_id": "file:kag/indexes/session_memory_source_inventory.json:414c2d55b9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/manifest.json:0d25d90d08",
+      "label": "kag/manifest.json",
+      "source_record_id": "file:kag/manifest.json:0d25d90d08"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/nodes/session_manifest_schema.json:aea0f1c646",
+      "label": "kag/nodes/session_manifest_schema.json",
+      "source_record_id": "file:kag/nodes/session_manifest_schema.json:aea0f1c646"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/nodes/session_memory_kernel.json:5a90d16ba8",
+      "label": "kag/nodes/session_memory_kernel.json",
+      "source_record_id": "file:kag/nodes/session_memory_kernel.json:5a90d16ba8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "projection",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/projections/session_memory_source_return.json:eee0190bab",
+      "label": "kag/projections/session_memory_source_return.json",
+      "source_record_id": "file:kag/projections/session_memory_source_return.json:eee0190bab"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "receipt",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "receipt"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:kag/receipts/validation_receipt.json:8e616be0cd",
+      "label": "kag/receipts/validation_receipt.json",
+      "source_record_id": "file:kag/receipts/validation_receipt.json:8e616be0cd"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:manifests/agents.md:7b87c94b40",
+      "label": "manifests/AGENTS.md",
+      "source_record_id": "file:manifests/agents.md:7b87c94b40"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "manifest",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "manifest",
+      "id": "entity:file:manifests/artifact_bundles/portable_bundle.bundle.json:7189ad2fbc",
+      "label": "manifests/artifact_bundles/portable_bundle.bundle.json",
+      "source_record_id": "file:manifests/artifact_bundles/portable_bundle.bundle.json:7189ad2fbc"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:maps/agents.md:3fddea4487",
+      "label": "maps/AGENTS.md",
+      "source_record_id": "file:maps/agents.md:3fddea4487"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/readme.md:51ae4d5709",
+      "label": "maps/README.md",
+      "source_record_id": "file:maps/readme.md:51ae4d5709"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/start.md:b2d8cd0159",
+      "label": "maps/START.md",
+      "source_record_id": "file:maps/start.md:b2d8cd0159"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/_templates/axis-readme.template.md:545efa6a36",
+      "label": "maps/_templates/axis-readme.template.md",
+      "source_record_id": "file:maps/_templates/axis-readme.template.md:545efa6a36"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/_templates/route-entry.template.md:cd1ec7ea52",
+      "label": "maps/_templates/route-entry.template.md",
+      "source_record_id": "file:maps/_templates/route-entry.template.md:cd1ec7ea52"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-access-boundary/readme.md:405a1de85d",
+      "label": "maps/by-access-boundary/README.md",
+      "source_record_id": "file:maps/by-access-boundary/readme.md:405a1de85d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-access-boundary/entries/.gitkeep:821438061b",
+      "label": "maps/by-access-boundary/entries/.gitkeep",
+      "source_record_id": "file:maps/by-access-boundary/entries/.gitkeep:821438061b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-agent-event/readme.md:2ce61c4182",
+      "label": "maps/by-agent-event/README.md",
+      "source_record_id": "file:maps/by-agent-event/readme.md:2ce61c4182"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-agent-event/entries/.gitkeep:226839c4fd",
+      "label": "maps/by-agent-event/entries/.gitkeep",
+      "source_record_id": "file:maps/by-agent-event/entries/.gitkeep:226839c4fd"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-agent/readme.md:09bd026972",
+      "label": "maps/by-agent/README.md",
+      "source_record_id": "file:maps/by-agent/readme.md:09bd026972"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-agent/entries/.gitkeep:ab8b132c8c",
+      "label": "maps/by-agent/entries/.gitkeep",
+      "source_record_id": "file:maps/by-agent/entries/.gitkeep:ab8b132c8c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-api/readme.md:19797430e6",
+      "label": "maps/by-api/README.md",
+      "source_record_id": "file:maps/by-api/readme.md:19797430e6"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-api/entries/.gitkeep:0fab01deed",
+      "label": "maps/by-api/entries/.gitkeep",
+      "source_record_id": "file:maps/by-api/entries/.gitkeep:0fab01deed"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-authority-surface/readme.md:b6ee93d266",
+      "label": "maps/by-authority-surface/README.md",
+      "source_record_id": "file:maps/by-authority-surface/readme.md:b6ee93d266"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-authority-surface/entries/.gitkeep:34382a3b9d",
+      "label": "maps/by-authority-surface/entries/.gitkeep",
+      "source_record_id": "file:maps/by-authority-surface/entries/.gitkeep:34382a3b9d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-confidence/readme.md:274eb4efbd",
+      "label": "maps/by-confidence/README.md",
+      "source_record_id": "file:maps/by-confidence/readme.md:274eb4efbd"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-confidence/entries/.gitkeep:b80bf45f1d",
+      "label": "maps/by-confidence/entries/.gitkeep",
+      "source_record_id": "file:maps/by-confidence/entries/.gitkeep:b80bf45f1d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-conversation-act/readme.md:868f67db5a",
+      "label": "maps/by-conversation-act/README.md",
+      "source_record_id": "file:maps/by-conversation-act/readme.md:868f67db5a"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-conversation-act/entries/.gitkeep:a38003aed3",
+      "label": "maps/by-conversation-act/entries/.gitkeep",
+      "source_record_id": "file:maps/by-conversation-act/entries/.gitkeep:a38003aed3"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-correlation/readme.md:9b8c8249e7",
+      "label": "maps/by-correlation/README.md",
+      "source_record_id": "file:maps/by-correlation/readme.md:9b8c8249e7"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-correlation/entries/.gitkeep:5a245632ce",
+      "label": "maps/by-correlation/entries/.gitkeep",
+      "source_record_id": "file:maps/by-correlation/entries/.gitkeep:5a245632ce"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-delivery-state/readme.md:0c7b770456",
+      "label": "maps/by-delivery-state/README.md",
+      "source_record_id": "file:maps/by-delivery-state/readme.md:0c7b770456"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-delivery-state/entries/.gitkeep:4cde60ebee",
+      "label": "maps/by-delivery-state/entries/.gitkeep",
+      "source_record_id": "file:maps/by-delivery-state/entries/.gitkeep:4cde60ebee"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-entity/readme.md:bd7b713409",
+      "label": "maps/by-entity/README.md",
+      "source_record_id": "file:maps/by-entity/readme.md:bd7b713409"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-entity/entries/.gitkeep:ae5818fa97",
+      "label": "maps/by-entity/entries/.gitkeep",
+      "source_record_id": "file:maps/by-entity/entries/.gitkeep:ae5818fa97"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-eval/readme.md:52e5d2a001",
+      "label": "maps/by-eval/README.md",
+      "source_record_id": "file:maps/by-eval/readme.md:52e5d2a001"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-eval/entries/.gitkeep:45af1a4934",
+      "label": "maps/by-eval/entries/.gitkeep",
+      "source_record_id": "file:maps/by-eval/entries/.gitkeep:45af1a4934"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-evidence-provenance/readme.md:ada109f75d",
+      "label": "maps/by-evidence-provenance/README.md",
+      "source_record_id": "file:maps/by-evidence-provenance/readme.md:ada109f75d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-evidence-provenance/entries/.gitkeep:42a17d1033",
+      "label": "maps/by-evidence-provenance/entries/.gitkeep",
+      "source_record_id": "file:maps/by-evidence-provenance/entries/.gitkeep:42a17d1033"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-external-snapshot/readme.md:2c58c79024",
+      "label": "maps/by-external-snapshot/README.md",
+      "source_record_id": "file:maps/by-external-snapshot/readme.md:2c58c79024"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-external-snapshot/entries/.gitkeep:c257462779",
+      "label": "maps/by-external-snapshot/entries/.gitkeep",
+      "source_record_id": "file:maps/by-external-snapshot/entries/.gitkeep:c257462779"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-failure-mode/readme.md:03833d634f",
+      "label": "maps/by-failure-mode/README.md",
+      "source_record_id": "file:maps/by-failure-mode/readme.md:03833d634f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-failure-mode/entries/.gitkeep:f763010c4b",
+      "label": "maps/by-failure-mode/entries/.gitkeep",
+      "source_record_id": "file:maps/by-failure-mode/entries/.gitkeep:f763010c4b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-freshness/readme.md:1341276c52",
+      "label": "maps/by-freshness/README.md",
+      "source_record_id": "file:maps/by-freshness/readme.md:1341276c52"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-freshness/entries/.gitkeep:7bb7741af0",
+      "label": "maps/by-freshness/entries/.gitkeep",
+      "source_record_id": "file:maps/by-freshness/entries/.gitkeep:7bb7741af0"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-git/readme.md:7f8d2d0aad",
+      "label": "maps/by-git/README.md",
+      "source_record_id": "file:maps/by-git/readme.md:7f8d2d0aad"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-git/entries/.gitkeep:4bc6ddd9ff",
+      "label": "maps/by-git/entries/.gitkeep",
+      "source_record_id": "file:maps/by-git/entries/.gitkeep:4bc6ddd9ff"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-goal/readme.md:3397de05b3",
+      "label": "maps/by-goal/README.md",
+      "source_record_id": "file:maps/by-goal/readme.md:3397de05b3"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-goal/entries/.gitkeep:43ab4168c5",
+      "label": "maps/by-goal/entries/.gitkeep",
+      "source_record_id": "file:maps/by-goal/entries/.gitkeep:43ab4168c5"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-graph/readme.md:30b6d495a6",
+      "label": "maps/by-graph/README.md",
+      "source_record_id": "file:maps/by-graph/readme.md:30b6d495a6"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-graph/entries/.gitkeep:7e9980ea0e",
+      "label": "maps/by-graph/entries/.gitkeep",
+      "source_record_id": "file:maps/by-graph/entries/.gitkeep:7e9980ea0e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-hook-health/readme.md:e0829090fd",
+      "label": "maps/by-hook-health/README.md",
+      "source_record_id": "file:maps/by-hook-health/readme.md:e0829090fd"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-hook-health/entries/.gitkeep:a97c60f33c",
+      "label": "maps/by-hook-health/entries/.gitkeep",
+      "source_record_id": "file:maps/by-hook-health/entries/.gitkeep:a97c60f33c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-hook/readme.md:bffaadb4f1",
+      "label": "maps/by-hook/README.md",
+      "source_record_id": "file:maps/by-hook/readme.md:bffaadb4f1"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-hook/entries/.gitkeep:4a0920368e",
+      "label": "maps/by-hook/entries/.gitkeep",
+      "source_record_id": "file:maps/by-hook/entries/.gitkeep:4a0920368e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-index-health/readme.md:e567cc8d18",
+      "label": "maps/by-index-health/README.md",
+      "source_record_id": "file:maps/by-index-health/readme.md:e567cc8d18"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-index-health/entries/.gitkeep:4b7b713a05",
+      "label": "maps/by-index-health/entries/.gitkeep",
+      "source_record_id": "file:maps/by-index-health/entries/.gitkeep:4b7b713a05"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-mcp/readme.md:dea316838c",
+      "label": "maps/by-mcp/README.md",
+      "source_record_id": "file:maps/by-mcp/readme.md:dea316838c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-mcp/entries/.gitkeep:127eb412fd",
+      "label": "maps/by-mcp/entries/.gitkeep",
+      "source_record_id": "file:maps/by-mcp/entries/.gitkeep:127eb412fd"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-mechanic/readme.md:1ae4364ba8",
+      "label": "maps/by-mechanic/README.md",
+      "source_record_id": "file:maps/by-mechanic/readme.md:1ae4364ba8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-mechanic/entries/.gitkeep:7a7f4e9511",
+      "label": "maps/by-mechanic/entries/.gitkeep",
+      "source_record_id": "file:maps/by-mechanic/entries/.gitkeep:7a7f4e9511"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-memory-entity/readme.md:635663677e",
+      "label": "maps/by-memory-entity/README.md",
+      "source_record_id": "file:maps/by-memory-entity/readme.md:635663677e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-memory-entity/entries/.gitkeep:7becef4231",
+      "label": "maps/by-memory-entity/entries/.gitkeep",
+      "source_record_id": "file:maps/by-memory-entity/entries/.gitkeep:7becef4231"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-memory-surface/readme.md:518e4388d8",
+      "label": "maps/by-memory-surface/README.md",
+      "source_record_id": "file:maps/by-memory-surface/readme.md:518e4388d8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-memory-surface/entries/.gitkeep:b34363f8f9",
+      "label": "maps/by-memory-surface/entries/.gitkeep",
+      "source_record_id": "file:maps/by-memory-surface/entries/.gitkeep:b34363f8f9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-mutation-surface/readme.md:919584d05e",
+      "label": "maps/by-mutation-surface/README.md",
+      "source_record_id": "file:maps/by-mutation-surface/readme.md:919584d05e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-mutation-surface/entries/.gitkeep:762e4074f4",
+      "label": "maps/by-mutation-surface/entries/.gitkeep",
+      "source_record_id": "file:maps/by-mutation-surface/entries/.gitkeep:762e4074f4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-open-thread/readme.md:30bfd65742",
+      "label": "maps/by-open-thread/README.md",
+      "source_record_id": "file:maps/by-open-thread/readme.md:30bfd65742"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-open-thread/entries/.gitkeep:989c96b1f0",
+      "label": "maps/by-open-thread/entries/.gitkeep",
+      "source_record_id": "file:maps/by-open-thread/entries/.gitkeep:989c96b1f0"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-operator-preference/readme.md:c97171ad51",
+      "label": "maps/by-operator-preference/README.md",
+      "source_record_id": "file:maps/by-operator-preference/readme.md:c97171ad51"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-operator-preference/entries/.gitkeep:a693314039",
+      "label": "maps/by-operator-preference/entries/.gitkeep",
+      "source_record_id": "file:maps/by-operator-preference/entries/.gitkeep:a693314039"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-operator-request/readme.md:e05505ecd8",
+      "label": "maps/by-operator-request/README.md",
+      "source_record_id": "file:maps/by-operator-request/readme.md:e05505ecd8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-operator-request/entries/.gitkeep:55f623261b",
+      "label": "maps/by-operator-request/entries/.gitkeep",
+      "source_record_id": "file:maps/by-operator-request/entries/.gitkeep:55f623261b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-owner-route/readme.md:2b69062e91",
+      "label": "maps/by-owner-route/README.md",
+      "source_record_id": "file:maps/by-owner-route/readme.md:2b69062e91"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-owner-route/entries/.gitkeep:12a3153239",
+      "label": "maps/by-owner-route/entries/.gitkeep",
+      "source_record_id": "file:maps/by-owner-route/entries/.gitkeep:12a3153239"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-path/readme.md:d818e365bb",
+      "label": "maps/by-path/README.md",
+      "source_record_id": "file:maps/by-path/readme.md:d818e365bb"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-path/entries/.gitkeep:c1814bf329",
+      "label": "maps/by-path/entries/.gitkeep",
+      "source_record_id": "file:maps/by-path/entries/.gitkeep:c1814bf329"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-phase-topic/readme.md:be4ba81c2f",
+      "label": "maps/by-phase-topic/README.md",
+      "source_record_id": "file:maps/by-phase-topic/readme.md:be4ba81c2f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-phase-topic/entries/.gitkeep:8897943fcf",
+      "label": "maps/by-phase-topic/entries/.gitkeep",
+      "source_record_id": "file:maps/by-phase-topic/entries/.gitkeep:8897943fcf"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-playbook/readme.md:ea07f821a4",
+      "label": "maps/by-playbook/README.md",
+      "source_record_id": "file:maps/by-playbook/readme.md:ea07f821a4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-playbook/entries/.gitkeep:07e13080d9",
+      "label": "maps/by-playbook/entries/.gitkeep",
+      "source_record_id": "file:maps/by-playbook/entries/.gitkeep:07e13080d9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-plugin/readme.md:3bbe07cd4d",
+      "label": "maps/by-plugin/README.md",
+      "source_record_id": "file:maps/by-plugin/readme.md:3bbe07cd4d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-plugin/entries/.gitkeep:ce40be4782",
+      "label": "maps/by-plugin/entries/.gitkeep",
+      "source_record_id": "file:maps/by-plugin/entries/.gitkeep:ce40be4782"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-promotion-candidate/readme.md:c2b7506e7b",
+      "label": "maps/by-promotion-candidate/README.md",
+      "source_record_id": "file:maps/by-promotion-candidate/readme.md:c2b7506e7b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-promotion-candidate/entries/.gitkeep:fe0dd19003",
+      "label": "maps/by-promotion-candidate/entries/.gitkeep",
+      "source_record_id": "file:maps/by-promotion-candidate/entries/.gitkeep:fe0dd19003"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-repo-family/readme.md:2a99ff0bd7",
+      "label": "maps/by-repo-family/README.md",
+      "source_record_id": "file:maps/by-repo-family/readme.md:2a99ff0bd7"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-repo-family/entries/.gitkeep:65829ee0bc",
+      "label": "maps/by-repo-family/entries/.gitkeep",
+      "source_record_id": "file:maps/by-repo-family/entries/.gitkeep:65829ee0bc"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-resource-profile/readme.md:b9798f5206",
+      "label": "maps/by-resource-profile/README.md",
+      "source_record_id": "file:maps/by-resource-profile/readme.md:b9798f5206"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-resource-profile/entries/.gitkeep:0ff3f9720d",
+      "label": "maps/by-resource-profile/entries/.gitkeep",
+      "source_record_id": "file:maps/by-resource-profile/entries/.gitkeep:0ff3f9720d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-review-state/readme.md:44f0d1d9b0",
+      "label": "maps/by-review-state/README.md",
+      "source_record_id": "file:maps/by-review-state/readme.md:44f0d1d9b0"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-review-state/entries/.gitkeep:bb59a392b2",
+      "label": "maps/by-review-state/entries/.gitkeep",
+      "source_record_id": "file:maps/by-review-state/entries/.gitkeep:bb59a392b2"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-risk/readme.md:b0221e44d2",
+      "label": "maps/by-risk/README.md",
+      "source_record_id": "file:maps/by-risk/readme.md:b0221e44d2"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-risk/entries/.gitkeep:ffac50fcbf",
+      "label": "maps/by-risk/entries/.gitkeep",
+      "source_record_id": "file:maps/by-risk/entries/.gitkeep:ffac50fcbf"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-route-next-action/readme.md:c9884f9856",
+      "label": "maps/by-route-next-action/README.md",
+      "source_record_id": "file:maps/by-route-next-action/readme.md:c9884f9856"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-route-next-action/entries/.gitkeep:b3695c1439",
+      "label": "maps/by-route-next-action/entries/.gitkeep",
+      "source_record_id": "file:maps/by-route-next-action/entries/.gitkeep:b3695c1439"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-runtime-environment/readme.md:fc9049066c",
+      "label": "maps/by-runtime-environment/README.md",
+      "source_record_id": "file:maps/by-runtime-environment/readme.md:fc9049066c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-runtime-environment/entries/.gitkeep:b74b13a50f",
+      "label": "maps/by-runtime-environment/entries/.gitkeep",
+      "source_record_id": "file:maps/by-runtime-environment/entries/.gitkeep:b74b13a50f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-scope-contract/readme.md:da56d7566f",
+      "label": "maps/by-scope-contract/README.md",
+      "source_record_id": "file:maps/by-scope-contract/readme.md:da56d7566f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-scope-contract/entries/.gitkeep:16e060d65c",
+      "label": "maps/by-scope-contract/entries/.gitkeep",
+      "source_record_id": "file:maps/by-scope-contract/entries/.gitkeep:16e060d65c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-script/readme.md:a4e5013ef3",
+      "label": "maps/by-script/README.md",
+      "source_record_id": "file:maps/by-script/readme.md:a4e5013ef3"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-script/entries/.gitkeep:68947c55cb",
+      "label": "maps/by-script/entries/.gitkeep",
+      "source_record_id": "file:maps/by-script/entries/.gitkeep:68947c55cb"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-session-act/readme.md:4660559047",
+      "label": "maps/by-session-act/README.md",
+      "source_record_id": "file:maps/by-session-act/readme.md:4660559047"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-session-act/entries/.gitkeep:b59ece5a6e",
+      "label": "maps/by-session-act/entries/.gitkeep",
+      "source_record_id": "file:maps/by-session-act/entries/.gitkeep:b59ece5a6e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-skill/readme.md:58dbbbd5da",
+      "label": "maps/by-skill/README.md",
+      "source_record_id": "file:maps/by-skill/readme.md:58dbbbd5da"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-skill/entries/.gitkeep:e8b537c744",
+      "label": "maps/by-skill/entries/.gitkeep",
+      "source_record_id": "file:maps/by-skill/entries/.gitkeep:e8b537c744"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-technique/readme.md:b0847d21b8",
+      "label": "maps/by-technique/README.md",
+      "source_record_id": "file:maps/by-technique/readme.md:b0847d21b8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-technique/entries/.gitkeep:271dff265b",
+      "label": "maps/by-technique/entries/.gitkeep",
+      "source_record_id": "file:maps/by-technique/entries/.gitkeep:271dff265b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-test/readme.md:05cba1179e",
+      "label": "maps/by-test/README.md",
+      "source_record_id": "file:maps/by-test/readme.md:05cba1179e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-test/entries/.gitkeep:99e31bafe4",
+      "label": "maps/by-test/entries/.gitkeep",
+      "source_record_id": "file:maps/by-test/entries/.gitkeep:99e31bafe4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-time/readme.md:7c30e6a30f",
+      "label": "maps/by-time/README.md",
+      "source_record_id": "file:maps/by-time/readme.md:7c30e6a30f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-time/entries/.gitkeep:90d29df6a1",
+      "label": "maps/by-time/entries/.gitkeep",
+      "source_record_id": "file:maps/by-time/entries/.gitkeep:90d29df6a1"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-tool/readme.md:b25412ce94",
+      "label": "maps/by-tool/README.md",
+      "source_record_id": "file:maps/by-tool/readme.md:b25412ce94"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-tool/entries/.gitkeep:9bb9e5c950",
+      "label": "maps/by-tool/entries/.gitkeep",
+      "source_record_id": "file:maps/by-tool/entries/.gitkeep:9bb9e5c950"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-validator/readme.md:bccfafe1ca",
+      "label": "maps/by-validator/README.md",
+      "source_record_id": "file:maps/by-validator/readme.md:bccfafe1ca"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-validator/entries/.gitkeep:3cd7644fac",
+      "label": "maps/by-validator/entries/.gitkeep",
+      "source_record_id": "file:maps/by-validator/entries/.gitkeep:3cd7644fac"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-verification-state/readme.md:ee8a0b958f",
+      "label": "maps/by-verification-state/README.md",
+      "source_record_id": "file:maps/by-verification-state/readme.md:ee8a0b958f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-verification-state/entries/.gitkeep:3a4654592d",
+      "label": "maps/by-verification-state/entries/.gitkeep",
+      "source_record_id": "file:maps/by-verification-state/entries/.gitkeep:3a4654592d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "readme",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:maps/by-work-context/readme.md:0b13e8b0d6",
+      "label": "maps/by-work-context/README.md",
+      "source_record_id": "file:maps/by-work-context/readme.md:0b13e8b0d6"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "directory_marker",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
+      "id": "entity:file:maps/by-work-context/entries/.gitkeep:b9dc421083",
+      "label": "maps/by-work-context/entries/.gitkeep",
+      "source_record_id": "file:maps/by-work-context/entries/.gitkeep:b9dc421083"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:schemas/agents.md:1c6fbd98c4",
+      "label": "schemas/AGENTS.md",
+      "source_record_id": "file:schemas/agents.md:1c6fbd98c4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/atlas-route-entry.schema.json:3152c166db",
+      "label": "schemas/atlas-route-entry.schema.json",
+      "source_record_id": "file:schemas/atlas-route-entry.schema.json:3152c166db"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/hook-receipt.schema.json:280116ae74",
+      "label": "schemas/hook-receipt.schema.json",
+      "source_record_id": "file:schemas/hook-receipt.schema.json:280116ae74"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/incident.schema.json:5def1775ee",
+      "label": "schemas/incident.schema.json",
+      "source_record_id": "file:schemas/incident.schema.json:5def1775ee"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/segment.index.schema.json:6f8af4c233",
+      "label": "schemas/segment.index.schema.json",
+      "source_record_id": "file:schemas/segment.index.schema.json:6f8af4c233"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/session.manifest.schema.json:052ff6c4b5",
+      "label": "schemas/session.manifest.schema.json",
+      "source_record_id": "file:schemas/session.manifest.schema.json:052ff6c4b5"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "schema",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "contract",
+      "id": "entity:file:schemas/token-accounting.schema.json:7aae75314c",
+      "label": "schemas/token-accounting.schema.json",
+      "source_record_id": "file:schemas/token-accounting.schema.json:7aae75314c"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:scripts/agents.md:cb91064dc5",
+      "label": "scripts/AGENTS.md",
+      "source_record_id": "file:scripts/agents.md:cb91064dc5"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "script",
+        "code_role": "entrypoint",
+        "command_role": "script",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "command",
+      "id": "entity:file:scripts/aoa_session_memory.py:b3e675a74e",
+      "label": "scripts/aoa_session_memory.py",
+      "source_record_id": "file:scripts/aoa_session_memory.py:b3e675a74e"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:sessions/agents.md:3cea71d792",
+      "label": "sessions/AGENTS.md",
+      "source_record_id": "file:sessions/agents.md:3cea71d792"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:skills/agents.md:4c8c128d52",
+      "label": "skills/AGENTS.md",
+      "source_record_id": "file:skills/agents.md:4c8c128d52"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-codex-compact-probe/skill.md:a8292c283b",
+      "label": "skills/aoa-codex-compact-probe/SKILL.md",
+      "source_record_id": "file:skills/aoa-codex-compact-probe/skill.md:a8292c283b"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-codex-hooks-status/skill.md:57ecd507d9",
+      "label": "skills/aoa-codex-hooks-status/SKILL.md",
+      "source_record_id": "file:skills/aoa-codex-hooks-status/skill.md:57ecd507d9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-codex-session-segment-archive/skill.md:33daf991b4",
+      "label": "skills/aoa-codex-session-segment-archive/SKILL.md",
+      "source_record_id": "file:skills/aoa-codex-session-segment-archive/skill.md:33daf991b4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-archive-init/skill.md:a8d82f8057",
+      "label": "skills/aoa-session-archive-init/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-archive-init/skill.md:a8d82f8057"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-batch-distill/skill.md:fa999574f9",
+      "label": "skills/aoa-session-batch-distill/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-batch-distill/skill.md:fa999574f9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-first-pass-distill/skill.md:1a0b127885",
+      "label": "skills/aoa-session-first-pass-distill/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-first-pass-distill/skill.md:1a0b127885"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-history-import/skill.md:6c039eeb7d",
+      "label": "skills/aoa-session-history-import/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-history-import/skill.md:6c039eeb7d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-manual-review/skill.md:ce98903d86",
+      "label": "skills/aoa-session-manual-review/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-manual-review/skill.md:ce98903d86"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "audit",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-memory-audit/skill.md:e2c66e0552",
+      "label": "skills/aoa-session-memory-audit/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-memory-audit/skill.md:e2c66e0552"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-memory-doctor/skill.md:fc03ee6d84",
+      "label": "skills/aoa-session-memory-doctor/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-memory-doctor/skill.md:fc03ee6d84"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-memory-evidence-route/skill.md:312ad35fe8",
+      "label": "skills/aoa-session-memory-evidence-route/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-memory-evidence-route/skill.md:312ad35fe8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-memory-global-route/skill.md:602b70abe1",
+      "label": "skills/aoa-session-memory-global-route/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-memory-global-route/skill.md:602b70abe1"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-memory-stress-pass/skill.md:f94c379df8",
+      "label": "skills/aoa-session-memory-stress-pass/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-memory-stress-pass/skill.md:f94c379df8"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-naming-readiness/skill.md:e16efed1fa",
+      "label": "skills/aoa-session-naming-readiness/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-naming-readiness/skill.md:e16efed1fa"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-naming-wave/skill.md:bec7b15fae",
+      "label": "skills/aoa-session-naming-wave/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-naming-wave/skill.md:bec7b15fae"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-phase-discovery/skill.md:0806d87e02",
+      "label": "skills/aoa-session-phase-discovery/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-phase-discovery/skill.md:0806d87e02"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-raw-diagnostic/skill.md:107a964eb9",
+      "label": "skills/aoa-session-raw-diagnostic/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-raw-diagnostic/skill.md:107a964eb9"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-rehydrate/skill.md:5c7c6287fb",
+      "label": "skills/aoa-session-rehydrate/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-rehydrate/skill.md:5c7c6287fb"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-reindex/skill.md:bc8898188d",
+      "label": "skills/aoa-session-reindex/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-reindex/skill.md:bc8898188d"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "unknown_document",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "document",
+      "id": "entity:file:skills/aoa-session-search/skill.md:415c333dd4",
+      "label": "skills/aoa-session-search/SKILL.md",
+      "source_record_id": "file:skills/aoa-session-search/skill.md:415c333dd4"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "document",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "agents",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "agent_route",
+      "id": "entity:file:tests/agents.md:712d5f0348",
+      "label": "tests/AGENTS.md",
+      "source_record_id": "file:tests/agents.md:712d5f0348"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "test",
+        "code_role": "test",
+        "command_role": "test",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "command",
+      "id": "entity:file:tests/test_session_memory.py:97b303350c",
+      "label": "tests/test_session_memory.py",
+      "source_record_id": "file:tests/test_session_memory.py:97b303350c"
+    }
+  ],
+  "index_identity": {
+    "artifact_kind": "repository_entity_index",
+    "content_digest": "8780ec1d3a31b4c0dfe5a5016e21e1ae614aea2e88ba5554a93e12df719e5aee",
+    "index_kind": "entity",
+    "local_id": "index:repo-local:entities",
+    "schema_ref": "aoa-kag:schemas/repo-local-kag-repository-index.schema.json"
+  },
+  "registry_output": {
+    "consumer": "aoa-kag-mcp",
+    "resource_shape": "repo-local-entity-index",
+    "stable_fields": [
+      "id",
+      "entity_kind",
+      "source_record_id",
+      "coordinates"
+    ]
+  },
+  "repo": {
+    "git_ref": "git-index-source-tree",
+    "name": "aoa-session-memory",
+    "owner_type": "bundle_provider",
+    "root": "."
+  },
+  "schema_version": "aoa-repo-local-kag-repository-index-v1",
+  "source_index": {
+    "content_digest": "6c18619a38ac0699a9e0d399de7ee5fdc4b97726b1d73aefe3cd37b801682dd3",
+    "local_id": "index:repo-local:source-surfaces",
+    "path": "kag/indexes/source_surface_index.json"
+  },
+  "summary": {
+    "entry_count": 177,
+    "kind_counts": {
+      "agent_route": 11,
+      "artifact": 69,
+      "command": 2,
+      "contract": 6,
+      "document": 85,
+      "manifest": 1,
+      "owner_surface": 1,
+      "readmodel": 2
+    }
+  }
+}

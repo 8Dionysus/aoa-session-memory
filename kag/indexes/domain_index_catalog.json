@@ -1,0 +1,374 @@
+{
+  "catalog_identity": {
+    "local_id": "catalog:aoa-session-memory:domain-indexes",
+    "schema_ref": "aoa-kag:schemas/domain-index-catalog.schema.json"
+  },
+  "consumer_routes": [
+    "aoa-kag registry",
+    "aoa-kag-mcp"
+  ],
+  "entries": [
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py reindex-sessions all",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory",
+      "freshness_route": "python3 scripts/aoa_session_memory.py index-maintenance all",
+      "id": "domain-index:aoa-session-memory:archive-catalog",
+      "index_kind": "archive_catalog",
+      "materialization": "runtime_generated",
+      "path": "sessions/index.json",
+      "schema_ref": "scripts/aoa_session_memory.py#archive-catalog-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "owner_route"
+        },
+        {
+          "authority": "authored_source",
+          "path": "PIPELINE.md",
+          "repo": "aoa-session-memory",
+          "role": "pipeline_contract"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py reindex-sessions all",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory",
+      "freshness_route": "python3 scripts/aoa_session_memory.py index-maintenance all",
+      "id": "domain-index:aoa-session-memory:session-routes",
+      "index_kind": "session_route_index",
+      "materialization": "runtime_generated",
+      "path": "sessions/*/session.index.json",
+      "schema_ref": "scripts/aoa_session_memory.py#session-index-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "owner_route"
+        },
+        {
+          "authority": "authored_source",
+          "path": "schemas/session.manifest.schema.json",
+          "repo": "aoa-session-memory",
+          "role": "session_identity_contract"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py reindex-sessions all",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory",
+      "freshness_route": "python3 scripts/aoa_session_memory.py index-maintenance all",
+      "id": "domain-index:aoa-session-memory:segment-events",
+      "index_kind": "segment_event_index",
+      "materialization": "runtime_generated",
+      "path": "sessions/*/segments/*.index.json",
+      "schema_ref": "schemas/segment.index.schema.json",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "schemas/segment.index.schema.json",
+          "repo": "aoa-session-memory",
+          "role": "schema"
+        },
+        {
+          "authority": "authored_source",
+          "path": "config/event-taxonomy.json",
+          "repo": "aoa-session-memory",
+          "role": "event_taxonomy"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py sync <transcript>",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory",
+      "freshness_route": "python3 scripts/aoa_session_memory.py sweep-codex-sessions",
+      "id": "domain-index:aoa-session-memory:session-registry",
+      "index_kind": "session_registry",
+      "materialization": "runtime_generated",
+      "path": "session-registry.json",
+      "schema_ref": "scripts/aoa_session_memory.py#session-registry-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "owner_route"
+        },
+        {
+          "authority": "authored_source",
+          "path": "NAMING.md",
+          "repo": "aoa-session-memory",
+          "role": "identity_contract"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py name-session <session> --name <name> --apply",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory",
+      "freshness_route": "python3 scripts/aoa_session_memory.py naming-readiness all",
+      "id": "domain-index:aoa-session-memory:session-names",
+      "index_kind": "session_name_index",
+      "materialization": "runtime_generated",
+      "path": "session-name-index.json",
+      "schema_ref": "scripts/aoa_session_memory.py#session-name-index-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "NAMING.md",
+          "repo": "aoa-session-memory",
+          "role": "naming_contract"
+        },
+        {
+          "authority": "authored_source",
+          "path": "config/naming-policy.json",
+          "repo": "aoa-session-memory",
+          "role": "naming_policy"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py atlas build all",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory-atlas",
+      "freshness_route": "python3 scripts/aoa_session_memory.py route-readiness all",
+      "id": "domain-index:aoa-session-memory:atlas",
+      "index_kind": "route_atlas_index",
+      "materialization": "runtime_generated",
+      "path": "maps/index.json",
+      "schema_ref": "schemas/atlas-route-entry.schema.json",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/atlas-policy.json",
+          "repo": "aoa-session-memory",
+          "role": "atlas_policy"
+        },
+        {
+          "authority": "authored_source",
+          "path": "maps/README.md",
+          "repo": "aoa-session-memory",
+          "role": "atlas_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py route-readiness all"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py search-catalog --refresh",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-session-memory-mcp",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory-search",
+      "freshness_route": "python3 scripts/aoa_session_memory.py search-catalog",
+      "id": "domain-index:aoa-session-memory:search-catalog",
+      "index_kind": "search_catalog",
+      "materialization": "runtime_generated",
+      "path": "search/catalog.json",
+      "schema_ref": "scripts/aoa_session_memory.py#search-catalog-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/search-providers.json",
+          "repo": "aoa-session-memory",
+          "role": "search_policy"
+        },
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "search_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py maintenance-status"
+    },
+    {
+      "authority": "owner_runtime",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py search-index all",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-session-memory-mcp"
+      ],
+      "domain": "session-memory-search",
+      "freshness_route": "python3 scripts/aoa_session_memory.py maintenance-status",
+      "id": "domain-index:aoa-session-memory:search-store",
+      "index_kind": "sqlite_search_index",
+      "materialization": "runtime_generated",
+      "path": "search/aoa-search.sqlite3",
+      "schema_ref": "scripts/aoa_session_memory.py#search-schema-v10",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/search-providers.json",
+          "repo": "aoa-session-memory",
+          "role": "search_policy"
+        },
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "search_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py search-provider-status"
+    },
+    {
+      "authority": "owner_runtime",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py graph-build all --write --store-only",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-session-memory-mcp"
+      ],
+      "domain": "session-memory-graph",
+      "freshness_route": "python3 scripts/aoa_session_memory.py graph-freshness-check",
+      "id": "domain-index:aoa-session-memory:graph-store",
+      "index_kind": "sqlite_graph_index",
+      "materialization": "runtime_generated",
+      "path": "graph/graph.sqlite3",
+      "schema_ref": "scripts/aoa_session_memory.py#graph-store-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/graph-quality-regression-corpus.json",
+          "repo": "aoa-session-memory",
+          "role": "graph_quality_contract"
+        },
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "graph_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py graph-quality-corpus check"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py graph-build all --write",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory-graph",
+      "freshness_route": "python3 scripts/aoa_session_memory.py graph-freshness-check",
+      "id": "domain-index:aoa-session-memory:graph-snapshot",
+      "index_kind": "graph_snapshot_index",
+      "materialization": "runtime_generated",
+      "path": "graph/index.json",
+      "schema_ref": "scripts/aoa_session_memory.py#graph-snapshot-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/graph-quality-regression-corpus.json",
+          "repo": "aoa-session-memory",
+          "role": "graph_quality_contract"
+        },
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "graph_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py graph-quality-corpus check"
+    },
+    {
+      "authority": "owner_generated",
+      "availability": "runtime_optional",
+      "builder_route": "python3 scripts/aoa_session_memory.py manual-review --apply",
+      "consumer_routes": [
+        "aoa-session-memory CLI",
+        "aoa-kag-mcp"
+      ],
+      "domain": "session-memory-review",
+      "freshness_route": "python3 scripts/aoa_session_memory.py promotion-review",
+      "id": "domain-index:aoa-session-memory:review",
+      "index_kind": "review_index",
+      "materialization": "runtime_generated",
+      "path": "sessions/*/distillation/review.index.json",
+      "schema_ref": "scripts/aoa_session_memory.py#review-index-contract",
+      "source_refs": [
+        {
+          "authority": "authored_source",
+          "path": "config/batch-distillation-policy.json",
+          "repo": "aoa-session-memory",
+          "role": "review_policy"
+        },
+        {
+          "authority": "authored_source",
+          "path": "README.md",
+          "repo": "aoa-session-memory",
+          "role": "review_owner_route"
+        }
+      ],
+      "storage_posture": "runtime_store",
+      "validator_route": "python3 scripts/aoa_session_memory.py doctor"
+    }
+  ],
+  "owner_return_route": {
+    "repo": "aoa-session-memory",
+    "route_kind": "authored_meaning",
+    "surface": "README.md"
+  },
+  "provenance_mode": "strict_source_linked",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-domain-index-catalog-v1",
+  "source_owner": "aoa-session-memory"
+}
