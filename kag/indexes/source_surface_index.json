@@ -1,7 +1,7 @@
 {
   "classification_summary": {
     "artifact_kind": {
-      "config": 15,
+      "config": 16,
       "directory_marker": 52,
       "document": 96,
       "index": 2,
@@ -14,7 +14,7 @@
       "test": 1
     },
     "command_role": {
-      "none": 175,
+      "none": 176,
       "script": 1,
       "test": 1
     },
@@ -23,21 +23,21 @@
       "audit": 1,
       "design": 1,
       "design_agents": 1,
-      "none": 81,
+      "none": 82,
       "readme": 56,
       "unknown_document": 26
     },
     "mechanics_role": {
-      "none": 177
+      "none": 178
     },
     "primary_kind": {
       "artifact": 57,
       "command": 2,
       "document": 96,
-      "surface": 22
+      "surface": 23
     },
     "surface_state": {
-      "authored_source": 174,
+      "authored_source": 175,
       "generated_readmodel": 2,
       "receipt": 1
     }
@@ -48,7 +48,7 @@
     "generated_count": 2,
     "heading_count": 380,
     "mechanics_count": 0,
-    "record_count": 177,
+    "record_count": 178,
     "schema_count": 6,
     "script_count": 1,
     "test_count": 1,
@@ -57,7 +57,7 @@
   },
   "index_identity": {
     "artifact_kind": "source_surface_index",
-    "content_digest": "6c18619a38ac0699a9e0d399de7ee5fdc4b97726b1d73aefe3cd37b801682dd3",
+    "content_digest": "7be6870dada8a1c890140fa7a7a294722cae4a249d0b84c504f97bad2c4b2264",
     "local_id": "index:repo-local:source-surfaces",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-index.schema.json"
   },
@@ -1212,13 +1212,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "32c46b06d38d5f22a98cfd00912af9033267d6b723ea3085d052c8c545c7a91a",
+        "content_hash": "fe81cd388e0a1a6562479323a2875d3483451b36d0bcf53ba1f7161e152d10b6",
         "git_ref": "git-index-source-tree",
         "id": "file:pipeline.md:f9097f67d8",
         "mime": "text/markdown",
         "path": "PIPELINE.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 101207
+        "size_bytes": 105207
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1317,126 +1317,126 @@
           {
             "anchor": "session-evidence-consumer-route",
             "level": 2,
-            "line": 247,
+            "line": 305,
             "ref": "PIPELINE.md#session-evidence-consumer-route",
             "title": "Session Evidence Consumer Route"
           },
           {
             "anchor": "agent-event-and-task-episode-route",
             "level": 2,
-            "line": 283,
+            "line": 341,
             "ref": "PIPELINE.md#agent-event-and-task-episode-route",
             "title": "Agent Event And Task Episode Route"
           },
           {
             "anchor": "postcompact",
             "level": 3,
-            "line": 514,
+            "line": 572,
             "ref": "PIPELINE.md#postcompact",
             "title": "PostCompact"
           },
           {
             "anchor": "stop",
             "level": 3,
-            "line": 532,
+            "line": 590,
             "ref": "PIPELINE.md#stop",
             "title": "Stop"
           },
           {
             "anchor": "segment-rule",
             "level": 2,
-            "line": 560,
+            "line": 618,
             "ref": "PIPELINE.md#segment-rule",
             "title": "Segment Rule"
           },
           {
             "anchor": "storage-weight-rule",
             "level": 2,
-            "line": 586,
+            "line": 644,
             "ref": "PIPELINE.md#storage-weight-rule",
             "title": "Storage Weight Rule"
           },
           {
             "anchor": "index-rule",
             "level": 2,
-            "line": 708,
+            "line": 766,
             "ref": "PIPELINE.md#index-rule",
             "title": "Index Rule"
           },
           {
             "anchor": "navigation-commands",
             "level": 2,
-            "line": 1238,
+            "line": 1296,
             "ref": "PIPELINE.md#navigation-commands",
             "title": "Navigation Commands"
           },
           {
             "anchor": "graph-and-graphrag",
             "level": 2,
-            "line": 1356,
+            "line": 1414,
             "ref": "PIPELINE.md#graph-and-graphrag",
             "title": "Graph And GraphRAG"
           },
           {
             "anchor": "failure-modes",
             "level": 2,
-            "line": 1992,
+            "line": 2050,
             "ref": "PIPELINE.md#failure-modes",
             "title": "Failure Modes"
           },
           {
             "anchor": "invalid-hook-json",
             "level": 3,
-            "line": 1994,
+            "line": 2052,
             "ref": "PIPELINE.md#invalid-hook-json",
             "title": "Invalid Hook JSON"
           },
           {
             "anchor": "raw-session-unavailable",
             "level": 3,
-            "line": 2003,
+            "line": 2061,
             "ref": "PIPELINE.md#raw-session-unavailable",
             "title": "Raw Session Unavailable"
           },
           {
             "anchor": "duplicate-hook-receipts",
             "level": 3,
-            "line": 2011,
+            "line": 2069,
             "ref": "PIPELINE.md#duplicate-hook-receipts",
             "title": "Duplicate Hook Receipts"
           },
           {
             "anchor": "untrusted-native-hooks",
             "level": 3,
-            "line": 2018,
+            "line": 2076,
             "ref": "PIPELINE.md#untrusted-native-hooks",
             "title": "Untrusted Native Hooks"
           },
           {
             "anchor": "premature-or-repeated-compaction",
             "level": 3,
-            "line": 2026,
+            "line": 2084,
             "ref": "PIPELINE.md#premature-or-repeated-compaction",
             "title": "Premature or Repeated Compaction"
           },
           {
             "anchor": "unindexed-bulk-markdown",
             "level": 3,
-            "line": 2032,
+            "line": 2090,
             "ref": "PIPELINE.md#unindexed-bulk-markdown",
             "title": "Unindexed Bulk Markdown"
           },
           {
             "anchor": "verification-gates",
             "level": 2,
-            "line": 2039,
+            "line": 2097,
             "ref": "PIPELINE.md#verification-gates",
             "title": "Verification Gates"
           },
           {
             "anchor": "distillation-boundary",
             "level": 2,
-            "line": 2072,
+            "line": 2130,
             "ref": "PIPELINE.md#distillation-boundary",
             "title": "Distillation Boundary"
           }
@@ -1448,7 +1448,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "32c46b06d38d5f22a98cfd00912af9033267d6b723ea3085d052c8c545c7a91a",
+        "digest": "fe81cd388e0a1a6562479323a2875d3483451b36d0bcf53ba1f7161e152d10b6",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -1496,13 +1496,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "b63d3d17bb2c7b728e2a7858a92124e68750775b7aac3071374c76630c7d5e9e",
+        "content_hash": "79021238df786a537335b7c8669d02c599b2f1156790145ab246aa8ea418d405",
         "git_ref": "git-index-source-tree",
         "id": "file:readiness.md:2b8090cf72",
         "mime": "text/markdown",
         "path": "READINESS.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 174519
+        "size_bytes": 175942
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1580,14 +1580,14 @@
           {
             "anchor": "probe-notes",
             "level": 2,
-            "line": 2445,
+            "line": 2464,
             "ref": "READINESS.md#probe-notes",
             "title": "Probe Notes"
           },
           {
             "anchor": "rule",
             "level": 2,
-            "line": 2459,
+            "line": 2478,
             "ref": "READINESS.md#rule",
             "title": "Rule"
           }
@@ -1599,7 +1599,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "b63d3d17bb2c7b728e2a7858a92124e68750775b7aac3071374c76630c7d5e9e",
+        "digest": "79021238df786a537335b7c8669d02c599b2f1156790145ab246aa8ea418d405",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -1647,13 +1647,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "034445d31f04f78ac9792550823376cf4ae8b0fc5feb6660114759fb3cb141b4",
+        "content_hash": "2899af3ba1b6c1007a30db5a020e210e228992dcccd219ab5aa8e0499696f24f",
         "git_ref": "git-index-source-tree",
         "id": "file:readme.md:b335630551",
         "mime": "text/markdown",
         "path": "README.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 82830
+        "size_bytes": 85228
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1731,42 +1731,42 @@
           {
             "anchor": "agent-atlas",
             "level": 2,
-            "line": 238,
+            "line": 254,
             "ref": "README.md#agent-atlas",
             "title": "Agent Atlas"
           },
           {
             "anchor": "graph-store-and-sidecar",
             "level": 2,
-            "line": 265,
+            "line": 281,
             "ref": "README.md#graph-store-and-sidecar",
             "title": "Graph Store And Sidecar"
           },
           {
             "anchor": "storage-audit",
             "level": 2,
-            "line": 802,
+            "line": 825,
             "ref": "README.md#storage-audit",
             "title": "Storage Audit"
           },
           {
             "anchor": "portable-route",
             "level": 2,
-            "line": 874,
+            "line": 897,
             "ref": "README.md#portable-route",
             "title": "Portable Route"
           },
           {
             "anchor": "skill-shape",
             "level": 2,
-            "line": 1743,
+            "line": 1779,
             "ref": "README.md#skill-shape",
             "title": "Skill Shape"
           },
           {
             "anchor": "core-rule",
             "level": 2,
-            "line": 1758,
+            "line": 1794,
             "ref": "README.md#core-rule",
             "title": "Core Rule"
           }
@@ -1778,7 +1778,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "034445d31f04f78ac9792550823376cf4ae8b0fc5feb6660114759fb3cb141b4",
+        "digest": "2899af3ba1b6c1007a30db5a020e210e228992dcccd219ab5aa8e0499696f24f",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -1826,13 +1826,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "954e8df1ff1709fad3c430d42dd6292509b53baa9af6c96f3a123450ac0565a1",
+        "content_hash": "7d84f4204ca33575b2410efdc414deebf9f943cb46d0b6873e3bdf98a0522936",
         "git_ref": "git-index-source-tree",
         "id": "file:config/agents.md:e0bf6e3214",
         "mime": "text/markdown",
         "path": "config/AGENTS.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 2019
+        "size_bytes": 2610
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -1882,14 +1882,14 @@
           {
             "anchor": "rules",
             "level": 2,
-            "line": 30,
+            "line": 32,
             "ref": "config/AGENTS.md#rules",
             "title": "Rules"
           },
           {
             "anchor": "checks",
             "level": 2,
-            "line": 40,
+            "line": 49,
             "ref": "config/AGENTS.md#checks",
             "title": "Checks"
           }
@@ -1901,7 +1901,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "954e8df1ff1709fad3c430d42dd6292509b53baa9af6c96f3a123450ac0565a1",
+        "digest": "7d84f4204ca33575b2410efdc414deebf9f943cb46d0b6873e3bdf98a0522936",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -2281,6 +2281,95 @@
         "artifact_class": "config",
         "compatibility": "stable",
         "contract_version": "none",
+        "schema_version": "skill_candidate_semantics_fixture_v1"
+      },
+      "access": {
+        "scope": "public",
+        "secrets_risk": "none"
+      },
+      "artifact_kind": "config",
+      "classification": {
+        "confidence": "high",
+        "primary_kind": "surface"
+      },
+      "code_role": "none",
+      "command_role": "none",
+      "consumer_route": {
+        "route_kind": "resource",
+        "surface": "aoa-kag-mcp"
+      },
+      "document_role": "none",
+      "freshness": {
+        "checked_ref": "git-index-source-tree",
+        "mode": "source_snapshot",
+        "state": "current"
+      },
+      "identity": {
+        "content_hash": "94854374a6f4bce4c26a061fb78322ee77ff83e2128263f2e2bc0b465c8bb012",
+        "git_ref": "git-index-source-tree",
+        "id": "file:config/fixtures/skill-candidate-semantics.json:b5d8b2ff3f",
+        "mime": "application/json",
+        "path": "config/fixtures/skill-candidate-semantics.json",
+        "repo": "aoa-session-memory",
+        "size_bytes": 3303
+      },
+      "mechanics_role": "none",
+      "observed_form": "file",
+      "owner_return_route": {
+        "route_kind": "source_owner",
+        "surface": "config/fixtures/skill-candidate-semantics.json"
+      },
+      "provenance": {
+        "generated_by": "",
+        "materials": [],
+        "observed_by": "aoa-kag:scripts/generate_repo_local_kag_index.py",
+        "source_refs": [
+          {
+            "authority": "authored_source",
+            "path": "config/fixtures/skill-candidate-semantics.json",
+            "repo": "aoa-session-memory",
+            "role": "primary"
+          }
+        ],
+        "validated_by": [
+          "aoa-kag:scripts/validate_kag.py"
+        ]
+      },
+      "refs": {
+        "heading_refs": [],
+        "line_refs": [
+          "config/fixtures/skill-candidate-semantics.json:1"
+        ],
+        "path_ref": "config/fixtures/skill-candidate-semantics.json"
+      },
+      "signs": {
+        "attestation_ref": "",
+        "digest": "94854374a6f4bce4c26a061fb78322ee77ff83e2128263f2e2bc0b465c8bb012",
+        "signature_ref": "",
+        "verification_state": "digest-only"
+      },
+      "surface_state": "authored_source",
+      "toolchain": {
+        "detected_tools": [
+          "git",
+          "python"
+        ],
+        "owner_commands": [],
+        "required_tools": [
+          "jq"
+        ]
+      },
+      "validator_route": {
+        "route_kind": "source_fast",
+        "surface": "aoa-kag:scripts/validate_kag.py"
+      }
+    },
+    {
+      "abi": {
+        "abi_epoch": "source",
+        "artifact_class": "config",
+        "compatibility": "stable",
+        "contract_version": "none",
         "schema_version": "1"
       },
       "access": {
@@ -2394,13 +2483,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "bfd17d63ca76fff0f90ac13866c95d5d421e0535049d5c59c0655e605e3eab2b",
+        "content_hash": "5f5baf7e820508e38b3efc1768b7ffbb17234c9b03494ef44f3eb732ffe1159b",
         "git_ref": "git-index-source-tree",
         "id": "file:config/live-scenario-regression-corpus.json:5c9c552c08",
         "mime": "application/json",
         "path": "config/live-scenario-regression-corpus.json",
         "repo": "aoa-session-memory",
-        "size_bytes": 52172
+        "size_bytes": 56650
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -2433,7 +2522,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "bfd17d63ca76fff0f90ac13866c95d5d421e0535049d5c59c0655e605e3eab2b",
+        "digest": "5f5baf7e820508e38b3efc1768b7ffbb17234c9b03494ef44f3eb732ffe1159b",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -15224,13 +15313,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "60885402649f1b95225c53bd6b1143ece912caef22aa43e898281c24e7fa22fd",
+        "content_hash": "58c24db827881b86ec445459897d83a07ca68def2b40a7a940d0d1c0e4563238",
         "git_ref": "git-index-source-tree",
         "id": "file:scripts/aoa_session_memory.py:b3e675a74e",
         "mime": "text/x-python",
         "path": "scripts/aoa_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 4246236
+        "size_bytes": 4311820
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -15263,7 +15352,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "60885402649f1b95225c53bd6b1143ece912caef22aa43e898281c24e7fa22fd",
+        "digest": "58c24db827881b86ec445459897d83a07ca68def2b40a7a940d0d1c0e4563238",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -16805,13 +16894,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "9629508596c27f470fdeb0654ae70f7224ce798cf120a340d4ae42468456a985",
+        "content_hash": "82866b8858ff00502f9684cf133bbc1db80d9f44f0219222ba867d18e7bd8e54",
         "git_ref": "git-index-source-tree",
         "id": "file:skills/aoa-session-memory-evidence-route/skill.md:312ad35fe8",
         "mime": "text/markdown",
         "path": "skills/aoa-session-memory-evidence-route/SKILL.md",
         "repo": "aoa-session-memory",
-        "size_bytes": 22011
+        "size_bytes": 24336
       },
       "mechanics_role": "none",
       "observed_form": "file",
@@ -16861,28 +16950,28 @@
           {
             "anchor": "mcp-preference",
             "level": 2,
-            "line": 225,
+            "line": 255,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#mcp-preference",
             "title": "MCP Preference"
           },
           {
             "anchor": "reading-packets",
             "level": 2,
-            "line": 316,
+            "line": 346,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#reading-packets",
             "title": "Reading Packets"
           },
           {
             "anchor": "authority-boundary",
             "level": 2,
-            "line": 344,
+            "line": 376,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#authority-boundary",
             "title": "Authority Boundary"
           },
           {
             "anchor": "verification",
             "level": 2,
-            "line": 358,
+            "line": 390,
             "ref": "skills/aoa-session-memory-evidence-route/SKILL.md#verification",
             "title": "Verification"
           }
@@ -16894,7 +16983,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "9629508596c27f470fdeb0654ae70f7224ce798cf120a340d4ae42468456a985",
+        "digest": "82866b8858ff00502f9684cf133bbc1db80d9f44f0219222ba867d18e7bd8e54",
         "signature_ref": "",
         "verification_state": "digest-only"
       },
@@ -18186,13 +18275,13 @@
         "state": "current"
       },
       "identity": {
-        "content_hash": "c5ee54b66cd67c609f48abbca0cfc76c17d50de4e0119b176a65d88dc89f067a",
+        "content_hash": "be238feb38d42911f55e7d4d2d031fc6877f13bfbdd34ca3ee730dcc1ba6d8ab",
         "git_ref": "git-index-source-tree",
         "id": "file:tests/test_session_memory.py:97b303350c",
         "mime": "text/x-python",
         "path": "tests/test_session_memory.py",
         "repo": "aoa-session-memory",
-        "size_bytes": 1619224
+        "size_bytes": 1671512
       },
       "mechanics_role": "none",
       "observed_form": "command",
@@ -18225,7 +18314,7 @@
       },
       "signs": {
         "attestation_ref": "",
-        "digest": "c5ee54b66cd67c609f48abbca0cfc76c17d50de4e0119b176a65d88dc89f067a",
+        "digest": "be238feb38d42911f55e7d4d2d031fc6877f13bfbdd34ca3ee730dcc1ba6d8ab",
         "signature_ref": "",
         "verification_state": "digest-only"
       },

@@ -235,6 +235,22 @@ These packets are route evidence, not owner truth. Use them to find raw,
 segment, and session refs, then hand decisions, eval verdicts, skill meaning,
 or durable memory promotion back to the owning surface.
 
+With `--kind skill`, `usage-chain` and `entity-usage-audit` return
+skill-linked candidate evidence, not an invocation verdict. Read
+`skill_evidence.state_counts`, `association_state_counts`, its
+dispatch/behavioral dimensions,
+`candidate_only`, and `invocation_claim_allowed` before interpreting generic
+usage counts. Reads, edits, mentions, co-occurrence, prompt visibility,
+selection, or deflection do not by themselves prove that the procedure was
+followed. Results owned by a different non-empty correlation id are excluded
+from consequences and retained separately in `false_correlation_events` with
+raw refs and both correlation ids. It is listed under
+`rejection_edge_states`, never among accepted or automatic candidate states.
+Each archived event contributes one canonical state to `state_counts`, even if
+several direct/correlated projections contributed different association
+states. Skill route prefixes, `SKILL.md` paths, separators, and namespaced
+plugin skill names normalize to one canonical route key before matching.
+
 ## Agent Atlas
 
 `maps/` is the source-owned skeleton for the generated agent atlas.
@@ -515,9 +531,16 @@ expansion. It also includes the `maintenance_status` profile so route-quality
 gates verify the read-only maintenance packet exposes typed next actions and an
 exact next command without treating maintenance guidance as evidence truth.
 `usage-chain` builds the hot consumer packet for one stable anchor: direct
-usage events, result/consequence events, refs, freshness, noise flags, and
-next expansion commands without opening GraphRAG, graph neighborhood, or raw
-preview neighborhoods by default.
+evidence events, correlation-safe result/consequence events, refs, freshness,
+noise flags, and next expansion commands without opening GraphRAG, graph
+neighborhood, or raw preview neighborhoods by default. Skill mode adds a
+candidate-only state contract and keeps rejected foreign-correlation edges
+separate from accepted lifecycle evidence.
+The reviewed `skill_candidate_semantics_contract` corpus case materializes a
+temporary synthetic archive and executes the real raw-to-segment-to-SQLite
+route. It proves parent/child identity, artifact/selection separation, blocked
+invocation claims, and rejected-correlation refs without depending on host
+history; its synthetic evidence origin is not adoption or effectiveness proof.
 `entity-dossier` builds the heavier human card for one stable anchor with
 strong refs, weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/
 decisions, open questions, and a read-first route.
@@ -1467,6 +1490,10 @@ the right first route for “does this entity exist / where is its source?”. U
 Use `entity-dossier` when graph/cooccurrence/timeline context or a heavier
 human card is needed. Use `entity-usage-audit` when the chain or dossier is
 unavailable or the task needs the underlying usage/consequence event list.
+For skills, qualify that question as “what skill-linked candidate evidence was
+observed?”. `quality.direct_usage_present` is the generic compatibility field,
+not skill invocation proof; use the skill-specific behavioral/dispatch
+candidate fields and the invocation-claim blocker instead.
 
 `maps/entity-registry.json` is generated navigation. It records active,
 observed, stale, removed, and unknown entity states so agents can route quickly
@@ -1529,6 +1556,15 @@ previews and compressed full-body hydration, and it skips broad text fallback
 when route hits already contain direct usage evidence. Use the returned
 raw/session refs or
 `entity-usage-neighborhood` when exact before/after evidence is needed.
+
+Skill artifact hits do not end the bounded structured search: outcome and
+entrypoint route passes still look for dispatch evidence. If those passes find
+none, the hot packet defers broad FTS explicitly instead of turning a
+hyphenated skill name into an expensive generic token query. Exact skill
+identity uses route-key and token boundaries, so a child such as
+`aoa-eval-apply` is not evidence for the parent `aoa-eval`. Foreign correlated
+results remain context in local windows and never enter the accepted
+consequence chain.
 
 For literal text, path, command, error text, or session-id inputs, use
 `literal-query-plan` before `search`. The packet exposes the detected

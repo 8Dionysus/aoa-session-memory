@@ -21,6 +21,8 @@ review lanes. They are machine-readable route law, not generated reports.
   regression controls for pre-GraphRAG trust gates.
 - `live-scenario-regression-corpus.json` defines source-owned live scenario
   route-quality controls for consumer-loop regressions; it is not memory truth.
+- `fixtures/` holds reviewed portable synthetic inputs for corpus cases that
+  must execute raw-to-index routes without depending on one host archive.
 - `naming-golden-set.json` defines portable naming-quality examples for
   mass naming wave regression checks.
 - `search-providers.json` defines the portable SQLite default, optional host
@@ -31,6 +33,13 @@ review lanes. They are machine-readable route law, not generated reports.
 
 - Keep config portable. Do not hard-code local AoA project facts unless the
   config is explicitly about portable defaults.
+- Fixture-backed corpus evidence must remain synthetic, privacy-safe, relative
+  to this source root, and explicit that execution proof is not observed-user
+  adoption or owner proof.
+- Both the fixture source and its corpus case require review metadata. Fixture
+  files and every path component below `config/fixtures/` must be regular,
+  non-symlinked source entries; invalid materialization must not report a
+  reviewed evidence origin.
 - Preserve `schema_version` and structured JSON shape.
 - Do not hide policy changes inside generated indexes.
 - After taxonomy, route-signal, naming, or atlas routing changes, reindex or

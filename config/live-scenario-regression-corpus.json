@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-07-07T10:00:00Z",
+  "generated_at": "2026-07-10T23:30:00Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
   "authority_boundary": "These cases control route quality over live session-memory packets; raw, segment, receipt, and owner-local refs remain the stronger evidence.",
-  "case_count": 27,
+  "case_count": 28,
   "cases": [
     {
       "id": "literal_planner_route_contract",
@@ -588,6 +588,138 @@
               "failed",
               "observed"
             ],
+            "max_elapsed_ms": 30000
+          }
+        ]
+      }
+    },
+    {
+      "id": "skill_candidate_semantics_contract",
+      "profiles": [
+        "entity_usage_chain"
+      ],
+      "seed": "corpus-skill-candidate-semantics",
+      "sample_size": 2,
+      "recent_days": 14,
+      "limit": 4,
+      "fixture_archive": "config/fixtures/skill-candidate-semantics.json",
+      "usage_chain_probes": [
+        {
+          "name": "parent_artifact_is_not_invocation",
+          "anchor": "aoa-eval",
+          "kind": "skill",
+          "required_usage_actions": [
+            "edited"
+          ],
+          "forbidden_usage_actions": [
+            "used"
+          ],
+          "required_skill_evidence_states": [
+            "edited"
+          ],
+          "forbidden_skill_evidence_states": [
+            "selected",
+            "procedure_observed",
+            "verified",
+            "completed"
+          ],
+          "expected_skill_behavioral_candidate": false,
+          "expected_skill_dispatch_candidate": false,
+          "expected_skill_invocation_claim_allowed": false,
+          "min_false_correlation_event_count": 1,
+          "required_false_correlation_event_ids": [
+            "000006"
+          ],
+          "require_false_correlation_raw_and_segment_refs": true,
+          "required_result_or_consequence_event_ids": [
+            "000007",
+            "000008"
+          ],
+          "required_chained_result_or_consequence_event_ids": [
+            "000007",
+            "000008"
+          ],
+          "forbidden_result_or_consequence_event_ids": [
+            "000006"
+          ]
+        },
+        {
+          "name": "child_selection_stays_dispatch_only",
+          "anchor": "aoa-eval-apply",
+          "kind": "skill",
+          "require_direct_usage": false,
+          "max_usage_event_count": 0,
+          "require_result_or_consequence": false,
+          "required_usage_actions": [
+            "selected"
+          ],
+          "forbidden_usage_actions": [
+            "used"
+          ],
+          "required_skill_evidence_states": [
+            "selected"
+          ],
+          "forbidden_skill_evidence_states": [
+            "edited",
+            "skill_read",
+            "mentioned",
+            "procedure_observed",
+            "verified",
+            "completed"
+          ],
+          "required_result_or_consequence_event_ids": [
+            "000003"
+          ],
+          "expected_skill_behavioral_candidate": false,
+          "expected_skill_dispatch_candidate": true,
+          "expected_skill_invocation_claim_allowed": false
+        }
+      ],
+      "review": {
+        "status": "reviewed",
+        "reviewer": "source_config",
+        "reviewed_at": "2026-07-10",
+        "note": "A reviewed synthetic raw-to-segment archive must keep parent/child skill identity exact, classify artifact mutation and selection separately, block invocation claims, and retain foreign correlated output as referenced rejected evidence rather than a consequence."
+      },
+      "expect": {
+        "max_failed_count": 0,
+        "max_warn_count": 0,
+        "max_actionable_gap_count": 0,
+        "max_first_useful_packet_ms": 30000,
+        "min_raw_or_segment_ref_scenario_count": 1,
+        "profile_expectations": [
+          {
+            "profile": "entity_usage_chain",
+            "allowed_statuses": [
+              "passed"
+            ],
+            "min_sample_count": 2,
+            "max_failed_count": 0,
+            "max_warn_count": 0,
+            "min_result_count": 2,
+            "min_raw_ref_count": 1,
+            "min_segment_ref_count": 1,
+            "min_raw_or_segment_ref_sample_count": 2,
+            "min_direct_usage_sample_count": 1,
+            "min_usage_chain_usage_event_count": 1,
+            "min_usage_chain_result_or_consequence_count": 2,
+            "required_kinds": [
+              "skill"
+            ],
+            "required_usage_actions": [
+              "edited",
+              "selected"
+            ],
+            "required_skill_evidence_states": [
+              "edited",
+              "selected"
+            ],
+            "min_skill_dispatch_candidate_sample_count": 1,
+            "max_skill_behavioral_candidate_sample_count": 0,
+            "max_skill_invocation_claim_allowed_sample_count": 0,
+            "min_false_correlation_event_count": 1,
+            "min_false_correlation_ref_sample_count": 1,
+            "max_foreign_correlation_consequence_violation_count": 0,
             "max_elapsed_ms": 30000
           }
         ]

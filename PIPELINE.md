@@ -186,7 +186,8 @@ list.
 signals and direct usage classes with lightweight search hits, skips raw
 semantic previews and compressed full-body hydration on the search harvest, and
 only opens the broad text fallback when the typed route hits do not contain
-direct usage evidence. The payload exposes `text_search_skipped`,
+direct usage evidence. Skill mode follows the candidate-specific structured
+dispatch/deferred-FTS rule below instead. The payload exposes `text_search_skipped`,
 `route_hit_count_before_text_fallback`, and
 `route_usage_hit_count_before_text_fallback` so an agent can tell whether it got
 the fast indexed path or had to widen.
@@ -215,6 +216,49 @@ refs, freshness, noise flags, and next expansion commands together. Use
 `usage-chain` first when the question only needs the usage-to-consequence
 chain. Both routes are evidence packets, not reviewed truth.
 
+For `--kind skill`, the packet answers which skill-linked candidate evidence
+exists; it does not prove that the skill was invoked or effective. Read the
+nested `skill_evidence` contract before interpreting generic `usage_role` or
+`usage_event_count`. Automatically classified accepted states currently cover
+`selected`, `skill_read`, `edited`, `mentioned`, and `cooccurrence`;
+`prompt_visible`, `procedure_observed`, `verified`, `completed`, and
+`deflected` remain declared receipt-or-review states until a stronger producer
+supplies them. `selected` and `deflected` are dispatch candidates, while only
+`procedure_observed`, `verified`, or `completed` are behavioral candidates.
+Even then, `candidate_only=true` and `invocation_claim_allowed=false` require
+task-episode correlation plus owner review before an invocation or
+effectiveness claim. `quality.direct_usage_present` remains the generic event
+compatibility field; use `skill_behavioral_candidate_present`,
+`skill_dispatch_candidate_present`, and `skill_invocation_claim_allowed` for
+skill semantics. Artifact-only hits do not end the structured search: skill
+mode runs exact canonical skill-route usage plus outcome/entrypoint dispatch
+passes that can find an explicit selection announcement without an unfiltered
+retry. `skill:`, `SKILL.md` path, hyphen/underscore, and namespaced plugin
+aliases resolve to one canonical skill key. When those indexed passes remain
+artifact-only, the hot packet sets `skill_text_fallback_deferred=true` instead
+of expanding a hyphenated skill name into a broad, timeout-prone FTS query;
+open literal/raw expansion explicitly when that extra recall is justified.
+
+Correlation rejection is a separate edge dimension, not a lifecycle state. A
+result whose non-empty correlation id differs from the source event cannot
+enter the consequence chain. It remains inspectable in
+`false_correlation_events`, with source/rejected correlation ids and raw refs;
+the summary reports rejection edge and unique-event counts, and neighborhood
+windows keep the event as `role=context` with
+`relation=foreign_correlation_context`. This makes discarded evidence
+auditable without letting it affect accepted action, freshness, document, or
+skill-state counts.
+
+Multiple projections of one archived event remain visible in
+`association_state_counts`, but `state_counts` selects exactly one canonical
+state per event using a semantic-strength order distinct from retrieval/display
+priority: completed and verified evidence cannot be downgraded by a selected
+projection. The same canonical state is
+written back to each accepted projection before compact event and action
+aggregation, so a correlation-rich neighbor cannot erase a direct `selected`
+surface. `false_correlation` is declared only in `rejection_edge_states`; it is
+not an accepted or automatic candidate state.
+
 Use `live-scenario-audit` with the default `entity_dossier` profile as the
 consumer-loop smoke for that one-packet route. Use
 `entity-usage-scenario-audit` as the narrower live randomized pipeline test for
@@ -231,6 +275,20 @@ Use `live-scenario-corpus check` when the loop needs regression proof rather
 than a one-off diagnostic. The source-owned cases live in
 `config/live-scenario-regression-corpus.json`; they check route behavior and
 evidence refs, while raw/segment/receipt refs remain the stronger authority.
+Cases with a relative `fixture_archive` materialize a temporary private archive
+from a reviewed portable synthetic transcript, run the normal hook, segment,
+SQLite, and consumer routes, and then discard it. They execute even when the
+host archive is empty. Their `evidence_origin` must remain
+`reviewed_synthetic_fixture_archive`: this proves code-path behavior, not real
+user adoption. That origin is allowed only after both the source fixture and
+corpus case carry review metadata. Fixture refs must stay below the real,
+non-symlinked `config/fixtures/` tree; invalid or unreviewed sources never claim
+reviewed evidence. `skill_candidate_semantics_contract` uses this lane to enforce
+exact parent/child skill identity, artifact-versus-dispatch separation,
+blocked invocation claims, and correlation-safe consequence selection.
+The check preserves `fixture_source_ref` and its digest, replaces temporary
+archive paths with `<ephemeral-fixture-archive>`, and marks generated raw and
+segment refs invalid after the check; rerun the case to re-materialize them.
 The corpus also checks `maintenance_status` as a read-only route-guidance
 profile: it verifies typed next actions and exact next commands, not repair
 completion.
