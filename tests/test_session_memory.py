@@ -3904,6 +3904,872 @@ def test_entity_usage_audit_prefers_non_stale_usage_in_compact_slice(tmp_path: P
     assert audit["quality"]["freshness_counts"] == {"fresh": 1, "unverifiable": 1}
 
 
+def test_skill_usage_audit_distinguishes_artifact_edit_from_behavioral_invocation(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    edited_skill_hit = {
+        "doc_id": "event:session:032:023784",
+        "event_type": "FILE_WRITE",
+        "family": "workspace_mutation",
+        "phase": "implementation",
+        "actor": "tool",
+        "action": "mutate_workspace",
+        "outcome": "changed",
+        "conversation_act": "command_mutation_request",
+        "session_act": "tool_call",
+        "usage_role": "usage",
+        "title": "Tool call: exec_command",
+        "snippet": (
+            "git add skills/core/engineering/aoa-eval/SKILL.md "
+            ".agents/skills/aoa-eval/SKILL.md && git commit"
+        ),
+        "route_signals": "skill:aoa_eval|path:skills_core_engineering_aoa_eval_skill_md",
+        "refs": {
+            "raw": "raw:line:23784",
+            "segment": "032__compaction-to-compaction.md#event-023784",
+            "session": "session.manifest.json",
+        },
+        "freshness": {"status": "fresh"},
+    }
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [edited_skill_hit],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {
+            "providers": {
+                "portable_sqlite": {
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {"status": "current"},
+                }
+            }
+        },
+    )
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-eval",
+        kind="skill",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    assert audit["usage_event_count"] == 1
+    assert audit["usage_events"][0]["skill_evidence_state"] == "edited"
+    assert audit["skill_evidence"]["state_counts"] == {"edited": 1}
+    assert audit["skill_evidence"]["candidate_only"] is True
+    assert audit["skill_evidence"]["behavioral_candidate_present"] is False
+    assert audit["skill_evidence"]["dispatch_candidate_present"] is False
+    assert audit["quality"]["generic_direct_event_present"] is True
+    assert audit["quality"]["direct_usage_present"] is True
+    assert audit["quality"]["skill_behavioral_candidate_present"] is False
+    assert audit["quality"]["skill_invocation_claim_allowed"] is False
+
+    chain = module.entity_usage_chain(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-eval",
+        kind="skill",
+        limit=1,
+        per_route_limit=1,
+    )
+
+    usage_event = chain["usage_chain"]["chains"][0]["usage_event"]
+    assert usage_event["skill_evidence_state"] == "edited"
+    assert usage_event["primary_usage_action"] == "edited"
+    assert "used" not in usage_event["usage_actions"]
+    assert chain["skill_evidence"]["state_counts"] == {"edited": 1}
+    assert chain["quality"]["direct_usage_present"] is True
+    assert chain["quality"]["skill_behavioral_candidate_present"] is False
+    assert chain["quality"]["skill_invocation_claim_allowed"] is False
+    assert chain["quality"]["skill_text_fallback_deferred"] is True
+    assert chain["next_expansion"][0]["id"] == "skill_dispatch_literal_plan"
+    assert "literal-query-plan aoa-eval" in chain["next_expansion_command"]
+    assert "skill_artifact_activity_not_behavioral_invocation" in chain["noise_flags"]
+
+
+def test_skill_evidence_states_keep_selection_read_and_mentions_distinct() -> None:
+    selected = module.skill_evidence_state_for_event(
+        {
+            "event_type": "ASSISTANT_MESSAGE",
+            "snippet": "Использую скилл aoa-eval как eval front door.",
+            "route_signals": ["skill:aoa_eval"],
+        },
+        anchor="aoa-eval",
+    )
+    skill_read = module.skill_evidence_state_for_event(
+        {
+            "event_type": "FILE_READ",
+            "action": "inspect_workspace",
+            "snippet": "sed -n 1,240p skills/core/engineering/aoa-eval/SKILL.md",
+            "route_signals": ["skill:aoa_eval"],
+        },
+        anchor="aoa-eval",
+    )
+    mentioned = module.skill_evidence_state_for_event(
+        {
+            "event_type": "ASSISTANT_MESSAGE",
+            "snippet": "The aoa-eval route exists in the skill catalog.",
+            "route_signals": ["skill:aoa_eval"],
+        },
+        anchor="aoa-eval",
+    )
+
+    assert selected == "selected"
+    assert skill_read == "skill_read"
+    assert mentioned == "mentioned"
+
+    summary = module.skill_evidence_summary(
+        [
+            {"event_type": "ASSISTANT_MESSAGE", "snippet": "Using skill aoa-eval", "route_signals": ["skill:aoa_eval"]},
+            {
+                "event_type": "FILE_READ",
+                "action": "inspect_workspace",
+                "snippet": "skills/core/engineering/aoa-eval/SKILL.md",
+                "route_signals": ["skill:aoa_eval"],
+            },
+        ],
+        anchor="aoa-eval",
+    )
+
+    assert summary["state_counts"] == {"selected": 1, "skill_read": 1}
+    assert summary["behavioral_candidate_present"] is False
+    assert summary["dispatch_candidate_present"] is True
+    assert summary["invocation_claim_allowed"] is False
+    assert "prompt_visible" in summary["supported_states"]
+    assert "false_correlation" not in summary["automatic_candidate_states"]
+    assert "false_correlation" not in summary["supported_states"]
+    assert summary["rejection_edge_states"] == ["false_correlation"]
+    assert "procedure_observed" in summary["receipt_or_review_states"]
+
+    prompt_visible = module.skill_evidence_summary(
+        [{"skill_evidence_state": "prompt_visible"}],
+        anchor="aoa-eval",
+    )
+    deflected = module.skill_evidence_summary(
+        [{"skill_evidence_state": "deflected"}],
+        anchor="aoa-eval",
+    )
+    procedure_observed = module.skill_evidence_summary(
+        [{"skill_evidence_state": "procedure_observed"}],
+        anchor="aoa-eval",
+    )
+
+    assert prompt_visible["state_counts"] == {"prompt_visible": 1}
+    assert prompt_visible["behavioral_candidate_present"] is False
+    assert prompt_visible["dispatch_candidate_present"] is False
+    assert deflected["state_counts"] == {"deflected": 1}
+    assert deflected["behavioral_candidate_present"] is False
+    assert deflected["dispatch_candidate_present"] is True
+    assert procedure_observed["behavioral_candidate_present"] is True
+    assert procedure_observed["dispatch_candidate_present"] is False
+
+
+def test_skill_selection_requires_an_unnegated_assistant_selection_surface() -> None:
+    cases = [
+        (
+            {
+                "event_type": "USER_INTENT",
+                "snippet": "Please use skill aoa-eval.",
+                "route_signals": ["skill:aoa_eval"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "TOOL_OUTPUT",
+                "snippet": "echo 'using skill aoa-eval'",
+                "route_signals": ["skill:aoa_eval"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "I will not use skill aoa-eval for this task.",
+                "route_signals": ["skill:aoa_eval"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "VERIFICATION",
+                "snippet": "Tests passed.",
+            },
+            "cooccurrence",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "Using skill aoa-eval-apply.",
+                "route_signals": ["skill:aoa_eval_apply"],
+            },
+            "cooccurrence",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "I will use aoa-tdd-slice, not aoa-eval.",
+                "route_signals": ["skill:aoa_eval", "skill:aoa_tdd_slice"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "Instead of using aoa-eval, I will use aoa-tdd-slice.",
+                "route_signals": ["skill:aoa_eval", "skill:aoa_tdd_slice"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "Вместо aoa-eval использую aoa-tdd-slice.",
+                "route_signals": ["skill:aoa_eval", "skill:aoa_tdd_slice"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "aoa-eval не выбираю; выбираю aoa-tdd-slice.",
+                "route_signals": ["skill:aoa_eval", "skill:aoa_tdd_slice"],
+            },
+            "mentioned",
+        ),
+        (
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": "I will use rg to inspect aoa-eval.",
+                "route_signals": ["skill:aoa_eval"],
+            },
+            "mentioned",
+        ),
+    ]
+
+    for event, expected in cases:
+        assert module.skill_evidence_state_for_event(event, anchor="aoa-eval") == expected
+
+    for announcement in (
+        "Использую aoa-eval как front door.",
+        "Применяю aoa-eval для этого среза.",
+        "I am using aoa-eval for this task.",
+        "I will use aoa-eval as the routing skill.",
+        "Instead of manual checks I will use aoa-eval.",
+        "Вместо ручной проверки использую aoa-eval.",
+    ):
+        assert module.skill_evidence_state_for_event(
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": announcement,
+                "route_signals": ["skill:aoa_eval"],
+            },
+            anchor="aoa-eval",
+        ) == "selected"
+
+
+def test_skill_identity_is_canonical_across_route_prefix_path_and_plugin_names() -> None:
+    cases = [
+        ("skill:aoa_eval", "aoa_eval", "I will use skill:aoa_eval."),
+        ("skills/core/engineering/aoa-eval/SKILL.md", "aoa_eval", "I will use aoa-eval."),
+        ("github:yeet", "github_yeet", "I will use github:yeet."),
+        ("data-analytics:build-report", "data_analytics_build_report", "I will use data-analytics:build-report."),
+    ]
+
+    for anchor, canonical_key, announcement in cases:
+        assert module.canonical_skill_entity_key(anchor) == canonical_key
+        exact_candidates = [
+            candidate
+            for candidate in module.trace_route_lookup_candidates(
+                module.trace_route_candidates(anchor, kind="skill")
+            )
+            if candidate["layer"] == "skill"
+        ]
+        assert [candidate["route_signal"] for candidate in exact_candidates] == [
+            f"skill:{canonical_key}"
+        ]
+        assert module.skill_evidence_state_for_event(
+            {
+                "event_type": "ASSISTANT_MESSAGE",
+                "snippet": announcement,
+                "route_signals": [f"skill:{canonical_key}"],
+            },
+            anchor=anchor,
+        ) == "selected"
+
+
+def test_skill_evidence_summary_chooses_one_canonical_state_per_archived_event() -> None:
+    direct_selected = {
+        "doc_id": "event:session:001:000003",
+        "event_id": "000003",
+        "event_type": "ASSISTANT_MESSAGE",
+        "role": "outcome",
+        "snippet": "I will use aoa-eval.",
+        "route_signals": ["skill:aoa_eval"],
+        "refs": {"raw": "raw:line:3"},
+    }
+    correlated_neighbor = {
+        "doc_id": "event:session:001:000003",
+        "event_id": "000003",
+        "event_type": "ASSISTANT_MESSAGE",
+        "role": "outcome",
+        "relation": "same_correlation_id",
+        "correlation_id": "call-3",
+        "route_signals": ["skill:aoa_eval"],
+        "refs": {"segment": "001.md#event-000003"},
+    }
+
+    summary = module.skill_evidence_summary(
+        [direct_selected, correlated_neighbor],
+        anchor="aoa-eval",
+    )
+    canonical = module.unique_entity_usage_events(
+        [direct_selected, correlated_neighbor]
+    )
+
+    assert summary["state_counts"] == {"selected": 1}
+    assert summary["association_state_counts"] == {"mentioned": 1, "selected": 1}
+    assert summary["unique_evidence_event_count"] == 1
+    assert summary["duplicate_evidence_association_count"] == 1
+    assert [event["skill_evidence_state"] for event in (direct_selected, correlated_neighbor)] == [
+        "selected",
+        "selected",
+    ]
+    assert len(canonical) == 1
+    assert canonical[0]["skill_evidence_state"] == "selected"
+    assert canonical[0]["refs"] == {
+        "raw": "raw:line:3",
+        "segment": "001.md#event-000003",
+    }
+    assert module.entity_usage_event_action_semantics(canonical[0]) == ["selected"]
+
+    completed_projection = {
+        **correlated_neighbor,
+        "skill_evidence_state": "completed",
+    }
+    completed_summary = module.skill_evidence_summary(
+        [direct_selected, completed_projection],
+        anchor="aoa-eval",
+    )
+    assert completed_summary["state_counts"] == {"completed": 1}
+    assert completed_summary["association_state_counts"] == {
+        "completed": 1,
+        "selected": 1,
+    }
+    assert completed_summary["behavioral_candidate_present"] is True
+
+    procedure_projection = {
+        "doc_id": "event:session:001:000004",
+        "skill_evidence_state": "procedure_observed",
+    }
+    verified_projection = {
+        "doc_id": "event:session:001:000004",
+        "skill_evidence_state": "verified",
+    }
+    verified_summary = module.skill_evidence_summary(
+        [procedure_projection, verified_projection],
+        anchor="aoa-eval",
+    )
+    assert verified_summary["state_counts"] == {"verified": 1}
+    assert verified_summary["behavioral_candidate_present"] is True
+
+
+def test_skill_usage_audit_does_not_let_artifact_hits_hide_selection(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    edited_skill_hit = {
+        "doc_id": "event:session:001:000010",
+        "event_type": "FILE_WRITE",
+        "action": "mutate_workspace",
+        "usage_role": "usage",
+        "title": "Tool call: exec_command",
+        "snippet": "git add skills/core/engineering/aoa-eval/SKILL.md",
+        "route_signals": "skill:aoa_eval",
+        "refs": {"raw": "raw:line:10", "segment": "001.md", "session": "session.manifest.json"},
+        "freshness": {"status": "fresh"},
+    }
+    second_edited_skill_hit = {
+        **edited_skill_hit,
+        "doc_id": "event:session:001:000011",
+        "refs": {"raw": "raw:line:11", "segment": "001.md", "session": "session.manifest.json"},
+    }
+    selected_skill_hit = {
+        "doc_id": "event:session:001:000009",
+        "event_type": "ASSISTANT_MESSAGE",
+        "conversation_act": "assistant_plan",
+        "usage_role": "outcome",
+        "title": "Assistant message",
+        "snippet": "Использую скилл aoa-eval как front door.",
+        "route_signals": "skill:aoa_eval",
+        "refs": {"raw": "raw:line:9", "segment": "001.md", "session": "session.manifest.json"},
+        "freshness": {"status": "fresh"},
+    }
+    called_usage_roles: list[str] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        usage_role = str(kwargs.get("usage_role") or "")
+        called_usage_roles.append(usage_role)
+        hits = (
+            [edited_skill_hit, second_edited_skill_hit]
+            if usage_role == "usage"
+            else [edited_skill_hit, second_edited_skill_hit, selected_skill_hit]
+        )
+        return {"ok": True, "result_count": len(hits), "results": hits, "diagnostics": []}
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {"providers": {"portable_sqlite": {"freshness": {"status": "current"}}}},
+    )
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-eval",
+        kind="skill",
+        limit=2,
+        per_route_limit=2,
+    )
+
+    assert set(called_usage_roles) == {"usage", "outcome", "entrypoint"}
+    assert audit["skill_evidence"]["state_counts"] == {"edited": 1, "selected": 1}
+    assert audit["skill_evidence"]["behavioral_candidate_present"] is False
+    assert audit["skill_evidence"]["dispatch_candidate_present"] is True
+    assert audit["quality"]["direct_usage_present"] is True
+    assert audit["outcome_events"][0]["skill_evidence_state"] == "selected"
+    assert audit["quality"]["skill_dispatch_fast_path_applied"] is True
+    assert audit["quality"]["text_search_skipped"] is True
+    assert audit["quality"]["text_search_skip_reason"] == "skill_dispatch_candidate_route_sufficient"
+
+
+def test_skill_usage_audit_defers_broad_text_after_bounded_dispatch_route(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    edited_skill_hit = {
+        "doc_id": "event:session:001:000010",
+        "event_type": "FILE_WRITE",
+        "action": "mutate_workspace",
+        "usage_role": "usage",
+        "title": "Tool call: exec_command",
+        "snippet": "git add skills/core/engineering/aoa-eval/SKILL.md",
+        "route_signals": "skill:aoa_eval",
+        "refs": {"raw": "raw:line:10", "segment": "001.md", "session": "session.manifest.json"},
+        "freshness": {"status": "fresh"},
+    }
+    selected_text_hit = {
+        "doc_id": "event:session:001:000009",
+        "event_type": "ASSISTANT_MESSAGE",
+        "usage_role": "outcome",
+        "title": "Assistant message",
+        "snippet": "Использую aoa-eval как front door.",
+        "route_signals": "",
+        "refs": {"raw": "raw:line:9", "segment": "001.md", "session": "session.manifest.json"},
+        "freshness": {"status": "fresh"},
+    }
+    calls: list[tuple[str, str]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        query = str(kwargs.get("query") or "")
+        usage_role = str(kwargs.get("usage_role") or "")
+        calls.append((query, usage_role))
+        hits = [selected_text_hit] if query == "aoa-eval" else [edited_skill_hit]
+        return {"ok": True, "result_count": len(hits), "results": hits, "diagnostics": []}
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {"providers": {"portable_sqlite": {"freshness": {"status": "current"}}}},
+    )
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-eval",
+        kind="skill",
+        limit=2,
+        per_route_limit=2,
+    )
+
+    assert not any(query == "aoa-eval" for query, _usage_role in calls)
+    assert audit["quality"]["text_search_skipped"] is True
+    assert audit["quality"]["text_search_skip_reason"] == "skill_dispatch_route_exhausted_text_fallback_deferred"
+    assert audit["quality"]["skill_text_fallback_deferred"] is True
+    assert audit["skill_evidence"]["state_counts"] == {"edited": 1}
+    assert audit["skill_evidence"]["dispatch_candidate_present"] is False
+
+
+def test_skill_selection_fast_path_never_hides_a_broad_retry_and_markdown_keeps_ref(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    selected_hit = {
+        "doc_id": "event:session:001:000003",
+        "event_id": "000003",
+        "event_type": "ASSISTANT_MESSAGE",
+        "conversation_act": "assistant_plan",
+        "usage_role": "outcome",
+        "title": "Assistant selection",
+        "snippet": "I will use aoa-eval.",
+        "route_signals": "skill:aoa_eval",
+        "refs": {
+            "raw": "raw:line:3",
+            "segment": "001.md#event-000003",
+            "session": "session.manifest.json",
+        },
+        "freshness": {"status": "fresh"},
+    }
+    calls: list[tuple[str, int, str]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        usage_role = str(kwargs.get("usage_role") or "")
+        calls.append((usage_role, int(kwargs.get("limit") or 0), str(kwargs.get("query") or "")))
+        hits = [selected_hit] if usage_role == "outcome" else []
+        return {"ok": True, "result_count": len(hits), "results": hits, "diagnostics": []}
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {"providers": {"portable_sqlite": {"freshness": {"status": "current"}}}},
+    )
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="skill:aoa_eval",
+        kind="skill",
+        limit=3,
+        per_route_limit=3,
+    )
+
+    assert {usage_role for usage_role, _limit, _query in calls} == {
+        "usage",
+        "outcome",
+        "entrypoint",
+    }
+    assert not any(usage_role == "" or limit == 100 or query for usage_role, limit, query in calls)
+    assert audit["quality"]["route_usage_retry_applied"] is False
+    assert audit["quality"]["broad_route_retry_applied"] is False
+    assert audit["quality"]["broad_route_search_fully_skipped"] is True
+    assert audit["skill_evidence"]["state_counts"] == {"selected": 1}
+    audit_markdown = module.entity_usage_audit_markdown(audit)
+    assert "## Dispatch and Outcome Candidates" in audit_markdown
+    assert "`selected` `000003` `ASSISTANT_MESSAGE`" in audit_markdown
+    assert "raw:line:3" in audit_markdown
+
+    chain = module.entity_usage_chain(
+        aoa_root=tmp_path / ".aoa",
+        anchor="skill:aoa_eval",
+        kind="skill",
+        limit=3,
+        per_route_limit=3,
+    )
+    assert chain["normalized_entity"]["route_key"] == "aoa_eval"
+    assert chain["normalized_entity"]["route_signal"] == "skill:aoa_eval"
+    chain_markdown = module.entity_usage_chain_markdown(chain)
+    assert "## Dispatch and Outcome Candidates" in chain_markdown
+    assert "raw:line:3" in chain_markdown
+
+
+def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) -> None:
+    fixture_path = Path(__file__).parents[1] / "config" / "fixtures" / "skill-candidate-semantics.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    workspace = tmp_path / "AbyssOS"
+    workspace.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-10T00-00-00-skill-candidate-semantics.jsonl"
+    events = fixture["events"]
+    events[0]["payload"]["cwd"] = str(workspace)
+    write_jsonl(transcript, events)
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": fixture["session_id"],
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, fixture["session_id"])
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+
+    expected = fixture["expected"]
+    segment_index_path = next((Path(record["path"]) / "segments").glob("*.index.json"))
+    segment_index = json.loads(segment_index_path.read_text(encoding="utf-8"))
+    indexed_events = {event["event_id"]: event for event in segment_index["events"]}
+    source_event = indexed_events[expected["parent_artifact_event_id"]]
+    foreign_output = indexed_events[expected["foreign_output_event_id"]]
+    matched_output = indexed_events[expected["matched_output_event_id"]]
+
+    assert source_event["type"] == "FILE_WRITE"
+    assert any(
+        signal["layer"] == "skill" and signal["key"] == "aoa_eval"
+        for signal in source_event["facets"]["route_signals"]
+    )
+    assert {
+        "rel": "answered_by",
+        "event_id": expected["matched_output_event_id"],
+        "correlation_id": "parent-skill-call",
+    } in source_event["relationships"]
+    assert foreign_output["correlation_id"] == "other-call"
+    assert matched_output["correlation_id"] == "parent-skill-call"
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor=fixture["parent_skill_anchor"],
+        kind="skill",
+        session=record["session_label"],
+        limit=2,
+        per_route_limit=4,
+        consequence_window=6,
+        include_source_audit=True,
+    )
+    source_chain = next(
+        item
+        for item in chain["usage_chain"]["chains"]
+        if item["usage_event"]["event_id"] == expected["parent_artifact_event_id"]
+    )
+    consequence_by_id = {
+        event["event_id"]: event
+        for event in source_chain["result_or_consequence_events"]
+    }
+
+    assert expected["foreign_output_event_id"] not in consequence_by_id
+    assert consequence_by_id[expected["matched_output_event_id"]]["relation"] == "same_correlation_id"
+    assert expected["allowed_outcome_event_id"] in consequence_by_id
+    assert chain["counts"]["false_correlation_event_count"] == 1
+    rejected = chain["usage_chain"]["false_correlation_events"][0]
+    assert rejected["event_id"] == expected["foreign_output_event_id"]
+    assert rejected["skill_evidence_state"] == "false_correlation"
+    assert rejected["usage_actions"] == ["context"]
+    assert rejected["source_correlation_id"] == "parent-skill-call"
+    assert rejected["rejected_correlation_id"] == "other-call"
+    assert rejected["correlation_id"] == "other-call"
+    assert rejected["refs"]["raw"] == "raw:line:6"
+    assert chain["skill_evidence"]["correlation_rejections"] == {
+        "state": "false_correlation",
+        "edge_count": 1,
+        "unique_event_count": 1,
+    }
+    assert "false_correlation" not in chain["skill_evidence"]["state_counts"]
+    assert chain["skill_evidence"]["duplicate_evidence_association_count"] == 0
+    assert chain["primary_usage_action_counts"].get("context", 0) == 0
+    assert chain["counts"]["accepted_event_association_count"] == 3
+    assert chain["counts"]["unique_accepted_event_count"] == 3
+    assert chain["counts"]["duplicate_accepted_event_association_count"] == 0
+    assert chain["freshness"]["event_counts"] == {"fresh": 3}
+    assert "cooccurrence" not in chain["usage_action_counts"]
+    assert "foreign_correlated_results_rejected" in chain["noise_flags"]
+    chain_markdown = module.entity_usage_chain_markdown(chain)
+    audit_markdown = module.entity_usage_audit_markdown(chain["source_audit"])
+    assert "skill_invocation_claim_allowed: `False`" in chain_markdown
+    assert "## Rejected Foreign Correlations" in chain_markdown
+    assert "source=`parent-skill-call` rejected=`other-call`" in audit_markdown
+
+    neighborhood = module.entity_usage_neighborhood(
+        aoa_root=aoa_root,
+        anchor=fixture["parent_skill_anchor"],
+        kind="skill",
+        session=record["session_label"],
+        limit=1,
+        per_route_limit=4,
+        before=0,
+        after=6,
+        raw_preview_chars=0,
+    )
+    local = neighborhood["neighborhoods"][0]
+    neighborhood_consequence_ids = {
+        event["event_id"] for event in local["consequence_events"]
+    }
+    foreign_local_event = next(
+        event
+        for event in local["local_events"]
+        if event["event_id"] == expected["foreign_output_event_id"]
+    )
+
+    assert expected["foreign_output_event_id"] not in neighborhood_consequence_ids
+    assert foreign_local_event["relation"] == "foreign_correlation_context"
+    assert foreign_local_event["role"] == "context"
+    assert neighborhood["quality"]["foreign_correlation_context_count"] == 1
+    assert "foreign_correlation_contexts: `1`" in module.entity_usage_neighborhood_markdown(neighborhood)
+
+    child_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor=fixture["child_skill_anchor"],
+        kind="skill",
+        session=record["session_label"],
+        limit=2,
+        per_route_limit=4,
+        consequence_window=4,
+    )
+    child_outcomes = {
+        event["event_id"]: event
+        for event in child_chain["usage_chain"]["outcome_events"]
+    }
+    selected_child = child_outcomes[expected["child_selection_event_id"]]
+    assert selected_child["skill_evidence_state"] == "selected"
+    assert selected_child["primary_usage_action"] == "selected"
+    assert "used" not in selected_child["usage_actions"]
+    assert child_chain["skill_evidence"]["state_counts"] == {"selected": 1}
+    assert child_chain["skill_evidence"]["dispatch_candidate_present"] is True
+    assert child_chain["skill_evidence"]["behavioral_candidate_present"] is False
+    assert child_chain["skill_evidence"]["invocation_claim_allowed"] is False
+    assert child_chain["counts"]["usage_event_count"] == 0
+
+
+def test_generic_usage_keeps_shared_consequence_edges_and_consistent_rejection_counts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    usage_hits = [
+        {
+            "doc_id": f"event:session:001:00000{index}",
+            "event_id": f"00000{index}",
+            "event_type": "TOOL_CALL",
+            "conversation_act": "tool_call_request",
+            "session_act": "tool_call",
+            "usage_role": "usage",
+            "title": f"MCP call {index}",
+            "route_signals": "mcp:aoa_session_memory_mcp",
+            "refs": {
+                "raw": f"raw:line:{index}",
+                "segment": f"001.md#event-00000{index}",
+            },
+            "freshness": {"status": "fresh"},
+        }
+        for index in (1, 2)
+    ]
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        hits = usage_hits if kwargs.get("usage_role") == "usage" else []
+        return {"ok": True, "result_count": len(hits), "results": hits, "diagnostics": []}
+
+    def fake_consequences(
+        hit: dict[str, Any],
+        *,
+        false_correlation_events: list[dict[str, Any]],
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        source_doc_id = str(hit["doc_id"])
+        false_correlation_events.append(
+            {
+                "doc_id": "event:session:001:000099",
+                "source_doc_id": source_doc_id,
+                "event_id": "000099",
+                "event_type": "TOOL_OUTPUT",
+                "role": "context",
+                "source_correlation_id": source_doc_id,
+                "rejected_correlation_id": "foreign-call",
+                "correlation_id": "foreign-call",
+                "refs": {
+                    "raw": "raw:line:99",
+                    "segment": "001.md#event-000099",
+                },
+                "freshness": {"status": "fresh"},
+            }
+        )
+        return [
+            {
+                "doc_id": "event:session:001:000010",
+                "source_doc_id": source_doc_id,
+                "event_id": "000010",
+                "event_type": "TOOL_OUTPUT",
+                "role": "result",
+                "relation": "same_correlation_id",
+                "outcome": "succeeded",
+                "title": "Shared result event",
+                "refs": {
+                    "raw": "raw:line:10",
+                    "segment": "001.md#event-000010",
+                },
+                "freshness": {"status": "fresh"},
+            }
+        ]
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    monkeypatch.setattr(module, "consequence_events_for_usage_hit", fake_consequences)
+    monkeypatch.setattr(module, "search_usage_role_filter_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {"providers": {"portable_sqlite": {"freshness": {"status": "current"}}}},
+    )
+
+    audit = module.entity_usage_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        limit=2,
+        per_route_limit=2,
+    )
+
+    assert audit["consequence_event_count"] == 2
+    assert {event["source_doc_id"] for event in audit["consequence_events"]} == {
+        usage_hits[0]["doc_id"],
+        usage_hits[1]["doc_id"],
+    }
+    assert audit["false_correlation_edge_count"] == 2
+    assert audit["unique_false_correlation_event_count"] == 1
+    assert audit["quality"]["false_correlation_edge_count"] == 2
+    assert audit["quality"]["unique_false_correlation_event_count"] == 1
+    assert "false_correlation_edges: `2`" in module.entity_usage_audit_markdown(audit)
+
+    chain = module.entity_usage_chain(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-mcp",
+        kind="mcp",
+        limit=2,
+        per_route_limit=2,
+    )
+    assert [item["has_result_or_consequence"] for item in chain["usage_chain"]["chains"]] == [
+        True,
+        True,
+    ]
+    assert chain["counts"]["false_correlation_edge_count"] == 2
+    assert chain["counts"]["unique_false_correlation_event_count"] == 1
+    assert "false_correlation_edges: `2`" in module.entity_usage_chain_markdown(chain)
+
+
+def test_unique_entity_usage_events_keeps_strongest_correlated_role() -> None:
+    context_view = {
+        "doc_id": "event:session:001:000004",
+        "event_id": "000004",
+        "event_type": "HOOK_EVENT",
+        "role": "context",
+        "outcome": "succeeded",
+        "refs": {"raw": "raw:line:4"},
+    }
+    result_view = {
+        **context_view,
+        "role": "result",
+        "relation": "same_correlation_id",
+        "correlation_id": "call-4",
+    }
+
+    unique = module.unique_entity_usage_events([context_view, result_view])
+
+    assert unique == [result_view]
+    assert module.entity_usage_event_action_semantics(unique[0]) == ["observed"]
+
+
 def test_entity_usage_audit_retries_route_window_before_text_fallback(tmp_path: Path, monkeypatch: Any) -> None:
     result_hits = [
         {
@@ -4447,6 +5313,237 @@ def test_live_scenario_usage_chain_audit_tracks_action_semantics(tmp_path: Path,
     assert audit["quality"]["failed_count"] == 1
     assert audit["quality"]["usage_action_counts"]["called"] == 2
     assert audit["samples"][1]["quality_flags"] == ["usage_chain_probe_missing_action:validated"]
+
+
+def test_live_scenario_usage_chain_audit_enforces_skill_candidate_contract(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    def fake_entity_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        anchor = str(kwargs["anchor"])
+        if anchor == "aoa-eval":
+            return {
+                "ok": True,
+                "kind": "skill",
+                "requested_kind": "skill",
+                "counts": {
+                    "event_count": 3,
+                    "usage_event_count": 1,
+                    "result_event_count": 0,
+                    "outcome_event_count": 0,
+                    "consequence_event_count": 2,
+                    "false_correlation_event_count": 1,
+                },
+                "skill_evidence": {
+                    "state_counts": {"edited": 1, "cooccurrence": 2},
+                    "behavioral_candidate_present": False,
+                    "dispatch_candidate_present": False,
+                    "invocation_claim_allowed": False,
+                },
+                "usage_chain": {
+                    "chains": [
+                        {
+                            "usage_event": {"event_id": "000004"},
+                            "result_or_consequence_events": [
+                                {"event_id": "000007"},
+                                {"event_id": "000008"},
+                            ],
+                        }
+                    ],
+                    "false_correlation_events": [
+                        {
+                            "event_id": "000006",
+                            "refs": {
+                                "raw": "raw:line:6",
+                                "segment": "000.md#event-000006",
+                            },
+                        }
+                    ],
+                },
+                "usage_action_counts": {"edited": 1},
+                "primary_usage_action_counts": {"edited": 1},
+                "quality": {
+                    "skipped_graph_rag_packet": True,
+                    "skipped_graph_neighborhood": True,
+                    "skipped_raw_preview_neighborhood": True,
+                },
+                "evidence_refs": [
+                    {"kind": "raw_line", "value": "raw:line:4"},
+                    {"kind": "segment_markdown", "value": "000.md#event-000004"},
+                ],
+                "first_ref": {"raw": "raw:line:4", "segment": "000.md#event-000004"},
+                "diagnostics": [],
+            }
+        return {
+            "ok": True,
+            "kind": "skill",
+            "requested_kind": "skill",
+            "counts": {
+                "event_count": 1,
+                "usage_event_count": 0,
+                "result_event_count": 0,
+                "outcome_event_count": 1,
+                "consequence_event_count": 0,
+                "false_correlation_event_count": 0,
+            },
+            "skill_evidence": {
+                "state_counts": {"selected": 1},
+                "behavioral_candidate_present": False,
+                "dispatch_candidate_present": True,
+                "invocation_claim_allowed": False,
+            },
+            "usage_chain": {
+                "chains": [],
+                "outcome_events": [{"event_id": "000003"}],
+                "false_correlation_events": [],
+            },
+            "usage_action_counts": {"selected": 1},
+            "primary_usage_action_counts": {"selected": 1},
+            "quality": {
+                "skipped_graph_rag_packet": True,
+                "skipped_graph_neighborhood": True,
+                "skipped_raw_preview_neighborhood": True,
+            },
+            "evidence_refs": [
+                {"kind": "raw_line", "value": "raw:line:3"},
+                {"kind": "segment_markdown", "value": "000.md#event-000003"},
+            ],
+            "first_ref": {"raw": "raw:line:3", "segment": "000.md#event-000003"},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "entity_usage_chain", fake_entity_usage_chain)
+
+    audit = module.live_scenario_usage_chain_audit(
+        aoa_root=tmp_path / ".aoa",
+        probes=[
+            {
+                "name": "parent",
+                "anchor": "aoa-eval",
+                "kind": "skill",
+                "required_skill_evidence_states": ["edited"],
+                "forbidden_usage_actions": ["used"],
+                "forbidden_skill_evidence_states": ["selected", "procedure_observed", "verified", "completed"],
+                "expected_skill_behavioral_candidate": False,
+                "expected_skill_dispatch_candidate": False,
+                "expected_skill_invocation_claim_allowed": False,
+                "min_false_correlation_event_count": 1,
+                "required_false_correlation_event_ids": ["000006"],
+                "require_false_correlation_raw_and_segment_refs": True,
+                "required_chained_result_or_consequence_event_ids": ["000007", "000008"],
+                "forbidden_result_or_consequence_event_ids": ["000006"],
+            },
+            {
+                "name": "child",
+                "anchor": "aoa-eval-apply",
+                "kind": "skill",
+                "require_direct_usage": False,
+                "max_usage_event_count": 0,
+                "require_result_or_consequence": False,
+                "required_skill_evidence_states": ["selected"],
+                "forbidden_usage_actions": ["used"],
+                "forbidden_skill_evidence_states": ["edited", "skill_read", "mentioned"],
+                "required_result_or_consequence_event_ids": ["000003"],
+                "expected_skill_behavioral_candidate": False,
+                "expected_skill_dispatch_candidate": True,
+                "expected_skill_invocation_claim_allowed": False,
+            },
+        ],
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["skill_evidence_state_counts"] == {
+        "cooccurrence": 2,
+        "edited": 1,
+        "selected": 1,
+    }
+    assert audit["quality"]["skill_dispatch_candidate_sample_count"] == 1
+    assert audit["quality"]["skill_behavioral_candidate_sample_count"] == 0
+    assert audit["quality"]["skill_invocation_claim_allowed_sample_count"] == 0
+    assert audit["quality"]["false_correlation_event_count"] == 1
+    assert audit["quality"]["false_correlation_ref_sample_count"] == 1
+    assert audit["quality"]["foreign_correlation_consequence_violation_count"] == 0
+
+    def bad_entity_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        payload = fake_entity_usage_chain(**kwargs)
+        if kwargs["anchor"] == "aoa-eval":
+            payload["skill_evidence"]["state_counts"]["selected"] = 1
+            del payload["skill_evidence"]["invocation_claim_allowed"]
+            payload["usage_chain"]["chains"][0]["result_or_consequence_events"].append(
+                {"event_id": "000006"}
+            )
+            payload["usage_chain"]["chains"] = []
+            payload["usage_chain"]["result_events"] = [
+                {"event_id": "000006"},
+                {"event_id": "000007"},
+            ]
+            payload["usage_chain"]["outcome_events"] = [{"event_id": "000008"}]
+            payload["usage_chain"]["false_correlation_events"][0]["refs"] = {
+                "raw": "raw:line:6"
+            }
+        return payload
+
+    monkeypatch.setattr(module, "entity_usage_chain", bad_entity_usage_chain)
+    bad = module.live_scenario_usage_chain_audit(
+        aoa_root=tmp_path / ".aoa",
+        probes=[
+            {
+                "name": "bad-parent",
+                "anchor": "aoa-eval",
+                "kind": "skill",
+                "forbidden_skill_evidence_states": ["selected"],
+                "expected_skill_invocation_claim_allowed": False,
+                "min_false_correlation_event_count": 1,
+                "require_false_correlation_raw_and_segment_refs": True,
+                "required_result_or_consequence_event_ids": ["000007", "000008"],
+                "required_chained_result_or_consequence_event_ids": ["000007", "000008"],
+                "forbidden_result_or_consequence_event_ids": ["000006"],
+            }
+        ],
+    )
+
+    assert bad["ok"] is False
+    assert bad["samples"][0]["quality_flags"] == [
+        "usage_chain_probe_forbidden_skill_state:selected",
+        "usage_chain_probe_missing_skill_invocation_claim_allowed_field",
+        "usage_chain_probe_false_correlation_missing_raw_or_segment_refs",
+        "usage_chain_probe_missing_chained_result_or_consequence_event:000007",
+        "usage_chain_probe_missing_chained_result_or_consequence_event:000008",
+        "usage_chain_probe_forbidden_result_or_consequence_event:000006",
+        "usage_chain_probe_foreign_correlation_in_consequences:000006",
+    ]
+
+    def leaked_child_entity_usage_chain(**kwargs: Any) -> dict[str, Any]:
+        payload = fake_entity_usage_chain(**kwargs)
+        if kwargs["anchor"] == "aoa-eval-apply":
+            payload["counts"]["usage_event_count"] = 1
+            payload["skill_evidence"]["state_counts"]["edited"] = 1
+            payload["usage_action_counts"]["edited"] = 1
+            payload["primary_usage_action_counts"]["edited"] = 1
+        return payload
+
+    monkeypatch.setattr(module, "entity_usage_chain", leaked_child_entity_usage_chain)
+    leaked_child = module.live_scenario_usage_chain_audit(
+        aoa_root=tmp_path / ".aoa",
+        probes=[
+            {
+                "name": "leaked-child",
+                "anchor": "aoa-eval-apply",
+                "kind": "skill",
+                "require_direct_usage": False,
+                "max_usage_event_count": 0,
+                "require_result_or_consequence": False,
+                "required_skill_evidence_states": ["selected"],
+                "forbidden_skill_evidence_states": ["edited"],
+            }
+        ],
+    )
+
+    assert leaked_child["ok"] is False
+    assert leaked_child["samples"][0]["quality_flags"] == [
+        "usage_chain_probe_usage_event_count:1>0",
+        "usage_chain_probe_forbidden_skill_state:edited",
+    ]
 
 
 def test_entity_usage_chain_first_ref_skips_manifest_only_until_material_ref() -> None:
@@ -7487,8 +8584,213 @@ def test_live_scenario_corpus_check_skips_empty_archive(
     assert payload["case_count"] == 1
     assert payload["live_session_count"] == 0
     assert payload["skipped_count"] == 1
+    assert payload["passed_count"] == 1
+    assert payload["passed_count_semantics"] == "ok_including_skipped"
+    assert payload["executed_count"] == 0
+    assert payload["executed_passed_count"] == 0
+    assert payload["skipped_ok_count"] == 1
     assert payload["failed_count"] == 0
     assert payload["results"][0]["skip_reason"] == "empty_archive_no_live_scenarios"
+
+
+def test_live_scenario_corpus_runs_reviewed_skill_fixture_on_empty_archive(tmp_path: Path) -> None:
+    source_root = Path(__file__).parents[1]
+    source_fixture = json.loads(
+        (source_root / "config" / "fixtures" / "skill-candidate-semantics.json").read_text(encoding="utf-8")
+    )
+    source_corpus = json.loads(
+        (source_root / "config" / "live-scenario-regression-corpus.json").read_text(encoding="utf-8")
+    )
+    source_case = next(
+        case
+        for case in source_corpus["cases"]
+        if case["id"] == "skill_candidate_semantics_contract"
+    )
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    module.write_json(
+        aoa_root / "config" / "fixtures" / "skill-candidate-semantics.json",
+        source_fixture,
+    )
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "case_count": 1,
+            "cases": [source_case],
+        },
+    )
+
+    payload = module.live_scenario_corpus_check(
+        aoa_root=aoa_root,
+        corpus_path=corpus_path,
+    )
+
+    assert payload["ok"] is True
+    assert payload["live_session_count"] == 0
+    assert payload["skipped_count"] == 0
+    assert payload["executed_count"] == 1
+    assert payload["executed_passed_count"] == 1
+    assert payload["failed_count"] == 0
+    result = payload["results"][0]
+    assert result["evidence_origin"] == "reviewed_synthetic_fixture_archive"
+    assert result["fixture_archive"] == "config/fixtures/skill-candidate-semantics.json"
+    assert result["fixture_materialization_ephemeral"] is True
+    assert result["fixture_raw_and_segment_refs_valid_after_check"] is False
+    assert Path(result["fixture_source_ref"]).is_file()
+    assert len(result["fixture_source_sha256"]) == 64
+    observed = result["observed"]["profiles"][0]
+    assert observed["first_ref"]["segment_index"].startswith("<ephemeral-fixture-archive>/")
+    assert observed["skill_evidence_state_counts"]["edited"] == 1
+    assert observed["skill_evidence_state_counts"]["selected"] == 1
+    assert observed["skill_dispatch_candidate_sample_count"] == 1
+    assert observed["skill_behavioral_candidate_sample_count"] == 0
+    assert observed["skill_invocation_claim_allowed_sample_count"] == 0
+    assert observed["false_correlation_event_count"] == 1
+    assert observed["false_correlation_ref_sample_count"] == 1
+    assert observed["foreign_correlation_consequence_violation_count"] == 0
+    inventory = module.live_scenario_corpus_inventory(
+        aoa_root=aoa_root,
+        corpus_path=corpus_path,
+    )
+    assert inventory["cases"][0]["fixture_archive"] == "config/fixtures/skill-candidate-semantics.json"
+    assert inventory["cases"][0]["evidence_origin"] == "reviewed_synthetic_fixture_archive"
+
+
+def test_live_scenario_corpus_rejects_fixture_path_escape(tmp_path: Path) -> None:
+    result = module.live_scenario_corpus_case_check(
+        tmp_path / ".aoa",
+        {
+            "id": "fixture_escape",
+            "profiles": ["entity_usage_chain"],
+            "fixture_archive": "../escape.json",
+            "review": {
+                "status": "reviewed",
+                "reviewer": "test",
+                "reviewed_at": "2026-07-10",
+            },
+            "expect": {},
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["failures"] == [
+        "fixture_archive_error:fixture_archive must stay under config/fixtures and end in .json"
+    ]
+    assert result["evidence_origin"] == "synthetic_fixture_invalid"
+    assert result["fixture_materialized"] is False
+
+
+def test_live_scenario_fixture_contract_rejects_symlinked_fixture_root(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    external = tmp_path / "external-fixtures"
+    external.mkdir(parents=True)
+    module.write_json(
+        external / "fixture.json",
+        {
+            "schema_version": "fixture_v1",
+            "case_id": "external",
+            "reviewed_label": "must_not_be_trusted",
+            "review": {
+                "status": "reviewed",
+                "reviewer": "test",
+                "reviewed_at": "2026-07-10",
+            },
+            "events": [],
+        },
+    )
+    (aoa_root / "config").mkdir(parents=True)
+    (aoa_root / "config" / "fixtures").symlink_to(external, target_is_directory=True)
+
+    try:
+        module.live_scenario_fixture_source_contract(
+            source_aoa_root=aoa_root,
+            fixture_ref="config/fixtures/fixture.json",
+        )
+    except ValueError as exc:
+        assert str(exc) == "fixture_archive path components must not be symlinks"
+    else:  # pragma: no cover - explicit trust-boundary assertion
+        raise AssertionError("symlinked config/fixtures must be rejected")
+
+
+def test_live_scenario_fixture_contract_requires_source_and_case_review(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    fixture_path = aoa_root / "config" / "fixtures" / "unreviewed.json"
+    module.write_json(
+        fixture_path,
+        {
+            "schema_version": "fixture_v1",
+            "case_id": "unreviewed",
+            "reviewed_label": "candidate_only",
+            "review": {"status": "draft"},
+            "events": [],
+        },
+    )
+    reviewed_case = {
+        "id": "unreviewed_fixture",
+        "profiles": ["entity_usage_chain"],
+        "fixture_archive": "config/fixtures/unreviewed.json",
+        "review": {
+            "status": "reviewed",
+            "reviewer": "test",
+            "reviewed_at": "2026-07-10",
+        },
+        "expect": {},
+    }
+
+    invalid_source = module.live_scenario_corpus_case_check(aoa_root, reviewed_case)
+    assert invalid_source["ok"] is False
+    assert invalid_source["failures"] == [
+        "fixture_archive_error:fixture_archive is not a reviewed synthetic fixture contract"
+    ]
+    assert invalid_source["evidence_origin"] == "synthetic_fixture_invalid"
+
+    source_fixture = json.loads(
+        (
+            Path(__file__).parents[1]
+            / "config"
+            / "fixtures"
+            / "skill-candidate-semantics.json"
+        ).read_text(encoding="utf-8")
+    )
+    module.write_json(
+        aoa_root / "config" / "fixtures" / "reviewed.json",
+        source_fixture,
+    )
+    unreviewed_case = {
+        **reviewed_case,
+        "id": "unreviewed_case",
+        "fixture_archive": "config/fixtures/reviewed.json",
+    }
+    unreviewed_case.pop("review")
+    invalid_case = module.live_scenario_corpus_case_check(aoa_root, unreviewed_case)
+    assert invalid_case["ok"] is False
+    assert invalid_case["failures"] == ["fixture_case_is_not_reviewed"]
+    assert invalid_case["evidence_origin"] == "synthetic_fixture_unreviewed"
+
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    module.write_json(
+        corpus_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "case_count": 2,
+            "cases": [reviewed_case, unreviewed_case],
+        },
+    )
+    inventory = module.live_scenario_corpus_inventory(
+        aoa_root=aoa_root,
+        corpus_path=corpus_path,
+    )
+    assert [row["fixture_contract_status"] for row in inventory["cases"]] == [
+        "invalid:fixture_archive is not a reviewed synthetic fixture contract",
+        "case_unreviewed",
+    ]
+    assert all(
+        row["evidence_origin"] == "synthetic_fixture_unreviewed_or_invalid"
+        for row in inventory["cases"]
+    )
 
 
 def test_live_scenario_profile_expectations_enforce_route_specific_counts() -> None:
@@ -28187,6 +29489,12 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
         "SELECT MAX(LENGTH(body)), COUNT(*) FROM documents JOIN document_bodies ON document_bodies.doc_rowid = documents.rowid"
     ).fetchone()
     route_preview_len, payload_len = conn.execute("SELECT MAX(LENGTH(route_signals)), MAX(LENGTH(payload_json)) FROM documents").fetchone()
+    script_registry_payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM documents WHERE id = ?",
+            ("entity_registry:tool:search_operational_direct_event_rollup_query",),
+        ).fetchone()[0]
+    )
     raw_unavailable_state = conn.execute(
         "SELECT status, reason FROM search_freshness_state WHERE session_id = ?",
         ("raw-missing-session",),
@@ -28201,6 +29509,9 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert preview_len <= module.SEARCH_BODY_PREVIEW_CHARS
     assert route_preview_len <= module.SEARCH_ROUTE_SIGNALS_PREVIEW_CHARS
     assert payload_len < 1000
+    assert script_registry_payload["entity_registry"]["source_refs_sample"][0]["path"] == (
+        "scripts/aoa_session_memory.py"
+    )
     assert compressed_count == indexed["document_count"]
     assert raw_unavailable_state == ("current", "indexed")
 

@@ -2441,6 +2441,25 @@ Maintenance gates:
   `mentions_route_signal=2980345`, `physical.reclaim=0 B`, and
   `next_route` pointing to cardinality reduction, sharding, or high-fanout
   query projections rather than physical SQLite compaction.
+- 2026-07-10 reviewed skill-candidate evidence contract: skill anchors now
+  canonicalize `skill:`, `SKILL.md` path, separator, and namespaced plugin
+  aliases before exact route lookup. Accepted projections contribute one
+  canonical state per archived event while association counts preserve weaker
+  alternate views; dispatch and behavioral candidates remain separate, and
+  `false_correlation` is a rejection-edge state only. Consequences are
+  deduplicated per source/result edge, foreign parallel results retain all
+  correlation ids and refs, selection-only packets avoid hidden broad retries,
+  and Markdown preserves dispatch evidence. The reviewed privacy-safe fixture
+  enforces parent/child collision, artifact-versus-selection, chained result,
+  and foreign-correlation behavior through raw -> hook -> segment -> SQLite ->
+  usage-chain, with dual fixture/case review and non-symlinked source-path
+  containment. Source and fresh portable-bundle suites each returned
+  `488 passed`; the exported corpus returned `executed_passed_count=1/1`,
+  `skipped_count=10`, `failed_count=0`; portable audit returned `ok=true`,
+  `completion_ready=true`. A live `aoa-eval` usage-chain readback returned the
+  single canonical route `skill:aoa_eval`, no diagnostics, and no broad retry;
+  its provider summary separately exposed the pre-existing dirty live
+  projection as stale rather than promoting it to producer proof.
 
 ## Probe Notes
 

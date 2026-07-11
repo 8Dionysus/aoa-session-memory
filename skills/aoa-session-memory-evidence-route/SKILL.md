@@ -41,6 +41,36 @@ Use these first routes when available:
   asks how it was used and what happened after it. This is the compact hot
   route; it avoids GraphRAG, graph neighborhood, and raw-preview neighborhood
   expansion by default while preserving raw, segment, and session refs.
+- for `usage-chain <anchor> --kind skill`, answer “what skill-linked candidate
+  evidence exists”, not “the skill was invoked”. Read
+  `skill_evidence.schema_version`, `state_counts`,
+  `association_state_counts`, `rejection_edge_states`, `dimensions`,
+  `dispatch_candidate_present`, `behavioral_candidate_present`,
+  `candidate_only`, `invocation_claim_allowed`, and
+  `invocation_claim_blocker`. Treat `prompt_visible`, `selected`,
+  `skill_read`, `edited`, `mentioned`, `cooccurrence`, and `deflected` as
+  insufficient by themselves to prove procedure execution. The currently
+  declared receipt-or-review states are not automatically ingested; check
+  `receipt_or_review_ingestion_available` before relying on them. Follow raw
+  or segment refs plus a reviewed task episode before making invocation or
+  effectiveness claims, and hand the verdict to the skill owner or
+  `aoa-evals`.
+- treat `state_counts` as one canonical state per archived event;
+  `association_state_counts` may show weaker alternate projections. Skill
+  route prefixes, `SKILL.md` paths, hyphen/underscore forms, and namespaced
+  plugin names resolve to one canonical key. Do not add their counts together
+  as independent evidence.
+- when `quality.skill_text_fallback_deferred=true`, the bounded indexed
+  outcome/entrypoint dispatch passes found no candidate and the hot route
+  intentionally avoided broad FTS. Do not rewrite that as “selection did not
+  happen”; use the returned literal/raw expansion only when the missing recall
+  matters enough to pay for it.
+- inspect `false_correlation_events`,
+  `skill_evidence.correlation_rejections`, and the
+  `foreign_correlated_results_rejected` noise flag for skill chains. A foreign
+  result remains auditable context with its source/rejected correlation ids;
+  it must never be read as a consequence. In neighborhood packets the same
+  event uses `role=context` and `relation=foreign_correlation_context`.
 - Use `entity-dossier <anchor> --kind <kind>` when the question also needs the
   full graph/cooccurrence/timeline dossier, related entities, or a heavier
   one-packet human card. Use the dossier as a route packet, not as owner truth.
@@ -319,6 +349,8 @@ Prefer packets that expose:
 
 - normalized entity or route candidates;
 - usage, result, outcome, consequence, graph, and neighborhood counts;
+- for skill packets, candidate state dimensions, the invocation-claim blocker,
+  and separate foreign-correlation rejection edge/unique-event counts;
 - freshness, ambiguity, truncation, and omitted counts;
 - agent-route lane coverage when a packet includes `agent_route_summary`; if
   a packet includes `query_route_advice`, follow typed-lane, dedicated-route,
@@ -363,3 +395,6 @@ session evidence to choose the next source surface and cite refs.
 - Cite at least one raw, segment, or session ref before treating the packet as
   evidence for another owner route.
 - State which owner layer receives the decision, proof, write, or promotion.
+- For a regression claim about skill candidate semantics, run the reviewed
+  `skill_candidate_semantics_contract` live-scenario corpus case. Report its
+  synthetic `evidence_origin` and do not present it as observed adoption.

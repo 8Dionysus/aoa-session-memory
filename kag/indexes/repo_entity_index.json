@@ -220,6 +220,20 @@
         "surface_state": "authored_source"
       },
       "entity_kind": "artifact",
+      "id": "entity:file:config/fixtures/skill-candidate-semantics.json:b5d8b2ff3f",
+      "label": "config/fixtures/skill-candidate-semantics.json",
+      "source_record_id": "file:config/fixtures/skill-candidate-semantics.json:b5d8b2ff3f"
+    },
+    {
+      "coordinates": {
+        "artifact_kind": "config",
+        "code_role": "none",
+        "command_role": "none",
+        "document_role": "none",
+        "mechanics_role": "none",
+        "surface_state": "authored_source"
+      },
+      "entity_kind": "artifact",
       "id": "entity:file:config/graph-quality-regression-corpus.json:5d68f5b7c3",
       "label": "config/graph-quality-regression-corpus.json",
       "source_record_id": "file:config/graph-quality-regression-corpus.json:5d68f5b7c3"
@@ -2481,7 +2495,7 @@
   ],
   "index_identity": {
     "artifact_kind": "repository_entity_index",
-    "content_digest": "8780ec1d3a31b4c0dfe5a5016e21e1ae614aea2e88ba5554a93e12df719e5aee",
+    "content_digest": "1a69ca903dacd015493e5c224c46bfcde5839f7796a3ad699c3605f0e8fad73f",
     "index_kind": "entity",
     "local_id": "index:repo-local:entities",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-repository-index.schema.json"
@@ -2504,15 +2518,15 @@
   },
   "schema_version": "aoa-repo-local-kag-repository-index-v1",
   "source_index": {
-    "content_digest": "6c18619a38ac0699a9e0d399de7ee5fdc4b97726b1d73aefe3cd37b801682dd3",
+    "content_digest": "7be6870dada8a1c890140fa7a7a294722cae4a249d0b84c504f97bad2c4b2264",
     "local_id": "index:repo-local:source-surfaces",
     "path": "kag/indexes/source_surface_index.json"
   },
   "summary": {
-    "entry_count": 177,
+    "entry_count": 178,
     "kind_counts": {
       "agent_route": 11,
-      "artifact": 69,
+      "artifact": 70,
       "command": 2,
       "contract": 6,
       "document": 85,

@@ -1,0 +1,111 @@
+{
+  "schema_version": "skill_candidate_semantics_fixture_v1",
+  "case_id": "skill_candidate_dispatch_artifact_and_parallel_correlation",
+  "reviewed_label": "candidate_evidence_not_invocation_truth",
+  "session_id": "skill-candidate-semantics",
+  "parent_skill_anchor": "aoa-eval",
+  "child_skill_anchor": "aoa-eval-apply",
+  "review": {
+    "status": "reviewed",
+    "reviewer": "source_config",
+    "reviewed_at": "2026-07-10",
+    "note": "Synthetic privacy-safe transcript reviewed for parent-child identity, artifact mutation, dispatch selection, and parallel correlation behavior."
+  },
+  "events": [
+    {
+      "timestamp": "2026-07-10T00:00:00Z",
+      "type": "session_meta",
+      "payload": {
+        "id": "skill-candidate-semantics",
+        "cwd": "$WORKSPACE"
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:01Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Apply the bounded eval change test-first."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:02Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "Использую скилл aoa-eval-apply из skills/core/engineering/aoa-eval-apply/SKILL.md как дочерний route для этого среза."
+          }
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:03Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "parent-skill-call",
+        "arguments": "{\"cmd\":\"git add skills/core/engineering/aoa-eval/SKILL.md && git diff --cached --check\"}"
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:04Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "other-call",
+        "arguments": "{\"cmd\":\"git status --short\"}"
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:05Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "other-call",
+        "output": "Chunk ID: other\nProcess exited with code 0\nFinal output:\n M unrelated.txt\n"
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:06Z",
+      "type": "response_item",
+      "payload": {
+        "type": "function_call_output",
+        "call_id": "parent-skill-call",
+        "output": "Chunk ID: parent\nProcess exited with code 0\nFinal output:\n"
+      }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:07Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "The bounded artifact edit completed; verification remains owner-reviewed."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "child_selection_event_id": "000003",
+    "parent_artifact_event_id": "000004",
+    "foreign_output_event_id": "000006",
+    "matched_output_event_id": "000007",
+    "allowed_outcome_event_id": "000008"
+  }
+}
