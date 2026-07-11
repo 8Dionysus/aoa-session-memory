@@ -20,7 +20,7 @@ source-linked records.
 | --- | --- |
 | node | portable kernel route and session manifest schema |
 | edge | archive route returns to the owner route |
-| index | source surface inventory over local records |
+| index | repository source, entity, artifact, and event indexes plus routes to owner-native session-memory indexes |
 | projection | MCP-readable source-return packet |
 | receipt | validation receipt for the current owner route |
 
