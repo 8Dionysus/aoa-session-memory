@@ -599,7 +599,7 @@
         "entity_usage_chain"
       ],
       "seed": "corpus-skill-candidate-semantics",
-      "sample_size": 2,
+      "sample_size": 3,
       "recent_days": 14,
       "limit": 4,
       "fixture_archive": "config/fixtures/skill-candidate-semantics.json",
@@ -673,13 +673,43 @@
           "expected_skill_behavioral_candidate": false,
           "expected_skill_dispatch_candidate": true,
           "expected_skill_invocation_claim_allowed": false
+        },
+        {
+          "name": "structured_selection_is_loaded_dispatch_not_behavior",
+          "anchor": "aoa-eval-select",
+          "kind": "skill",
+          "require_direct_usage": false,
+          "max_usage_event_count": 0,
+          "require_result_or_consequence": false,
+          "required_usage_actions": [
+            "selected",
+            "loaded"
+          ],
+          "forbidden_usage_actions": [
+            "used",
+            "validated"
+          ],
+          "required_skill_evidence_states": [
+            "selected"
+          ],
+          "forbidden_skill_evidence_states": [
+            "edited",
+            "skill_read",
+            "mentioned",
+            "procedure_observed",
+            "verified",
+            "completed"
+          ],
+          "expected_skill_behavioral_candidate": false,
+          "expected_skill_dispatch_candidate": true,
+          "expected_skill_invocation_claim_allowed": false
         }
       ],
       "review": {
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-10",
-        "note": "A reviewed synthetic raw-to-segment archive must keep parent/child skill identity exact, classify artifact mutation and selection separately, block invocation claims, and retain foreign correlated output as referenced rejected evidence rather than a consequence."
+        "note": "A reviewed synthetic raw-to-segment archive must keep parent/child skill identity exact, classify artifact mutation, assistant selection, and structured skill selection/payload loading separately, prevent skill-body words from becoming behavioral actions, block invocation claims, and retain foreign correlated output as referenced rejected evidence rather than a consequence."
       },
       "expect": {
         "max_failed_count": 0,
@@ -693,13 +723,13 @@
             "allowed_statuses": [
               "passed"
             ],
-            "min_sample_count": 2,
+            "min_sample_count": 3,
             "max_failed_count": 0,
             "max_warn_count": 0,
-            "min_result_count": 2,
+            "min_result_count": 3,
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
-            "min_raw_or_segment_ref_sample_count": 2,
+            "min_raw_or_segment_ref_sample_count": 3,
             "min_direct_usage_sample_count": 1,
             "min_usage_chain_usage_event_count": 1,
             "min_usage_chain_result_or_consequence_count": 2,
@@ -708,13 +738,14 @@
             ],
             "required_usage_actions": [
               "edited",
-              "selected"
+              "selected",
+              "loaded"
             ],
             "required_skill_evidence_states": [
               "edited",
               "selected"
             ],
-            "min_skill_dispatch_candidate_sample_count": 1,
+            "min_skill_dispatch_candidate_sample_count": 2,
             "max_skill_behavioral_candidate_sample_count": 0,
             "max_skill_invocation_claim_allowed_sample_count": 0,
             "min_false_correlation_event_count": 1,

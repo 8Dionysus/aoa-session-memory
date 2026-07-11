@@ -55,6 +55,17 @@ Use these first routes when available:
   or segment refs plus a reviewed task episode before making invocation or
   effectiveness claims, and hand the verdict to the skill owner or
   `aoa-evals`.
+- When `structured_skill_selection_candidate_present=true`, inspect
+  `structured_skill_selection_event_count` and the raw/segment ref. A `loaded`
+  action only says Codex embedded the structured skill payload in the user
+  input; it is not `skill_read`, procedure observation, verification, or
+  completion. Only the exact structured target may become selected/loaded. Do
+  not infer behavioral actions, operator scope, or dispatch for other skill
+  names from words inside that payload.
+- Use composite `task_episode_refs`, `task_episode_ref_count`,
+  `task_episode_link_event_count`, and the link candidate dimension only as
+  bounded join keys for opening the reviewed task episode. Bare task ids are
+  session-local; they do not prove invocation, completion, or causal lift.
 - treat `state_counts` as one canonical state per archived event;
   `association_state_counts` may show weaker alternate projections. Skill
   route prefixes, `SKILL.md` paths, hyphen/underscore forms, and namespaced

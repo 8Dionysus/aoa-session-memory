@@ -4074,6 +4074,440 @@ def test_skill_evidence_states_keep_selection_read_and_mentions_distinct() -> No
     assert procedure_observed["dispatch_candidate_present"] is False
 
 
+def structured_skill_test_envelope(
+    *,
+    name: str = "aoa-eval-select",
+    path: str = "/skills/aoa-eval-select/SKILL.md",
+    frontmatter: str | None = None,
+    body: str = "",
+) -> str:
+    local_name = name.rsplit(":", 1)[-1]
+    resolved_frontmatter = frontmatter if frontmatter is not None else f"---\nname: {local_name}\n---"
+    body_block = f"\n{body.rstrip()}" if body.strip() else ""
+    return (
+        f"<skill>\n<name>{name}</name>\n<path>{path}</path>\n"
+        f"{resolved_frontmatter}{body_block}\n</skill>"
+    )
+
+
+def structured_skill_test_payload(
+    text: str,
+    *,
+    role: str = "user",
+    extra_content: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": role,
+        "content": [
+            {"type": "input_text", "text": text},
+            *(extra_content or []),
+        ],
+    }
+
+
+def test_structured_skill_input_is_selected_and_loaded_without_false_behavioral_actions() -> None:
+    structured_skill_text = structured_skill_test_envelope(
+        path="/srv/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md",
+        frontmatter=(
+            "---\nname: aoa-eval-select\n"
+            "description: Select an existing eval surface before mutation.\n---"
+        ),
+        body=(
+            "# aoa-eval-select\n\n## Procedure\n"
+            "1. Inspect local owner surfaces.\n"
+            "2. Validate the selected route only after inspection."
+        ),
+    )
+    parsed = {
+        "type": "response_item",
+        "payload": structured_skill_test_payload(structured_skill_text),
+    }
+
+    raw_event = module.classify_raw_event(json.dumps(parsed), parsed, 1)
+
+    structured = raw_event.facets["structured_skill_input"]
+    assert structured["name"] == "aoa-eval-select"
+    assert structured["path"].endswith("/aoa-eval-select/SKILL.md")
+    assert structured["content_embedded"] is True
+    assert raw_event.facets["conversation_act"]["kind"] == "structured_skill_selection"
+    assert raw_event.facets["session_act"]["kind"] == "skill_explicit_selection"
+
+    projected = {
+        "event_type": raw_event.event_type,
+        "session_id": "session-a",
+        "conversation_act": raw_event.facets["conversation_act"]["kind"],
+        "session_act": raw_event.facets["session_act"]["kind"],
+        "task_episode_id": "task-0001",
+        "snippet": structured_skill_text[:420],
+        "route_signals": ["skill:aoa_eval_select"],
+    }
+    assert module.skill_evidence_state_for_event(projected, anchor="aoa-eval-select") == "selected"
+
+    summary = module.skill_evidence_summary([projected], anchor="aoa-eval-select")
+    assert summary["state_counts"] == {"selected": 1}
+    assert summary["dispatch_candidate_present"] is True
+    assert summary["behavioral_candidate_present"] is False
+    assert summary["dimensions"]["selection_candidate_present"] is True
+    assert summary["dimensions"]["structured_skill_selection_candidate_present"] is True
+    assert summary["dimensions"]["skill_payload_loaded_candidate_present"] is True
+    assert summary["dimensions"]["skill_read_candidate_present"] is False
+    assert summary["structured_skill_selection_event_count"] == 1
+    assert summary["task_episode_link_event_count"] == 1
+    assert summary["task_episode_ref_count"] == 1
+    assert summary["task_episode_refs"] == [
+        {
+            "session_id": "session-a",
+            "task_episode_id": "task-0001",
+        }
+    ]
+    assert summary["task_episode_refs_truncated"] is False
+    assert summary["dimensions"]["task_episode_link_candidate_present"] is True
+    assert summary["invocation_claim_allowed"] is False
+    assert module.entity_usage_event_action_semantics(projected) == ["selected", "loaded"]
+    assert module.entity_usage_event_action_semantics(
+        {
+            "event_type": "USER_INTENT",
+            "session_act": "skill_explicit_selection",
+            "snippet": "Structured skill input aoa-validator-config /skills/aoa-validator-config/SKILL.md",
+        }
+    ) == ["selected", "loaded"]
+
+    cross_session = module.skill_evidence_summary(
+        [
+            {
+                "doc_id": "event:session-a:000:000001",
+                "session_id": "session-a",
+                "task_episode_id": "task-0001",
+                "session_act": "skill_explicit_selection",
+                "route_signals": ["skill:aoa_eval_select"],
+            },
+            {
+                "doc_id": "event:session-b:000:000001",
+                "session_id": "session-b",
+                "task_episode_id": "task-0001",
+                "session_act": "skill_explicit_selection",
+                "route_signals": ["skill:aoa_eval_select"],
+            },
+        ],
+        anchor="aoa-eval-select",
+    )
+    assert cross_session["task_episode_ref_count"] == 2
+    assert {
+        (ref["session_id"], ref["task_episode_id"])
+        for ref in cross_session["task_episode_refs"]
+    } == {
+        ("session-a", "task-0001"),
+        ("session-b", "task-0001"),
+    }
+
+
+def test_namespaced_structured_skill_accepts_quoted_leaf_frontmatter_name() -> None:
+    structured_skill_text = structured_skill_test_envelope(
+        name="github:gh-fix-ci",
+        path="/plugins/github/skills/gh-fix-ci/SKILL.md",
+        frontmatter=(
+            '---\nname: "gh-fix-ci"\n'
+            "description: Diagnose GitHub Actions failures.\n---"
+        ),
+        body="# gh-fix-ci",
+    )
+    parsed = {
+        "type": "response_item",
+        "payload": structured_skill_test_payload(structured_skill_text),
+    }
+
+    raw_event = module.classify_raw_event(json.dumps(parsed), parsed, 1)
+
+    assert raw_event.facets["structured_skill_input"]["canonical_name"] == "github_gh_fix_ci"
+    assert raw_event.facets["session_act"]["skill_name"] == "github_gh_fix_ci"
+    route_signals = {
+        (signal["layer"], signal["key"])
+        for signal in raw_event.facets["route_signals"]
+    }
+    assert route_signals == {
+        ("entity", "github_gh_fix_ci"),
+        ("skill", "github_gh_fix_ci"),
+    }
+    additional_envelopes = [
+        (
+            "imagegen",
+            "/home/dionysus/.codex/skills/.system/imagegen/SKILL.md",
+            "imagegen",
+            "imagegen",
+        ),
+        (
+            "review",
+            "/home/dionysus/.codex/skills/review/SKILL.md",
+            "review",
+            "review",
+        ),
+        (
+            "openai-docs",
+            "/home/dionysus/.codex/skills/.system/openai-docs/SKILL.md",
+            "openai-docs",
+            "openai_docs",
+        ),
+        (
+            "hugging-face:hf-cli",
+            "/plugins/cache/openai-curated-remote/hugging-face/1.0.0/skills/cli/SKILL.md",
+            "hf-cli",
+            "hugging_face_hf_cli",
+        ),
+        (
+            "hugging-face:transformers-js",
+            "/plugins/cache/openai-curated-remote/hugging-face/1.0.0/skills/transformers.js/SKILL.md",
+            "transformers-js",
+            "hugging_face_transformers_js",
+        ),
+        (
+            "data-analytics:report-to-google-doc",
+            "/plugins/cache/openai-curated-remote/data-analytics/1.0.0/skills/build-report/report-to-google-doc/SKILL.md",
+            "report-to-google-doc",
+            "data_analytics_report_to_google_doc",
+        ),
+    ]
+    for name, path, frontmatter_name, canonical_name in additional_envelopes:
+        payload = structured_skill_test_payload(
+            structured_skill_test_envelope(
+                name=name,
+                path=path,
+                frontmatter=f'---\nname: "{frontmatter_name}"\n---',
+            )
+        )
+        structured = module.structured_skill_input_for_payload(
+            payload,
+            source_type="response_item",
+        )
+        assert structured is not None
+        assert structured["canonical_name"] == canonical_name
+
+
+def test_structured_skill_input_rejects_noncanonical_or_spoofable_envelopes() -> None:
+    canonical_envelope = structured_skill_test_envelope()
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("event_msg", structured_skill_test_payload(canonical_envelope)),
+        ("response_item", structured_skill_test_payload(canonical_envelope, role="assistant")),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                canonical_envelope,
+                extra_content=[{"type": "input_text", "text": "ordinary prompt"}],
+            ),
+        ),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                structured_skill_test_envelope(
+                    frontmatter="# not frontmatter\nname: aoa-eval-select",
+                )
+            ),
+        ),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                structured_skill_test_envelope(
+                    path="/skills/other/../aoa-eval-select/SKILL.md",
+                )
+            ),
+        ),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                structured_skill_test_envelope(path="/skills/other/SKILL.md")
+            ),
+        ),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                structured_skill_test_envelope(
+                    frontmatter="---\nname: aoa-eval-apply\n---",
+                )
+            ),
+        ),
+        (
+            "response_item",
+            structured_skill_test_payload(
+                structured_skill_test_envelope(
+                    frontmatter=(
+                        "---\nname: aoa-eval-select\n"
+                        "name: aoa-eval-select\n---"
+                    ),
+                )
+            ),
+        ),
+    ]
+    for source_type, payload in cases:
+        assert module.structured_skill_input_for_payload(payload, source_type=source_type) is None
+
+    invalid_names = [
+        "aoa-eval.select",
+        "aoa_eval_select",
+        "AOA-EVAL-SELECT",
+        "aoa--eval--select",
+        "aoa-eval-select-",
+        "a" * 65,
+        f"{'a' * 40}:{'b' * 40}",
+        "github:gh_fix_ci",
+    ]
+    for name in invalid_names:
+        payload = structured_skill_test_payload(
+            structured_skill_test_envelope(
+                name=name,
+                path=f"/skills/{name}/SKILL.md",
+                frontmatter=f"---\nname: {name}\n---",
+            )
+        )
+        assert module.structured_skill_input_for_payload(payload, source_type="response_item") is None
+
+    case_mismatched_path = structured_skill_test_payload(
+        structured_skill_test_envelope(
+            path="/skills/AOA-EVAL-SELECT/SKILL.md",
+        )
+    )
+    assert module.structured_skill_input_for_payload(
+        case_mismatched_path,
+        source_type="response_item",
+    ) is None
+
+    invalid_namespaced_paths = [
+        "/plugins/github-tools/skills/gh-fix-ci/SKILL.md",
+        "/plugins/other/skills/github/gh-fix-ci/SKILL.md",
+        "/plugins/github/skills/unsafe_DIR/gh-fix-ci/SKILL.md",
+    ]
+    for path in invalid_namespaced_paths:
+        payload = structured_skill_test_payload(
+            structured_skill_test_envelope(
+                name="github:gh-fix-ci",
+                path=path,
+            )
+        )
+        assert module.structured_skill_input_for_payload(payload, source_type="response_item") is None
+
+
+def test_app_server_runtime_envelope_and_structured_skill_share_one_real_task_episode(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-11T00-00-00-structured-order.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-07-11T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "structured-order", "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-07-11T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>\n  <cwd>/fixture</cwd>\n</environment_context>",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-11T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Return the supplied skill name and its first action.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-11T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<skill>\n<name>aoa-eval-select</name>\n"
+                            "<path>/skills/aoa-eval-select/SKILL.md</path>\n"
+                            "---\nname: aoa-eval-select\n---\n"
+                            "\n# aoa-eval-select\n</skill>"
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-11T00:00:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "aoa-eval-select; inspection comes before mutation.",
+                    }
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, rows)
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "structured-order",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "structured-order")
+    session_index = json.loads(
+        (Path(record["path"]) / module.SESSION_INDEX_JSON).read_text(encoding="utf-8")
+    )
+    assert session_index["task_episode_counts"]["total"] == 1
+    assert session_index["task_episode_counts"]["by_status"] == {"open": 1}
+    episode = session_index["task_episodes"][0]
+    assert episode["start_user_ref"]["event_id"] == "000003"
+    assert episode["event_range"] == {
+        "from_event_id": "000003",
+        "to_event_id": "000005",
+        "from_line": 3,
+        "to_line": 5,
+    }
+    assert {ref["event_id"] for ref in episode["transition_refs"]} == {"000004"}
+    assert "interrupted_by_new_user_prompt" not in episode["ambiguity_flags"]
+
+
+def test_plain_user_skill_request_does_not_spoof_structured_selection() -> None:
+    event = {
+        "event_type": "USER_INTENT",
+        "conversation_act": "operator_instruction",
+        "session_act": "operator_prompt",
+        "snippet": "Please use skill aoa-eval-select for this task.",
+        "route_signals": ["skill:aoa_eval_select"],
+    }
+
+    event["skill_evidence_state"] = module.skill_evidence_state_for_event(
+        event,
+        anchor="aoa-eval-select",
+    )
+    assert event["skill_evidence_state"] == "mentioned"
+    assert module.entity_usage_event_action_semantics(event) == ["mentioned"]
+
+
 def test_skill_selection_requires_an_unnegated_assistant_selection_surface() -> None:
     cases = [
         (
@@ -4518,6 +4952,7 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
     source_event = indexed_events[expected["parent_artifact_event_id"]]
     foreign_output = indexed_events[expected["foreign_output_event_id"]]
     matched_output = indexed_events[expected["matched_output_event_id"]]
+    structured_selection = indexed_events[expected["structured_selection_event_id"]]
 
     assert source_event["type"] == "FILE_WRITE"
     assert any(
@@ -4531,6 +4966,31 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
     } in source_event["relationships"]
     assert foreign_output["correlation_id"] == "other-call"
     assert matched_output["correlation_id"] == "parent-skill-call"
+    assert structured_selection["facets"]["conversation_act"]["kind"] == "structured_skill_selection"
+    assert structured_selection["facets"]["session_act"]["kind"] == "skill_explicit_selection"
+    assert structured_selection["facets"]["structured_skill_input"]["canonical_name"] == "aoa_eval_select"
+    structured_route_signals = {
+        (signal["layer"], signal["key"])
+        for signal in structured_selection["facets"]["route_signals"]
+    }
+    assert structured_route_signals == {
+        ("entity", "aoa_eval_select"),
+        ("skill", "aoa_eval_select"),
+    }
+    assert not any(
+        signal["layer"] == "scope_contract"
+        for signal in structured_selection["facets"]["route_signals"]
+    )
+
+    session_index = json.loads(
+        (Path(record["path"]) / module.SESSION_INDEX_JSON).read_text(encoding="utf-8")
+    )
+    assert session_index["task_episode_counts"]["total"] == 1
+    assert session_index["task_episodes"][0]["episode_id"] == "task-0001"
+    assert expected["structured_selection_event_id"] in {
+        ref["event_id"]
+        for ref in session_index["task_episodes"][0]["transition_refs"]
+    }
 
     chain = module.entity_usage_chain(
         aoa_root=aoa_root,
@@ -4633,6 +5093,70 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
     assert child_chain["skill_evidence"]["behavioral_candidate_present"] is False
     assert child_chain["skill_evidence"]["invocation_claim_allowed"] is False
     assert child_chain["counts"]["usage_event_count"] == 0
+
+    structured_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="aoa-eval-select",
+        kind="skill",
+        session=record["session_label"],
+        limit=2,
+        per_route_limit=4,
+        consequence_window=4,
+    )
+    structured_entrypoint = structured_chain["usage_chain"]["entrypoint_events"][0]
+    assert structured_entrypoint["event_id"] == expected["structured_selection_event_id"]
+    assert structured_entrypoint["task_episode_id"] == "task-0001"
+    assert structured_entrypoint["skill_evidence_state"] == "selected"
+    assert structured_entrypoint["usage_actions"] == ["selected", "loaded"]
+    assert structured_entrypoint["refs"]["raw"] == "raw:line:9"
+    assert structured_entrypoint["refs"]["segment"]
+    assert structured_chain["skill_evidence"]["state_counts"] == {"selected": 1}
+    assert structured_chain["skill_evidence"]["structured_skill_selection_event_count"] == 1
+    assert structured_chain["skill_evidence"]["task_episode_link_event_count"] == 1
+    assert structured_chain["skill_evidence"]["task_episode_refs"] == [
+        {
+            "session_id": fixture["session_id"],
+            "session_label": record["session_label"],
+            "task_episode_id": "task-0001",
+        }
+    ]
+    assert structured_chain["skill_evidence"]["dimensions"]["structured_skill_selection_candidate_present"] is True
+    assert structured_chain["skill_evidence"]["dimensions"]["skill_payload_loaded_candidate_present"] is True
+    assert structured_chain["skill_evidence"]["dimensions"]["task_episode_link_candidate_present"] is True
+    assert structured_chain["skill_evidence"]["dimensions"]["skill_read_candidate_present"] is False
+    assert structured_chain["skill_evidence"]["dispatch_candidate_present"] is True
+    assert structured_chain["skill_evidence"]["behavioral_candidate_present"] is False
+    assert structured_chain["skill_evidence"]["invocation_claim_allowed"] is False
+    assert structured_chain["usage_action_counts"] == {"loaded": 1, "selected": 1}
+    assert structured_chain["counts"]["entrypoint_event_count"] == 1
+    assert structured_chain["counts"]["usage_event_count"] == 0
+
+    structured_entity_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="aoa-eval-select",
+        kind="entity",
+        session=record["session_label"],
+        limit=2,
+        per_route_limit=4,
+        consequence_window=4,
+    )
+    assert structured_entity_chain["usage_action_counts"] == {"loaded": 1, "selected": 1}
+    assert structured_entity_chain["usage_action_counts"].get("validated", 0) == 0
+    assert structured_entity_chain["usage_action_counts"].get("configured", 0) == 0
+
+    unrelated_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="aoa-tdd-slice",
+        kind="skill",
+        session=record["session_label"],
+        limit=2,
+        per_route_limit=4,
+        consequence_window=4,
+    )
+    assert unrelated_chain["skill_evidence"]["state_counts"].get("selected", 0) == 0
+    assert unrelated_chain["skill_evidence"]["structured_skill_selection_event_count"] == 0
+    assert unrelated_chain["usage_action_counts"].get("loaded", 0) == 0
+    assert unrelated_chain["skill_evidence"]["dispatch_candidate_present"] is False
 
 
 def test_generic_usage_keeps_shared_consequence_edges_and_consistent_rejection_counts(
@@ -8643,8 +9167,9 @@ def test_live_scenario_corpus_runs_reviewed_skill_fixture_on_empty_archive(tmp_p
     observed = result["observed"]["profiles"][0]
     assert observed["first_ref"]["segment_index"].startswith("<ephemeral-fixture-archive>/")
     assert observed["skill_evidence_state_counts"]["edited"] == 1
-    assert observed["skill_evidence_state_counts"]["selected"] == 1
-    assert observed["skill_dispatch_candidate_sample_count"] == 1
+    assert observed["skill_evidence_state_counts"]["selected"] == 2
+    assert observed["usage_action_counts"]["loaded"] == 1
+    assert observed["skill_dispatch_candidate_sample_count"] == 2
     assert observed["skill_behavioral_candidate_sample_count"] == 0
     assert observed["skill_invocation_claim_allowed_sample_count"] == 0
     assert observed["false_correlation_event_count"] == 1
