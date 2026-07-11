@@ -242,8 +242,23 @@ dispatch/behavioral dimensions,
 `candidate_only`, and `invocation_claim_allowed` before interpreting generic
 usage counts. Reads, edits, mentions, co-occurrence, prompt visibility,
 selection, or deflection do not by themselves prove that the procedure was
-followed. Results owned by a different non-empty correlation id are excluded
-from consequences and retained separately in `false_correlation_events` with
+followed. A serialized Codex structured skill input is an exact dispatch
+candidate: it contributes `selected` plus the separate `loaded` action and
+sets the structured-selection/payload-loaded dimensions. `loaded` means that
+the skill payload was embedded in the user input; it does not mean that the
+model read the skill, followed its procedure, or completed the task. Words in
+that embedded `SKILL.md` body cannot create behavioral actions such as
+`validated` or `used`, operator scope contracts, or routes for skills merely
+mentioned in the payload. The indexed projection exposes only the exact target
+skill/entity identity; the full payload stays behind raw refs. Structured skill
+metadata attaches to the current real task episode instead of interrupting it,
+and runtime envelopes such as `<environment_context>` do not open phantom task
+episodes. `task_episode_refs`, `task_episode_ref_count`,
+`task_episode_link_event_count`, and the task-episode-link dimension expose the
+bounded `(session, task episode)` join key needed for later
+selection-to-outcome review; they remain candidate links, not invocation or
+effectiveness proof. Results owned by a different non-empty correlation id
+are excluded from consequences and retained separately in `false_correlation_events` with
 raw refs and both correlation ids. It is listed under
 `rejection_edge_states`, never among accepted or automatic candidate states.
 Each archived event contributes one canonical state to `state_counts`, even if
@@ -538,9 +553,12 @@ candidate-only state contract and keeps rejected foreign-correlation edges
 separate from accepted lifecycle evidence.
 The reviewed `skill_candidate_semantics_contract` corpus case materializes a
 temporary synthetic archive and executes the real raw-to-segment-to-SQLite
-route. It proves parent/child identity, artifact/selection separation, blocked
-invocation claims, and rejected-correlation refs without depending on host
-history; its synthetic evidence origin is not adoption or effectiveness proof.
+route. It proves parent/child identity, artifact/selection separation,
+structured App Server selection and payload-loading semantics, isolation from
+behavioral/route/scope words embedded in the skill body, one-task attribution,
+blocked invocation claims, and rejected-correlation refs without depending on
+host history; its synthetic evidence origin is not adoption or effectiveness
+proof.
 `entity-dossier` builds the heavier human card for one stable anchor with
 strong refs, weak refs, related skills/MCPs/tools/hooks/paths/goals/failures/
 decisions, open questions, and a read-first route.

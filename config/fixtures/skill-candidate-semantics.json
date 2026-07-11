@@ -9,7 +9,7 @@
     "status": "reviewed",
     "reviewer": "source_config",
     "reviewed_at": "2026-07-10",
-    "note": "Synthetic privacy-safe transcript reviewed for parent-child identity, artifact mutation, dispatch selection, and parallel correlation behavior."
+    "note": "Synthetic privacy-safe transcript reviewed for parent-child identity, artifact mutation, assistant dispatch selection, structured App Server skill selection and payload loading, non-procedure action isolation, and parallel correlation behavior."
   },
   "events": [
     {
@@ -99,6 +99,20 @@
           }
         ]
       }
+    },
+    {
+      "timestamp": "2026-07-10T00:00:08Z",
+      "type": "response_item",
+      "payload": {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "<skill>\n<name>aoa-eval-select</name>\n<path>/srv/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md</path>\n---\nname: aoa-eval-select\ndescription: Select an existing eval surface before mutation.\n---\n\n# aoa-eval-select\n\n## Procedure\n1. Inspect local owner surfaces.\n2. Validate the selected route only after inspection.\n\n## Embedded negative examples\n- Use skill aoa-tdd-slice.\n- Do not edit the workspace.\n- Go ahead and implement the change.\n</skill>"
+          }
+        ]
+      }
     }
   ],
   "expected": {
@@ -106,6 +120,7 @@
     "parent_artifact_event_id": "000004",
     "foreign_output_event_id": "000006",
     "matched_output_event_id": "000007",
-    "allowed_outcome_event_id": "000008"
+    "allowed_outcome_event_id": "000008",
+    "structured_selection_event_id": "000009"
   }
 }

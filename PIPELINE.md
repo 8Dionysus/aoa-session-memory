@@ -225,6 +225,23 @@ nested `skill_evidence` contract before interpreting generic `usage_role` or
 `deflected` remain declared receipt-or-review states until a stronger producer
 supplies them. `selected` and `deflected` are dispatch candidates, while only
 `procedure_observed`, `verified`, or `completed` are behavioral candidates.
+Codex structured skill inputs are recognized as exact `selected` candidates
+with a separate `loaded` usage action. The corresponding
+`structured_skill_selection_candidate_present` and
+`skill_payload_loaded_candidate_present` dimensions mean that a skill payload
+was embedded in the input; they do not imply `skill_read`, procedure execution,
+verification, or completion. Non-procedure states are action-isolated so words
+inside the embedded `SKILL.md` cannot synthesize `validated`, `used`, or other
+behavioral actions. Structured payloads project only their exact target skill
+and entity routes; embedded references to other skills and operator-like scope
+phrases remain raw evidence rather than dispatch or scope signals. Structured
+skill metadata and recognized runtime envelopes also do not open or interrupt
+task episodes, so the real prompt remains the episode start used for later
+outcome correlation. Compact usage events retain `task_episode_id`, and the
+skill-evidence packet exposes bounded composite `task_episode_refs` plus link
+counts and a candidate dimension. The session-qualified refs avoid collapsing
+the same local task id across sessions. These are join candidates for reviewed
+outcome analysis, not proof that the skill caused the outcome.
 Even then, `candidate_only=true` and `invocation_claim_allowed=false` require
 task-episode correlation plus owner review before an invocation or
 effectiveness claim. `quality.direct_usage_present` remains the generic event
