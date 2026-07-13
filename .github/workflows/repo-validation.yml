@@ -32,6 +32,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install test dependency
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.3
+
       - name: Check repo-local KAG index family
         uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@da9f50a581645b2173b99dbf771a63d447ec2fec
         with:
