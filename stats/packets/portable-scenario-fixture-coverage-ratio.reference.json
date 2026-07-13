@@ -1,0 +1,82 @@
+{
+  "schema_version": "aoa_stats_measurement_packet_v1",
+  "contract_ref": "stats/port.manifest.json#/measurements/0",
+  "contract_version": "1.0.0",
+  "measurement_id": "aoa-session-memory/portable-scenario-fixture-coverage-ratio",
+  "writer_repo": "aoa-session-memory",
+  "observation_id": "aoa-session-memory:portable-scenario-fixture-coverage-ratio:e782d572cdbb39cf",
+  "observed_at": "2026-07-13T17:15:11-06:00",
+  "object_ref": {
+    "kind": "declared-live-scenario-corpus-case",
+    "id": "live-scenario-regression-corpus:e782d572cdbb39cf",
+    "version": "e782d572cdbb39cfe8fa3270f92708fca2a1b3c8"
+  },
+  "population": {
+    "id": "declared-live-scenario-corpus-cases:e782d572cdbb39cf",
+    "definition_ref": "stats/port.manifest.json#/measurements/0/population",
+    "size": 28
+  },
+  "sample": {
+    "size": 28,
+    "selection": "census of cases in the source-owned live-scenario regression corpus"
+  },
+  "cohort": null,
+  "window": {
+    "id": "source-revision:e782d572cdbb39cfe8fa3270f92708fca2a1b3c8",
+    "start": "2026-07-13T17:15:11-06:00",
+    "end": "2026-07-13T17:15:11-06:00",
+    "temporality": "instant"
+  },
+  "dimensions": {},
+  "value": {
+    "status": "observed",
+    "kind": "ratio",
+    "unit": "1",
+    "number": 0.03571428571428571,
+    "numerator": 1,
+    "denominator": 28
+  },
+  "uncertainty": {
+    "status": "not_applicable",
+    "sample_size": 28,
+    "method": "not_applicable",
+    "reason": "The packet is a census of the source-owned live-scenario corpus at one source revision."
+  },
+  "provenance": {
+    "evidence_refs": [
+      {
+        "kind": "live-scenario-corpus",
+        "ref": "config/live-scenario-regression-corpus.json"
+      },
+      {
+        "kind": "reviewed-synthetic-fixture",
+        "ref": "config/fixtures/skill-candidate-semantics.json"
+      },
+      {
+        "kind": "corpus-inventory-derivation",
+        "ref": "scripts/aoa_session_memory.py#live_scenario_corpus_inventory"
+      },
+      {
+        "kind": "portable-readiness-model",
+        "ref": "READINESS.md#portable-scenario-posture"
+      }
+    ],
+    "derivation_ref": "stats/README.md#reference-derivation",
+    "source_revision": "e782d572cdbb39cfe8fa3270f92708fca2a1b3c8"
+  },
+  "reporting_rule": {
+    "id": "aoa-session-memory/portable-scenario-fixture-coverage-ratio/reference-census",
+    "version": "1.0.0"
+  },
+  "posture": {
+    "freshness": "current",
+    "live_state": "reference",
+    "privacy": "public",
+    "raw_content_included": false
+  },
+  "progress": {
+    "state": "terminal",
+    "completed": 28,
+    "total": 28
+  }
+}

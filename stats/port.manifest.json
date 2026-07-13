@@ -1,0 +1,115 @@
+{
+  "schema_version": "aoa_stats_local_port_v1",
+  "contract_version": "1.0.0",
+  "owner_repo": "aoa-session-memory",
+  "status": "active",
+  "owner_boundary_ref": "AGENTS.md",
+  "central_contract_refs": [
+    "aoa-stats:stats/measurement-contract/measurement-contract.schema.json",
+    "aoa-stats:stats/measurement-contract/measurement-packet.schema.json"
+  ],
+  "evidence_posture": {
+    "live_state": "reference_only",
+    "privacy": "public",
+    "raw_content_allowed": false
+  },
+  "questions": [
+    {
+      "id": "question:portable-scenario-fixture-coverage-ratio",
+      "question": "What fraction of current declared live-scenario corpus cases can execute in a clean portable bundle from a reviewed privacy-safe source fixture without a runtime session archive?",
+      "consumer_refs": [
+        "scripts/aoa_session_memory.py#live_scenario_corpus_inventory",
+        "READINESS.md#portable-scenario-posture"
+      ]
+    }
+  ],
+  "measurements": [
+    {
+      "schema_version": "aoa_stats_measurement_contract_v1",
+      "measurement_id": "aoa-session-memory/portable-scenario-fixture-coverage-ratio",
+      "contract_version": "1.0.0",
+      "owner_repo": "aoa-session-memory",
+      "question_ref": "question:portable-scenario-fixture-coverage-ratio",
+      "semantic_class": "statistic",
+      "statistic": "ratio",
+      "object_kind": "declared-live-scenario-corpus-case",
+      "unit": {
+        "symbol": "1",
+        "quantity": "proportion"
+      },
+      "population": {
+        "subject": "current declared live-scenario corpus cases",
+        "definition": "one case entry in config/live-scenario-regression-corpus.json",
+        "inclusion_rule": "every current case declared by the source-owned live-scenario regression corpus at the source revision",
+        "exclusion_rule": "ad hoc tests, runtime diagnostics, live session results, private transcripts, generated reports, and scenario ideas not declared in the owner corpus",
+        "sampling": "census"
+      },
+      "window": {
+        "temporality": "instant",
+        "clock": "owner_defined"
+      },
+      "dimensions": {
+        "allowed": [],
+        "prohibited": [
+          "case_id",
+          "profile",
+          "fixture_path",
+          "session_id",
+          "raw_ref",
+          "prompt",
+          "user_identity"
+        ]
+      },
+      "aggregation": {
+        "operator": "none",
+        "across": []
+      },
+      "missingness": {
+        "states": [
+          "missing",
+          "unknown",
+          "stale"
+        ],
+        "zero_is_observation": true
+      },
+      "uncertainty": {
+        "required": false,
+        "methods": [
+          "not_applicable"
+        ]
+      },
+      "provenance": {
+        "evidence_refs_required": true,
+        "source_revision_required": true
+      },
+      "lifecycle": {
+        "status": "active",
+        "compatible_with": []
+      },
+      "privacy": {
+        "classification": "public",
+        "raw_content_allowed": false,
+        "sensitive_dimensions_allowed": false
+      },
+      "live_state": {
+        "capability": "reference_only"
+      },
+      "authority_ceiling": "Reports only the fraction of source-declared live-scenario cases whose owner inventory can ground execution in a contained reviewed synthetic fixture without a runtime archive; it does not establish case pass status, route correctness, archive health, retrieval quality, reviewed memory, live readiness, user performance, adoption, or permission to promote session evidence."
+    }
+  ],
+  "exports": [
+    {
+      "measurement_id": "aoa-session-memory/portable-scenario-fixture-coverage-ratio",
+      "posture": "reference",
+      "packet_refs": [
+        "stats/packets/portable-scenario-fixture-coverage-ratio.reference.json"
+      ],
+      "evidence_refs": [
+        "config/live-scenario-regression-corpus.json",
+        "config/fixtures/skill-candidate-semantics.json",
+        "scripts/aoa_session_memory.py",
+        "READINESS.md"
+      ]
+    }
+  ]
+}

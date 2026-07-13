@@ -10,7 +10,7 @@ source-linked records.
 | role | local KAG provider for portable session-memory archive, route atlas, and session manifest surfaces |
 | records | `nodes/`, `edges/`, `indexes/`, `projections/`, `receipts/` |
 | manifest | `manifest.json` |
-| source route | `README.md`, `PIPELINE.md`, `READINESS.md`, `schemas/session.manifest.schema.json`, `maps/README.md` |
+| source route | `README.md`, `PIPELINE.md`, `READINESS.md`, `schemas/session.manifest.schema.json`, `maps/README.md`, `stats/port.manifest.json` |
 | consumer route | `aoa-kag` registry/composition, `abyss-stack`, MCP resources |
 | owner return | `README.md` and `PIPELINE.md` |
 

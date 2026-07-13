@@ -9183,6 +9183,87 @@ def test_live_scenario_corpus_runs_reviewed_skill_fixture_on_empty_archive(tmp_p
     assert inventory["cases"][0]["evidence_origin"] == "reviewed_synthetic_fixture_archive"
 
 
+def test_local_stats_reference_matches_portable_scenario_fixture_coverage() -> None:
+    source_root = Path(__file__).parents[1]
+    result = module.validate_local_stats_reference(source_root)
+
+    assert result["ok"] is True
+    assert result["diagnostics"] == []
+    assert result["source_case_count"] == 28
+    assert result["coverage"] == {
+        "measurement_id": module.LOCAL_STATS_MEASUREMENT_ID,
+        "status": "observed",
+        "numerator": 1,
+        "denominator": 28,
+        "number": 1 / 28,
+        "population": "declared_live_scenario_corpus_cases",
+        "covered_state": "reviewed_synthetic_fixture_archive",
+        "live_state": "reference",
+        "authority_boundary": (
+            "Measures portable reviewed-fixture coverage only; it is not case "
+            "pass status, archive health, memory quality, or live readiness."
+        ),
+    }
+    packet = json.loads(
+        (source_root / module.LOCAL_STATS_PACKET_PATH).read_text(encoding="utf-8")
+    )
+    assert packet["posture"] == {
+        "freshness": "current",
+        "live_state": "reference",
+        "privacy": "public",
+        "raw_content_included": False,
+    }
+
+
+def test_local_stats_reference_rejects_false_fixture_coverage_numerator() -> None:
+    source_root = Path(__file__).parents[1]
+    packet = json.loads(
+        (source_root / module.LOCAL_STATS_PACKET_PATH).read_text(encoding="utf-8")
+    )
+    packet["value"]["numerator"] = 2
+    packet["value"]["number"] = 2 / 28
+
+    result = module.validate_local_stats_reference(source_root, packet=packet)
+
+    assert result["ok"] is False
+    assert "local_stats_numerator_mismatch" in result["diagnostics"]
+    assert "local_stats_ratio_mismatch" in result["diagnostics"]
+
+
+def test_local_stats_fixture_coverage_excludes_invalid_fixture_route(tmp_path: Path) -> None:
+    aoa_root = tmp_path / ".aoa"
+    corpus_path = aoa_root / "config" / "live-scenario-regression-corpus.json"
+    write_json(
+        corpus_path,
+        {
+            "artifact_type": "session_memory_live_scenario_regression_corpus",
+            "cases": [
+                {
+                    "id": "invalid_fixture_route",
+                    "profiles": ["entity_usage_chain"],
+                    "fixture_archive": "../escape.json",
+                    "review": {
+                        "status": "reviewed",
+                        "reviewer": "source_config",
+                        "reviewed_at": "2026-07-13",
+                    },
+                    "expect": {},
+                }
+            ],
+        },
+    )
+
+    inventory = module.live_scenario_corpus_inventory(
+        aoa_root=aoa_root,
+        corpus_path=corpus_path,
+    )
+
+    assert inventory["cases"][0]["fixture_contract_status"].startswith("invalid:")
+    assert inventory["portable_fixture_coverage"]["numerator"] == 0
+    assert inventory["portable_fixture_coverage"]["denominator"] == 1
+    assert inventory["portable_fixture_coverage"]["number"] == 0.0
+
+
 def test_live_scenario_corpus_rejects_fixture_path_escape(tmp_path: Path) -> None:
     result = module.live_scenario_corpus_case_check(
         tmp_path / ".aoa",
@@ -34955,11 +35036,15 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
+    assert (aoa_root / "scripts" / "validate_local_stats_port.py").exists()
     assert (aoa_root / "manifests" / "AGENTS.md").exists()
     assert (aoa_root / "manifests" / "artifact_bundles" / "portable_bundle.bundle.json").exists()
     assert not (aoa_root / "manifests" / "artifact_bundles" / "artifact.verify.json").exists()
     assert (aoa_root / "sessions" / "AGENTS.md").exists()
     assert (aoa_root / "skills" / "AGENTS.md").exists()
+    assert (aoa_root / "stats" / "AGENTS.md").exists()
+    assert (aoa_root / "stats" / "port.manifest.json").exists()
+    assert (aoa_root / module.LOCAL_STATS_PACKET_PATH).exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
@@ -34980,7 +35065,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
-def test_copy_portable_bundle_keeps_hook_example_portable(tmp_path: Path) -> None:
+def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     target = tmp_path / "aoa-session-memory"
 
@@ -34996,6 +35081,10 @@ def test_copy_portable_bundle_keeps_hook_example_portable(tmp_path: Path) -> Non
     assert str(module.default_source_aoa_root()) not in rendered_hooks
     assert str(target.resolve()) not in rendered_hooks
     assert "/path/to/workspace/.aoa/scripts/aoa_session_memory.py" in rendered_hooks
+    assert "stats" in payload["copied"]
+    assert (target / "stats" / "port.manifest.json").is_file()
+    assert (target / module.LOCAL_STATS_PACKET_PATH).is_file()
+    assert module.validate_local_stats_reference(target)["ok"] is True
 
 
 def test_agent_atlas_policy_matches_source_skeleton() -> None:

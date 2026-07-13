@@ -1,143 +1,65 @@
-# AoA Session Memory Install
+# Portable installation
 
-## Role
+The repository can operate as a standalone portable bundle or as the source
+for a workspace-local `.aoa/` installation. Installation copies the kernel; it
+does not transfer owner authority, live session history, or host configuration.
 
-`INSTALL.md` is the operator route for moving the portable `.aoa` session-memory
-kernel into another workspace or preparing a clean bundle for a future
-repository.
+## Install shapes
 
-Read `DESIGN.md`, `DESIGN.AGENTS.md`, and `PIPELINE.md` first. This file is
-about installation, not memory doctrine.
+### Standalone source
 
-## Clean Bundle Export
+In a standalone checkout, the repository root is the AoA root. Source tests,
+portable validation, and export operate directly on that root. Runtime session
+capture is optional.
 
-Export only the portable kernel, without current session archives:
+### Workspace-local root
 
-```bash
-python3 scripts/aoa_session_memory.py export-bundle \
-  --target-dir /tmp/aoa-session-memory-bundle \
-  --source-aoa-root . \
-  --force
-```
+In a project workspace, the kernel lives under `.aoa/`. Generated archives,
+indexes, search and graph stores, and diagnostics then belong to that workspace
+installation. Local AoA or Tree of Sophia meaning remains an overlay outside
+the portable kernel.
 
-This writes an empty `sessions/` archive directory with `AGENTS.md`,
-`INDEX.md`, and `index.json`, plus an empty `session-registry.json`. It also
-copies the source-owned `maps/` atlas skeleton without generated atlas entries
-or generated atlas indexes. It does not copy raw transcripts unless
-`--with-sessions` is explicitly used.
+## Copy boundary
 
-Use this path when preparing a standalone GitHub repository.
-When the target is already a Git repository, `--force` refreshes the portable
-bundle files but preserves `.git`.
+Portable export includes authored root documents, configuration, schemas,
+hooks, manifests, maps, scripts, skills, stats, and tests. It excludes session
+archives and generated runtime stores by default.
 
-## Workspace Install
+An explicit session-inclusive export is a private evidence operation, not a
+normal package release. Such an export must preserve raw-evidence handling and
+must never be treated as public-safe merely because the kernel is portable.
 
-Install the bundle into another workspace:
+## Existing installations
 
-```bash
-python3 scripts/aoa_session_memory.py install \
-  --workspace-root /path/to/workspace \
-  --source-aoa-root . \
-  --force
-```
+Kernel upgrades preserve existing session directories and rebuild the
+registry/index views from those archives. Forced export may replace portable
+files while preserving repository metadata and the local KAG provider. It must
+not silently delete runtime evidence.
 
-The target root defaults to `/path/to/workspace/.aoa`.
+## Hook rendering
 
-The installer regenerates `hooks/codex-hooks.user.example.json` for the selected
-workspace and `.aoa` root. Do not copy hook JSON by hand between machines.
+The committed hook file is a placeholder example. Installation renders a
+configuration for the chosen workspace and AoA roots. Host-wide hook placement
+and native Codex hook trust are explicit user operations.
 
-To install user-level Codex hooks at the same time:
+Project and user hooks may both run. Archive writes are idempotent for the same
+raw source, while duplicate receipts remain possible and visible.
 
-```bash
-python3 scripts/aoa_session_memory.py install \
-  --workspace-root /path/to/workspace \
-  --source-aoa-root . \
-  --write-user-hooks ~/.codex/hooks.json \
-  --force
-```
+## User skills
 
-Existing user hooks are backed up unless `--no-hooks-backup` is set.
+The global session-memory router and the evidence route are approved for
+explicit user-level installation. Other bundle skills stay local as focused
+procedures. User skill links are host state and are not part of portable source
+readiness.
 
-## User-Level Skill Entrypoint
+## Validation after install
 
-To make `.aoa` session-memory guidance available in every Codex session for
-the current user, install the global router skill from the selected install
-root:
+Source validation, installed-root health, and completion audit are different
+questions. A clean portable bundle may validate without runtime sessions;
+doctor evaluates the selected installation; audit can still report missing
+live grounding.
 
-```bash
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py install-user-skill \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
-
-The user-level skill is only a router. It should point agents back to the
-installed bundle instead of duplicating bundle logic. Keep the narrow operating
-skills inside the bundle. If another skill already occupies the target path,
-rerun with `--force`; the old target is moved to a timestamped backup before
-the symlink is replaced.
-
-## Verification
-
-After install, run the target script from the target root:
-
-```bash
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py validate \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-grounding \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py doctor \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --check-user-skill
-```
-
-If user-level hooks were installed, add `--check-live-hooks` to `doctor`.
-
-Then verify the native Codex hook trust state:
-
-```bash
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
-
-If matching hooks are present but untrusted, trust the current hashes through
-Codex app-server:
-
-```bash
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --trust-current
-```
-
-To prove the compaction hook path on a live Codex install:
-
-```bash
-python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py codex-compact-probe \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --trust-hooks
-```
-
-This uses Codex app-server `thread/compact/start`, records a small persisted
-probe thread, and requires archived `PreCompact` and `PostCompact` receipts.
-
-## Rules
-
-- Export is clean by default.
-- Session archives and raw transcripts move only with `--with-sessions`.
-- Hook commands are generated from selected absolute roots.
-- A green `validate` proves the temporary PreCompact/PostCompact/Stop light
-  preservation route and the explicit full-sync archive route work.
-- A green `codex-grounding` proves the local Codex version, compact config, and
-  expected hook markers are visible on this host.
-- A green `codex-hooks-status` proves native Codex hook discovery, command
-  matching, and trust state are coherent.
-- A green `codex-compact-probe` proves live `PreCompact` and `PostCompact`
-  receipts reach the archive.
-- A green `doctor` proves the installed filesystem contract is coherent.
+The executable CLI owns exact export, install, hook-rendering, skill-install,
+validate, doctor, and audit syntax. Inspect the selected subcommand help in
+`scripts/aoa_session_memory.py`. Short focused check routes live in the nearest
+`AGENTS.md` rather than in this document.
