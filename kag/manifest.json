@@ -44,6 +44,13 @@
       "source_class": "memo_source",
       "role": "supporting",
       "authority": "authored_source"
+    },
+    {
+      "repo": "aoa-session-memory",
+      "path": "stats/port.manifest.json",
+      "source_class": "memo_source",
+      "role": "supporting",
+      "authority": "authored_source"
     }
   ],
   "record_classes": [

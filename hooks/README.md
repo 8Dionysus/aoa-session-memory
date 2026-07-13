@@ -1,108 +1,38 @@
-# AoA Session Memory Hooks
+# AoA Session Memory hooks
 
-This directory documents Codex hook wiring for the `.aoa` session-memory
-kernel.
+This directory owns the portable Codex hook example and explains the lifecycle
+boundary. The committed example contains placeholder paths; a live user or
+project configuration must be rendered for the selected workspace and AoA
+roots.
 
-For host-wide capture, install a user-level Codex hooks file at:
+## Supported events
 
-```text
-~/.codex/hooks.json
-```
+- `SessionStart` records the opening receipt and defers heavy work.
+- `UserPromptSubmit` records prompt-boundary metadata without copying prompt
+  text into public projections.
+- `PreCompact` records the pre-compaction receipt and bounded source state.
+- `PostCompact` queues sealing of the closed compaction interval.
+- `Stop` may finish a small archive and defers large work.
 
-The static example is:
+## Runtime contract
 
-```text
-.aoa/hooks/codex-hooks.user.example.json
-```
+Hooks are fail-open and return only schema-valid Codex fields. Raw transcript
+unavailability creates an incident and diagnostic route instead of blocking the
+agent. Foreground mirror and lock waits are bounded; heavy archive, indexing,
+and graph work belongs to `hook-worker`.
 
-It uses placeholder paths and is not the source of truth for a live machine.
-Do not hand-edit paths when installing on another machine or under another
-workspace root. Generate the live config from the selected roots:
+Deferred jobs live under runtime diagnostics and can be recovered by the
+worker, maintenance, or session sweep. Manual sync and import remain recovery
+routes, not the normal compaction lifecycle.
 
-```bash
-python3 .aoa/scripts/aoa_session_memory.py hooks-config \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
+User-level and project-level hooks may coexist. Archive generation is
+idempotent for the same raw source, but duplicate lifecycle receipts can remain
+visible.
 
-To install it for the current user:
+Codex hook trust, user configuration placement, and optional typing bridges are
+host state. They do not belong in the portable example or source readiness
+claim.
 
-```bash
-python3 .aoa/scripts/aoa_session_memory.py hooks-config \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --write ~/.codex/hooks.json
-```
-
-User-level hooks may run in addition to project-level hooks. The archive script
-is idempotent for the same raw transcript, but duplicate hook event receipts can
-appear in `hooks/events.jsonl`.
-
-Recent Codex builds require unmanaged hooks to be trusted before they run.
-After writing `~/.codex/hooks.json`, inspect the native hook state:
-
-```bash
-python3 .aoa/scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
-
-If the AoA hooks are present but untrusted, trust the current matching hashes:
-
-```bash
-python3 .aoa/scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --trust-current
-```
-
-For a live compaction check, use:
-
-```bash
-python3 .aoa/scripts/aoa_session_memory.py codex-compact-probe \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --trust-hooks
-```
-
-## Hook Contract
-
-- Hooks are fail-open.
-- Raw transcript unavailability writes `INCIDENT.md` and `DIAGNOSTIC.json`.
-- SessionStart records the hook receipt by default and defers raw sync/indexing
-  unless `AOA_SESSION_MEMORY_FULL_START_SYNC=1` is set.
-- PreCompact and PostCompact preserve the hook receipt and mirror raw
-  transcript state only while the transcript is below
-  `AOA_SESSION_MEMORY_HOOK_MIRROR_MAX_BYTES`, then defer segment/index
-  regeneration. Larger transcripts record a receipt and defer raw mirroring.
-- PostCompact must queue automatic interval sealing for `hook-worker`: the
-  worker writes `raw/blocks/*.raw.jsonl`, `raw/blocks.index.json`,
-  `raw/compaction-events.jsonl`, compaction-segment Markdown, and sibling
-  segment indexes outside the Codex hook timeout.
-- Stop may full-sync small transcripts, but mirrors raw and defers indexing
-  once the transcript is over `AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES`.
-- UserPromptSubmit records the hook event by default, but does not run the full
-  transcript sync unless `AOA_SESSION_MEMORY_FULL_PROMPT_SYNC=1` is set.
-- UserPromptSubmit does not call the optional `abyss-machine typing` bridge by
-  default. Set `AOA_SESSION_MEMORY_TYPING_BRIDGE=1` to enable it, with
-  `AOA_SESSION_MEMORY_TYPING_BRIDGE_TIMEOUT_SEC` bounded to the foreground hook
-  timeout budget.
-- PreCompact, PostCompact, and large Stop hooks return only schema-valid Codex
-  protocol fields and must not block the active lifecycle by default.
-- Deferred lifecycle work is automatically queued under
-  `diagnostics/hook-jobs/pending/` and processed by `hook-worker` outside the
-  Codex hook timeout window. Set `AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC=0`
-  to disable worker launch, or `AOA_SESSION_MEMORY_HOOK_SYNC_QUEUE=0` to
-  disable queueing.
-- If Codex exits before a usable lifecycle hook runs, `sweep-codex-sessions`
-  is the recovery route over `~/.codex/sessions`. It plans missing, stale,
-  deferred, hook-only, and raw-unavailable archives by comparing transcript
-  snapshots with `.aoa` manifests, then syncs them only with `--apply`.
-- Manual sync/import/reindex are recovery and rebuild paths. They must not be
-  the normal route for closing a compaction interval after `PostCompact`.
-- Hook registry writes use a short non-blocking lock window. If another
-  `.aoa` operation owns the registry lock, the hook keeps the local receipt or
-  manifest and marks the registry update as deferred.
-- Indexed sessions are stored directly under
-  `sessions/YYYY-MM-DD__NNN__short-title`.
-- Distillation is not performed in hooks.
+Exact rendering, trust inspection, and live compaction-probe syntax belongs to
+the executable CLI. The hook-focused procedures and short verification routes
+live in `hooks/AGENTS.md` and the corresponding `skills/` entries.

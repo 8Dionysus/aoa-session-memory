@@ -13,18 +13,38 @@ jobs:
   source_index:
     name: Repo Validation
     runs-on: ubuntu-latest
+    env:
+      AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Checkout aoa-stats protocol validator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-stats
+          ref: 96833eea25f16fd61b174dad8286e7d8bcf1a93c
+          path: .deps/aoa-stats
 
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
 
+      - name: Install test dependency
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.3
+
       - name: Check repo-local KAG index family
         uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@da9f50a581645b2173b99dbf771a63d447ec2fec
         with:
           history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
           event-history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
+
+      - name: Check owner-local stats protocol
+        run: python3 scripts/validate_local_stats_port.py
+
+      - name: Check owner-local stats derivation
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+          tests/test_session_memory.py -k local_stats

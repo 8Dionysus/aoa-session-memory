@@ -13,6 +13,8 @@ blast radius.
 - `aoa_session_memory.py` implements archive generation, hook handling,
   indexing, naming, distillation, validation, export, install, audit, and
   doctor checks.
+- `validate_local_stats_port.py` delegates the owner-local measurement packet
+  to the pinned central `aoa-stats` protocol validator.
 
 ## Rules
 

@@ -32,7 +32,8 @@ When working here, read:
 2. `DESIGN.AGENTS.md`
 3. `PIPELINE.md`
 4. `INSTALL.md` when changing portability, export, or hook installation
-5. `READINESS.md`
+5. `READINESS.md` for the durable readiness model; current state belongs to
+   generated diagnostics
 6. `README.md`
 7. `NAMING.md`
 8. `sessions/AGENTS.md` if present
@@ -45,7 +46,7 @@ When working here, read:
 
 When editing a source district, also read that directory's own `AGENTS.md`
 first: `config/`, `hooks/`, `maps/`, `schemas/`, `scripts/`, `skills/`,
-`tests/`, or `sessions/`. When inspecting live reports, read
+`stats/`, `tests/`, or `sessions/`. When inspecting live reports, read
 `diagnostics/AGENTS.md`; it is a runtime evidence district, not portable source.
 
 ## Generated Material

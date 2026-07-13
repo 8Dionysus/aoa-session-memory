@@ -109,7 +109,8 @@ queue, or naming-readiness pass.
 ### Pipeline and readiness
 
 `PIPELINE.md` owns operational flow.
-`READINESS.md` owns current proof posture and coverage.
+`READINESS.md` owns the durable readiness model; generated diagnostics own
+current proof posture and coverage.
 
 They are the surfaces an agent should use before deciding that a layer is ready
 for the next pass.
@@ -210,30 +211,11 @@ If any answer is weak, record the blocker and route to recovery, reindex,
 manual review, or a narrower candidate queue. Do not hide the weakness behind a
 confident-looking semantic name.
 
-The operational entry for this layer is:
-
-```bash
-python3 scripts/aoa_session_memory.py naming-readiness all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --refresh-indexes \
-  --write-report
-```
-
-This command refreshes the lightweight naming route in `SESSION_NAMES.md` and
+The `naming-readiness` CLI route refreshes the lightweight naming route in `SESSION_NAMES.md` and
 `sessions/INDEX.md`. It does not apply names and does not close review.
 
-For long sessions, the next layer is phase discovery:
-
-```bash
-python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --write \
-  --write-report
-```
-
-This writes `naming/phase-discovery.json` and `.md` as open candidates. A later
+For long sessions, the next layer is the `phase-discovery` CLI route. It writes
+`naming/phase-discovery.json` and `.md` as open candidates. A later
 agent may apply accepted `phase` or `topic` names, but the candidate file itself
 is not reviewed truth.
 
