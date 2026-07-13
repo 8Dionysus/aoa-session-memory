@@ -1,6 +1,6 @@
 {
   "entries": [
-    {"anchor_id":"aoa:aoa-session-memory:anchor:2e063b9ca926fede36c0983c","artifact_kind":"config","content_hash":"679fbdac29deb7cb9807b35e1d20b29d17f4830a5f562a023229fd7fb102589f","id":"aoa:aoa-session-memory:artifact:3affb923d04bc06217e2c3a1","lineage_path":".github/workflows/repo-validation.yml","mime":"application/yaml","path":".github/workflows/repo-validation.yml","provenance_ref":"deterministic","surface_state":"authored_source","temporal_ref":"current","trust_ref":"deterministic","version_id":"aoa:aoa-session-memory:artifact-version:3bc3f19a1097bca2f4656ece"},
+    {"anchor_id":"aoa:aoa-session-memory:anchor:2e063b9ca926fede36c0983c","artifact_kind":"config","content_hash":"5145a746719bb453bf9e0440ca185ebf95bea5c7f3682fa2209120d808cf2608","id":"aoa:aoa-session-memory:artifact:3affb923d04bc06217e2c3a1","lineage_path":".github/workflows/repo-validation.yml","mime":"application/yaml","path":".github/workflows/repo-validation.yml","provenance_ref":"deterministic","surface_state":"authored_source","temporal_ref":"current","trust_ref":"deterministic","version_id":"aoa:aoa-session-memory:artifact-version:b9a8d4887c4336d630ef0b29"},
     {"anchor_id":"aoa:aoa-session-memory:anchor:880282ad6e1117a8f9614ac3","artifact_kind":"owner_metadata","content_hash":"360d659b5a8a98455b1753b9e4b028fbb8bf2ce790a07dc5e030c08dd566c5a9","id":"aoa:aoa-session-memory:artifact:bc37d034bad564583790a46f","lineage_path":".gitignore","mime":"text/plain","path":".gitignore","provenance_ref":"deterministic","surface_state":"authored_source","temporal_ref":"current","trust_ref":"deterministic","version_id":"aoa:aoa-session-memory:artifact-version:45cb061b46d61075599fc1a6"},
     {"anchor_id":"aoa:aoa-session-memory:anchor:66fa5deebfc82db8a59b370f","artifact_kind":"document","content_hash":"77ca8c5c44b1c0a98411e932de1aef5bfbe6b8b3a1c9099b1daa6d3af0a3a6a7","id":"aoa:aoa-session-memory:artifact:a54ff182c7e8acf56acfd6e4","lineage_path":"AGENTS.md","mime":"text/markdown","path":"AGENTS.md","provenance_ref":"deterministic","surface_state":"authored_source","temporal_ref":"current","trust_ref":"deterministic","version_id":"aoa:aoa-session-memory:artifact-version:73e4430151186947eecf7d89"},
     {"anchor_id":"aoa:aoa-session-memory:anchor:c56a1580c515d76a199cd741","artifact_kind":"document","content_hash":"e0428ff8b8fa6b65b61e57208a783f6aa9014db6ae9db195e3a1390851ff0173","id":"aoa:aoa-session-memory:artifact:42d9f271dea9edd048f8e120","lineage_path":"DESIGN.AGENTS.md","mime":"text/markdown","path":"DESIGN.AGENTS.md","provenance_ref":"deterministic","surface_state":"authored_source","temporal_ref":"current","trust_ref":"deterministic","version_id":"aoa:aoa-session-memory:artifact-version:97de1221b9781295acf3434d"},
@@ -181,7 +181,7 @@
   ],
   "index_identity": {
     "artifact_kind": "repository_artifact_index",
-    "content_digest": "c9c9b8caed2ada37eb62a94ddfff52eafa284a96038c70e6a6dd08db3d191c1b",
+    "content_digest": "a07cd1bd0953b526778fed9a68e996b02da854d1e30e8a9d2ce27025c541025a",
     "index_kind": "artifact",
     "local_id": "index:repo-local:artifacts",
     "schema_ref": "aoa-kag:schemas/repo-local-kag-repository-index.schema.json"
@@ -267,7 +267,7 @@
   },
   "schema_version": "aoa-repo-local-kag-repository-index-v2",
   "source_index": {
-    "content_digest": "0eecb9cd20694e7afad6ebc61d4f2b68b82f0077890b2b56621d6e10294d1371",
+    "content_digest": "02725ecfd8514ed6782d3ca2293ab560507c735167d4b8a9a0a4d45e1b280060",
     "local_id": "index:repo-local:source-surfaces",
     "path": "kag/indexes/source_surface_index.json"
   },

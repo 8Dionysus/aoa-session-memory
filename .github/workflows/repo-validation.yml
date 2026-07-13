@@ -24,4 +24,4 @@ jobs:
           python-version: "3.12"
 
       - name: Check repo-local KAG index family
-        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@6bb1f5770ca608b14ddec858011e5cf7cd6b14b1
+        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@3068d5c4f9c78fc4654d40f0d103fa6487b8a5e6
