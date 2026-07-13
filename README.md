@@ -1,150 +1,307 @@
 # AoA Session Memory
 
-`aoa-session-memory` is the portable kernel that preserves agent-session
-evidence and builds bounded navigation over it. A checkout can be used as a
-standalone source bundle or installed as a workspace-local `.aoa/` root.
+`aoa-session-memory` is a portable memory organ that preserves agent-session
+trajectories as evidence and turns them into queryable, provenance-carrying
+read models without confusing memory with truth.
 
-The kernel preserves before it interprets. Raw transcripts remain local
-evidence; generated segments, indexes, search stores, graph stores, reports,
-and statistics are weaker projections. Reviewed distillation is the only path
-from session evidence toward durable memory, skills, automation, or doctrine.
+Its current production adapter is Codex. The architecture is intentionally
+broader than Codex: sessions, evidence, episodes, indexes, typed relationships,
+freshness, and review boundaries are the durable center.
 
-## Evidence chain
+## Why It Exists
+
+Long agent work does not fit safely inside active context.
+
+Sessions compact, terminate, move between runtimes, and accumulate more exact
+evidence than a summary can preserve. Commands, corrections, failed branches,
+decisions, tool results, verification, and ownership boundaries must remain
+recoverable after the context that produced them is gone.
+
+`aoa-session-memory` separates:
+
+- preserved evidence from interpretation;
+- retrieval from proof;
+- memory from current owner truth;
+- candidate learning from promoted capability;
+- portable source from local runtime state.
+
+## Current System
+
+The portable implementation currently provides:
+
+- Codex transcript capture and lifecycle receipts;
+- raw transcript mirrors and compaction-coordinate raw blocks;
+- readable segments plus machine indexes;
+- stable session identity, naming, and archive navigation;
+- typed agent events and task episodes;
+- exact/literal search and structured route filters;
+- entity registry, usage-chain, consequence, and neighborhood routes;
+- generated atlas, search, graph, and operational rollup projections;
+- bounded graph neighborhood, bridge, timeline, and GraphRAG-style packets;
+- projection freshness, maintenance coordination, and recovery routes;
+- read-only, plan-only MCP access;
+- clean export and installation into another workspace.
+
+These capabilities are read and evidence surfaces. They do not make generated
+classifications, graph edges, or summaries reviewed truth.
+
+## Direction of Growth
+
+The organ is intended to grow from reliable session recall toward cumulative
+agent experience:
 
 ```text
-raw transcript
-  -> raw compaction blocks and hook receipts
-  -> readable compaction-interval segments
-  -> segment and session indexes
-  -> bounded search, atlas, entity, and graph projections
-  -> evidence packets with raw and segment refs
-  -> later reviewed distillation
+experience
+  -> evidence-backed memory
+  -> reviewed understanding
+  -> eval
+  -> skill / automation / dataset / training candidate
+  -> changed agent
+  -> new experience
 ```
 
-The canonical archive directory is
-`sessions/<date>__<sequence>__<short-title>/`. Stable transcript identity stays
-in `session.manifest.json`; a readable directory label is navigation, not a
-replacement identity.
+Future adapters may preserve dialogue-oriented sessions, model experiments,
+instrumentation, eval/training lineage, and experience across model versions.
+Those are architectural horizons, not claims about the current implementation.
 
-## Source and runtime split
+The organ does not itself own eval verdicts, skills, automation policy, model
+training, or agent identity. It preserves the evidence and lineage from which
+their owners may make reviewed decisions.
 
-The repository contains the portable kernel:
-
-- authored contracts under `config/`, `schemas/`, and `maps/`;
-- hook and CLI implementation under `scripts/`;
-- focused agent routes under `skills/`;
-- portable hook examples under `hooks/`;
-- package and trust metadata under `manifests/`;
-- the owner-local statistical handoff under `stats/`;
-- regression coverage under `tests/`.
-
-A live `.aoa` installation additionally owns raw session archives, generated
-indexes, search and graph databases, diagnostics, maintenance coordination,
-and local hook receipts. Those runtime surfaces are not portable source and
-must not be committed as owner truth.
-
-## Capture and archive lifecycle
-
-The supported Codex lifecycle events are `SessionStart`, `UserPromptSubmit`,
-`PreCompact`, `PostCompact`, and `Stop`. Foreground hooks are fail-open and
-bounded. They retain receipts and cheap transcript state, while expensive
-archive, indexing, and graph work is queued for the worker path.
-
-`PostCompact` is the ordinary interval-sealing route. `Stop` may finish a small
-archive, but large transcripts defer heavy work. Import, sweep, sync, and
-reindex operations are recovery routes for missed hooks, historical sessions,
-or changed generated contracts; they are not competing authorities.
-
-Each archived interval keeps both readable Markdown and a machine index. The
-index classifies events, relationships, route signals, task episodes, agent
-events, goal observations, and evidence refs without treating those
-classifications as reviewed truth.
-
-## Token accounting
-
-Token accounting is count-only generated evidence. Provider-reported usage,
-exact tokenizer counts, estimates, and unknown observations remain distinct.
-Estimates never become exact usage facts, and accounting projections do not
-carry prompt text, raw text, session titles, transcript paths, or token ids.
-
-Host consumers may read generated summaries. They must not open raw
-transcripts merely to obtain counts or write their own meaning back into the
-archive.
-
-## Navigation surfaces
-
-The kernel offers several progressively more expensive navigation layers:
-
-1. session and segment indexes for direct evidence routing;
-2. typed agent-event, task-episode, goal, hook, and entity routes;
-3. a portable SQLite search projection and optional structured shards;
-4. a source-owned agent atlas under `maps/`;
-5. graph neighborhoods, bridges, timelines, and GraphRAG packets;
-6. raw or segment expansion when a claim needs stronger evidence.
-
-Generated search and graph material is replaceable. It must carry freshness,
-cost, and evidence-ref posture, and it must never outrank raw transcripts,
-segment indexes, or reviewed owner records.
-
-For skill-related evidence, selection, loading, editing, validation,
-co-occurrence, and consequences are separate candidate states. A selected or
-loaded skill is not automatically invoked or followed. Foreign correlation
-results remain rejected context with refs rather than accepted consequences.
-
-## Maintenance and pressure
-
-Maintenance is coordinated so hooks, timers, and manual writers do not race.
-Hot paths use bounded freshness gates; large search or graph repairs use
-explicit resource-aware routes. Live transcripts within the quiet window are
-deferred rather than misreported as stable corruption.
-
-Search pressure and graph pressure are cardinality questions before they are
-SQLite-compaction questions. Read models may omit or roll up generated rows
-only after a replacement route preserves evidence refs, recall boundaries,
-freshness, and a rollback path. Raw archives are never storage-cleanup
-candidates.
-
-## Review and naming
-
-Naming and distillation are separate from capture. Naming-readiness first
-checks evidence coverage and identity consistency. Phase discovery produces
-open candidates; reviewed naming routes apply accepted labels without changing
-raw identity.
-
-First-pass and batch distillation classify review candidates. They do not
-promote claims. Manual-review packets are append-only evidence queues, and
-promotion belongs to the stronger owner named by the candidate.
-
-## Portable installation
-
-Export and install copy only the portable kernel unless session inclusion is
-explicitly requested. Existing workspace sessions are preserved during a
-kernel upgrade. Hook examples are regenerated with portable placeholders, and
-user-level skill installation remains an explicit operator choice.
-
-Exact operator syntax belongs to the executable CLI. Inspect the relevant
-subcommand help in `scripts/aoa_session_memory.py`; use the matching route under
-`skills/` when an agent needs a procedural workflow. Short repository checks
-are listed only in the nearest `AGENTS.md`.
-
-## Owner map
-
-- `DESIGN.md` owns archive architecture and evidence boundaries.
-- `DESIGN.AGENTS.md` owns agent-facing route and authority design.
-- `PIPELINE.md` owns lifecycle and projection flow.
-- `READINESS.md` owns the durable readiness model, not a host snapshot.
-- `INSTALL.md` owns portability and installation semantics.
-- `NAMING.md` owns session and phase naming semantics.
-- `stats/` owns the local measurement question and central stats handoff.
-- `scripts/aoa_session_memory.py` owns commands and runtime behavior.
-- nearest `AGENTS.md` files own district-specific working guidance.
-
-## Core rule
+## Architecture at a Glance
 
 ```text
-Raw JSONL is evidence.
-Segment Markdown is the readable archive.
-Indexes and read models are navigation.
-Statistics are bounded derived views.
-Distillation is a later reviewed act.
+agent runtime
+  -> adapter and lightweight capture
+  -> raw session evidence
+  -> segments, typed events, and task episodes
+  -> exact / structured / semantic / graph / narrative projections
+  -> bounded evidence packets with freshness and refs
+  -> human or agent review
+  -> owner-controlled promotion
+```
+
+The downward route always remains available:
+
+```text
+narrative or answer
+  -> episode / graph / search hit
+  -> segment
+  -> raw or external owner evidence
+```
+
+## Evidence and Authority
+
+Use the source that owns the question:
+
+| Question | Authority |
+| --- | --- |
+| What was recorded in the session? | raw transcript and source metadata |
+| Where is the relevant evidence? | generated indexes and route packets |
+| What does a repository do now? | that repository's current source |
+| What did an eval prove? | the eval owner and admitted evidence |
+| Is a projection current? | live projection and maintenance status |
+| Why does the architecture have this boundary? | `DESIGN.md` and owner decisions |
+
+Session memory can find owner truth. It does not replace it.
+
+## Repository and Install Shapes
+
+The same portable source can run as:
+
+```text
+standalone aoa-session-memory repository
+workspace/.aoa
+```
+
+A live workspace may contain private session archives, generated search/graph
+stores, and diagnostics. A clean portable bundle excludes those runtime
+surfaces by default.
+
+## Quick Start
+
+Validate a source or installed root:
+
+```bash
+python3 scripts/aoa_session_memory.py validate \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+Inspect filesystem and adapter health:
+
+```bash
+python3 scripts/aoa_session_memory.py doctor \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+```
+
+Inspect projection and maintenance state without mutating:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa
+
+python3 scripts/aoa_session_memory.py maintenance-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --full
+```
+
+For installation, hooks, and clean export, use `INSTALL.md`.
+
+## Common Evidence Routes
+
+Plan an exact path, UUID, command, error, or literal phrase query:
+
+```bash
+python3 scripts/aoa_session_memory.py literal-query-plan \
+  "Traceback ValueError"
+```
+
+Ask how an operational entity was used and what happened after:
+
+```bash
+python3 scripts/aoa_session_memory.py usage-chain \
+  aoa-session-memory-mcp --kind mcp
+```
+
+Inspect one task interval:
+
+```bash
+python3 scripts/aoa_session_memory.py task-episodes latest \
+  --limit 10 --order recent
+```
+
+Inspect a bounded relation between known anchors:
+
+```bash
+python3 scripts/aoa_session_memory.py graph-bridge \
+  aoa-session-memory-mcp exec_command \
+  --source-kind mcp --target-kind tool
+```
+
+These commands return navigation and evidence packets. Open the returned raw,
+segment, session, receipt, or owner refs before relying on an important claim.
+
+The complete operational and recovery reference lives in `PIPELINE.md`.
+
+## Freshness Is Part of the Answer
+
+Generated projections may be:
+
+- `current`;
+- `stale-readable`;
+- `deferred`;
+- `blocked`;
+- `failed`;
+- `truncated`;
+- `fallback`;
+- `unresolved`.
+
+A stale packet can still route older evidence, but it cannot silently answer a
+current-state question. Use the packet's typed next action or the relevant
+maintenance route. A timer success is not proof that every semantic projection
+is current.
+
+## Agent Access
+
+Agents should use progressive disclosure:
+
+1. classify the question;
+2. select an exact or typed route;
+3. inspect the bounded packet and freshness;
+4. expand to episodes, graph, semantic, or narrative layers only when needed;
+5. open raw evidence for exact verification;
+6. return unknown when the evidence is insufficient.
+
+`DESIGN.AGENTS.md` defines this contract. The MCP surface follows the same
+read-only evidence route and does not own mutation or proof.
+
+## Automatic Maintenance
+
+Capture stays lightweight. Incremental workers and maintenance routes advance
+segments, indexes, search, atlas, registry, graph, and other generated
+projections.
+
+The intended happy path is automatic and observable:
+
+- dirty state propagates through projection dependencies;
+- active live tails wait for a quiet window;
+- bounded jobs resume after resource or lock deferral;
+- readers retain the last committed usable snapshot;
+- status distinguishes launcher success from semantic freshness.
+
+Manual commands remain available for diagnosis, controlled repair, deep
+rebuild, and recovery. See `PIPELINE.md`.
+
+## Documentation Map
+
+| File | Read it for |
+| --- | --- |
+| `AGENTS.md` | immediate laws, authority, and task routing |
+| `DESIGN.md` | identity, architecture, boundaries, and open horizon |
+| `DESIGN.AGENTS.md` | agent query and evidence-access contract |
+| `PIPELINE.md` | operational lifecycle, command reference, maintenance, and recovery |
+| `READINESS.md` | readiness states, proof requirements, and gate selection |
+| `INSTALL.md` | installation, hook generation, and portable export |
+| `NAMING.md` | archive labels and semantic naming |
+| `stats/` | bounded revision-level measurements over portable source surfaces |
+
+Source code, config, and schemas own runtime behavior. Live commands and
+generated diagnostics own current status. Git history and session evidence own
+historical development detail.
+
+The owner-local stats port currently measures portable scenario-fixture
+coverage at a named source revision. It does not inspect live archives or turn
+fixture coverage into memory quality, route correctness, or readiness.
+
+## Portability
+
+Export a clean bundle from the active authored source:
+
+```bash
+python3 scripts/aoa_session_memory.py export-bundle \
+  --source-aoa-root /path/to/source/.aoa \
+  --target-dir /path/to/aoa-session-memory \
+  --force
+```
+
+Install into a workspace:
+
+```bash
+python3 scripts/aoa_session_memory.py install \
+  --source-aoa-root /path/to/aoa-session-memory \
+  --workspace-root /path/to/workspace \
+  --force
+```
+
+Do not hand-copy generated hooks or portable consumers when the builder/export
+route exists.
+
+## What Does Not Belong Here
+
+The portable owner terrain should not accumulate:
+
+- private transcripts or session-specific notes;
+- experiment diaries, temporary benchmarks, or failed variants;
+- changing runtime counts and version snapshots;
+- local operator doctrine;
+- generated search/graph databases or maintenance reports;
+- model caches or training artifacts;
+- unreviewed claims promoted from session history.
+
+Keep construction history in session provenance and diagnostics. Promote only
+the smallest durable contract, invariant, fixture, or decision that the owner
+actually needs.
+
+## Core Rule
+
+```text
+Preserve evidence.
+Project without replacing it.
+Route by intent.
+Expose freshness.
+Review before promotion.
 ```

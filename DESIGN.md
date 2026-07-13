@@ -2,95 +2,247 @@
 
 ## Role
 
-`DESIGN.md` defines the operating form of the `.aoa` session-memory kernel.
+`DESIGN.md` is the durable architecture and boundary contract for
+`aoa-session-memory`.
 
-It is not the implementation manual, naming table, schema reference, or
-distillation report. It answers one question:
-
-What shape must this memory system preserve as it grows?
-
-Agents should read this file immediately after `AGENTS.md` when working inside
-`.aoa`, then read `DESIGN.AGENTS.md` for the agent-facing route mesh.
+It describes what the organ is, which truths it may own, how its layers relate,
+and which future growth the current architecture must not close off. It is not
+a command reference, runtime status report, experiment journal, naming table,
+or claim that every horizon capability is already implemented.
 
 ## Design Thesis
 
-`.aoa` exists because a Codex session is not true memory.
+`aoa-session-memory` is a portable, evidence-preserving memory organ for agent
+sessions.
 
-A long agent session can overflow, compact too early, compact too late, or
-survive only as a summary of a summary. In those states, the agent may remember
-the mood of the work while losing the evidence, commands, false starts,
-decisions, and exact boundaries that made the work real.
+It exists to make agent experience addressable across compaction, sessions,
+runtimes, and, eventually, model generations without making unreviewed
+experience authoritative.
 
-The answer is not to force everything into active context.
+A context window is working memory, not a durable memory system. A session can
+overflow, compact, terminate, move to another runtime, or survive only as a
+lossy summary. The commands, observations, corrections, dead branches,
+decisions, outcomes, and exact evidence that shaped the work must be able to
+survive those transitions outside active context.
 
-The answer is to make memory external, addressable, indexed, recoverable, and
-reviewable.
+The answer is not to keep everything in the prompt. The answer is to preserve
+experience, give it stable coordinates, derive bounded read models, and keep a
+reviewable path from every important claim back to evidence.
 
-The originating idea is simple: a large context window is a cargo bay, not a
-memory system. It can carry more for a while, but it still has failure modes:
-overflow, premature compaction, late compaction, lossy summaries, and lost
-evidence. `.aoa` exists so the work survives those modes without asking active
-context to become an archive.
+The deepest purpose is continuity of experience and transformation. Evals,
+skills, automation, training corpora, and specialized agents are possible
+downstream crystallizations of that experience. They are not the definition of
+the organ and they do not become authoritative merely because the memory organ
+can propose them.
+
+## Position in the Wider System
+
+`aoa-session-memory` is an organ of an agentic system, not the whole system.
+
+It owns:
+
+- preservation and identity of session-bound evidence;
+- temporal and provenance binding across events, spans, episodes, and sessions;
+- rebuildable indexes and projections over that evidence;
+- evidence-routed retrieval and bounded navigation;
+- visibility of freshness, uncertainty, truncation, and failure;
+- portable adapter contracts for session-producing runtimes;
+- candidate routes from experience toward later review.
+
+It does not own:
+
+- the current truth of another repository or domain;
+- AoA doctrine or Tree of Sophia meaning;
+- the identity, personality, or consciousness of an agent;
+- central eval doctrine or final proof verdicts;
+- skill, automation, policy, or model-training authority;
+- model execution, tensor storage, or training infrastructure;
+- the right to promote observed behavior into a durable rule.
+
+The organ can remember that a decision was made. The owner repository decides
+whether that decision still governs. The organ can preserve an eval run. The
+eval owner decides what it proves.
+
+## Current Contract and Open Horizon
+
+The current production adapter is Codex. Codex transcripts, lifecycle hooks,
+compaction markers, commands, tool calls, and responses are therefore the most
+developed evidence stream today.
+
+This is an implementation priority, not an ontological boundary.
+
+The architecture must permit other session producers to attach compatible
+evidence without pretending that all producers emit the same kinds of
+experience. A dialogue-oriented agent, an action-oriented coding agent, an
+instrumented model experiment, and a training/eval run may share identity,
+time, provenance, and reference contracts while keeping different event
+semantics and projection pipelines.
+
+Future capabilities belong in this design only as extension laws:
+
+- continuity may cross runtimes and model versions;
+- selected experience may later support evals, skills, automation, datasets,
+  fine-tuning, or specialized agents;
+- model instrumentation may be linked to session trajectories;
+- narratives may connect projects and long developmental arcs.
+
+None of those statements is a present-tense capability claim. If latent,
+activation, or other model-state traces are added later, they are measured
+instrumentation. They are not automatically hidden reasoning, intention,
+emotion, consciousness, or truth about the model.
 
 ## Design as Physiology
 
-Treat the Codex context window as working memory, not as the archive.
+The physiological metaphor remains useful when its boundaries stay precise:
 
-- Context is attention.
-- Raw transcript is the black box.
-- Compaction boundaries are natural memory intervals.
-- Segment Markdown is the readable flight recorder.
-- Segment index is the local event map.
-- Session index is the atlas.
-- The sessions directory index is the table of contents for the atlas.
-- Agent-facing design is the route law for moving through the atlas without
-  flattening its layers.
-- Distillation is later reviewed metabolism.
-- Skills and automation are mature organs, not raw memory.
+- active context is working memory and attention;
+- raw session evidence is the flight recorder;
+- events and spans are recorded experience;
+- episodes are bounded working memories reconstructed over evidence;
+- exact indexes are fast recall;
+- semantic projections are associative recall;
+- typed graphs are relationship and causality views;
+- narratives are slow, higher-order consolidation;
+- freshness orchestration is circulation and repair;
+- review is judgment;
+- promoted skills and automation are learned capability;
+- training or model adaptation is a later transformation owned elsewhere.
 
-The system should not pretend that compaction is a bug to ignore. Compaction is
-a physiological boundary. `.aoa` uses that boundary as a memory coordinate.
+Compaction is a useful capture coordinate, not necessarily a semantic boundary.
+A meaningful episode may begin before compaction and finish after it. The raw
+boundary must remain visible while episode formation follows intent, action,
+result, correction, verification, failure, and recovery.
 
-## Names as Topology
+## Authority Is Typed
 
-Names are not decoration here. They are the first map an agent sees.
+There is no single global ranking in which one file is always “more true.”
+Authority depends on the question.
 
-Every durable name should tell the agent what kind of thing it is, when it
-belongs, and where it sits in the archive. Date, day-local sequence, short
-title, segment role, event type, and status are routing signals. A good agent
-will still inspect the evidence, but a good name reduces the chance that the
-first move is already wrong.
+| Question | Strongest authority |
+| --- | --- |
+| What bytes or events were recorded in the session? | raw transcript and source metadata |
+| What interval or episode does a projection describe? | projection plus resolvable raw/segment/session refs |
+| Did a command, tool, hook, or runtime action occur? | structured event and runtime receipt evidence |
+| What does the repository do now? | current owner source, config, schemas, and live runtime |
+| Why is an architectural boundary durable? | owner design/decision surface |
+| What did an eval prove? | admitted eval evidence and the eval owner |
+| Is a skill or automation authoritative? | its owner source and review/admission route |
+| What should an agent read next? | generated route models, qualified by freshness |
 
-There are several naming layers. The canonical archive label is the stable
-physical coordinate. A `session` semantic name is the mutable umbrella essence
-when the whole session becomes clearer than the first prompt. `phase` and
-`topic` names describe bounded processes inside the session. Semantic names
-must not be naked aliases. They carry a bridge anchor back to `session_id`, raw
-transcript provenance, raw sha256, canonical label, explicit raw refs, and
-optional coverage ranges. This keeps names useful for agents without letting
-them replace evidence.
+Raw evidence is authoritative for what was preserved, but it is not reviewed
+truth about the world. A user or assistant may be mistaken. A successful
+command may print documentation about failures. A transcript may mention a
+skill without using it. A later owner change may supersede an earlier session
+decision.
 
-The name index is a light map, not an authority. It should help agents compare
-candidate session names and phase names before choosing a better working title.
-It must stay small enough to read before opening heavy session material.
+Generated segments, episodes, indexes, embeddings, graph edges, dossiers, and
+narratives are evidence-bearing read models. They may improve access and
+interpretation; they do not replace their sources.
 
-Avoid vague durable names because they create false topology:
+Owner-local statistics are revision-bound measurements over named source
+populations. Their manifest, packet, refs, and authority ceiling define what
+they can support; portable fixture coverage is not memory quality or live
+readiness.
+
+## Two Durable Records
+
+The system deliberately maintains two different durable records:
+
+1. Session memory preserves evidence of what happened, including uncertainty,
+   error, disagreement, and failed work.
+2. Owner repositories preserve the selected current truth of the systems they
+   own.
+
+A review and promotion gate connects them:
 
 ```text
-misc
-tmp
-old
-new
-unknown
-dump
+session evidence
+  -> evidence-backed candidate
+  -> owner review
+  -> admitted decision / eval / skill / automation / dataset
 ```
 
-Use explicit unresolved names when truth is missing. Do not hide uncertainty
-behind a vague label.
+This gate prevents both forms of corruption:
 
-## Core Shape
+- losing valuable experience because it was not immediately promoted;
+- polluting owner terrain by copying every session insight, hypothesis, or
+  construction detail into permanent source.
 
-The durable unit is a session archive:
+## Memory Streams
+
+The organ should support heterogeneous streams rather than flattening all
+experience into one text field.
+
+### Interaction memory
+
+User intent, questions, corrections, assistant responses, dialogue phases,
+handoffs, and unresolved threads.
+
+### Operational memory
+
+Plans, tool calls, commands, mutations, outputs, errors, retries,
+verification, closeout, and action-to-consequence chains.
+
+### Evaluation memory
+
+Cases, conditions, versions, seeds, budgets, outcomes, adjudication, and proof
+refs. Evaluation memory remains evidence for the eval owner, not the final
+verdict by itself.
+
+### Instrumentation memory
+
+Runtime telemetry and, in the future, model-state observations attached to
+precise session coordinates. Instrumentation must retain measurement method,
+model/runtime version, scope, uncertainty, and privacy boundary.
+
+### Lineage memory
+
+In the future, datasets, model versions, training runs, skills, agents, and
+their measured consequences may be linked to the session experience that
+produced them. Lineage does not make the session-memory repository the owner of
+those artifacts.
+
+All streams should share a minimal envelope where applicable:
+
+- stable identity;
+- session/run identity;
+- timestamp or interval;
+- actor, runtime, model, and owner context;
+- source kind;
+- raw or external evidence refs;
+- schema and producer version;
+- confidence and uncertainty;
+- validity and supersession state;
+- privacy, retention, and access metadata.
+
+Sharing this envelope does not require one universal ingestion pipeline.
+
+## Durable Primitives
+
+The architecture distinguishes the following primitives:
+
+- **session** — one runtime-bounded trajectory with stable identity;
+- **event** — an observed atomic record from a producer;
+- **span** — a contiguous evidence interval;
+- **episode** — a bounded semantic working unit over one or more spans;
+- **entity** — a typed identity such as a skill, tool, MCP, repository, goal,
+  error, decision, model, or artifact;
+- **relation** — a typed, directed, evidence-backed connection;
+- **narrative** — a higher-order consolidation over episodes with preserved
+  refs;
+- **projection** — a rebuildable read model over stronger evidence;
+- **evidence ref** — a resolvable coordinate into raw, segment, session, or an
+  external owner surface;
+- **candidate** — an unpromoted interpretation or downstream possibility;
+- **receipt** — structured evidence that a lifecycle or runtime action was
+  observed.
+
+Stable IDs must not depend only on a mutable title or rendered summary. Names
+improve navigation; they do not replace technical identity.
+
+## Physical Archive Contract
+
+The current portable archive centers on a session directory:
 
 ```text
 sessions/
@@ -102,6 +254,7 @@ sessions/
     hooks/
     raw/
       session.raw.jsonl
+      source.json
       blocks/
       blocks.index.json
       compaction-events.jsonl
@@ -110,448 +263,442 @@ sessions/
     distillation/
 ```
 
-The intended segment unit is one Markdown artifact per compaction interval:
+The full raw transcript remains the preserved black box. Raw blocks provide
+bounded interval access. Segment Markdown is a readable projection. Segment
+and session indexes provide navigation. Naming rules and exact generated
+shapes belong to `NAMING.md`, schemas, and `PIPELINE.md`.
+
+Physical topology may evolve, but migrations must preserve stable identity,
+evidence refs, source provenance, rebuildability, and rollback.
+
+## Memory Lifecycle
+
+The durable lifecycle is:
 
 ```text
-initial-to-compaction
-compaction-to-compaction
-compaction-to-latest
-initial-to-latest
+capture
+  -> preserve
+  -> normalize
+  -> project
+  -> retrieve
+  -> read and compare evidence
+  -> review
+  -> retain / supersede / promote / explicitly forget
 ```
 
-When no compaction has happened yet, `initial-to-latest` is the correct segment
-role. When compaction boundaries exist, they become the archive boundaries.
+### Capture
 
-The full raw transcript remains the black box. Each generated segment also has
-a bounded raw block under `raw/blocks/` so a closed compaction epoch can be
-inspected without reopening the whole session transcript. `raw/blocks.index.json`
-is the raw block ledger; `raw/compaction-events.jsonl` is the observed boundary
-ledger.
+Capture records the producer event and enough source identity to recover it.
+The capture path should be lightweight, loss-aware, and fail-open for the
+active agent runtime.
 
-## Preservation Before Intelligence
+### Preserve
 
-The first duty is preservation.
+Preservation is the first non-negotiable duty. Failure, repetition, wrong
+assumptions, dead branches, and noisy outputs remain valuable evidence at this
+layer.
 
-Do not summarize away material by default. Raw mistakes, failed commands,
-unhelpful searches, wrong assumptions, repeated attempts, and noisy tool output
-are not waste at the archive layer. They are ore for later process improvement.
+### Normalize
 
-The archive layer answers:
+Normalization adds typed structure without erasing source form. It must retain
+producer/schema versions and permit reprocessing when taxonomy improves.
 
-Did we keep the material?
+### Project
 
-The index layer answers:
+Projection creates exact, semantic, graph, episode, narrative, registry, and
+diagnostic read models. Every projection is disposable in principle and
+rebuildable from stronger evidence.
 
-Can we find the material?
+### Retrieve and read
 
-The route-signal layer answers:
+Retrieval finds candidate evidence. A reading stage establishes support,
+temporal order, contradiction, supersession, and insufficiency before making a
+claim.
 
-Which operational contract, surface, entity, verification state, failure mode,
-memory provenance, freshness state, owner route, runtime state, mutation
-surface, correlation, confidence, access boundary, cost profile, or operator
-preference did this event expose?
+### Review and promote
 
-The atlas layer answers:
+Review decides whether an observation becomes a durable owner-controlled
+artifact. Promotion is a cross-boundary act and must follow the target owner's
+admission route.
 
-Which route should the next agent take first?
+### Retain, supersede, forget, and roll back
 
-The diagnostic layer answers:
+Changing facts need validity and supersession rather than silent overwrite.
+Forgetting or retention changes require explicit policy, auditability, and
+rollback appropriate to the evidence class. The current protected raw archive
+must not be rewritten or deleted as ordinary cleanup.
 
-Why did preservation fail?
+## Episode Projection
 
-The distillation layer answers:
+Events are preservation units. Episodes are primary semantic retrieval units.
 
-What became experience?
+Episode boundaries should follow the work:
 
-The skill and automation layers answer:
+- user intent and correction;
+- goal or task lifecycle;
+- owner or repository transition;
+- action, result, and verification;
+- decision and supersession;
+- failure, abandoned branch, recovery, and rerun;
+- coherent quiescence or closeout.
 
-What matured into repeatable action?
+Compaction, turn, and segment boundaries are evidence coordinates and useful
+hints. They are not mandatory semantic cuts.
 
-Do not collapse these layers.
+An episode should carry:
 
-## Agent Atlas
+- stable ID and session binding;
+- raw, segment, and session refs;
+- time span and work context;
+- intent, actions, outcome, and verification;
+- entities and exact lexical anchors;
+- facts, decisions, failures, and open questions;
+- confidence, validity, and supersession;
+- a concise narrative;
+- multiple search representations rather than one monolithic embedding.
 
-The agent atlas is the convex map above generated session indexes.
+Episodes never replace raw events. An episode that cannot resolve its evidence
+refs is an invalid projection.
 
-It is a source-owned skeleton under `maps/` plus generated route entries derived
-from manifests, segment indexes, route signals, diagnostics, search indexes,
-and reviewed distillation. Its job is to keep the first move cheap for any
-agent: choose a route axis, inspect a short entry, then follow evidence refs
-into the stronger archive layers.
+## Projection Architecture
 
-The atlas must stay route-positive:
+No single read model should answer every query.
 
-- by work context
-- by memory surface
-- by authority surface
-- by session act
-- by scope contract
-- by verification state
-- by open thread
-- by entity, path, tool, MCP, hook, and goal
-- by delivery, failure, risk, review, promotion, index health, time, operator
-  request, and next action
-- by evidence provenance, owner route, freshness, runtime environment,
-  mutation surface, correlation, confidence, access boundary, resource profile,
-  and standing operator preference
+### Exact lexical projection
 
-These axes are allowed to expand. Expansion is correct when a new axis answers
-a distinct route question and reduces the need to load heavy context. Expansion
-is not correct when it creates another place for unreviewed claims to become
-truth.
+Optimized for paths, UUIDs, commands, flags, error text, dates, names, and
+literal phrases. Exact recall must remain available even when a cheaper typed
+route is preferred first.
 
-Atlas entries are maps, not evidence. They must carry session, segment, and raw
-refs when available, and they must never replace raw transcript truth or
-reviewed distillation.
+### Typed registry and posting projections
 
-## First-Wave Conveyor
+Optimized for entity identity, existence, usage candidates, route signals,
+facets, and compact rollups. Registration, mention, selection, invocation,
+behavior, verification, and consequence are separate states.
 
-Historical sessions should move through a conveyor, not a blind summarizer.
+### Semantic and hybrid projections
 
-Manual review does not mean the operator must personally reread the whole
-archive. It means the claim has entered a responsibility layer: an agent may
-read, compare, sample, and connect evidence, but it must do so with project
-grounding and explicit raw/index references. The human operator should be able
-to audit the promoted claim, not carry the full archival load alone.
+Optimized for paraphrase and related episodes across languages. Source kind is
+part of semantics: user intent, assistant answer, reasoning boundary,
+structured tool call, command output, system instruction, loaded skill
+payload, documentation, and generated summary must not receive equal
+evidentiary weight.
 
-The first wave may do mechanical work:
+### Typed graph views
 
-- classify indexed sessions into review lanes
-- split manual review into `deep`, `standard`, and `sample` priorities
-- count event and route signals
-- write provisional first-pass distillation artifacts
-- surface mechanics candidates for later patching
-- surface diagnostic failures before review
-- record project grounding such as the originating `cwd` and nearest
-  `AGENTS.md`, `DESIGN.md`, or README files
+Optimized for temporal, causal, entity, owner, dependency, and bridge
+questions. The graph is topology, not a second transcript store.
 
-The first wave may not do judgment work:
+### Narrative and global projections
 
-- mark a claim as reviewed truth
-- promote a pattern into a skill
-- create automation from one raw incident
-- hide manual-review needs behind a clean status
+Optimized for themes, phases, recurring failures, changing decisions, and
+long developmental arcs. They are consolidated lazily over episodes and keep
+their evidence chain.
 
-The correct conveyor shape is adaptive. If a batch reveals repeated parser
-misses, missing indexes, noisy names, hook gaps, or reusable command patterns,
-the next act is a narrow improvement to the kernel followed by tests and audit.
-The conveyor improves while it works, but every improvement remains
-inspectable.
+### Diagnostic and freshness projections
 
-When the originating `cwd` is missing or too broad, the conveyor must not hide
-that uncertainty behind workspace fallback. Project grounding and owner
-resolution are separate signals. Project grounding records the best available
-guidance files. Owner resolution infers the likely owning root from `cwd`,
-grounding files, and indexed path evidence, and it must stay explicitly
-`unresolved`, `ambiguous`, or low-confidence when the evidence is weak.
+Optimized for deciding whether another projection is current, stale-readable,
+deferred, blocked, failed, truncated, or unavailable.
 
-Manual-review packets are the first durable responsibility surface after the
-machine index. They collect event refs, reasons, grounding, owner resolution,
-and promotion candidates into a bounded artifact. They are not reviewed truth.
-The promotion layer may queue candidates for skills, playbooks, root-cause
-notes, decisions, or automation, but every candidate remains unpromoted until a
-reviewed distillation path accepts it.
+The same physical store may host several logical projections. Physical
+separation is an implementation choice, not a design goal.
 
-Manual-review passes are append-only waves. Re-running a pass creates another
-wave, records it in the session review index, and leaves earlier packets open
-for future passes. A found candidate is indexed evidence, not a closed item.
-Only a later reviewed distillation or promotion path may close or promote it.
+## Query and Evidence-Reading Contract
 
-The conveyor should not inflate responsibility signals. Stream copies of agent
-messages are evidence, but final response items carry the semantic promotion
-weight. A security policy mention is not a leak. A successful command that
-prints documentation about errors is not itself an error. The classifier should
-prefer structured status, correlation, and command intent before broad text
-matching.
+A query route should:
 
-As the system matures, distillation should become layered:
+1. classify intent without overstating certainty;
+2. choose the cheapest sufficiently specific typed route;
+3. carry an explicit evidence, node, edge, token, time, and fallback budget;
+4. escalate only when the first route is insufficient;
+5. expose selected route, projection version, freshness, truncation, and
+   fallback state;
+6. stop when evidence is sufficient;
+7. return unknown or insufficient evidence when it is not.
 
-- machine index layer: counts, routes, refs, and provisional candidates
-- agent project-grounded layer: reads with the local project laws in view
-- operator sampling layer: reviews promoted claims and suspicious clusters
-- promotion review layer: turns reviewed patterns into skills or automation
+Exact identifiers should not pay for broad graph or semantic expansion.
+Local questions should not trigger global narrative search. Graph traversal
+should begin from exact or hybrid anchors. Broad raw-text fallback should be
+bounded but remain available until a replacement proves equal or better
+recall.
 
-This keeps scale from forcing shallow summaries while still respecting that
-real understanding must be grounded in the project where the session happened.
+The evidence-reading stage should:
 
-## Raw Truth and Reviewed Truth
+- identify the supporting refs for every important claim;
+- separate fact, observation, interpretation, opinion, and uncertainty;
+- order temporal evidence;
+- detect conflict and supersession;
+- keep rejected or foreign-correlation context auditable but outside the
+  accepted chain;
+- abstain when support is incomplete.
 
-Raw JSONL is evidence, not final truth.
+## Relationship Semantics
 
-Generated Markdown segments are readable evidence, not final truth.
+Mention is not a durable relationship.
 
-Indexes are maps, not final truth.
+Durable graph relations should be typed, directed, and evidence-backed, for
+example:
 
-Distillation notes are provisional until reviewed.
+- `used_in`;
+- `produced`;
+- `caused`;
+- `resolved_by`;
+- `verified_by`;
+- `supersedes`;
+- `valid_during`;
+- `owned_by`;
+- `depends_on`;
+- `decided_in`;
+- `failed_with`;
+- `recovered_by`.
 
-Patterns, skills, and automation may only become durable authority after a
-reviewed distillation path.
+Logical graph views should distinguish at least:
 
-This distinction is the main safety rail of `.aoa`.
+- entity and usage topology;
+- temporal validity and supersession;
+- causal action-result-verification chains;
+- authority, owner, and dependency boundaries.
 
-## Indexing Philosophy
+Ordinary sequence belongs in an event or episode timeline when that is cheaper
+and clearer than materializing it as graph topology. Generic high-degree nodes
+must not drive expansion without a specificity gate. A graph route is justified
+only when it improves its intended causal, multi-hop, temporal, or topology
+lane over hybrid retrieval without graph.
 
-Indexing is not decoration. It is the memory system's attention model.
+## Narrative Consolidation
 
-Every archived segment should be navigable by stable event types, tags,
-importance, anchors, and raw references. An agent should be able to ask:
-
-- where are the decisions?
-- where are the commands?
-- where are the failures?
-- where are the dead branches?
-- where are the process lessons?
-- where is the latest final state?
-- what should be rehydrated first?
-
-The answer should be in indexes before the agent opens large raw or segment
-files.
-
-## Layer Ladder
-
-Every late-stage operation is also a quality check on the layers beneath it.
-
-Naming is the clearest pressure test. A broad session naming pass should be
-fast and accurate only when raw preservation, segmentation, indexing, registry
-sync, archive-local TOC, rehydration, and review packets are already coherent.
-If naming becomes confusing, the naming task should reveal which earlier layer
-is weak instead of hiding that weakness behind a clever title.
-
-The intended ladder is:
+The intended hierarchy is:
 
 ```text
-preservation -> segmentation -> indexing -> routing -> review -> naming -> promotion
+event or fact
+  -> episode
+  -> topic or phase
+  -> session / project / quest narrative
 ```
 
-Each layer may send work back down the ladder. It must not pretend the lower
-layer is healthy when evidence says otherwise.
+Narrative consolidation should occur after quiescence or another proved
+trigger, not after every raw event. Global queries should use lazy, bounded,
+iterative deepening. Full community expansion is not the default route.
 
-## Universal Event Ontology
+A narrative may compress many episodes, but it must retain episode and raw
+refs, conflicts, exclusions, and validity limits. It must not promote
+unreviewed experience into doctrine.
 
-Every Codex session has universal motions before it has project-specific
-meaning:
+## Freshness and Orchestration
 
-- a session starts
-- the user asks or corrects
-- the agent plans
-- the agent speaks
-- a tool is called
-- a command reads, writes, verifies, or mutates
-- output succeeds, fails, or becomes evidence
-- context compacts
-- a decision, assumption, open thread, lesson, risk, or final state appears
-
-The archive must index those motions explicitly. A flat `event_type` is not
-enough. Each event should also carry universal facets:
+Automatic update is part of the architecture, not a collection of timers.
 
-- `family`: the broad domain, such as communication, command execution,
-  workspace mutation, context memory, verification, or risk
-- `phase`: where the event sits in the work cycle
-- `actor`: user, assistant, tool, Codex runtime, or unknown
-- `action`: the verb performed
-- `object`: what the action touched
-- `outcome`: requested, observed, changed, failed, succeeded, verified,
-  compacted, unresolved, candidate, and so on
-- `relationships`: nearby sequence links and correlation links such as a tool
-  output responding to a tool call
-
-This keeps the classifier portable across projects while still allowing later
-layers to ground meaning in a specific workspace.
-
-Above conversation-act classification, the archive also carries a generated
-`session_act` route layer for operational motions that agents should be able to
-query directly: memory reads and citations, Codex-memory access, MCP resource
-reads, goal updates, hook receipts, tool calls, commands, mutations,
-verification, and compaction boundaries. `session_act` is navigation, not
-reviewed truth; every act must keep the raw event ref, tool/correlation
-metadata where available, and confidence.
+Each projection should expose:
 
-Session-level indexes should also expose generated `work_context`: the best
-current route signal for which real workspace or repository the session is
-about. This is inferred from `cwd`, grounding files, memory surfaces, and
-indexed path evidence. It should name concrete roots such as
-`aoa-session-memory`, `Agents-of-Abyss`, `aoa-techniques`, `Tree-of-Sophia`, or
-another actual repository when evidence supports it, while staying explicitly
-ambiguous or unresolved when the evidence is weak.
+- schema and producer version;
+- source epoch or fingerprint;
+- processed watermark;
+- dependency state;
+- last successful semantic update;
+- current freshness state;
+- deferred, blocked, failed, and retry information.
 
-## Event Metabolism
+Projection dependencies should propagate dirty state from capture through
+segmentation, indexes, episodes, search, graph, and narrative layers.
+Incremental workers should be idempotent, bounded, restartable, and safe under
+concurrent readers.
 
-Every event may become experience.
-
-Every repeated experience may become a pattern.
+Active sessions need quiet-window/debounce behavior. Resource-heavy work needs
+backpressure, bounded retry, priority, and starvation visibility. A timer or
+systemd success proves only that a launcher ran; it does not prove semantic
+freshness.
 
-Every reviewed pattern may become a skill.
+The query plane must distinguish:
 
-Every stable skill may become automation.
+- `current`;
+- `stale-readable`;
+- `deferred`;
+- `blocked`;
+- `failed`;
+- `truncated`;
+- `fallback`;
+- `unresolved`.
 
-Every automation must remain inspectable.
-
-The event taxonomy and distillation routes exist for this reason. A `COMMAND`
-may become a safe runner pattern. An `ERROR` may become a preflight check. A
-`DEAD_BRANCH` may become a routing rule. A `DECISION` may become an
-architecture principle. A `PROCESS_LESSON` may become a skill amendment.
+Manual maintenance is a recovery and operator route, not the intended hidden
+happy path.
 
-Nothing should jump directly from raw event to automation without review.
+## Access Plane
 
-## Diagnostics, Not Panic Memory
+CLI commands, skills, indexes, and MCP expose access to the organ. They do not
+become evidence or proof authorities.
 
-If raw session material is unavailable, do not normalize the failure by writing
-a vague panic packet and moving on.
+The current MCP contract is read-only and plan-only. It may return typed route
+packets, freshness, refs, budgets, and next commands. Mutating maintenance,
+repair, promotion, and owner decisions remain behind explicit owner commands
+and review gates.
 
-Raw-unavailable is an infrastructure incident.
+Agent-facing packets should be small enough for active context and should
+prefer refs and expansion routes over copied transcript bodies. The detailed
+agent access contract lives in `DESIGN.AGENTS.md`.
 
-The correct response is diagnostic:
+## Portability and Adapters
 
-- where was the raw transcript expected?
-- did the path exist?
-- was it readable?
-- which `session_id` was active?
-- which hook fired?
-- which working directory invoked it?
-- are there alternative transcript candidates?
-- was the session rotated, moved, compacted, or deleted?
-- what recovery action is safe?
+The portable core should not require a particular workspace, operator, model
+provider, host cache, or AoA deployment.
 
-Write the incident. Write the diagnostic JSON. Keep the failure visible so the
-capture system improves.
+An adapter may provide:
 
-## Hooks and Skills
+- session/run identity;
+- event and actor mapping;
+- transcript or evidence source;
+- lifecycle and compaction markers;
+- tool/correlation metadata;
+- model/runtime metadata;
+- capture and recovery hooks.
 
-Hooks are the capture reflex. Skills are the conscious recovery and refinement
-route.
+The adapter must not weaken the common evidence, provenance, freshness, and
+privacy contract.
 
-Hooks should be minimal, schema-valid, fail-open, and biased toward preserving
-or refreshing evidence. They must not perform heavy interpretation inside the
-active Codex lifecycle unless the operator deliberately enables that mode.
+Codex-specific hooks and grounding belong to the Codex adapter and operational
+docs. Other runtimes may have no compaction hooks or may produce different
+evidence streams.
 
-Compaction hooks are preservation hooks before they are indexing hooks. They
-should capture the receipt and mirror readable raw state, then allow a later
-manual rebuild, import, or reindex pass to do the heavier segment and index
-work. A hook that times out has failed its first duty, even if its intended
-work was useful.
+Portable source and installed runtime state are distinct. Generated bundles
+must be produced through the owner export route and must exclude private raw
+sessions, runtime databases, diagnostics, secrets, and host-only state by
+default.
 
-Skills should handle the work that benefits from deliberate attention:
+## Experience Metabolism
 
-- manually rebuilding an archive from raw JSONL
-- rehydrating a session from indexes
-- diagnosing raw-unavailable failures
-- running first-pass distillation
-- promoting reviewed lessons toward patterns, skills, or automation
-
-The design uses both because neither is enough alone. A hook catches the
-moment. A skill lets an agent return, inspect, repair, and improve the system
-without pretending the hook already understood the work.
-
-## Agent Entry Route
-
-When an agent enters `.aoa`, it should proceed in this order:
-
-1. Read nearest `AGENTS.md`.
-2. Read this `DESIGN.md`.
-3. Read `DESIGN.AGENTS.md` for agent-facing route shape.
-4. Read `README.md` for current implementation shape.
-5. Read `NAMING.md` before touching paths or generated names.
-6. Read `sessions/AGENTS.md`, `sessions/INDEX.md`, `SESSION_NAMES.md`, and
-   `session-registry.json` before choosing a session.
-7. Inside a session, read `AGENTS.md`, then `SESSION.md`, then
-   `session.manifest.json`.
-8. Read the relevant segment index before opening a full segment.
-9. Use raw JSONL only to verify, recover, or inspect exact evidence.
-
-This route keeps the agent from eating the whole archive when it only needs a
-map.
-
-## Design as Portability
-
-`.aoa` must remain a portable kernel.
-
-Local Agents of Abyss, Tree of Sophia, AbyssOS, and operator-specific meaning
-may overlay it, but the kernel should not require those meanings to function.
-
-The portable kernel owns:
-
-- capture shape
-- archive structure
-- naming law
-- event taxonomy
-- indexes
-- diagnostics
-- rehydration route
-- distillation hooks and statuses
-
-Local overlays own:
-
-- project doctrine
-- repository-specific meanings
-- local quest, checkpoint, role, and runtime state
-- local organ relationships
-- private operator context
-
-Keep this boundary clean so the bundle can later move to its own repository.
-
-## Design as AoA Organ
-
-In AoA terms, `.aoa` is not the city center and not the whole operating system.
-
-It is a memory organ.
-
-It helps the wider system survive long work, return to evidence, metabolize
-experience, and grow better processes. It should cooperate with skills, hooks,
-playbooks, evals, routing, and runtime layers without stealing their authority.
-
-The organ is healthy when it preserves, indexes, diagnoses, and routes.
-
-It is unhealthy when it claims to know, judge, promote, or automate without the
-review path that belongs to another layer.
-
-## Good Design Feels Like
-
-A new agent can find the archive.
-
-A tired agent can rehydrate without rereading everything.
-
-A human can inspect why a claim exists.
-
-A session can survive compaction without losing its raw trail.
-
-A failure becomes a diagnostic artifact, not a silent gap.
-
-A repeated lesson has a path toward a skill.
-
-A future repository can adopt the bundle without inheriting local doctrine.
-
-## Bad Design Smells Like
-
-- raw deletion as cleanup
-- giant unindexed Markdown dumps
-- summaries replacing evidence
-- vague names such as `misc`, `tmp`, `old`, or `unknown`
-- hooks that block normal work by accident
-- generated artifacts treated as reviewed authority
-- incidents hidden as normal resume notes
-- distillation mixed into preservation
-- local AoA doctrine hardcoded into the portable kernel
-- automation born directly from unreviewed raw events
-
-## Stop Lines
-
-Do not make `.aoa` clever before it is reliable.
-
-Do not make it authoritative before it is reviewed.
-
-Do not make it local-only before it is portable.
-
-Do not let agents confuse memory with judgment.
-
-Do not let compaction erase process history.
-
-The enduring law is:
+The organ should make this path possible without shortcutting it:
 
 ```text
-Preserve first.
-Index aggressively.
-Diagnose failures.
-Distill later.
-Promote only through review.
-Automate only when inspectable.
+thought or intent
+  -> task
+  -> action
+  -> artifact or observation
+  -> evaluation
+  -> revised understanding
+  -> skill / automation / dataset / training candidate
+  -> changed agent
+  -> new experience
+```
+
+Each arrow is a typed, evidence-bearing transformation, not a loose semantic
+association.
+
+Raw experience may produce candidates. Repeated experience may justify an
+eval. An eval may justify a skill or automation change. A reviewed corpus and
+model-development owner may justify training. None of those transitions is
+automatic.
+
+Training-oriented exports, when they exist, must preserve provenance,
+selection criteria, privacy and licensing posture, model/runtime lineage,
+negative examples, rejected hypotheses, and eval results. The memory organ may
+prepare evidence-backed datasets; it is not the trainer or the authority that a
+model became better.
+
+Cross-model continuity should come from portable, inspectable memory and
+lineage, not from pretending successive models are the same process.
+
+## Quality and Proof
+
+Quality is multi-dimensional:
+
+- retrieval: exact recall, semantic coverage, ranking, omissions, duplicates,
+  and false neighbors;
+- relationships: edge/path precision, temporal order, causality, and
+  supersession;
+- reading: evidence completeness, contradiction handling, abstention, and
+  unsupported claims;
+- system: freshness, idempotency, recovery, version coherence, and parity;
+- resources: latency, context cost, storage, cardinality, update cost, and
+  headroom.
+
+Formal tests are necessary for mechanical invariants such as schema validity,
+ref resolution, deterministic serialization, idempotency, bounded budgets, and
+portable parity.
+
+Semantic correctness requires manual evidence review on real sessions,
+including negative, collision, temporal, causal, multilingual, randomized, and
+insufficient-evidence cases. Stable failures discovered manually may become
+minimal regression tests or eval cases afterward. One aggregate score or one
+LLM judge is not sufficient proof.
+
+An architectural change should be compared against the same evidence corpus,
+versions, freshness, and budgets. A mean improvement must not hide a critical
+exact-recall, provenance, freshness, or abstention regression.
+
+The organ should eventually be able to recover the meaningful trajectory of
+its own development through independent exact, episode, temporal, entity, and
+causal routes. Failure of self-provenance is a system defect, not merely a
+documentation gap.
+
+## Resource and Storage Law
+
+Preservation and projection have different storage obligations.
+
+Protected raw evidence may be expensive. Generated projections should earn
+their weight through measured query value. Cardinality, duplicate payloads,
+WAL growth, latency, and context cost must stay observable.
+
+Do not prune a projection merely because it is large. First prove a replacement
+with:
+
+- equal or better quality in its intended lanes;
+- resolvable evidence refs;
+- freshness and fallback;
+- bounded cost;
+- rebuild and rollback;
+- before/after cardinality and storage;
+- repeated manual verification after cleanup.
+
+An “aggregate” that increases rows or duplicates another complete
+representation is not a successful aggregation.
+
+## Privacy, Security, and Retention
+
+Raw sessions may contain private prompts, paths, outputs, identities, or
+secrets. Access and export must follow least exposure:
+
+- portable bundles exclude private session material by default;
+- diagnostics and accounting avoid raw prompt/text leakage;
+- packet previews are bounded and purpose-specific;
+- derived training or sharing requires explicit review and sanitization;
+- deletion, redaction, and retention operations are typed and auditable;
+- a redacted projection must not silently pretend the protected raw source was
+  rewritten.
+
+## Healthy Design
+
+The organ is healthy when:
+
+- sessions survive compaction and runtime boundaries;
+- agents find exact evidence without loading the archive;
+- semantic retrieval resists boilerplate and false correlation;
+- episodes reconstruct intent, action, result, and verification;
+- graph relations improve the lanes they serve;
+- stale state is visible and automatically catches up;
+- every important claim resolves to evidence;
+- owner terrain receives only reviewed durable truth;
+- the portable core remains useful beyond one runtime.
+
+The organ is unhealthy when:
+
+- summaries replace evidence;
+- Codex-specific mechanics define the whole identity;
+- generated projections masquerade as truth;
+- mention becomes usage or causality;
+- freshness depends on an undocumented manual command;
+- graph or search weight grows without measured value;
+- session experiments become permanent repository clutter;
+- experience jumps directly into skills, automation, or training;
+- current owners are overridden by historical memory.
+
+## Enduring Laws
+
+```text
+Preserve evidence.
+Keep identity stable.
+Project without replacing.
+Retrieve by intent.
+Read before claiming.
+Expose freshness and uncertainty.
+Review before promotion.
+Let experience grow capability only through proof.
 ```

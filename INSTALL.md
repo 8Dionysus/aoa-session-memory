@@ -33,8 +33,8 @@ must never be treated as public-safe merely because the kernel is portable.
 
 Kernel upgrades preserve existing session directories and rebuild the
 registry/index views from those archives. Forced export may replace portable
-files while preserving repository metadata and the local KAG provider. It must
-not silently delete runtime evidence.
+files while preserving repository-owned `.git`, `.github`, and `kag` surfaces.
+It must not silently delete runtime evidence.
 
 ## Hook rendering
 
@@ -58,6 +58,11 @@ Source validation, installed-root health, and completion audit are different
 questions. A clean portable bundle may validate without runtime sessions;
 doctor evaluates the selected installation; audit can still report missing
 live grounding.
+
+For the Codex adapter, grounding validates the effective context and
+auto-compaction contract. Explicit configuration wins when present; otherwise
+the command resolves the selected model defaults through `codex debug models`
+instead of requiring redundant local overrides.
 
 The executable CLI owns exact export, install, hook-rendering, skill-install,
 validate, doctor, and audit syntax. Inspect the selected subcommand help in
