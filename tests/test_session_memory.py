@@ -35161,11 +35161,14 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     git_dir = target / ".git"
+    workflow = target / ".github" / "workflows" / "repo-validation.yml"
     kag_dir = target / "kag"
     stale_dir = target / "stale"
     stale_file = target / "stale.txt"
     git_dir.mkdir(parents=True)
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: Repo Validation\n", encoding="utf-8")
     kag_dir.mkdir()
     (kag_dir / "manifest.json").write_text('{"repo":"aoa-session-memory"}\n', encoding="utf-8")
     stale_dir.mkdir()
@@ -35176,6 +35179,7 @@ def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
 
     assert git_dir.exists()
     assert (git_dir / "HEAD").exists()
+    assert workflow.read_text(encoding="utf-8") == "name: Repo Validation\n"
     assert kag_dir.exists()
     assert (kag_dir / "manifest.json").exists()
     assert not stale_dir.exists()
@@ -35601,6 +35605,100 @@ def test_codex_grounding_accepts_expected_config_and_markers(tmp_path: Path) -> 
     assert payload["ok"] is True
     assert payload["compact_ratio"] == 0.8
     assert all(payload["schema_markers"].values())
+
+
+def test_codex_grounding_accepts_resolved_model_defaults(tmp_path: Path) -> None:
+    workspace = tmp_path / "Workspace"
+    aoa_root = workspace / ".aoa"
+    (workspace / ".codex").mkdir(parents=True)
+    (workspace / ".codex" / "config.toml").write_text(
+        "\n".join(
+            [
+                'model = "gpt-5.6-sol"',
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    native = tmp_path / "codex-native"
+    native.write_bytes(
+        b"SessionStart user-prompt-submit.command.input PreCompact pre-compact.command "
+        b"PostCompact post-compact.command stopReason"
+    )
+    native.chmod(0o755)
+    models_output = json.dumps(
+        {
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "context_window": 272000,
+                    "max_context_window": 272000,
+                    "auto_compact_token_limit": None,
+                    "effective_context_window_percent": 95,
+                }
+            ]
+        }
+    )
+
+    payload = module.codex_grounding(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        codex_native_bin=native,
+        codex_version_output="codex-cli 0.144.3",
+        codex_models_output=models_output,
+    )
+
+    assert payload["ok"] is True
+    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model_context_window"] == 272000
+    assert payload["model_auto_compact_token_limit"] == 244800
+    assert payload["compact_ratio"] == 0.9
+    assert payload["model_context_window_source"] == "model_catalog"
+    assert payload["model_auto_compact_token_limit_source"] == "derived_model_default"
+
+
+def test_codex_grounding_rejects_unresolved_model_defaults(tmp_path: Path) -> None:
+    workspace = tmp_path / "Workspace"
+    aoa_root = workspace / ".aoa"
+    (workspace / ".codex").mkdir(parents=True)
+    (workspace / ".codex" / "config.toml").write_text(
+        "\n".join(
+            [
+                'model = "missing-model"',
+                "",
+                "[features]",
+                "hooks = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    native = tmp_path / "codex-native"
+    native.write_bytes(
+        b"SessionStart user-prompt-submit.command.input PreCompact pre-compact.command "
+        b"PostCompact post-compact.command stopReason"
+    )
+    native.chmod(0o755)
+
+    payload = module.codex_grounding(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        codex_native_bin=native,
+        codex_version_output="codex-cli 0.144.3",
+        codex_models_output='{"models": []}',
+    )
+
+    assert payload["ok"] is False
+    assert payload["model"] == "missing-model"
+    assert payload["model_context_window"] == 0
+    assert payload["model_auto_compact_token_limit"] == 0
+    compact_check = next(
+        check for check in payload["checks"] if check["name"] == "compact_window_configured"
+    )
+    assert compact_check["ok"] is False
 
 
 def test_resolve_codex_native_binary_supports_nested_npm_vendor_layout(tmp_path: Path, monkeypatch) -> None:

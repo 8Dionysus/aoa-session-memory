@@ -58,16 +58,20 @@ Use this skill in any Codex session when the task touches:
 
 ## Procedure
 
-1. Read `/srv/AbyssOS/.aoa/AGENTS.md`, `/srv/AbyssOS/.aoa/DESIGN.md`, and
-   `/srv/AbyssOS/.aoa/DESIGN.AGENTS.md`.
-2. Choose the narrow bundle skill from `/srv/AbyssOS/.aoa/skills/`.
-3. Use `/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py` for commands.
-4. Keep historical raw/session material intact unless the user explicitly asks
+1. Read `/srv/AbyssOS/.aoa/AGENTS.md` and classify the task before loading
+   deeper context.
+2. Read only the owning surface: `DESIGN.md` for architecture or boundaries,
+   `DESIGN.AGENTS.md` for query/access behavior, the relevant `PIPELINE.md`
+   section for operations, `INSTALL.md` for portability, `NAMING.md` for names,
+   or `READINESS.md` for proof posture.
+3. Choose the narrow bundle skill from `/srv/AbyssOS/.aoa/skills/`.
+4. Use `/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py` for commands.
+5. Keep historical raw/session material intact unless the user explicitly asks
    for a repair.
-5. If the task changes portable behavior, export to
+6. If the task changes portable behavior, export to
    `/srv/AbyssOS/bundles/aoa-session-memory` and validate both source and
    standalone surfaces.
-6. If the user-level router itself is missing or stale, run
+7. If the user-level router itself is missing or stale, run
    `install-user-skill` from the active install root instead of hand-writing a
    symlink.
 

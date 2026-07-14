@@ -1,370 +1,344 @@
-# AoA Session Memory Agent Surface Design
+# AoA Session Memory Agent Access Contract
 
 ## Role
 
-`DESIGN.AGENTS.md` describes the desired form of agent-facing guidance inside
-the `.aoa` session-memory kernel.
+`DESIGN.AGENTS.md` defines how an agent should enter, query, inspect, and
+leave the session-memory organ without flattening evidence layers or spending
+unbounded context.
 
-It is not an `AGENTS.md` card, naming table, schema, generated index, or
-distillation report.
+The filename is retained as a portable compatibility surface. It is not a
+second root instruction file and it does not duplicate `AGENTS.md`.
 
-It answers one question:
+This file owns:
 
-What shape should agent-facing surfaces take so an agent can preserve, route,
-rehydrate, review, and name sessions without losing raw evidence or layer
-boundaries?
+- context-loading and progressive-disclosure law;
+- query-intent routing;
+- evidence-packet shape;
+- bounded escalation and abstention;
+- freshness and fallback presentation;
+- the boundary between read access and mutation.
 
-## Design Thesis
+Architecture belongs to `DESIGN.md`. Commands and recovery procedures belong
+to `PIPELINE.md`. Naming belongs to `NAMING.md`. Current status belongs to
+live diagnostics.
 
-The session-memory bundle should not give agents one giant instruction wall.
+## Agent Access Thesis
 
-It should give them a layered route mesh:
+An agent should receive the smallest evidence-bearing packet that can answer
+the question or name the next honest expansion.
 
-- root agent law for immediate boundaries;
-- design surfaces for system form and agent-facing form;
-- pipeline and readiness surfaces for operational gates;
-- naming topology for stable labels, semantic names, and evidence anchors;
-- generated indexes that guide navigation without becoming authority;
-- session-local cards and manifests that narrow the lane;
-- skills that turn deliberate recovery and review into repeatable workflows.
+More context is not automatically better. A useful access surface:
 
-Agent guidance is not stronger because it says more. It is stronger when the
-right surface appears at the right layer and points back to stronger evidence.
+- begins from the user's actual intent;
+- selects the cheapest sufficiently specific route;
+- keeps provenance and freshness visible;
+- distinguishes navigation from proof;
+- expands only when the current packet is insufficient;
+- stops rather than filling the gap with a plausible neighbor.
 
-The root names the archive law.
-The design names the system form.
-The index names the route.
-The manifest names the technical identity.
-The raw transcript keeps the evidence.
-The skill performs the deliberate pass.
-The closeout returns the work to future agents.
+The organ should give the agent a map and resolvable coordinates, not an
+instruction wall or copied archive.
 
-## Design as Layer Ladder
+## Context Loading Law
 
-Every later task is a quality test of the layers beneath it.
+Always-loaded guidance should remain small. Deeper surfaces are loaded
+just-in-time.
 
-Session naming is the clearest example. A fast and accurate naming pass can
-only happen when the earlier layers are already coherent:
+Use this order:
 
-- raw transcript provenance is preserved;
-- compaction intervals and segments are current;
-- segment indexes expose decisions, commands, errors, lessons, and final state;
-- session-act and work-context indexes expose memory, MCP, goals, hooks, tools,
-  and the likely active repository without replacing raw refs;
-- route-signal indexes expose scope contracts, authority surfaces, verification
-  states, failure modes, memory provenance, freshness, owner routes, runtime
-  state, mutation surfaces, access boundaries, and operator preferences as
-  route evidence, not reviewed truth;
-- the agent atlas exposes a small tree of route axes before agents open heavy
-  archive material;
-- manifests, registry records, and archive-local TOC agree;
-- semantic names can carry raw refs and coverage rather than naked aliases;
-- rehydration and review packets can explain why a name is deserved.
+1. Read the nearest `AGENTS.md`.
+2. Classify the task.
+3. Open only the owning design, operation, naming, install, or readiness
+   surface.
+4. Use generated indexes or a typed query route to choose evidence.
+5. Open bounded segment/raw material only when the packet cannot establish the
+   required claim.
 
-If naming feels hard, the answer is usually not to invent a cleverer title. The
-answer is to inspect which earlier layer failed to make the session legible.
+Do not read all root docs, all session indexes, or a whole transcript as a
+default orientation ritual.
 
-This is the ladder rule:
+## Route by Question
+
+| Question shape | First route |
+| --- | --- |
+| Exact path, UUID, command, flag, error, phrase, date, or identifier | exact/literal planner and bounded lexical route |
+| Does an entity exist and where is it registered? | typed entity registry |
+| Was an entity mentioned, selected, invoked, used, or consequential? | typed usage chain with state distinctions |
+| What did the agent answer or report? | agent-event response/closeout route |
+| What happened during one task? | task episode |
+| What happened before or after an event? | bounded neighborhood or timeline |
+| What was true then or is valid now? | temporal/validity route with supersession |
+| What caused, resolved, or verified an outcome? | action-result episode, then causal graph if needed |
+| How are two specific entities connected? | exact anchors, then bounded graph bridge |
+| What pattern recurred across sessions or projects? | lazy narrative/global route over episodes |
+| Is a projection current or why is it delayed? | projection or maintenance status |
+| What does a committed portable statistic measure? | `stats/` manifest, revision packet, and referenced source corpus |
+| Is there enough evidence to answer? | evidence-reading and abstention route |
+
+If the query is ambiguous, expose the competing interpretations or ask for a
+narrower anchor. Do not silently choose the broadest and most expensive route.
+
+## Typed Authority Route
+
+The correct next surface depends on the claim:
+
+- session occurrence: raw/segment/session evidence;
+- current repository behavior: the repository owner;
+- evaluation verdict: the eval owner;
+- skill meaning: the skill source;
+- runtime health: live runtime evidence;
+- revision-bound portable fixture coverage: the owner-local stats packet and
+  its source refs, never a live-readiness inference;
+- architecture: the current owner design/decision surface;
+- navigation: generated session-memory projections.
+
+Session memory may locate an owner surface. It must not answer an owner-truth
+question from historical session evidence alone.
+
+## Evidence Packet Contract
+
+Every agent-facing packet should expose, when applicable:
+
+- normalized query intent;
+- selected route and why it was selected;
+- projection, schema, model, and classifier versions;
+- source epoch, watermark, or fingerprint;
+- freshness state;
+- result and expansion budgets;
+- candidate evidence with stable IDs;
+- raw, segment, session, receipt, or external owner refs;
+- confidence and uncertainty;
+- truncation, omission, fallback, and timeout state;
+- conflicts, supersession, and rejected correlations;
+- exact next expansion command or route;
+- an explicit insufficiency reason when no supported answer exists.
+
+A preview without a resolvable ref is orientation only. A packet without
+freshness cannot claim to represent current state.
+
+## Bounded Escalation
+
+Escalation should be monotonic in cost and explicit in purpose:
 
 ```text
-preservation -> segmentation -> indexing -> routing -> review -> naming -> promotion
+typed identity or exact anchor
+  -> typed postings / exact lexical
+  -> episode or bounded neighborhood
+  -> semantic/hybrid candidates
+  -> typed graph expansion
+  -> lazy narrative/global consolidation
+  -> bounded raw verification
 ```
 
-No layer should pretend the previous one is complete. A later pass may reveal
-weakness below it, but the repair belongs at the weakest responsible layer.
+This is a routing shape, not a mandatory pipeline. A query may enter at a later
+stage when its intent requires it, but it should not pay for unrelated stages.
+
+Each escalation must say what evidence was missing from the previous packet.
+Stop escalation when:
+
+- the supported claim is already established;
+- the budget is exhausted;
+- additional candidates add only duplicates or generic neighbors;
+- freshness is too weak;
+- the required owner or raw evidence is unavailable.
 
-## Agent Surface Anatomy
+## Entity Usage Semantics
 
-### Root card
+Agents must keep the following states distinct:
 
-`AGENTS.md` owns the immediate route law: what must be read, what is generated,
-what must not be claimed, and which evidence is protected.
+```text
+registered
+mentioned
+prompt-visible
+selected
+loaded
+read
+procedure-observed
+invoked
+completed
+verified
+consequence-producing
+failed
+deflected
+```
 
-It should stay compact. It routes agents into the deeper surfaces instead of
-trying to hold the whole design.
+Not every producer can prove every state. A loaded skill payload proves that
+the payload was present, not that the model read or followed it. A tool name in
+system instructions proves visibility, not use. An adjacent result with a
+different correlation ID is context, not consequence.
 
-### System design
+Packets may expose candidate states and blocked claims. They must not collapse
+those states into one generic “used” count.
 
-`DESIGN.md` owns the memory system form: raw truth, compaction intervals,
-indexes, diagnostics, distillation, hooks, skills, and portability.
+## Source-Aware Reading
 
-It tells agents what kind of archive they are preserving.
+Text source is part of meaning.
 
-### Agent-surface design
+Agents should distinguish:
 
-This file owns the agent-facing form: how route surfaces, generated companions,
-session-local cards, skills, validation, naming gates, and closeout expectations
-should cooperate.
+- user intent and correction;
+- assistant final answer;
+- assistant progress or analysis boundary;
+- structured tool call;
+- command and command output;
+- structured result, error, or status;
+- raw tool dump;
+- system/developer instruction;
+- loaded skill payload;
+- repository documentation;
+- generated summary or index text.
 
-It tells agents how to move through the archive without flattening the layers.
+System instructions, skill bodies, and documentation can contain many
+operational words without providing operational evidence. Structured identity,
+correlation, status, action, and receipt evidence should outrank broad text
+association.
 
-### Naming topology
+## Episode Route
 
-`NAMING.md` owns durable labels, semantic names, scopes, anchors, fallback
-words, and generated segment roles.
+Use episodes when the question concerns a coherent piece of work rather than a
+single token match.
 
-It should be read before any physical relabel, semantic `name-session`, naming
-queue, or naming-readiness pass.
+A task episode should expose:
 
-### Pipeline and readiness
+- initiating intent or correction;
+- actions and tool/command refs;
+- outcomes and errors;
+- verification and closeout;
+- unresolved branches;
+- owner/work context;
+- time span and evidence refs.
 
-`PIPELINE.md` owns operational flow.
-`READINESS.md` owns the durable readiness model; generated diagnostics own
-current proof posture and coverage.
+Episode packets are generated navigation. Open their refs before promoting a
+decision, causal claim, lesson, or current-state statement.
 
-They are the surfaces an agent should use before deciding that a layer is ready
-for the next pass.
+## Graph Route
 
-### Generated companions
+Start graph work from specific anchors obtained through exact or hybrid
+retrieval. Prefer:
 
-`sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`,
-`SESSION_NAMES.md`, `session-name-index.json`, `session-registry.json`,
-session indexes, segment indexes, generated atlas entries, reports, and
-diagnostics are companions.
+- a bridge between two known anchors;
+- a bounded neighborhood;
+- a temporal or causal path;
+- a typed owner/dependency relation.
 
-They route and compress. They do not author truth. They must stay reproducible
-from stronger evidence or explicit review.
+Every graph packet needs node, edge, time, evidence, and context budgets.
+Generic high-degree nodes should not expand without a specificity gate.
 
-### Agent atlas
+Cooccurrence and mention edges are discovery hints. They are not causality,
+usage, ownership, or consequence.
 
-`maps/` is the source-owned skeleton for the generated atlas.
+## Narrative and Global Route
 
-The root atlas files and axis `README.md` files are authored route shape.
-`maps/by-*/entries/`, per-axis indexes, and root atlas indexes are generated
-route companions. The axis tree may grow as the archive learns new recurring
-route questions, but every entry should keep the same small shape: route key,
-session identity, work context, authority surface, confidence, route layer,
-signal count, next route, and evidence refs.
+Global questions should not broaden every local query.
 
-### Session-local surfaces
+Use a narrative route only for questions about recurring patterns, changing
+decisions, phases, long arcs, or cross-session/project themes. Begin from
+episodes or typed anchors, consolidate lazily, and retain exceptions and
+evidence refs.
 
-Each session directory carries its own `AGENTS.md`, `SESSION.md`,
-`session.manifest.json`, `session.index.json`, raw source metadata, segment
-indexes, diagnostics, and distillation artifacts.
+A narrative answer is incomplete if it cannot identify the episodes and
+evidence that support its important claims.
 
-Those surfaces narrow the lane for that archive. The raw transcript remains the
-black box.
+## Freshness Presentation
 
-### Skills
+Agents must preserve the difference between:
 
-Skills are deliberate routes for work that should not live inside a lifecycle
-hook: archive rebuilds, raw diagnostics, rehydration, first-pass distillation,
-manual review, promotion review, stress passes, and reindexing.
+- `current`;
+- `stale-readable`;
+- `deferred`;
+- `blocked`;
+- `failed`;
+- `truncated`;
+- `fallback`;
+- `unresolved`.
 
-When a task becomes recurring, prefer a skill route over a long chat-only
-procedure.
+A stale-readable packet may still be useful for older evidence, but it cannot
+answer “current” without a stronger fallback or an explicit caveat. A timer
+success is not semantic freshness. A quiet-window defer is not corruption.
 
-### Source districts
+When a packet is stale, return the stable evidence that remains usable and the
+narrowest catch-up or fallback route.
 
-Portable source districts such as `config/`, `hooks/`, `schemas/`, `scripts/`,
-`skills/`, `tests/`, and `sessions/` should carry their own `AGENTS.md` card.
+## MCP and Other Access Planes
 
-Those cards are not replacements for root law. They narrow the lane at the
-point where an agent is likely to edit or inspect that district.
+MCP is an access plane, not proof authority.
 
-`diagnostics/` is different: it is a live runtime evidence district. Its
-`AGENTS.md` should guide inspection and cleanup, but it should not make
-diagnostics part of the clean portable export.
+The current session-memory MCP should remain read-only and plan-only. It may:
 
-## Source Order
+- expose typed searches and route packets;
+- report projection freshness and maintenance needs;
+- return bounded refs and expansion commands;
+- compact payloads for agent context.
 
-Agents should rank evidence by source strength before naming, reviewing,
-repairing, or promoting anything:
+It must not:
 
-1. Raw transcript JSONL and raw source metadata.
-2. Session manifest technical identity: `session_id`, source path, archive
-   path, span, counts, and diagnostic state.
-3. Segment Markdown and segment indexes generated from the raw archive.
-4. `SESSION.md`, `session.index.json`, `session-registry.json`,
-   `sessions/AGENTS.md`, `sessions/INDEX.md`, `sessions/index.json`,
-   `SESSION_NAMES.md`, and `session-name-index.json`.
-5. Diagnostics, stress-pass reports, rehydrate packets, review packets, and
-   provisional distillation outputs.
-6. Semantic names and aliases.
-7. Promoted skills, automation, policy, or durable doctrine.
-
-Lower layers may guide navigation through stronger layers, but they do not
-override them. A semantic name can be useful before review, but it cannot
-erase the `session_id`, raw path, or coverage limits that made the name.
-
-## Naming-Readiness Before Naming
-
-Do not start a broad naming pass by applying names.
-
-Start by asking whether the archive can support names:
-
-1. Does the session have readable raw evidence or a visible raw-unavailable
-   diagnostic?
-2. Do segment counts match current compaction boundaries where raw is present?
-3. Do `SESSION.md`, `session.index.json`, `session.manifest.json`, registry,
-   `SESSION_NAMES.md`, `sessions/AGENTS.md`, and `sessions/INDEX.md` agree?
-4. Can the candidate name cite raw refs, segment refs, or review packet refs?
-5. Is the candidate a whole-session name, a phase name, a topic name, or an
-   alias?
-6. Is coverage clear enough to avoid naming one late phase as the whole
-   session?
-7. Is the session small enough for direct naming, or large enough to require
-   phase/topic discovery first?
-8. Is the result still provisional, or has a reviewed distillation accepted it?
-
-If any answer is weak, record the blocker and route to recovery, reindex,
-manual review, or a narrower candidate queue. Do not hide the weakness behind a
-confident-looking semantic name.
-
-The `naming-readiness` CLI route refreshes the lightweight naming route in `SESSION_NAMES.md` and
-`sessions/INDEX.md`. It does not apply names and does not close review.
-
-For long sessions, the next layer is the `phase-discovery` CLI route. It writes
-`naming/phase-discovery.json` and `.md` as open candidates. A later
-agent may apply accepted `phase` or `topic` names, but the candidate file itself
-is not reviewed truth.
-
-Every candidate should expose its linked signal bundle. A phase name is stronger
-when the user intent, touched paths, command/check/error/mutation counts,
-coverage range, and raw refs all point in the same direction. Generic prompts
-should become low-confidence path/event candidates, not durable names.
-
-Showing weakness is not enough. The phase-discovery artifact must also create a
-review queue: each weak candidate needs an action, synthesis inputs, and an
-apply template so the next agent can turn diagnosis into a reviewed semantic
-name without guessing the route.
-
-The apply route should be procedural, not a copied low-level command. A weak
-candidate must pass through `review-phase-name --reviewed-name ... --apply`;
-`--use-candidate` is only valid for candidates already marked
-`ready_for_raw_check`. Successful application refreshes the name index and the
-sessions table of contents, so the route does not depend on the agent holding
-the whole chain in active context.
-
-For archive-wide naming, agents should use a naming wave. The wave is a
-multi-session review packet that turns the readiness map into explicit
-actions: sync, reindex, phase review, semantic session-name review, or skip.
-It can synthesize candidate umbrella names, but the apply layer still requires
-`reviewed_name` unless the operator deliberately chooses the high-confidence
-`--accept-proposed` path. This keeps speed from becoming silent promotion.
-
-Naming waves must keep semantic names separate from physical relabels. A wave
-may attach or revise a `session` semantic name with raw refs and bridge
-anchors; it may not move archive directories. Directory relabeling is a later
-operation after the semantic map has proved itself.
-
-## Post-Change Route Review
-
-Any change to a route surface should end by checking the adjacent surfaces it
-now implies.
-
-Use this review after changing:
-
-- root route files: `AGENTS.md`, `DESIGN.md`, this file, `README.md`,
-  `PIPELINE.md`, `READINESS.md`, `INSTALL.md`, or `NAMING.md`;
-- generator behavior, schemas, config, hook output, diagnostics, indexes, or
-  naming logic;
-- skills, user-level router behavior, exported bundle contents, or tests;
-- session-local cards, manifests, generated indexes, or review packet shape.
-
-Do not update every surface mechanically. Ask which route a future agent will
-follow, which file will be read first, and whether the changed meaning is now
-visible at the right layer.
-
-The minimum closeout for such a change should state:
-
-- changed route surfaces;
-- regenerated or exported companions;
-- validation run against source and, when portable behavior changed, the
-  standalone bundle;
-- skipped checks and why;
-- remaining weak layer, if any.
-
-## Decision Review
-
-`.aoa` does not need a decision log for every wording fix.
-
-Use a durable decision artifact only when a change alters archive topology,
-source order, portability law, naming policy, promotion rules, hook behavior,
-or the expected route for future agents. Until such a decision district exists,
-record the decision in the closest design/readiness surface and in the final
-closeout.
-
-## Authority Boundaries
-
-Agent-facing surfaces may:
-
-- route work;
-- name the next evidence surface;
-- require validation;
-- expose layer readiness;
-- propose names, review packets, and promotion candidates;
-- preserve closeout memory for the next agent.
-
-They must not:
-
-- turn generated indexes into source truth;
-- treat semantic names as reviewed claims without review;
-- replace raw refs with vibes or broad summaries;
-- repair physical labels when a semantic name is the safer layer;
-- call raw-unavailable sessions understood;
-- close review just because a candidate was found;
-- promote lessons into skills or automation without the reviewed path.
-
-## Agent Operation Route
-
-A safe agent move in `.aoa` follows the route before touching content:
-
-1. Read nearest `AGENTS.md`.
-2. Read `DESIGN.md`.
-3. Read this file.
-4. Read `README.md`, `PIPELINE.md`, `READINESS.md`, and `NAMING.md` for the
-   active kind of work.
-5. Use `sessions/AGENTS.md`, `sessions/INDEX.md`, `SESSION_NAMES.md`, and
-   `session-registry.json` to choose the target session.
-6. Inside the target session, read `AGENTS.md`, `SESSION.md`,
-   `session.manifest.json`, and `session.index.json`.
-7. Read relevant segment indexes before opening full segment Markdown.
-8. Open raw JSONL only to verify, recover, inspect exact evidence, or anchor a
-   durable claim.
-9. Run the narrowest useful validation before broader gates.
-10. Close out with changed surfaces, checks run, checks skipped, remaining
-    risk, and the next layer to improve.
+- repair or rewrite session archives;
+- run heavy maintenance as a hidden side effect;
+- promote memory;
+- decide another owner's truth;
+- hide stale, truncated, or fallback state.
+
+CLI, skill, and MCP routes should converge on the same underlying contracts even
+when their presentation differs.
+
+## Session-Local Navigation
+
+After a session has been selected:
+
+1. read the session-local route card and technical identity;
+2. use the session index to select an episode, segment, or event class;
+3. read the relevant segment index;
+4. open bounded segment or raw evidence for exact verification.
+
+Semantic names and generated summaries may orient the agent, but stable session
+identity and evidence refs control the route.
+
+## Read and Mutation Separation
+
+Finding evidence does not authorize changing it.
+
+Read routes may identify:
+
+- stale projections;
+- missing refs;
+- candidate repairs;
+- promotion candidates;
+- possible owner surfaces.
+
+Mutation requires the explicit owner command and its guards. Repair should
+preserve historical evidence and produce a diagnostic. Promotion requires the
+target owner's review. Generated/exported surfaces must be rebuilt from their
+source owner.
+
+## Agent Closeout
+
+Closeout is a navigation handoff, not a permanent project diary.
+
+Report:
+
+- the real outcome;
+- changed owner surfaces;
+- checks and manual evidence inspected;
+- generated/exported companions refreshed;
+- skipped checks and remaining risk;
+- the next owner route when work remains.
+
+Detailed hypotheses, failed experiments, seeds, transient metrics, and
+session-only reasoning remain in session provenance unless a reviewed durable
+need justifies promotion.
 
 ## Design Principles
 
-### 1. Layer readiness before layer ambition
-
-Do not perform late-layer work when earlier-layer evidence is missing or stale.
-Use the late-layer task to reveal the missing gate, then repair the right layer.
-
-### 2. Source before generated companion
-
-Generated indexes and reports accelerate navigation. They do not become the
-source of truth for raw events, reviewed claims, or promoted lessons.
-
-### 3. Semantic names need anchors
-
-A semantic name without raw refs, coverage, and a preserved bridge to
-`session_id` is only a label. A durable name is a routed claim.
-
-### 4. Proximity narrows the lane
-
-Root docs set archive law. Session-local files set archive context. Segment
-indexes set interval context. Raw transcript verifies exact evidence.
-
-### 5. Hooks preserve, skills refine
-
-Hooks should stay light, schema-valid, and fail-open. Heavy understanding,
-repair, review, naming, and promotion belong to deliberate commands and skills.
-
-### 6. Review remains open until reviewed
-
-A candidate found by batch, manual-review, naming-readiness, phase-discovery,
-or promotion review remains open. Only a later reviewed path may close or
-promote it.
-
-### 7. Portability comes from shape, not local doctrine
-
-The bundle may serve local AoA and Tree of Sophia work, but its portable kernel
-should remain useful wherever Codex-like sessions need raw-preserving memory.
-
-### 8. Closeout is future context
-
-A closeout is the next agent's entry surface. It should name what changed, what
-was checked, what is still weak, and which layer should be improved next.
+1. **Route before load.** Choose the lane before opening large context.
+2. **Specific before broad.** Exact and typed anchors precede semantic or graph
+   expansion.
+3. **Evidence before synthesis.** Retrieval candidates are not claims.
+4. **Source kind matters.** Boilerplate and tool dumps are not equivalent to
+   intent, action, or verified result.
+5. **Freshness is part of the answer.** Current, stale, deferred, and fallback
+   cannot be presentation details.
+6. **Refs survive compression.** Every useful higher layer keeps a path back
+   down.
+7. **Unknown is a valid result.** Nearest embedding is not always an answer.
+8. **Access does not confer authority.** MCP, indexes, graphs, and narratives
+   help agents navigate; owners decide truth and mutation.

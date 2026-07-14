@@ -4,6 +4,19 @@ This document owns the durable flow of the portable session-memory kernel. It
 describes what each stage means and where authority remains. Exact command
 syntax belongs to `scripts/aoa_session_memory.py` and its subcommand help.
 
+## Codex adapter grounding
+
+Codex is the current production adapter, not the identity boundary of the
+organ. Its hook schema, model context, compaction behavior, and local
+configuration may change independently of this pipeline.
+
+Before relying on that adapter, `codex-grounding` observes the installed Codex
+contract. Context-window and auto-compaction values may come from explicit
+configuration or from the selected model defaults resolved through
+`codex debug models`; grounding validates the effective contract rather than
+requiring manual overrides. Repeat grounding and live hook proof after an
+adapter or runtime change.
+
 ## 1. Intake
 
 Codex lifecycle hooks and explicit import routes identify a transcript and its

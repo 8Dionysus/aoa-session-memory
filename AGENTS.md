@@ -1,103 +1,145 @@
 # AGENTS.md
 
-## Purpose
+## Repository Identity
 
-This directory stores the portable AoA session-memory kernel for Codex-style
-agent sessions.
+This repository owns the portable source of `aoa-session-memory`: an
+evidence-preserving memory organ for agent sessions.
 
-It preserves raw session material, creates compaction-interval archives,
-builds indexes, records diagnostics, and provides skill surfaces for manual
-recovery and later distillation.
+The current production adapter is Codex, and most live evidence currently comes
+from Codex sessions. Codex is an adapter and evidence source, not the boundary
+of the organ.
 
-## Laws
+## Authority Map
 
-1. Preserve before distilling.
-2. Raw session files are local evidence, not reviewed truth.
-3. Segment Markdown is generated from raw and remains reviewable evidence.
-4. Index every archived segment.
-5. Record raw refs for important claims.
-6. Diagnose raw/session failures immediately.
-7. Do not promote experience, patterns, skills, or automation without reviewed
-   distillation.
-8. Keep the portable kernel separate from local AoA/Tree of Sophia overlays.
-9. Keep token accounting as count-only generated evidence: provider-reported,
-   exact-tokenizer, and estimated ledgers are separate, and estimates are never
-   promoted to exact counts.
+Use one owner for each concern:
 
-## Required Read Order
+| Concern | Authoritative surface |
+| --- | --- |
+| System identity, boundaries, and durable architecture | `DESIGN.md` |
+| Immediate agent laws and task routing | `AGENTS.md` |
+| Agent query, evidence-packet, and escalation contract | `DESIGN.AGENTS.md` |
+| Runtime behavior | source code, config, and schemas |
+| Operational lifecycle, maintenance, and recovery | `PIPELINE.md` |
+| Installation and portable export | `INSTALL.md` |
+| Naming contracts | `NAMING.md` and naming policy |
+| Readiness semantics and proof requirements | `READINESS.md` |
+| Revision-bound portable measurements | `stats/port.manifest.json` and its referenced packet |
+| Current health, freshness, versions, and watermarks | live commands and generated diagnostics |
+| What happened in a session | raw transcript plus resolvable session/segment refs |
+| Current repository or domain truth | the owning repository's source surfaces |
+| Evaluation truth | the owning eval surface and its admitted evidence |
 
-When working here, read:
+`README.md` is an entrypoint. Generated search, graph, atlas, registry,
+summary, and diagnostic surfaces are read models. Neither may override its
+owner.
 
-1. `DESIGN.md`
-2. `DESIGN.AGENTS.md`
-3. `PIPELINE.md`
-4. `INSTALL.md` when changing portability, export, or hook installation
-5. `READINESS.md` for the durable readiness model; current state belongs to
-   generated diagnostics
-6. `README.md`
-7. `NAMING.md`
-8. `sessions/AGENTS.md` if present
-9. `sessions/INDEX.md` if present
-10. `SESSION_NAMES.md` and `session-registry.json` if present
-11. The target session `AGENTS.md`
-12. The target session `SESSION.md`
-13. The target session `session.manifest.json`
-14. The relevant segment index before opening a full segment
+## Non-Negotiable Laws
 
-When editing a source district, also read that directory's own `AGENTS.md`
-first: `config/`, `hooks/`, `maps/`, `schemas/`, `scripts/`, `skills/`,
-`stats/`, `tests/`, or `sessions/`. When inspecting live reports, read
-`diagnostics/AGENTS.md`; it is a runtime evidence district, not portable source.
+1. Preserve evidence before interpreting it.
+2. Raw transcript is evidence of what was recorded, not reviewed truth about
+   the world, the operator, or another repository.
+3. Keep resolvable raw, segment, and session refs for important claims.
+4. Never replace raw evidence with segments, episodes, indexes, graphs,
+   narratives, or summaries.
+5. Treat every projection as versioned, freshness-bearing, rebuildable, and
+   weaker than its source.
+6. Keep mention, selection, invocation, behavior, verification, and consequence
+   distinct.
+7. Do not promote session experience into doctrine, memory, evals, skills,
+   automation, training data, or model changes without the owning review and
+   admission route.
+8. Keep hooks lightweight, idempotent, observable, and fail-open. Heavy
+   interpretation belongs to workers, commands, skills, or evals.
+9. Keep the portable organ independent of local AoA, Tree of Sophia, host,
+   operator, and repository-specific doctrine.
+10. Observe current state from runtime evidence. Do not copy changing counts,
+    versions, or health claims into durable design text.
 
-## Generated Material
+## Route by Task
 
-The following paths are generated or runtime-owned:
+Read only the surfaces needed for the task:
 
-- `sessions/*/raw/`
-- `sessions/*/segments/`
-- `sessions/AGENTS.md`
-- `sessions/INDEX.md`
-- `sessions/index.json`
-- `sessions/*/SESSION.md`
-- `sessions/*/session.index.json`
-- `sessions/*/session.manifest.json`
-- `sessions/*/hooks/`
-- `sessions/*/incidents/`
-- `session-registry.json`
-- `session-name-index.json`
-- `SESSION_NAMES.md`
-- token-accounting reports under `diagnostics/`
-- `maps/by-*/entries/*.md`
-- `maps/by-*/entries/*.json`
-- `maps/by-*/INDEX.md`
-- `maps/by-*/index.json`
-- `maps/INDEX.md`
-- `maps/index.json`
-- `maps/index-state.json`
-- `search/`
-- `graph/`
-- `diagnostics/`
+- architecture, scope, evidence semantics, or future compatibility:
+  `DESIGN.md`;
+- query routing, MCP access, evidence packets, or agent navigation:
+  `DESIGN.AGENTS.md`;
+- hooks, capture, indexing, maintenance, orchestration, storage, or recovery:
+  the relevant section of `PIPELINE.md`;
+- installation, export, or hook generation: `INSTALL.md`;
+- archive labels or semantic names: `NAMING.md`;
+- completion or proof posture: `READINESS.md`, then run the applicable live
+  gate;
+- a portable measurement: `stats/AGENTS.md`, then the manifest, packet, and
+  source corpus named by the measurement;
+- a historical session: generated archive indexes first, then the narrowest
+  segment/raw evidence required;
+- a source district: its nearest `AGENTS.md`.
 
-Agents may regenerate these files from raw session evidence. Do not manually
-edit generated session archives unless explicitly repairing a broken archive
-with a clear diagnostic note.
+Do not read every root document by default.
 
-The `maps/` root, its `AGENTS.md`, `START.md`, `README.md`, `_templates/`,
-axis `README.md` files, and placeholder `.gitkeep` files are source-owned
-atlas skeleton. Generated atlas entries belong only in the generated map paths
-listed above.
+## Source and Generated Boundaries
 
-Session archive directory names must follow `NAMING.md`. Keep the Codex UUID as
-`session_id` inside the manifest, not as the folder name.
+Source-owned portable surfaces include the root contracts, config, hook
+templates, atlas skeleton, schemas, scripts, skills, tests, `stats/`, and
+portable manifests.
+
+Generated or runtime-owned material includes:
+
+- session raw mirrors, raw blocks, segments, manifests, and indexes;
+- session registries, name indexes, archive tables of contents, and generated
+  session-local cards;
+- generated atlas entries and indexes;
+- search stores, graph stores, projection state, queues, and caches;
+- diagnostics, receipts, reports, and maintenance state.
+
+Regenerate derived material through the owning command. Do not hand-edit it
+except during an explicit evidence-preserving repair with a diagnostic record.
+Do not commit or export live private session material unless the operator
+explicitly requests that scope.
+
+## Change and Export Route
+
+Before editing, identify the active authored source and preserve unrelated
+user changes. A live `.aoa` install and a standalone Git checkout may have
+different roles even when their portable files are identical.
+
+When the active source feeds a portable bundle:
+
+1. edit the authored source;
+2. export with `export-bundle`;
+3. verify source and standalone surfaces;
+4. review that no sessions, raw text, host paths, secrets, runtime databases,
+   or diagnostics leaked into the clean bundle.
+
+Never update a generated or portable consumer by manual copy when the owner
+builder/export route exists.
+
+## Verification
+
+Use the smallest proof that matches the changed surface:
+
+- docs-only authority changes: inspect the rendered route, check referenced
+  files, export parity, and portable audit;
+- source/config/schema changes: focused tests plus `validate`;
+- hooks or Codex adapter changes: grounding, hook status, and the applicable
+  live lifecycle probe;
+- projections or retrieval changes: freshness plus manual evidence-ref checks
+  and the owning regression/eval route;
+- portability changes: source validation, clean export, and standalone audit.
+
+Tests and validators prove only their declared invariants. They do not replace
+manual semantic or provenance review.
 
 ## Stop Lines
 
-- Do not write secrets into portable exports.
-- Do not treat summaries as source truth.
-- Do not delete raw session evidence as cleanup.
-- Do not expose prompt text, raw text, session titles, transcript paths, or raw
-  paths through token-accounting projections.
-- Do not make this directory the authority for AoA doctrine, Tree of Sophia
-  meaning, or repository ownership.
-- Do not let hooks block Codex work unless an operator explicitly enables a
-  blocking mode.
+- Do not delete or rewrite historical raw/session evidence as cleanup.
+- Do not treat summaries, names, embeddings, graph edges, or generated
+  classifications as source truth.
+- Do not expose secrets or private transcript content through portable
+  artifacts, diagnostics, token accounting, or examples.
+- Do not let MCP or another access plane become proof or mutation authority.
+- Do not make Codex-specific behavior the permanent identity of the organ.
+- Do not add session-local hypotheses, experiment journals, temporary metrics,
+  or construction debris to owner docs.
+- Do not claim freshness, readiness, causality, usage, or completion without
+  the evidence route that proves it.
