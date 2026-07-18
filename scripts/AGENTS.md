@@ -13,6 +13,8 @@ blast radius.
 - `aoa_session_memory.py` implements archive generation, hook handling,
   indexing, naming, distillation, validation, export, install, audit, and
   doctor checks.
+- `generate_decision_indexes.py` derives portable lookup indexes from canonical
+  `docs/decisions/AOA-SM-D-*.md` records and checks their parity.
 - `validate_local_stats_port.py` delegates the owner-local measurement packet
   to the pinned central `aoa-stats` protocol validator.
 
@@ -33,6 +35,7 @@ Run:
 
 ```bash
 python3 -m py_compile scripts/aoa_session_memory.py
+python3 scripts/generate_decision_indexes.py --check
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
 python3 scripts/aoa_session_memory.py validate --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa

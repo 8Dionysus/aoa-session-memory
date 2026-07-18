@@ -78,6 +78,14 @@ default orientation ritual.
 If the query is ambiguous, expose the competing interpretations or ask for a
 narrower anchor. Do not silently choose the broadest and most expensive route.
 
+Date bounds follow the evidence grain rather than one archive-wide coordinate.
+Exact event routes compare the recorded event timestamp and fall back to the
+session date only when that timestamp is unavailable. General search documents
+use the session date, while episode routes use time-span overlap with a
+session-date fallback. Query plans and result packets must expose the selected
+basis so a multi-day session cannot silently turn an event-date request into a
+session-start filter.
+
 ## Typed Authority Route
 
 The correct next surface depends on the claim:
@@ -170,6 +178,14 @@ different correlation ID is context, not consequence.
 Packets may expose candidate states and blocked claims. They must not collapse
 those states into one generic “used” count.
 
+For an explicitly session-scoped skill query with no structured dispatch
+candidate, the consumer route may inspect a bounded initial developer/system
+context window for an exact entry under `### Available skills`. A match is
+`prompt-visible` context with raw, segment, and session refs. It is not a
+usage, selection, read, invocation, behavior, verification, or consequence.
+This query-time probe is not a global prompt catalogue index, and an
+incomplete probe cannot prove absence.
+
 ## Source-Aware Reading
 
 Text source is part of meaning.
@@ -193,6 +209,22 @@ operational words without providing operational evidence. Structured identity,
 correlation, status, action, and receipt evidence should outrank broad text
 association.
 
+A quantitative comparative claim requires evidence of the measurement, not
+only a highly similar episode. For a bounded session-scoped comparison, admit
+the answer only from a subject-, context-, and baseline-matched structured
+counting action plus its correlation-owned successful numeric result.
+Ambiguous, mismatched, or unresolved chains must abstain. Archive-wide
+comparisons require their own bounded global or narrative route.
+
+For a query that asks what happened inside a temporal interval, an ordered
+pair of endpoint anchors is navigation, not the answer. Admit interval
+contents only after a bounded source-aware read returns chronological interior
+events with resolvable refs, one unambiguous competitive span, compatible time
+scope, and no truncation. Hidden reasoning, token accounting, runtime message
+mirrors, and private collaboration-message bodies are not interval evidence.
+If the interior cannot be read under those guards, preserve the endpoint refs
+and abstain; lexical or semantic similarity cannot bypass this gate.
+
 ## Episode Route
 
 Use episodes when the question concerns a coherent piece of work rather than a
@@ -207,6 +239,12 @@ A task episode should expose:
 - unresolved branches;
 - owner/work context;
 - time span and evidence refs.
+
+For a declared fork, inspect episode lineage before attribution. A
+`pre_child_task_history_candidate` is replay candidate evidence, not proof that
+the child performed the work. A `local_fork_work` episode belongs to the child.
+Only an exact, unambiguous parent-evidence match may form a consolidated group,
+and both parent and fork raw routes must remain readable.
 
 Episode packets are generated navigation. Open their refs before promoting a
 decision, causal claim, lesson, or current-state statement.
@@ -223,6 +261,11 @@ retrieval. Prefer:
 
 Every graph packet needs node, edge, time, evidence, and context budgets.
 Generic high-degree nodes should not expand without a specificity gate.
+
+The direct graph store resolves only indexed node and canonical route
+identities. It does not perform payload-wide fuzzy search. When exact graph
+identity is unavailable, use bounded trace/search retrieval to produce the
+seed and keep the first route, selected route, and fallback reason visible.
 
 Cooccurrence and mention edges are discovery hints. They are not causality,
 usage, ownership, or consequence.
@@ -258,6 +301,18 @@ success is not semantic freshness. A quiet-window defer is not corruption.
 
 When a packet is stale, return the stable evidence that remains usable and the
 narrowest catch-up or fallback route.
+
+Graph packets keep global recall freshness separate from the freshness of the
+bounded evidence contributions they actually return. `scope_current` requires
+current, fingerprint-matched graph sources and a clean source-state ledger; it
+does not upgrade a stale global status or prove completeness, relation truth,
+or owner truth. A compact timeline derived from a broader neighborhood reports
+the selected timeline scope separately and preserves the neighborhood scope.
+
+Episode semantic, typed-entity, and dense packets must also compare the
+classifier epoch stored by their own sidecar. Rows from a missing or older
+epoch are not answer candidates: return `insufficient_projection_coverage`
+and the bounded refresh or raw-evidence route instead.
 
 ## MCP and Other Access Planes
 

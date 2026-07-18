@@ -24,6 +24,8 @@
       "refresh_index_quality_gate": ["abyss-machine", "nervous", "quality-audit", "--refresh", "--refresh-index", "--json"],
       "semantic_status_gate": ["abyss-machine", "nervous", "semantic-status", "--json"],
       "semantic_search_command": ["abyss-machine", "nervous", "semantic-search", "--query", "{query}", "--limit", "{limit}", "--json"],
+      "embedding_api_url": "http://127.0.0.1:5403/embeddings",
+      "episode_dense_enabled": true,
       "recall_command": ["abyss-machine", "nervous", "recall", "--mode", "lexical", "--query", "{query}", "--limit", "{limit}", "--json"],
       "rerank_api_health_url": "http://127.0.0.1:5405/health",
       "rerank_api_url": "http://127.0.0.1:5405/rerank",

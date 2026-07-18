@@ -160,6 +160,17 @@ python3 scripts/aoa_session_memory.py literal-query-plan \
   "Traceback ValueError"
 ```
 
+Verify an exact literal against one archived raw authority when the planner
+selects that fallback:
+
+```bash
+python3 scripts/aoa_session_memory.py archived-raw-search \
+  --session SESSION_ID_OR_LABEL --query "exact literal"
+```
+
+A complete negative result is authoritative only when the packet reports a
+digest-verified, non-truncated scan.
+
 Ask how an operational entity was used and what happened after:
 
 ```bash
@@ -247,6 +258,7 @@ rebuild, and recovery. See `PIPELINE.md`.
 | `READINESS.md` | readiness states, proof requirements, and gate selection |
 | `INSTALL.md` | installation, hook generation, and portable export |
 | `NAMING.md` | archive labels and semantic naming |
+| `docs/decisions/` | durable rationale and generated decision lookup indexes |
 | `stats/` | bounded revision-level measurements over portable source surfaces |
 
 Source code, config, and schemas own runtime behavior. Live commands and

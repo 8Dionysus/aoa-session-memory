@@ -172,6 +172,8 @@ Ready when:
 - resource/lock deferral later resumes automatically;
 - no heavy necessary projection starves indefinitely;
 - readers see honest stale/fallback state;
+- graph readers distinguish global recall freshness from bounded returned-
+  evidence freshness without letting either scope hide the other;
 - manual maintenance is not a hidden happy-path dependency.
 
 ### 10. Access plane

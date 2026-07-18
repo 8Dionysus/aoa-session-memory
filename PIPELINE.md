@@ -66,6 +66,12 @@ hook receipts, accounting summaries, and generated-version posture. The
 session index supplies bounded navigation across segments, task episodes,
 agent events, goals, decisions, errors, and open threads.
 
+When raw metadata declares a fork, the manifest also records the parent and the
+structural child-work boundary. Replayed pre-boundary material stays preserved
+in raw evidence but is scoped separately from local fork work in task episodes.
+Retrieval may consolidate it with an unambiguous parent episode only after an
+exact relevant-evidence comparison, and must retain both physical routes.
+
 The repository registry and archive indexes point to sessions. They do not
 replace the per-session manifest or raw evidence.
 
@@ -107,6 +113,13 @@ Materialized rollups precede shard resampling. Graph packets are used for
 bounded topology, not for evidence-free conclusions. Raw or segment expansion
 is the final authority route when a claim matters.
 
+For a supported exact query scoped to one archived session, an insufficient or
+timed-out projected result may fall back to a bounded read of that session's
+raw JSONL before broader raw-text search. The pass writes no index and computes
+the manifest digest while scanning. Only a complete digest-verified pass can
+prove absence; partial or unverifiable scans must expose that state. The live
+append-only tail remains a separate freshness route.
+
 Search results, graph paths, atlas entries, registry states, and scenario
 checks are navigation packets. They may expose useful counts or confidence,
 but they do not become reviewed memory, eval verdicts, or owner decisions.
@@ -120,7 +133,11 @@ context with evidence refs and cannot enter an accepted consequence chain.
 Skill evidence similarly keeps dispatch and behavior separate. Selection,
 payload loading, file editing, validation, mention, and co-occurrence are
 distinct states. The presence of skill text never proves procedure adherence
-or effectiveness.
+or effectiveness. When a caller supplies one session and structured dispatch
+evidence is absent, the usage route may lazily read only the bounded initial
+developer/system context and admit an exact `### Available skills` entry as
+`prompt-visible` context. It writes no posting, never becomes usage, and keeps
+negative claims blocked when the bounded raw probe is incomplete.
 
 ## 10. Freshness and live tails
 
@@ -129,9 +146,31 @@ generated state. Recently changing live transcripts are deferred through a
 quiet-window posture. A stable older projection may remain usable while the
 latest live tail is explicitly unavailable for current claims.
 
+Episode semantic state, entity postings, their repair queue, and the optional
+dense sidecar persist the route-signal classifier epoch that generated them.
+An epoch change makes those projections dirty even when the raw fingerprint
+and document count did not move. Queue seeding resets an exhausted old-epoch
+attempt so automatic maintenance can rebuild it instead of preserving a
+terminal retry state from a superseded classifier.
+
+Per-session physical entity-posting counts use an independent metadata version.
+Bounded automatic maintenance may reconcile those watermarks from existing
+current-epoch postings without reparsing raw transcripts or rebuilding episode
+documents. Cardinality replacement proof remains partial until both these
+watermarks and the operational route rollup are current.
+
 Deferred live state is not silently green and is not stable corruption. The
 next route is either to wait for quiet, run a targeted catch-up, or inspect raw
 evidence directly when authorized.
+
+Graph readers expose global recall freshness and bounded returned-evidence
+freshness as separate axes. Returned evidence-bearing nodes and edges are
+mapped through their source contributions, then checked against store
+generation identity, source fingerprints, and the source-state ledger. A clean
+bounded scope never makes a stale global graph current; missing, truncated, or
+unverified contributor coverage never becomes `scope_current`. When a compact
+timeline is selected from a wider neighborhood, both scope states remain
+visible.
 
 ## 11. Maintenance coordination
 
@@ -140,10 +179,55 @@ backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
 
+Timer-originated `auto-maintenance-resource` deferrals are also written to the
+generated persistent retry queue under `diagnostics/`. The
+`auto-maintenance-retry` dispatcher consumes at most a bounded number of due
+items, deduplicates by profile and target, applies exponential backoff, recovers
+an interrupted in-flight claim after dispatcher restart, and stops after the
+profile retry limit. A later successful periodic or retry launch clears the
+pending intent. Manual operator launches do not silently create background
+work. A host scheduler may invoke the portable dispatcher, but the queue and
+retry semantics remain owned by this organ; scheduled retry is not semantic
+maintenance success.
+
+Due retry items are ordered by a versioned profile-aware dispatch deadline,
+not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
+latency, while longer backlog and deep targets age into priority instead of
+being permanently displaced. Automatic profiles also use a cooperative work
+budget distinct from the longer host launcher timeout; explicit overrides
+remain visible. Queue and status packets expose the order, deadlines, breaches,
+and selected item. These scheduling signals do not make a projection current.
+
+Observed query demand is a bounded scheduling input, not evidence authority.
+An automatic scoped profile may prepend only the configured bounded set of
+demanded archive sessions that fell outside its normal date or count window.
+An applying graph queue consumer may likewise top up actionable demanded
+sources from the generated ledger even while the queue is nonempty, but only
+to one batch-sized reserve and counting entries already queued. Reports retain
+the original scope, added targets, queue top-up, remaining work, and freshness;
+the demand signal never makes a projection current by itself.
+
+Resource-blocked all-session graph fallback also maintains a separate bounded
+background candidate reserve. Existing entries count toward the reserve, and
+only the missing count is admitted from the generated ledger before ordinary
+priority and refresh-cost selection. An individually oversized source remains
+queued for a compatible heavy route but cannot prevent cheaper sources from
+entering the candidate window. A child process that exits successfully without
+advancing any actionable source while work remains reports a retryable
+`resource_blocked_graph_drip_no_progress`, not completion. Reports expose the
+existing queue count, reserve, requested top-up, progress, and remaining work.
+
 Incremental maintenance repairs only dirty source contributions when possible.
 Missing schemas, corrupt stores, or large policy migrations route to explicit
 rebuilds. Interrupted generated-store temporary files are cleanup candidates;
 raw evidence is not.
+
+A search schema mismatch is incremental only for an owner-declared additive
+version pair whose live store still has documents, route indexes, route terms,
+and no structural schema diagnostic. The first committed dirty-session repair
+may advance the store epoch; every untouched session remains dirty until its
+own projection state is regenerated. Unknown or structurally incomplete
+transitions keep the deep/full-rebuild boundary.
 
 ## 12. Search and graph pressure
 
