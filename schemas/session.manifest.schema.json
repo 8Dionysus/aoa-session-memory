@@ -31,6 +31,66 @@
     "updated_at": {"type": "string"},
     "hooks_seen": {"type": "array", "items": {"type": "string"}},
     "raw": {"type": "object"},
+    "lineage": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "relationship",
+        "session_id",
+        "parent_session_id",
+        "evidence",
+        "history_prefix",
+        "truth_status"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "minimum": 1},
+        "relationship": {"const": "forked_from"},
+        "session_id": {"type": "string", "minLength": 1},
+        "parent_session_id": {"type": "string", "minLength": 1},
+        "declared_parent_ids": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "thread_source": {"type": "string"},
+        "history_mode": {"type": "string"},
+        "agent": {"type": "object"},
+        "declared_at": {"type": "string"},
+        "evidence": {
+          "type": "object",
+          "required": ["raw_ref"],
+          "properties": {
+            "raw_ref": {"type": "string", "pattern": "^raw:line:[1-9][0-9]*$"},
+            "event_id": {"type": "string"},
+            "source_type": {"const": "session_meta"},
+            "parent_session_meta_ref": {"type": "string"},
+            "parent_session_meta_line": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": true
+        },
+        "history_prefix": {
+          "type": "object",
+          "required": ["schema_version", "status", "scope", "interpretation"],
+          "properties": {
+            "schema_version": {"type": "integer", "minimum": 1},
+            "status": {"enum": ["bounded", "unresolved"]},
+            "scope": {"const": "pre_child_task_start"},
+            "from_line": {"type": "integer", "minimum": 1},
+            "to_line": {"type": ["integer", "null"], "minimum": 0},
+            "local_work_from_line": {"type": ["integer", "null"], "minimum": 1},
+            "boundary_ref": {"type": "string"},
+            "boundary_turn_id": {"type": "string"},
+            "detection_basis": {"type": "string"},
+            "interpretation": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": true
+        },
+        "ambiguity_flags": {"type": "array", "items": {"type": "string"}},
+        "truth_status": {
+          "const": "raw_session_meta_declared_fork_with_structural_child_task_boundary"
+        }
+      },
+      "additionalProperties": true
+    },
     "segments": {"type": "array", "items": {"type": "object"}},
     "latest_event_count": {"type": "integer", "minimum": 0}
   },

@@ -49,12 +49,20 @@ Use these first routes when available:
   `candidate_only`, `invocation_claim_allowed`, and
   `invocation_claim_blocker`. Treat `prompt_visible`, `selected`,
   `skill_read`, `edited`, `mentioned`, `cooccurrence`, and `deflected` as
-  insufficient by themselves to prove procedure execution. The currently
-  declared receipt-or-review states are not automatically ingested; check
-  `receipt_or_review_ingestion_available` before relying on them. Follow raw
-  or segment refs plus a reviewed task episode before making invocation or
-  effectiveness claims, and hand the verdict to the skill owner or
-  `aoa-evals`.
+  insufficient by themselves to prove procedure execution. For an explicitly
+  session-scoped query with no structured dispatch candidate, inspect
+  `quality.skill_prompt_visibility_probe`. A `matched` probe reads only the
+  bounded initial developer/system context and admits an exact
+  `### Available skills` entry as `prompt_visible`; it does not create a
+  global posting or prove selection, reading, invocation, behavior, or
+  consequence. Treat `not_present` as bounded absence only when
+  `absence_claim_allowed=true`; `incomplete` cannot support a negative claim.
+  Read `prompt_visibility_ingestion_available` and `state_ingestion` for this
+  state. Other declared receipt-or-review states are not automatically
+  ingested; `receipt_or_review_ingestion_available` therefore remains false.
+  Follow raw or segment refs plus a reviewed task episode before making
+  invocation or effectiveness claims, and hand the verdict to the skill owner
+  or `aoa-evals`.
 - When `structured_skill_selection_candidate_present=true`, inspect
   `structured_skill_selection_event_count` and the raw/segment ref. A `loaded`
   action only says Codex embedded the structured skill payload in the user

@@ -23,6 +23,7 @@ Use one owner for each concern:
 | Installation and portable export | `INSTALL.md` |
 | Naming contracts | `NAMING.md` and naming policy |
 | Readiness semantics and proof requirements | `READINESS.md` |
+| Durable rationale for non-trivial owner choices | `docs/decisions/README.md` and source decision records |
 | Revision-bound portable measurements | `stats/port.manifest.json` and its referenced packet |
 | Current health, freshness, versions, and watermarks | live commands and generated diagnostics |
 | What happened in a session | raw transcript plus resolvable session/segment refs |
@@ -69,6 +70,8 @@ Read only the surfaces needed for the task:
 - archive labels or semantic names: `NAMING.md`;
 - completion or proof posture: `READINESS.md`, then run the applicable live
   gate;
+- durable rationale, alternatives, or supersession: `docs/decisions/AGENTS.md`,
+  then the generated index and source decision record;
 - a portable measurement: `stats/AGENTS.md`, then the manifest, packet, and
   source corpus named by the measurement;
 - a historical session: generated archive indexes first, then the narrowest
@@ -79,9 +82,9 @@ Do not read every root document by default.
 
 ## Source and Generated Boundaries
 
-Source-owned portable surfaces include the root contracts, config, hook
-templates, atlas skeleton, schemas, scripts, skills, tests, `stats/`, and
-portable manifests.
+Source-owned portable surfaces include the root contracts, `docs/decisions/`,
+config, hook templates, atlas skeleton, schemas, scripts, skills, tests,
+`stats/`, and portable manifests.
 
 Generated or runtime-owned material includes:
 

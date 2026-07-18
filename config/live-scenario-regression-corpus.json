@@ -2,7 +2,7 @@
   "schema_version": 1,
   "artifact_type": "session_memory_live_scenario_regression_corpus",
   "corpus_schema_version": 1,
-  "generated_at": "2026-07-10T23:30:00Z",
+  "generated_at": "2026-07-17T08:51:44Z",
   "ok": true,
   "mutates": false,
   "truth_status": "reviewed_live_scenario_route_controls_not_memory_truth",
@@ -21,8 +21,8 @@
       "review": {
         "status": "reviewed",
         "reviewer": "source_config",
-        "reviewed_at": "2026-06-27",
-        "note": "Literal planner must stay structured-first for common route shapes, including exact session id rehydrate."
+        "reviewed_at": "2026-07-17",
+        "note": "Literal planner must stay cheap and typed first for common route shapes. Structured hook receipt signals outrank error-text search for raw_unavailable; exact literal postings remain first for command literals, scoped or monolith full-text remains fallback-only, and exact session ids rehydrate directly."
       },
       "expect": {
         "max_failed_count": 0,
@@ -37,10 +37,10 @@
             "max_failed_count": 0,
             "max_warn_count": 0,
             "required_primary_routes": [
-              "route_signal_structured_search",
+              "hook_receipts",
               "entity_inventory",
               "entity_usage_chain",
-              "command_structured_search",
+              "exact_literal_postings_search",
               "session_rehydrate"
             ],
             "forbidden_primary_routes": [
@@ -48,7 +48,7 @@
               "scoped_shard_full_text"
             ],
             "required_shape_counts": [
-              "error_text",
+              "hook_receipt",
               "entity_class",
               "entity_anchor",
               "command",
@@ -517,9 +517,7 @@
           "kind": "mcp",
           "required_usage_actions": [
             "called",
-            "read",
             "used",
-            "validated",
             "observed"
           ]
         },
@@ -536,21 +534,20 @@
           ]
         },
         {
-          "name": "error_timeout",
-          "anchor": "timeout",
+          "name": "error_missing_path",
+          "anchor": "No such file or directory",
           "kind": "error",
           "require_direct_usage": false,
           "required_usage_actions": [
-            "failed",
-            "observed"
+            "failed"
           ]
         }
       ],
       "review": {
         "status": "reviewed",
         "reviewer": "source_config",
-        "reviewed_at": "2026-07-08",
-        "note": "Usage-chain must expose normalized action semantics over live operational entities so agents can distinguish invocation, inspection, validation, failure, and observed consequences without reading every event first."
+        "reviewed_at": "2026-07-17",
+        "note": "Usage-chain must expose normalized action semantics over live operational entities so agents can distinguish invocation, inspection, validation, failure, and observed consequences without reading every event first. Raw-first review replaced the ambiguous timeout parameter with an observed structured missing-path failure, and the bounded validator packet preserves one read sample without displacing core invocation evidence. Per-probe direct-usage requirements, rather than a stale aggregate usage-event count, define the admitted invocation floor; action breadth is enforced across the probe family."
       },
       "expect": {
         "max_failed_count": 0,
@@ -572,7 +569,6 @@
             "min_segment_ref_count": 1,
             "min_raw_or_segment_ref_sample_count": 3,
             "min_direct_usage_sample_count": 2,
-            "min_usage_chain_usage_event_count": 8,
             "min_usage_chain_result_or_consequence_count": 1,
             "min_usage_action_count": 6,
             "required_kinds": [
@@ -1078,7 +1074,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-07",
-        "note": "Dense operational anchors such as exec_command must use the bounded direct graph-store cooccurrence route, return neighboring route nodes and evidence refs, and expose truncation as route posture rather than an empty silent packet."
+        "note": "Dense operational anchors such as exec_command must use bounded episode-entity postings over direct typed relations, preserve raw/segment/session refs, reject mention/reference-only contexts and generic namespace wrappers, and abstain rather than fall through to the noisy mention graph when the classifier epoch is incomplete."
       },
       "expect": {
         "max_failed_count": 0,
@@ -1097,9 +1093,15 @@
             "min_evidence_ref_count": 1,
             "min_raw_ref_count": 1,
             "min_segment_ref_count": 1,
-            "min_session_ref_count": 1,
-            "require_bounded_store_query": true,
-            "max_elapsed_ms": 10000
+        "min_session_ref_count": 1,
+        "require_bounded_store_query": true,
+        "required_source": "episode_entity_postings_direct_relations",
+        "require_episode_postings_cooccurrence": true,
+        "require_graph_store_not_used": true,
+        "require_mention_reference_relations_not_used": true,
+        "required_freshness_status": "current",
+        "required_abstention_status": "not_required",
+        "max_elapsed_ms": 10000
           }
         ]
       }
@@ -1615,7 +1617,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-07",
-        "note": "High-fanout replacement readiness may only close the before/after cardinality gate after a current read-only projection comparison proves lower cardinality or verified post-prune replacement coverage for every configured replacement route while keeping graph-row pruning closed."
+        "note": "High-fanout replacement readiness may only close the before/after cardinality gate after current physical episode direct-posting and operational route-rollup row counts prove lower cardinality, while the measured segment/session aggregate remains visible as a rejected candidate and graph-row pruning stays closed."
       },
       "expect": {
         "max_failed_count": 0,
@@ -1638,12 +1640,12 @@
             "min_graph_cardinality_reduction_ratio": 0.1,
             "required_graph_cardinality_target_projections": [
               "entity_usage_rollup_by_anchor_session_segment",
-              "route_signal_cooccurrence_rollup_by_segment_session",
+          "episode_direct_postings_plus_operational_route_rollup",
               "task_answer_goal_timeline_rollup"
             ],
             "required_graph_cardinality_proven_target_projections": [
               "entity_usage_rollup_by_anchor_session_segment",
-              "route_signal_cooccurrence_rollup_by_segment_session",
+          "episode_direct_postings_plus_operational_route_rollup",
               "task_answer_goal_timeline_rollup"
             ],
             "max_elapsed_ms": 10000
