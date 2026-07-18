@@ -1,0 +1,248 @@
+{
+  "schema_version": "aoa_session_memory_skill_routing_cases_v1",
+  "authority": false,
+  "owner_repo": "aoa-session-memory",
+  "claim_limit": "Deterministic routing and composition pressure only; this corpus is not a behavioral-lift or promotion verdict.",
+  "positive_cases": [
+    {
+      "id": "global-router-english",
+      "query": ".aoa session memory compaction hooks validation",
+      "expected": "skill.aoa-session-memory-global-route",
+      "stage": "candidate_selection",
+      "max_rank": 1,
+      "expected_parent": "session-memory.use.route"
+    },
+    {
+      "id": "prior-entity-evidence",
+      "query": "session memory: find how MCP was used in prior sessions and return exact raw refs",
+      "expected": "skill.aoa-session-memory-evidence-route",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.use.query"
+    },
+    {
+      "id": "portable-search",
+      "query": "session memory: search archived sessions for an exact phrase using the portable SQLite index",
+      "expected": "skill.aoa-session-search",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.use.query"
+    },
+    {
+      "id": "bounded-rehydrate",
+      "query": "session memory: resume one archived session with bounded continuation context",
+      "expected": "skill.aoa-session-rehydrate",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.use.query"
+    },
+    {
+      "id": "root-initialize",
+      "query": "session memory: initialize and validate a portable memory root for a workspace",
+      "expected": "skill.aoa-session-archive-init",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.capture"
+    },
+    {
+      "id": "codex-segment-archive",
+      "query": "session memory: archive a Codex JSONL transcript by compaction intervals while preserving raw evidence",
+      "expected": "skill.aoa-codex-session-segment-archive",
+      "stage": "deep_rerank",
+      "max_rank": 3,
+      "expected_parent": "session-memory.adapters.codex"
+    },
+    {
+      "id": "history-import",
+      "query": "session memory: dry-run and import historical Codex JSONL sessions sequentially",
+      "expected": "skill.aoa-session-history-import",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.capture"
+    },
+    {
+      "id": "raw-read-failure",
+      "query": "session memory: record a diagnostic because the raw transcript cannot be read",
+      "expected": "skill.aoa-session-raw-diagnostic",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.capture"
+    },
+    {
+      "id": "projection-rebuild",
+      "query": "session memory: rebuild generated session segments and indexes from preserved raw archives",
+      "expected": "skill.aoa-session-reindex",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.project"
+    },
+    {
+      "id": "single-distillation",
+      "query": "session memory: extract provisional lessons and failures from one indexed session",
+      "expected": "skill.aoa-session-first-pass-distill",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.curate"
+    },
+    {
+      "id": "batch-distillation",
+      "query": "session memory: distill a reviewed batch of indexed sessions into provisional review queues",
+      "expected": "skill.aoa-session-batch-distill",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.curate"
+    },
+    {
+      "id": "manual-candidate-review",
+      "query": "session memory: manually review provisional candidates and route owner promotion",
+      "expected": "skill.aoa-session-manual-review",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.curate"
+    },
+    {
+      "id": "naming-readiness",
+      "query": "session memory naming readiness report classify semantic naming candidates",
+      "expected": "skill.aoa-session-naming-readiness",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.name"
+    },
+    {
+      "id": "phase-discovery",
+      "query": "session memory: discover evidence-linked phases for a long archived session before naming",
+      "expected": "skill.aoa-session-phase-discovery",
+      "stage": "deep_rerank",
+      "max_rank": 3,
+      "expected_parent": "session-memory.stewardship.name"
+    },
+    {
+      "id": "reviewed-naming-wave",
+      "query": "session memory: apply a reviewed semantic naming wave and audit receipts",
+      "expected": "skill.aoa-session-naming-wave",
+      "stage": "deep_rerank",
+      "max_rank": 1,
+      "expected_parent": "session-memory.stewardship.name"
+    },
+    {
+      "id": "root-doctor",
+      "query": "session memory: diagnose registry index hooks and grounding health for a selected memory root",
+      "expected": "skill.aoa-session-memory-doctor",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.assure"
+    },
+    {
+      "id": "completion-audit",
+      "query": "session memory: audit source standalone live and release readiness",
+      "expected": "skill.aoa-session-memory-audit",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.assure"
+    },
+    {
+      "id": "large-session-stress",
+      "query": "session memory: stress validate one large session and logical compaction boundaries with bounded reads",
+      "expected": "skill.aoa-session-memory-stress-pass",
+      "stage": "deep_rerank",
+      "max_rank": 1,
+      "expected_parent": "session-memory.stewardship.assure"
+    },
+    {
+      "id": "codex-hook-status",
+      "query": "session memory: inspect native Codex hook registry trust and drift",
+      "expected": "skill.aoa-codex-hooks-status",
+      "stage": "deep_rerank",
+      "max_rank": 1,
+      "expected_parent": "session-memory.adapters.codex"
+    },
+    {
+      "id": "codex-compact-probe",
+      "query": "session memory: run a behavioral Codex precompact postcompact visibility probe through app server",
+      "expected": "skill.aoa-codex-compact-probe",
+      "stage": "deep_rerank",
+      "max_rank": 1,
+      "expected_parent": "session-memory.adapters.codex"
+    },
+    {
+      "id": "global-router-russian-paraphrase",
+      "query": ".aoa: направь запрос о сжатии контекста и архивах сессий в правильную способность",
+      "expected": "skill.aoa-session-memory-global-route",
+      "stage": "candidate_selection",
+      "max_rank": 2,
+      "expected_parent": "session-memory.use.route"
+    },
+    {
+      "id": "evidence-route-russian-paraphrase",
+      "query": "память сессий: покажи по сырым ссылкам, как раньше использовался MCP и что произошло после",
+      "expected": "skill.aoa-session-memory-evidence-route",
+      "stage": "deep_rerank",
+      "max_rank": 3,
+      "expected_parent": "session-memory.use.query"
+    }
+  ],
+  "negative_owner_cases": [
+    {
+      "id": "current-repository-readme",
+      "query": "inspect the current repository README implementation and report source truth"
+    },
+    {
+      "id": "current-github-ci",
+      "query": "check the current GitHub pull request CI status"
+    },
+    {
+      "id": "generic-process-memory",
+      "query": "analyze current process memory consumption and CPU pressure"
+    },
+    {
+      "id": "calendar-history",
+      "query": "find historical calendar meetings for next quarter planning"
+    }
+  ],
+  "near_neighbor_cases": [
+    {
+      "id": "search-not-reindex",
+      "query": "session memory: query the current SQLite index for an exact archived phrase without rebuilding it",
+      "expected": "skill.aoa-session-search",
+      "max_rank": 2,
+      "excluded": ["skill.aoa-session-reindex"]
+    },
+    {
+      "id": "current-transcript-not-history",
+      "query": "session memory: archive this one current Codex transcript into compaction segments",
+      "expected": "skill.aoa-codex-session-segment-archive",
+      "max_rank": 3,
+      "excluded": ["skill.aoa-session-history-import"]
+    },
+    {
+      "id": "single-not-batch",
+      "query": "session memory: distill exactly one indexed session into provisional candidates",
+      "expected": "skill.aoa-session-first-pass-distill",
+      "max_rank": 2,
+      "excluded": ["skill.aoa-session-batch-distill"]
+    },
+    {
+      "id": "doctor-not-audit",
+      "query": "session memory: diagnose health of one selected live root, not release readiness",
+      "expected": "skill.aoa-session-memory-doctor",
+      "max_rank": 2,
+      "excluded": ["skill.aoa-session-memory-audit"]
+    },
+    {
+      "id": "hook-status-not-probe",
+      "query": "session memory: statically inspect Codex hook registry trust; no behavioral compaction probe",
+      "expected": "skill.aoa-codex-hooks-status",
+      "max_rank": 2,
+      "excluded": ["skill.aoa-codex-compact-probe"]
+    }
+  ],
+  "retrieval_comparisons": [
+    {
+      "id": "full-contract-improves-hook-route",
+      "query": "session memory native hook registry trust rendered expectations",
+      "expected": "skill.aoa-codex-hooks-status",
+      "compact_max_rank_exclusive": 4,
+      "full_max_rank": 1
+    }
+  ]
+}

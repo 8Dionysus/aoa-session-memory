@@ -31,13 +31,15 @@ active context.
 
 ```bash
 python3 scripts/aoa_session_memory.py stress-pass <session> \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --aoa-root <aoa-root> \
   --compactions 100 \
   --write
 ```
 
-5. Keep stdout bounded. Read the written diagnostic JSON/Markdown artifact when
-   detail is needed.
+5. Use `--write` only when a durable diagnostic was explicitly requested.
+   That write is limited to generated diagnostics and never authorizes archive
+   or raw-evidence mutation. Keep stdout bounded and read the written
+   JSON/Markdown artifact when detail is needed.
 6. Distinguish logical `compaction_boundary_count` from raw marker count.
 
 ## Verification

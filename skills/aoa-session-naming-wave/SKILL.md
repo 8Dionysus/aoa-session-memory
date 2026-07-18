@@ -15,12 +15,20 @@ sessions without opening every archive manually.
 This skill creates a mass review surface. It does not physically rename
 archive directories and it does not treat machine candidates as reviewed truth.
 
-## Build A Wave
+## Trigger Boundary
+
+Use this only after naming readiness and phase/title candidates define a
+bounded reviewable set. Do not apply when indexes are stale, candidates are
+unreviewed, or the wave mixes incompatible readiness classes.
+
+## Procedure
+
+### Build A Wave
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-wave build \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --write \
   --write-report
 ```
@@ -35,7 +43,7 @@ The build step writes a `naming-wave-plan.json` under
 - `reviewed_name`, initially empty;
 - `physical_relabel_allowed=false`.
 
-## Review The Plan
+### Review The Plan
 
 Edit only the plan JSON. For each session that is ready, fill
 `reviewed_name` with the accepted umbrella session name. Leave it empty to
@@ -45,12 +53,12 @@ skip. For preflight items, either set `approved=true` on the item or pass
 Do not use the wave to create aliases. Superseded names should not accumulate
 as routing noise.
 
-## Apply Reviewed Work
+### Apply Reviewed Work
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-wave apply \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
   --apply \
   --write-report
@@ -64,12 +72,12 @@ For a deliberately fast high-confidence pass, `--accept-proposed` can accept
 only proposed names whose candidate quality is `ok`. Use it after sampling the
 plan, not as the default route.
 
-## Audit Quality
+### Audit Quality
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-wave audit \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --plan diagnostics/naming-waves/<wave-id>/naming-wave-plan.json \
   --sample-size 18 \
   --sample-seed wave-quality-1 \
@@ -82,6 +90,14 @@ candidate quality flags. With `--sample-size`, it also writes a deterministic
 stratified sample with raw evidence previews. Treat each sampled defect as a
 class: add a small golden case or classifier rule, rebuild the wave, and sample
 again with a new seed.
+
+## Verification
+
+- Preflight and source indexes are current.
+- Apply uses only explicit reviewed names or separately authorized sampled
+  high-confidence candidates.
+- Every changed name has old/new refs and refreshed index entries.
+- The deterministic quality audit reports no hidden or unclassified failure.
 
 ## Stop Line
 

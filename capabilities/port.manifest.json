@@ -1,0 +1,26 @@
+{
+  "schema_version": "aoa_capability_home_port_v1",
+  "contract_ref": "aoa-skills:schemas/capability-home-port.schema.json",
+  "owner_repo": "aoa-session-memory",
+  "owner_ref": "capabilities/AGENTS.md",
+  "admission_ref": "docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md",
+  "source": {
+    "family_root": "capabilities/families",
+    "root_id": "aoa-session-memory"
+  },
+  "federation": {
+    "parent_owner": "aoa-skills",
+    "parent_node": "sessions",
+    "relation": "specializes"
+  },
+  "skill_home_ref": "skills/port.manifest.json",
+  "eval_port_ref": "evals/PORT.yaml",
+  "projection": {
+    "authority": false,
+    "graph_json": "generated/capability_graph.json",
+    "graph_markdown": "generated/capability_graph.md",
+    "router_markdown": "skills/aoa-session-memory-global-route/references/capability-router.md",
+    "generated_by": "aoa-skills:scripts/build_capability_home_projection.py"
+  }
+}
+

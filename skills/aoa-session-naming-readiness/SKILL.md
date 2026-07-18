@@ -29,8 +29,8 @@ Refresh the generated readiness maps:
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-readiness all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --refresh-indexes \
   --write-report
 ```
@@ -39,8 +39,8 @@ For a bounded window:
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-readiness all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --refresh-indexes \
   --write-report
@@ -50,8 +50,8 @@ For one target:
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-readiness <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --write-report
 ```
 
@@ -73,6 +73,13 @@ python3 scripts/aoa_session_memory.py naming-readiness <session-label-or-id> \
 - `low_signal`: likely probe or tiny session; leave it unless it matters.
 - `named`: verify or refine the existing semantic name.
 
+## Verification
+
+- Every scoped session has one readiness class, evidence refs, and an exact
+  next route.
+- Index/title freshness and owner-resolution blockers remain visible.
+- The readiness pass changes no semantic session name.
+
 ## Stop Line
 
 Do not use readiness as reviewed truth. It is a routing index for the next
@@ -85,8 +92,8 @@ open candidates first:
 
 ```bash
 python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --write \
   --write-report
 ```

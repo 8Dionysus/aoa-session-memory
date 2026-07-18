@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.deps/
 
 # Local evidence archive. Keep on disk, but do not publish as portable source.
 sessions/*

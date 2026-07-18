@@ -15,7 +15,7 @@ may be untrusted or stale.
 ## Trigger Boundary
 
 - The user says hooks failed, are untrusted, or are not firing.
-- `~/.codex/hooks.json` changed.
+- the logical `<codex-hook-registry>` changed.
 - `.aoa/scripts/aoa_session_memory.py` or hook command paths changed.
 - A Codex update may have changed hook trust behavior.
 
@@ -25,8 +25,8 @@ Inspect without changing trust first:
 
 ```bash
 python3 scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root>
 ```
 
 If matching AoA hooks are present but untrusted, and the user has approved
@@ -34,8 +34,8 @@ trusting the current commands, run:
 
 ```bash
 python3 scripts/aoa_session_memory.py codex-hooks-status \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --trust-current
 ```
 

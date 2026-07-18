@@ -16,14 +16,20 @@ continuation name but its internal phases are not yet clear.
 This skill generates open candidates. It does not apply semantic names and does
 not close review.
 
+## Trigger Boundary
+
+Use this when naming readiness identifies a long or multi-topic session that
+needs phase candidates. Do not use it for a short session with one reviewed
+name, or when the target/index cannot be resolved uniquely.
+
 ## Procedure
 
 Generate the candidate layer:
 
 ```bash
 python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --write \
   --write-report
 ```
@@ -32,8 +38,8 @@ Then refresh the indexes:
 
 ```bash
 python3 scripts/aoa_session_memory.py naming-readiness all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --refresh-indexes \
   --write-report
 ```
@@ -74,8 +80,8 @@ names in chat:
 
 ```bash
 python3 scripts/aoa_session_memory.py phase-review-assist <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --from-segment <segment-id> \
   --limit 8 \
   --write \
@@ -123,6 +129,13 @@ python3 scripts/aoa_session_memory.py review-phase-name <session-label-or-id> \
 For candidates marked `ready_for_raw_check`, `--use-candidate` is accepted only
 after raw samples are checked. It is rejected for
 `needs_semantic_synthesis`.
+
+## Verification
+
+- Every phase candidate carries bounded raw ranges and evidence refs.
+- Generic prompts alone do not become durable names.
+- Candidate confidence remains routing confidence, not truth confidence.
+- No phase or session name changes during discovery.
 
 ## Stop Line
 

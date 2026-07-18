@@ -1,0 +1,65 @@
+{
+  "schema_version": "local_eval_suite_execution_v1",
+  "suite_id": "session-memory-skill-routing",
+  "owner_repo": "aoa-session-memory",
+  "suite_note_ref": "evals/suites/session-memory-skill-routing.suite.md",
+  "runner": {
+    "kind": "python_pytest",
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tests/test_skill_system.py"
+    ],
+    "cwd": "."
+  },
+  "entrypoint_ref": "tests/test_skill_system.py",
+  "timeout_seconds": 180,
+  "success_exit_codes": [
+    0
+  ],
+  "tracked_sources": [
+    {
+      "path": "tests/test_skill_system.py",
+      "kind": "file",
+      "sha256": "b0db8ba6acab74cedd1e704ad9f3d8d24eb8dc7216e51171281da5747c9fada2"
+    },
+    {
+      "path": "evals/cases/session-memory-skill-routing.v1.json",
+      "kind": "file",
+      "sha256": "f344239a6986f799978306772b11b5fce71e6739388b33bb0bfc7db5eb877cc6"
+    },
+    {
+      "path": "capabilities/families/session-memory.yaml",
+      "kind": "file",
+      "sha256": "4e05d54671706b16a6cc087edc8b25c0545c52cd3819073a90cf933847782e91"
+    },
+    {
+      "path": "capabilities/port.manifest.json",
+      "kind": "file",
+      "sha256": "3aeb5348f4e968c04d9f32837889e9f7a9461b74fc5be1664cd05057ed2ff5a7"
+    },
+    {
+      "path": "skills/port.manifest.json",
+      "kind": "file",
+      "sha256": "040fb43eaeed24b1fbfdeeeccee8df50428e5717123fc031b9cee7ceb5472ffd"
+    },
+    {
+      "path": "generated/capability_graph.json",
+      "kind": "file",
+      "sha256": "58b36aed538e2c3cff4b68f67ecb17d50f5b9bdb00fd94daedc5ee4bb7cef5af"
+    }
+  ],
+  "auto_run_allowed": false,
+  "proof_authority": false,
+  "promotion_allowed": false,
+  "readiness_scope": "source-contract-ready",
+  "runtime_reproducibility_proven": false,
+  "jit_revalidation_required": true,
+  "execution_receipt_required": true,
+  "environment_capture_required": true,
+  "authority_boundary": "owner-local execution support only; no verdict, scoring, regression, proof doctrine, proof acceptance, or promotion authority"
+}

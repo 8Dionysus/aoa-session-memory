@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://8dionysus.github.io/aoa-session-memory/schemas/skill-usage-receipt-v1.schema.json",
+  "title": "Reviewed AoA skill usage receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "created_at",
+    "skill",
+    "runtime",
+    "episode",
+    "evidence",
+    "attribution",
+    "review",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": "skill_usage_receipt_v1"},
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^skill-use-[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source_version",
+        "source_fingerprint",
+        "source_revision",
+        "source_ref",
+        "capability_graph_hash",
+        "installed_status",
+        "prompt_visible_status",
+        "selected_version",
+        "selected_fingerprint",
+        "executed_version",
+        "executed_fingerprint",
+        "identity_status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "source_version": {"$ref": "#/$defs/version"},
+        "source_fingerprint": {"$ref": "#/$defs/sha256"},
+        "source_revision": {"type": "string", "minLength": 1},
+        "source_ref": {"$ref": "#/$defs/evidenceRef"},
+        "capability_graph_hash": {"$ref": "#/$defs/sha256"},
+        "installed_status": {"$ref": "#/$defs/surfaceStatus"},
+        "installed_version": {"$ref": "#/$defs/version"},
+        "installed_digest": {"$ref": "#/$defs/sha256"},
+        "install_receipt_ref": {"$ref": "#/$defs/evidenceRef"},
+        "prompt_visible_status": {"$ref": "#/$defs/surfaceStatus"},
+        "prompt_visible_version": {"$ref": "#/$defs/version"},
+        "prompt_description_sha256": {"$ref": "#/$defs/sha256"},
+        "selected_version": {"$ref": "#/$defs/version"},
+        "selected_fingerprint": {"$ref": "#/$defs/sha256"},
+        "executed_version": {"$ref": "#/$defs/version"},
+        "executed_fingerprint": {"$ref": "#/$defs/sha256"},
+        "identity_status": {
+          "type": "string",
+          "enum": ["current", "drift", "unverifiable"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "installed_status": {"enum": ["current", "drift"]}
+            }
+          },
+          "then": {
+            "required": [
+              "installed_version",
+              "installed_digest",
+              "install_receipt_ref"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "installed_status": {"const": "not-applicable"}
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["installed_version"]},
+                {"required": ["installed_digest"]},
+                {"required": ["install_receipt_ref"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "prompt_visible_status": {"enum": ["current", "drift"]}
+            }
+          },
+          "then": {
+            "required": [
+              "prompt_visible_version",
+              "prompt_description_sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "prompt_visible_status": {"const": "not-applicable"}
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["prompt_visible_version"]},
+                {"required": ["prompt_description_sha256"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "host",
+        "model",
+        "initial_context_ref",
+        "retrieval_mode",
+        "tools",
+        "permissions"
+      ],
+      "properties": {
+        "runtime": {"type": "string", "minLength": 1},
+        "host": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "initial_context_ref": {"$ref": "#/$defs/evidenceRef"},
+        "retrieval_mode": {
+          "type": "string",
+          "enum": ["prompt-visible", "direct", "retrieved", "composed"]
+        },
+        "tools": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "permissions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "episode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "task_episode_id",
+        "request_ref",
+        "outcome_ref"
+      ],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "task_episode_id": {"type": "string", "minLength": 1},
+        "request_ref": {"$ref": "#/$defs/evidenceRef"},
+        "outcome_ref": {"$ref": "#/$defs/evidenceRef"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "procedure_observations",
+        "tool_calls",
+        "checkpoints",
+        "verifier",
+        "consequence_refs"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["procedure_observed", "verified", "completed", "deflected"]
+        },
+        "procedure_observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["section", "status", "evidence_ref"],
+            "properties": {
+              "section": {"type": "string", "minLength": 1},
+              "status": {
+                "type": "string",
+                "enum": ["observed", "not-observed", "not-applicable"]
+              },
+              "evidence_ref": {"$ref": "#/$defs/evidenceRef"}
+            }
+          }
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tool", "call_ref", "result_ref"],
+            "properties": {
+              "tool": {"type": "string", "minLength": 1},
+              "call_ref": {"$ref": "#/$defs/evidenceRef"},
+              "result_ref": {"$ref": "#/$defs/evidenceRef"}
+            }
+          }
+        },
+        "checkpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "evidence_refs"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "status": {
+                "type": "string",
+                "enum": ["passed", "failed", "not-run", "not-applicable"]
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/evidenceRef"},
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        "verifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "independent_from_executor",
+            "verdict",
+            "evidence_refs"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["owner-check", "independent-eval", "human-review", "tool"]
+            },
+            "id": {"type": "string", "minLength": 1},
+            "independent_from_executor": {"type": "boolean"},
+            "verdict": {
+              "type": "string",
+              "enum": ["passed", "failed", "inconclusive", "not-run"]
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/evidenceRef"},
+              "uniqueItems": true
+            }
+          }
+        },
+        "consequence_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidenceRef"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocation_status",
+        "contribution_status",
+        "alternative_explanations"
+      ],
+      "properties": {
+        "invocation_status": {
+          "type": "string",
+          "enum": ["observed", "deflected"]
+        },
+        "contribution_status": {
+          "type": "string",
+          "enum": ["candidate", "supported", "not-supported", "unknown"]
+        },
+        "alternative_explanations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "comparison_ref": {"$ref": "#/$defs/evidenceRef"},
+        "eval_verdict_ref": {"$ref": "#/$defs/evidenceRef"}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewer",
+        "reviewer_kind",
+        "independent_from_executor",
+        "authority_ref",
+        "reviewed_at",
+        "evidence_refs"
+      ],
+      "properties": {
+        "status": {"const": "approved"},
+        "reviewer": {"type": "string", "minLength": 1},
+        "reviewer_kind": {
+          "type": "string",
+          "enum": ["owner", "human", "independent-agent", "tool"]
+        },
+        "independent_from_executor": {"const": true},
+        "authority_ref": {"$ref": "#/$defs/evidenceRef"},
+        "reviewed_at": {"type": "string", "format": "date-time"},
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceRef"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_only", "benefit_verdict", "claim_limit"],
+      "properties": {
+        "candidate_only": {"const": true},
+        "benefit_verdict": {"const": false},
+        "claim_limit": {
+          "const": "reviewed invocation evidence and effect-attribution candidate only; aoa-evals owns benefit and promotion verdicts"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "surfaceStatus": {
+      "type": "string",
+      "enum": ["current", "drift", "not-applicable", "unverifiable"]
+    },
+    "evidenceRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    }
+  }
+}

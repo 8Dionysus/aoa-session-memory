@@ -25,8 +25,8 @@ Start with a dry run:
 
 ```bash
 python3 scripts/aoa_session_memory.py reindex-sessions all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --dry-run \
   --write-report
 ```
@@ -35,8 +35,8 @@ For a bounded smoke pass:
 
 ```bash
 python3 scripts/aoa_session_memory.py reindex-sessions all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --limit 10 \
   --write-report
 ```
@@ -45,8 +45,8 @@ For one target session:
 
 ```bash
 python3 scripts/aoa_session_memory.py reindex-sessions <session-label-or-id> \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --write-report
 ```
 
@@ -55,8 +55,8 @@ named catch-up route:
 
 ```bash
 python3 scripts/aoa_session_memory.py projection-catchup all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --apply \
   --write-report
 ```

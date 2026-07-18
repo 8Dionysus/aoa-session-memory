@@ -11,14 +11,20 @@ metadata:
 
 Use this after `batch-distill` has shown coherent manual-review lanes.
 
+## Trigger Boundary
+
+Use this only when provisional candidate packets already exist and require
+bounded owner-aware human review. Do not use it to promote a raw session,
+machine candidate, or plausible pattern directly.
+
 ## Procedure
 
 Plan the wave first:
 
 ```bash
 python3 scripts/aoa_session_memory.py manual-review \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --priority deep \
   --write-report
@@ -29,8 +35,8 @@ coherent:
 
 ```bash
 python3 scripts/aoa_session_memory.py manual-review \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --priority deep \
   --apply \
@@ -41,8 +47,8 @@ Aggregate promotion candidates:
 
 ```bash
 python3 scripts/aoa_session_memory.py promotion-review \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --write-report
 ```
@@ -61,3 +67,17 @@ python3 scripts/aoa_session_memory.py promotion-review \
   `ambiguous`, `unresolved`, or `fallback_only`, do not promote
   project-specific claims.
 - Use packet evidence refs and segment indexes before opening large raw JSONL.
+
+## Verification
+
+- Every packet has a keep, reject, revise, or owner-handoff disposition.
+- Each disposition names the owner-resolution posture, evidence refs, and
+  remaining uncertainty.
+- `promoted_claim_count` remains `0`; promotion is a separate owner action.
+- Prior review waves remain preserved.
+
+## Stop Line
+
+Stop after each scoped packet has a reviewed disposition or an explicit
+evidence/owner blocker. Do not turn the queue, review packet, or current model
+judgment into accepted knowledge.

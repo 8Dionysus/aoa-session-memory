@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
+      AOA_SKILLS_ROOT: ${{ github.workspace }}/.deps/aoa-skills
+      AOA_EVALS_ROOT: ${{ github.workspace }}/.deps/aoa-evals
 
     steps:
       - name: Checkout
@@ -27,13 +29,29 @@ jobs:
           ref: 96833eea25f16fd61b174dad8286e7d8bcf1a93c
           path: .deps/aoa-stats
 
+      - name: Checkout aoa-skills capability contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-skills
+          ref: 6f53e97cecb74877cf1d91432d685a72cf6771b8
+          path: .deps/aoa-skills
+
+      - name: Checkout aoa-evals local-port contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-evals
+          ref: f836f94fd8a04dc914b5cab700757bf05b096aa8
+          path: .deps/aoa-evals
+
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
 
       - name: Install test dependency
-        run: python3 -m pip install --disable-pip-version-check pytest==9.0.3
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          pytest==9.0.3 'PyYAML>=6.0,<7.0' 'jsonschema>=4.0,<5.0'
 
       - name: Check repo-local KAG index family
         uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@b28f64a497fd440dd58cbaae90d655da46224d8c
@@ -44,7 +62,23 @@ jobs:
       - name: Check owner-local stats protocol
         run: python3 scripts/validate_local_stats_port.py
 
-      - name: Check owner-local stats derivation
+      - name: Check owner-local capability contract and generated parity
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1
+          python3 scripts/validate_local_capability_port.py --check-generated
+
+      - name: Check owner-local eval port and execution sidecars
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1
+          python3 "$AOA_EVALS_ROOT/scripts/validate_local_eval_port.py"
+          --target-root "$GITHUB_WORKSPACE"
+
+      - name: Check decision index parity
+        run: python3 scripts/generate_decision_indexes.py --check
+
+      - name: Run complete source and skill-system tests
         run: >-
           PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
-          tests/test_session_memory.py -k local_stats
+          tests/test_session_memory.py
+          tests/test_skill_system.py
+          tests/test_skill_behavioral_sandbox.py

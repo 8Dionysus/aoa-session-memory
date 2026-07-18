@@ -27,8 +27,8 @@ Start with a planning report:
 
 ```bash
 python3 scripts/aoa_session_memory.py batch-distill \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --write-report
 ```
@@ -51,8 +51,8 @@ Repair weak imported titles before a broad manual review wave:
 
 ```bash
 python3 scripts/aoa_session_memory.py repair-session-titles all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --write-report
 ```
@@ -63,8 +63,8 @@ Apply only after the queue shape is coherent:
 
 ```bash
 python3 scripts/aoa_session_memory.py batch-distill \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --apply \
   --write-report
@@ -95,6 +95,15 @@ After each batch, inspect `improvement_candidates` in the report. If the queue
 shows recurring parser misses, noisy names, missing indexes, hook gaps, or
 repeatable command patterns, improve the bundle itself with a narrow patch and
 rerun `doctor`, `audit`, and tests.
+
+## Verification
+
+- Every scoped session has an automatic, manual-review, mechanics-candidate,
+  diagnostic, skip, or failure terminal receipt.
+- All produced artifacts remain explicitly provisional.
+- Owner resolution and evidence refs are present before project-specific
+  interpretation.
+- No claim, skill change, automation, or durable lesson was promoted.
 
 ## Stop Line
 

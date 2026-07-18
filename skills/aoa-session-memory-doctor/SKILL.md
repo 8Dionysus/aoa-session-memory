@@ -27,8 +27,8 @@ Run the narrow filesystem and metadata doctor first:
 
 ```bash
 python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root>
 ```
 
 The default route is intentionally fast on large live archives. It checks
@@ -39,8 +39,8 @@ When live hooks and Codex grounding matter, run:
 
 ```bash
 python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --check-live-hooks \
   --check-user-skill \
   --check-codex-grounding
@@ -51,8 +51,8 @@ files, use the explicit deep route:
 
 ```bash
 python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --deep-segment-indexes
 ```
 

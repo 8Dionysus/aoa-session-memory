@@ -9,236 +9,60 @@ metadata:
 
 # aoa-session-search
 
-Use this when the archive needs fast retrieval across many sessions without
-turning search hits into authority.
-
 ## Trigger Boundary
 
-- The agent needs to find hook timeouts, naming complaints, raw-unavailable
-  incidents, commit/push/merge sessions, technique sessions, sync needs, or
-  other cross-session evidence.
-- The archive has been reindexed and needs a fresh portable retrieval layer.
-- A search result must show session, segment, raw block, raw line, and
-  freshness refs before the agent opens heavier material.
-- The agent wants to check whether optional host retrieval tools can be used
-  without replacing `.aoa` raw/segment authority.
-- The agent needs a bounded continuation or investigation packet for a long
-  session before opening raw or segment files.
+Use this skill for a bounded cross-session archive query or an explicitly
+requested portable search-projection refresh. Do not use it when current owner
+source, a typed entity route, or live runtime state already answers the
+question.
+
+Search results are navigation. Raw, segment, session, receipt, and owner refs
+remain the evidence handoff.
 
 ## Procedure
 
-Build or rebuild the runtime search database:
-
-```bash
-python3 scripts/aoa_session_memory.py search-index all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --write-report
-```
-
-Query with explanations:
+1. Resolve logical `<workspace-root>` and `<aoa-root>`.
+2. Inspect provider status and freshness before choosing query or maintenance.
+3. Prefer the smallest typed query and bounded filters:
 
 ```bash
 python3 scripts/aoa_session_memory.py search \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --query "hook timed out" \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
+  --query "<bounded-query>" \
   --explain
 ```
 
-Use local accelerators when semantic recall or reranking helps orientation:
+4. Use dedicated agent-event, entity, goal, or task routes when their typed
+   contract fits better than general search. Keep literal raw-text timeout
+   bounded; an explicit offline scan is a separate operator choice.
+5. Open returned raw or segment refs before using a hit for a decision, name,
+   distillation, automation candidate, or other owner mutation.
+6. Rebuild or repair a projection only after explicit intent and a preview or
+   gate packet. Query and maintenance share this package, but maintenance is a
+   typed internal mode, not an automatic consequence of a stale hit.
 
-```bash
-python3 scripts/aoa_session_memory.py search \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --query "hook timeout route" \
-  --include-semantic-context \
-  --rerank-local \
-  --allow-host-warnings \
-  --host-timeout 120 \
-  --explain
-```
+Use exactly one shallow reference when needed:
 
-The embedding overlay and reranker are host read-model accelerators. They may
-make the first route cheaper, but the returned `.aoa` raw/segment refs remain
-the only archive evidence to promote or cite.
-
-Literal raw-text query is bounded by default. Keep the default
-`--query-timeout-ms` for live agent work; pass `--query-timeout-ms 0` only for
-an explicit offline scan. Bounded FTS uses exact token matching with date order
-instead of `bm25` ranking, and a budget overrun returns `sqlite_query_timeout`
-with `bounded_timeout.next_expansion_command` rather than blocking the session.
-
-Use filters when the route is known:
-
-```bash
-python3 scripts/aoa_session_memory.py search \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --query "имена общие" \
-  --conversation-act operator_correction \
-  --explain
-```
-
-When the question is specifically about assistant answers, closeouts, progress
-updates, or reasoning windows on a materialized archive, prefer the dedicated
-agent-event route with shards:
-
-```bash
-python3 scripts/aoa_session_memory.py agent-responses \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --agent-event assistant_answer \
-  --use-shards \
-  --explain
-```
-
-Default monthly shards are structured route projections. They are meant for
-filters such as `--agent-event`, `--session-act`, `--route-signal`,
-`--doc-type`, date bounds, goals, episodes, and entity inventory. If a query
-needs literal raw-text FTS, `--use-shards` may report
-`search_shard_fanout_raw_text_uses_monolith_fallback` and use the monolith
-fallback instead; this is expected and preserves raw-text recall without broad
-FTS fan-out across every shard. Build full-text shards only with an explicit
-operator intent:
-
-```bash
-python3 scripts/aoa_session_memory.py search-shards all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --full-text \
-  --write-report
-```
-
-For live catch-up where the catalog already names only a few stale sessions in
-an existing shard, prefer the dirty incremental route:
-
-```bash
-python3 scripts/aoa_session_memory.py search-shards all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --shard month/2026-06 \
-  --no-rebuild \
-  --dirty-only \
-  --write-report
-```
-
-Do not use `--dirty-only` without `--no-rebuild`. The command refuses that
-combination so a partial dirty selection cannot replace a full shard DB.
-By default this route skips rows still marked `deferred_live`; run the
-live-tail catch-up route first, or pass `--include-deferred-live` only as an
-explicit operator override.
-Timer/resource catch-up follows the same boundary: `auto-maintenance-resource
-catchup all` must wrap the targeted live-tail `index-maintenance <session>
---skip-graph-repair --skip-token-accounting` command when it is ready, instead
-of broadening one deferred live session into full catch-up.
-
-When `search-operational-shrink-gates` reports `explicit_apply_route=pass` but
-still blocks on `storage_before_after_comparison`, use the guarded operator
-wrapper first:
-
-```bash
-python3 scripts/aoa_session_memory.py search-operational-shrink-apply \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --apply \
-  --write-report
-```
-
-This route preflights the shrink gates, captures before/after storage
-snapshots, rebuilds structured shards with route-ref-backed context-tail
-omission, refreshes `search-operational-route-rollup`, runs a route-rollup ref
-query, and runs the live scenario corpus. Use the lower-level
-`search-shards all --context-tail-omission-policy route-ref-backed` command
-only as the explicit rebuild primitive when debugging the wrapper.
-
-The rebuild omits only route-ref-backed context-tail event rows from
-structured shards; it keeps agent-event, task-episode, protected context, and
-unrouted context-tail rows. It is not valid with `--full-text`, does not touch
-raw/segment evidence, and does not remove the monolith raw-text fallback.
-Omitted route-backed rows must remain findable through compact refs: the shard
-stores `omitted_context_tail_route_refs`, and operational route-rollup queries
-read that sidecar as well as remaining candidate documents. After this rebuild,
-the wrapper should report either `applied` or
-`applied_with_storage_warning`. The latter is acceptable only when document
-cardinality and refs improved but SQLite/page allocation or sidecar overhead
-did not reduce physical bytes. Read `storage_before_after_comparison`,
-`document_count_source`, and diagnostics before claiming a weight win.
-An empty route-rollup after omission is a regression, not a successful shrink.
-If shrink gates report `projection_guard=blocked` only because the operational
-route-rollup is stale or source-mismatched, do not describe the apply route as
-missing. Run the generated maintenance lane first:
-
-```bash
-python3 scripts/aoa_session_memory.py auto-maintenance-resource hot all \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --apply \
-  --skip-graph-repair \
-  --write-report \
-  --full
-```
-
-Then re-run `search-operational-shrink-gates`. The resource wrapper should
-surface child statuses such as `skipped_lock_held` instead of hiding them as
-completed repairs; treat those as retry/defer signals with a named blocking
-owner.
-
-When only the generated entity inventory is stale, refresh it without touching
-session documents:
-
-```bash
-python3 scripts/aoa_session_memory.py entity-registry-search-sync \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --write-report
-```
-
-Check optional provider status before using host overlays:
-
-```bash
-python3 scripts/aoa_session_memory.py search-provider-status \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --include-host
-```
-
-When using `--provider abyss_machine_nervous`, keep the returned `.aoa` hits as
-the authoritative route. The host overlay is context only and should be ignored
-for promotion unless its claim is reopened through raw/segment refs.
-
-Build a recipe packet when search alone is too thin:
-
-```bash
-python3 scripts/aoa_session_memory.py retrieve continue-techniques-session \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
-  --query "aoa-techniques continuation" \
-  --write-report
-```
-
-Use retrieval packets before continuing a long session, investigating hook
-failure, reviewing a naming candidate, collecting process lessons, comparing
-repeated errors, or preparing manual review.
+- [query-modes.md](references/query-modes.md) for filters, shards, host
+  overlays, dedicated response routes, and retrieval packets;
+- [maintenance.md](references/maintenance.md) for index builds, dirty
+  catch-up, entity sync, shrink gates, guarded apply, and recovery.
 
 ## Verification
 
-- Search hits include `session_label`, `segment_id` or `event_id`, refs, and a
-  `freshness` block.
-- `freshness.status` is `fresh` before treating the hit as current routing
-  evidence. If it is `stale` or `unverifiable`, re-run `reindex-sessions` or
-  inspect the raw archive before using the hit.
-- Open the returned raw/segment refs for any claim that will become a decision,
-  name, distillation note, or promoted automation.
-- If host provider status is `ready_with_warnings`, use `portable_sqlite`
-  results as the only reliable `.aoa` route and record the warning as
-  capability state rather than failure of archive search.
-- Retrieval packets must include `evidence_hits`, `continuation_signals`,
-  `phase_discovery`, and `next_routes`; if any of these are empty, treat the
-  packet as an orientation gap and refine the query or run lower-layer repair.
+- Every hit names `session_label`, an event or segment identity, resolvable
+  evidence refs, and freshness.
+- Treat only `fresh` hits as current routing evidence. Reindex or inspect raw
+  when stale or unverifiable.
+- Record provider warnings without replacing portable SQLite authority.
+- A mutating mode reports preview/gates, exact scope, changed derived
+  artifacts, postcondition status, and recovery route.
+- Raw archives and segment evidence remain unchanged by search maintenance.
 
 ## Stop Line
 
-Search is a routing layer. It does not replace raw JSONL, segment indexes, or
-reviewed distillation.
+Stop after a bounded result set, honest miss, or one exact stale-provider
+recovery route. Do not widen from a successful typed route into broad FTS, run
+maintenance implicitly, claim storage improvement without before/after
+evidence, or treat a search hit as reviewed truth.

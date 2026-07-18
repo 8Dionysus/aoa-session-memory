@@ -16,6 +16,10 @@ or naming semantics by themselves.
   It includes route-signal projections such as `by_route_layer` and
   `by_route_signal`.
 - `session.manifest.schema.json` describes session archive manifests.
+- `skill-usage-receipt.schema.json` describes one immutable, owner-reviewed
+  positive skill-use evidence packet. It may admit invocation, verification,
+  deflection, and an effect-attribution candidate, but never a benefit or
+  promotion verdict; those remain with `aoa-evals`.
 - `token-accounting.schema.json` describes count-only token observations and
   aggregate ledgers. Provider-reported, exact-tokenizer, and estimated counts
   are separate ledgers.

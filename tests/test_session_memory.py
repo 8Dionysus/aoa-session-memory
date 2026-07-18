@@ -28290,6 +28290,8 @@ def test_reindex_backfills_work_context_for_existing_archives(tmp_path: Path) ->
 
     record = module.resolve_session_record(aoa_root, "work-context-reindex")
     session_dir = Path(record["path"])
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
     manifest_path = session_dir / "session.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.pop("work_context", None)
@@ -28303,6 +28305,7 @@ def test_reindex_backfills_work_context_for_existing_archives(tmp_path: Path) ->
     assert manifest["work_context"]["work_name"] == "aoa-techniques"
     assert manifest["work_context"]["work_family"] == "aoa"
     assert session_index["work_context"]["work_name"] == "aoa-techniques"
+    assert module.sha256_file(raw_path) == raw_sha_before
 
     atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all")
     assert atlas["ok"] is True
@@ -37387,7 +37390,10 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
         aoa_root=aoa_root,
     )
     stale_record = module.resolve_session_record(aoa_root, "route-stale")
-    stale_session_index_path = module.session_dir_from_record(stale_record) / module.SESSION_INDEX_JSON
+    stale_session_dir = module.session_dir_from_record(stale_record)
+    stale_raw_path = stale_session_dir / "raw" / "session.raw.jsonl"
+    stale_raw_sha_before = module.sha256_file(stale_raw_path)
+    stale_session_index_path = stale_session_dir / module.SESSION_INDEX_JSON
     stale_session_index = json.loads(stale_session_index_path.read_text(encoding="utf-8"))
     stale_session_index["route_signal_classifier_version"] = module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
     stale_session_index.pop("agent_event_schema_version", None)
@@ -37438,6 +37444,7 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
     assert isinstance(refreshed["agent_event_counts"], dict)
     assert isinstance(refreshed["task_episode_counts"], dict)
     assert isinstance(refreshed["task_episodes"], list)
+    assert module.sha256_file(stale_raw_path) == stale_raw_sha_before
 
     scope_identity = module.route_sample_identity(sample_by_layer["scope_contract"])
     authority_identity = module.route_sample_identity(sample_by_layer["authority_surface"])
@@ -63363,6 +63370,8 @@ def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path)
         aoa_root=aoa_root,
     )
     session_dir = aoa_root / "sessions" / "2026-05-12__001__reindex-this"
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
     index_path = session_dir / "segments" / "000__initial-to-latest.index.json"
     broken = json.loads(index_path.read_text(encoding="utf-8"))
     broken.pop("by_family", None)
@@ -63384,6 +63393,7 @@ def test_reindex_sessions_regenerates_universal_indexes_from_raw(tmp_path: Path)
     assert manifest["index_schema"]["universal_event_facets"] is True
     assert manifest["raw_blocks"]["blocks"][0]["role"] == "initial-to-latest"
     assert registry["sessions"][0]["raw_blocks"]["block_count"] == 1
+    assert module.sha256_file(raw_path) == raw_sha_before
 
     bounded = module.reindex_sessions(aoa_root=aoa_root, target="all", max_raw_bytes=1)
     assert bounded["counts"] == {"skipped": 1}
@@ -64147,6 +64157,85 @@ def test_codex_hook_lookup_tracks_trust_and_expected_commands(tmp_path: Path) ->
     }
 
 
+def test_codex_hooks_status_inspects_registry_without_mutating_trust(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "portable-workspace"
+    aoa_root = workspace / ".aoa"
+    expected_commands = module.expected_hook_commands(workspace, aoa_root)
+    hooks = [
+        {
+            "key": f"fixture:{event_name}",
+            "eventName": app_event_name,
+            "command": expected_commands[event_name],
+            "currentHash": f"sha256:{event_name.lower()}",
+            "trustStatus": "trusted",
+            "enabled": True,
+        }
+        for event_name, app_event_name in module.CODEX_APP_EVENT_NAMES.items()
+    ]
+    sent: list[dict[str, Any]] = []
+
+    class FakeCodexAppServerClient:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["codex_bin"] == "codex-fixture"
+            assert kwargs["cwd"] == workspace
+            assert kwargs["timeout"] == 7
+
+        def __enter__(self) -> "FakeCodexAppServerClient":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, payload: dict[str, Any]) -> None:
+            sent.append(payload)
+
+        def recv_response(
+            self,
+            request_id: int,
+            *,
+            timeout: int | None = None,
+        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            assert timeout in {None, 7}
+            if request_id == 1:
+                return {"id": 1, "result": {}}, []
+            assert request_id == 2
+            return {
+                "id": 2,
+                "result": {"data": [{"hooks": hooks}]},
+            }, []
+
+    monkeypatch.setattr(
+        module,
+        "CodexAppServerClient",
+        FakeCodexAppServerClient,
+    )
+
+    payload = module.codex_hooks_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        codex_bin="codex-fixture",
+        trust_current=False,
+        timeout=7,
+    )
+
+    assert payload["ok"] is True
+    assert payload["trusted_written"] is False
+    assert payload["trusted_state"] == {}
+    assert payload["trust_response"] is None
+    assert all(item["present"] for item in payload["hooks"].values())
+    assert all(item["trusted"] for item in payload["hooks"].values())
+    assert all(check["ok"] for check in payload["checks"])
+    assert [item["method"] for item in sent] == [
+        "initialize",
+        "initialized",
+        "hooks/list",
+    ]
+    assert not any(item["method"] == "config/batchWrite" for item in sent)
+
+
 def test_default_aoa_root_uses_script_parent() -> None:
     assert module.aoa_root_for() == SCRIPT.parents[1]
 
@@ -64455,18 +64544,42 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
+    assert (aoa_root / "scripts" / "build_capability_projection.py").exists()
+    assert (aoa_root / "scripts" / "capability_route.py").exists()
+    assert (aoa_root / "scripts" / "validate_local_capability_port.py").exists()
     assert (aoa_root / "scripts" / "validate_local_stats_port.py").exists()
     assert (aoa_root / "manifests" / "AGENTS.md").exists()
     assert (aoa_root / "manifests" / "artifact_bundles" / "portable_bundle.bundle.json").exists()
     assert not (aoa_root / "manifests" / "artifact_bundles" / "artifact.verify.json").exists()
+    assert (aoa_root / "capabilities" / "port.manifest.json").exists()
+    assert (
+        aoa_root / "capabilities" / "families" / "session-memory.yaml"
+    ).exists()
+    assert (aoa_root / "evals" / "PORT.yaml").exists()
+    assert (
+        aoa_root
+        / "evals"
+        / "suites"
+        / "session-memory-skill-routing.suite.json"
+    ).exists()
+    assert (aoa_root / "generated" / "capability_graph.json").exists()
     assert (aoa_root / "sessions" / "AGENTS.md").exists()
     assert (aoa_root / "skills" / "AGENTS.md").exists()
+    assert (aoa_root / "skills" / "port.manifest.json").exists()
+    assert (
+        aoa_root
+        / "skills"
+        / "aoa-session-memory-evidence-route"
+        / "references"
+        / "mcp-fallback.md"
+    ).exists()
     assert (aoa_root / "stats" / "AGENTS.md").exists()
     assert (aoa_root / "stats" / "port.manifest.json").exists()
     assert (aoa_root / module.LOCAL_STATS_PACKET_PATH).exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
+    assert (aoa_root / "tests" / "test_skill_system.py").exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"] == []
     session_entries = sorted(path.name for path in (aoa_root / "sessions").iterdir())
@@ -64521,6 +64634,76 @@ def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_pa
     )
     assert decision_check.returncode == 0, decision_check.stdout + decision_check.stderr
     assert module.validate_local_stats_reference(target)["ok"] is True
+
+
+def test_portable_artifact_manifest_fingerprints_complete_skill_system() -> None:
+    source_aoa = SCRIPT.parents[1]
+    manifest = json.loads(
+        (
+            source_aoa
+            / "manifests"
+            / "artifact_bundles"
+            / "portable_bundle.bundle.json"
+        ).read_text(encoding="utf-8")
+    )
+    subjects: set[str] = set()
+    for spec in manifest["artifact_subjects"]:
+        if "path" in spec:
+            path = source_aoa / spec["path"]
+            assert path.is_file(), spec["path"]
+            subjects.add(spec["path"])
+            continue
+        matches = sorted(
+            path
+            for path in source_aoa.glob(spec["glob"])
+            if path.is_file()
+        )
+        assert matches, spec["glob"]
+        subjects.update(
+            path.relative_to(source_aoa).as_posix() for path in matches
+        )
+
+    expected: set[str] = set()
+    for directory in ("capabilities", "evals", "skills"):
+        expected.update(
+            path.relative_to(source_aoa).as_posix()
+            for path in (source_aoa / directory).rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and not path.name.endswith(".pyc")
+        )
+    expected.update(
+        path.relative_to(source_aoa).as_posix()
+        for path in (source_aoa / "scripts").glob("*.py")
+        if path.is_file()
+    )
+    expected.update(
+        path.relative_to(source_aoa).as_posix()
+        for path in (source_aoa / "tests").glob("test_*.py")
+        if path.is_file()
+    )
+    expected.update(
+        path.relative_to(source_aoa).as_posix()
+        for path in (source_aoa / "generated").glob("capability_graph.*")
+        if path.is_file()
+    )
+
+    assert expected <= subjects
+    assert not any("__pycache__" in Path(path).parts for path in subjects)
+    assert not any(path.endswith(".pyc") for path in subjects)
+    for path in (source_aoa / "skills").rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {
+            ".json",
+            ".md",
+            ".txt",
+            ".yaml",
+            ".yml",
+        }:
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "/srv/AbyssOS" not in text, path
+        assert "/home/" not in text, path
+        assert "~/.codex" not in text, path
 
 
 def test_decision_indexes_match_canonical_records() -> None:
@@ -64798,6 +64981,16 @@ def test_install_user_skill_rejects_unknown_named_skill(tmp_path: Path) -> None:
 def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
+    module.copy_portable_bundle(
+        source_aoa_root=SCRIPT.parents[1],
+        target_aoa_root=aoa_root,
+        overwrite=True,
+    )
+    audit_before = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        check_codex=False,
+    )
     source_root = tmp_path / "codex-sessions"
     transcript = source_root / "2026" / "05" / "02" / "rollout-2026-05-02T12-00-00-import-session.jsonl"
     write_jsonl(
@@ -64817,8 +65010,23 @@ def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
                     "content": [{"type": "input_text", "text": "Import old session properly"}],
                 },
             },
+            {
+                "timestamp": "2026-05-02T12:00:02Z",
+                "type": "compacted",
+                "payload": {"replacement_history": []},
+            },
+            {
+                "timestamp": "2026-05-02T12:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Imported after compaction."}],
+                },
+            },
         ],
     )
+    source_sha256 = hashlib.sha256(transcript.read_bytes()).hexdigest()
 
     dry = module.import_codex_sessions(
         aoa_root=aoa_root,
@@ -64832,17 +65040,59 @@ def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
     assert dry["counts"] == {"planned": 1}
     assert Path(dry["report_json"]).exists()
     assert Path(dry["report_markdown"]).exists()
+    assert not list((aoa_root / module.SESSION_ROOT).glob("*/session.manifest.json"))
 
-    imported = module.import_codex_sessions(aoa_root=aoa_root, source_root=source_root, since="2026-05-01")
+    imported = module.import_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        write_report=True,
+    )
     assert imported["ok"] is True
     assert imported["counts"] == {"imported": 1}
+    assert Path(imported["report_json"]).exists()
+    assert Path(imported["report_markdown"]).exists()
     session_dir = Path(imported["results"][0]["session_dir"])
     assert session_dir.name == "2026-05-02__001__import-session-properly"
-    assert (session_dir / "raw" / "session.raw.jsonl").exists()
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    assert raw_path.exists()
+    assert hashlib.sha256(raw_path.read_bytes()).hexdigest() == source_sha256
 
     skipped = module.import_codex_sessions(aoa_root=aoa_root, source_root=source_root, since="2026-05-01")
     assert skipped["ok"] is True
     assert skipped["counts"] == {"skipped_existing": 1}
+
+    doctor_code, doctor = run_doctor_payload(workspace, aoa_root)
+    assert doctor_code == 0
+    assert doctor["ok"] is True
+    assert doctor["status"] == "current"
+    assert doctor["problems"] == []
+
+    audit_after = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        check_codex=False,
+    )
+    before_remaining = {
+        item["requirement"] for item in audit_before["remaining"]
+    }
+    after_remaining = {
+        item["requirement"] for item in audit_after["remaining"]
+    }
+    assert after_remaining <= before_remaining
+    audit_statuses = {
+        item["requirement"]: item["status"]
+        for item in audit_after["checklist"]
+    }
+    assert audit_statuses[
+        "Raw session material is preserved for indexed archives"
+    ] == "covered"
+    assert audit_statuses[
+        "Real Codex compaction boundaries are detected from raw transcripts"
+    ] == "covered"
+    assert audit_statuses[
+        "Segment topology matches raw compaction boundaries"
+    ] == "covered"
 
 
 def test_sweep_codex_sessions_repairs_missing_and_stale_transcripts(tmp_path: Path) -> None:
