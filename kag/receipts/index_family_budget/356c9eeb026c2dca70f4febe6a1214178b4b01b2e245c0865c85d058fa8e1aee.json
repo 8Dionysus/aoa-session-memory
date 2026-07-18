@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 17153377,
+  "allowed_tracked_bytes": 17195934,
+  "approved_by": "repository-owner",
+  "base_ref": "b04c6101b66040b16edc5cdf39b2621aef20765c",
+  "changed_generated_bytes": 17153377,
+  "changed_generated_files": 325,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "356c9eeb026c2dca70f4febe6a1214178b4b01b2e245c0865c85d058fa8e1aee",
+  "reason": "Reviewed portable KAG family growth caused by the session-memory retrieval and maintenance source expansion plus the hermetic PR review fixture fix in PR #59; authorize only this digest-bound measured family without changing standing limits.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 17195934,
+  "tracked_bytes_max": 13631488
+}
