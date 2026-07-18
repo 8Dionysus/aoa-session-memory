@@ -28493,12 +28493,29 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     assert provider["providers"]["portable_sqlite"]["route_term_count"] > 0
 
 
-def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Path) -> None:
+def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
     (repo / "AGENTS.md").write_text("# graph route\n", encoding="utf-8")
     aoa_root = workspace / ".aoa"
+
+    def local_skill_roots(root: Path) -> list[tuple[Path, str, str]]:
+        skill_root = root / "skills"
+        if not skill_root.exists():
+            return []
+        return [
+            (
+                skill_root,
+                "aoa_session_memory_source_skills",
+                "aoa-session-memory",
+            )
+        ]
+
+    monkeypatch.setattr(module, "entity_registry_skill_roots", local_skill_roots)
     transcript = tmp_path / "rollout-2026-05-26T00-00-00-graph-rag.jsonl"
     graph_session_id = "019e8b6e-343d-7951-87a7-579e1184cceb"
     write_jsonl(
@@ -28596,6 +28613,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
         "---\n"
         "name: aoa-session-memory-evidence-route\n"
         "description: Route prior session evidence for recurring operational entities.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    decision_skill_dir = aoa_root / "skills" / "aoa-decision"
+    decision_skill_dir.mkdir(parents=True)
+    (decision_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: aoa-decision\n"
+        "description: Route durable repository decision evidence.\n"
         "---\n",
         encoding="utf-8",
     )
@@ -29073,6 +29099,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(tmp_path: Pat
     assert embedded_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"
     assert embedded_skill_literal_plan["route_anchor_kind"] == "skill"
     assert embedded_skill_literal_plan["embedded_entity_anchor"]["registry_kind"] == "skill"
+    assert (
+        embedded_skill_literal_plan["embedded_entity_anchor"]["source_surface"]
+        == "aoa_session_memory_source_skills"
+    )
     assert embedded_skill_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
     assert embedded_skill_literal_plan["cost_profile"]["structured_first"] is True
     assert embedded_skill_literal_plan["cost_profile"]["uses_fts_first"] is False
