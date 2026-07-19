@@ -154,6 +154,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
 
+## dependency pinning
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## digest verification
 
 | Decision | Date | Status | Path |
@@ -220,6 +226,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
 
+## full-rebuild boundary
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## generated index parity
 
 | Decision | Date | Status | Path |
@@ -244,6 +256,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## global recall honesty
 
@@ -299,6 +312,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
+
+## mutation rollback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## natural-language intent
 
@@ -483,6 +502,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## starvation prevention
 

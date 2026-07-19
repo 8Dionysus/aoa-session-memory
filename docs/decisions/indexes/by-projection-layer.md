@@ -69,6 +69,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## entity usage chain
 
@@ -164,11 +165,35 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 
+## graph query packets
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
+## graph sidecar
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
+## graph source contributions
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## graph source-state ledger
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+
+## graph store
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## graph timeline
 

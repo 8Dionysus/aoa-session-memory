@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-07-19 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 | 2026-07-19 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 | 2026-07-19 | [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
 | 2026-07-18 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |

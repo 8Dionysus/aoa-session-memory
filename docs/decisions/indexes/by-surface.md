@@ -17,6 +17,12 @@
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 
+## atomic publication
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## attribution
 
 | Decision | Date | Status | Path |
@@ -70,6 +76,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 
+## entity canonicalization
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## entity routing
 
 | Decision | Date | Status | Path |
@@ -112,6 +124,12 @@
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0011 Evidence-Grain Date Bounds](../AOA-SM-D-0011-evidence-grain-date-bounds.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0011-evidence-grain-date-bounds.md` |
 
+## freshness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## freshness contract
 
 | Decision | Date | Status | Path |
@@ -138,6 +156,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 
+## graph indexing
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## graph maintenance
 
 | Decision | Date | Status | Path |
@@ -156,6 +180,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+
+## incremental maintenance
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## lifecycle
 

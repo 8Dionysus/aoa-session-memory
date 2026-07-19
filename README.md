@@ -240,6 +240,13 @@ current-state question. Use the packet's typed next action or the relevant
 maintenance route. A timer success is not proof that every semantic projection
 is current.
 
+Graph freshness includes the exact persisted entity-registry generation used
+to canonicalize its nodes and edges. Graph metadata and every source
+contribution pin that dependency. If the registry generation, semantic digest,
+source fingerprint, or stronger owner-source freshness changes, graph routes
+abstain until catch-up or full rebuild; they do not mix aliases dynamically
+inside one graph generation.
+
 ## Agent Access
 
 Agents should use progressive disclosure:

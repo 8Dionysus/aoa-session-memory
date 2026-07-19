@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import contextlib
 import fcntl
@@ -20518,6 +20519,13 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert registry_search["ok"] is True
     assert registry_search["results"][0]["doc_type"] == "entity_registry"
 
+    monkeypatch.setattr(
+        module,
+        "cached_entity_registry_entry_index",
+        lambda *_args, **_kwargs: pytest.fail(
+            "graph build must use its pinned registry snapshot"
+        ),
+    )
     graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=True, export_sidecar=False)
     node_types = {node["type"] for node in graph["nodes"]}
     edge_types = {edge["type"] for edge in graph["edges"]}
@@ -21125,6 +21133,135 @@ def test_entity_registry_stale_snapshot_overlays_cli_subcommands(tmp_path: Path,
     assert plan["route_anchor_kind"] == "tool"
     assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
     assert plan["ordered_routes"][0]["route_id"] == "entity_usage_chain"
+
+
+def test_entity_registry_cli_identities_are_per_subcommand_contract(
+    tmp_path: Path,
+) -> None:
+    parser = module.build_parser()
+    parser_by_name: dict[str, argparse.ArgumentParser] = {}
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            parser_by_name.update(
+                {
+                    str(name): subparser
+                    for name, subparser in choices.items()
+                    if isinstance(
+                        subparser,
+                        argparse.ArgumentParser,
+                    )
+                }
+            )
+    groups = module.entity_registry_cli_subcommand_groups(parser)
+    identities = {
+        canonical: module.entity_registry_cli_subcommand_contract_identity(
+            canonical=canonical,
+            aliases=aliases,
+            parser=parser_by_name[canonical],
+        )
+        for canonical, aliases in groups
+    }
+
+    assert len(identities) >= 100
+    assert len(
+        {
+            identity["sha256"]
+            for identity in identities.values()
+        }
+    ) == len(identities)
+    assert {
+        identity["mode"]
+        for identity in identities.values()
+    } == {"argparse_subcommand_contract_v1"}
+
+    rebuilt_parser = module.build_parser()
+    rebuilt_parser_by_name: dict[str, argparse.ArgumentParser] = {}
+    for action in rebuilt_parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            rebuilt_parser_by_name.update(
+                {
+                    str(name): subparser
+                    for name, subparser in choices.items()
+                    if isinstance(
+                        subparser,
+                        argparse.ArgumentParser,
+                    )
+                }
+            )
+    rebuilt_groups = (
+        module.entity_registry_cli_subcommand_groups(
+            rebuilt_parser
+        )
+    )
+    rebuilt_identities = {
+        canonical: module.entity_registry_cli_subcommand_contract_identity(
+            canonical=canonical,
+            aliases=aliases,
+            parser=rebuilt_parser_by_name[canonical],
+        )
+        for canonical, aliases in rebuilt_groups
+    }
+    assert identities == rebuilt_identities
+
+    target_name = "search-hotset-audit"
+    control_name = "graph-timeline"
+    target_parser = rebuilt_parser_by_name[target_name]
+    target_parser.description = (
+        str(target_parser.description or "")
+        + " Contract-isolation probe."
+    )
+    mutated_target = (
+        module.entity_registry_cli_subcommand_contract_identity(
+            canonical=target_name,
+            aliases=next(
+                aliases
+                for canonical, aliases in rebuilt_groups
+                if canonical == target_name
+            ),
+            parser=target_parser,
+        )
+    )
+    unchanged_control = (
+        module.entity_registry_cli_subcommand_contract_identity(
+            canonical=control_name,
+            aliases=next(
+                aliases
+                for canonical, aliases in rebuilt_groups
+                if canonical == control_name
+            ),
+            parser=rebuilt_parser_by_name[control_name],
+        )
+    )
+    assert mutated_target["sha256"] != (
+        identities[target_name]["sha256"]
+    )
+    assert unchanged_control["sha256"] == (
+        identities[control_name]["sha256"]
+    )
+
+    entries = module.entity_registry_discover_cli_subcommands(
+        tmp_path / ".aoa"
+    )
+    source_identities = [
+        str(entry["source_refs"][0].get("identity_sha256") or "")
+        for entry in entries
+    ]
+    assert len(source_identities) == len(set(source_identities))
+    assert all(source_identities)
+    assert all(
+        entry["source_refs"][0].get(
+            "identity_fingerprint_mode"
+        )
+        == "argparse_subcommand_contract_v1"
+        for entry in entries
+    )
+    assert all(
+        entry["identity_candidates"][0]["fingerprint"]["basis"]
+        == "argparse_subcommand_contract_v1"
+        for entry in entries
+    )
 
 
 def test_entity_registry_query_no_runtime_uses_archived_routes_not_runtime_snapshot(tmp_path: Path, capsys: Any) -> None:
@@ -35074,7 +35211,6 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
         depth=1,
         limit=8,
     )
-
     assert stale["status"] == "stale"
     assert (
         "graph_source_generation_or_version_mismatch"
@@ -35084,6 +35220,496 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
         "version_mismatch_source_count"
     ] == 1
     assert neighborhood is None
+
+
+def test_graph_pins_entity_registry_dependency_per_store_and_source(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-pinned:000",
+            "source_type": "segment",
+            "session_id": "registry-pinned",
+            "session_label": "2026-07-19__001__registry-pinned",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "registry-pinned.json"),
+            "source_paths": [str(tmp_path / "registry-pinned.json")],
+            "source_sha": "registry-pinned-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {
+                "id": "event:registry-pinned:000:000001",
+                "type": "event",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:registry-pinned",
+                "source": "event:registry-pinned:000:000001",
+                "target": "route:tool:registry-pinned",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        metadata = store.metadata()
+        source_dependency_id = store.conn.execute(
+            "SELECT entity_registry_dependency_id "
+            "FROM graph_sources WHERE source_key = ?",
+            ("segment:registry-pinned:000",),
+        ).fetchone()[0]
+    finally:
+        store.close()
+
+    dependency_id = metadata["entity_registry_dependency_id"]
+    state = module.graph_store_query_state(aoa_root)
+
+    assert dependency_id
+    assert source_dependency_id == dependency_id
+    assert state["status"] == "current"
+    assert state["entity_registry_dependency"]["compatible"] is True
+
+
+def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    event_id = "event:registry-stale:000:000001"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-stale:000",
+            "source_type": "segment",
+            "session_id": "registry-stale",
+            "session_label": "2026-07-19__001__registry-stale",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "registry-stale.json"),
+            "source_paths": [str(tmp_path / "registry-stale.json")],
+            "source_sha": "registry-stale-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [{"id": event_id, "type": "event"}],
+        "edges": [
+            {
+                "id": "edge:registry-stale",
+                "source": event_id,
+                "target": "route:tool:registry-stale",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        before_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+    finally:
+        store.close()
+
+    skill = aoa_root / "skills" / "registry-change" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: registry-change\n"
+        "description: Changes the registry dependency.\n---\n",
+        encoding="utf-8",
+    )
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        limit=1_000_000,
+    )
+
+    stale = module.graph_store_query_state(aoa_root)
+    source_states = module.graph_source_states(
+        aoa_root=aoa_root
+    )
+    cardinality_refresh = module.graph_cardinality(
+        aoa_root=aoa_root,
+        refresh=True,
+    )
+    prune = module.graph_raw_ref_prune(
+        aoa_root=aoa_root,
+        apply=True,
+        allow_low_free=True,
+    )
+    neighborhood = module.graph_from_store_neighborhood(
+        aoa_root=aoa_root,
+        anchor=event_id,
+        kind="auto",
+        depth=1,
+        limit=8,
+    )
+    reopened = module.GraphSqliteStore(aoa_root)
+    try:
+        with pytest.raises(
+            module.GraphEntityRegistryDependencyChanged
+        ):
+            reopened.replace_sources([contribution])
+        reopened.conn.rollback()
+        after_digest = module.graph_projection_semantic_digest(
+            reopened.conn
+        )["sha256"]
+    finally:
+        reopened.close()
+
+    assert stale["status"] == "stale"
+    assert (
+        "graph_entity_registry_dependency_mismatch"
+        in stale["reasons"]
+    )
+    assert stale["source_version_state"][
+        "version_mismatch_source_count"
+    ] == 1
+    assert source_states["reason_group_counts"][
+        "graph_entity_registry_dependency_mismatch"
+    ] >= 1
+    assert cardinality_refresh["projection"]["status"] == "blocked"
+    assert prune["status"] == "blocked"
+    assert neighborhood is None
+    assert after_digest == before_digest
+
+
+def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(source_name: str) -> dict[str, Any]:
+        event_id = f"event:{source_name}:000:000001"
+        return {
+            "source": {
+                "source_key": f"segment:{source_name}:000",
+                "source_type": "segment",
+                "session_id": source_name,
+                "session_label": f"2026-07-19__001__{source_name}",
+                "segment_id": "000",
+                "source_path": str(tmp_path / f"{source_name}.json"),
+                "source_paths": [str(tmp_path / f"{source_name}.json")],
+                "source_sha": f"{source_name}-sha",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [{"id": event_id, "type": "event"}],
+            "edges": [
+                {
+                    "id": f"edge:{source_name}",
+                    "source": event_id,
+                    "target": f"route:tool:{source_name}",
+                    "type": "mentions_route_signal",
+                }
+            ],
+        }
+
+    original_store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        original_store.rebuild([contribution("published")])
+        before_digest = module.graph_projection_semantic_digest(
+            original_store.conn
+        )["sha256"]
+    finally:
+        original_store.close()
+
+    monkeypatch.setattr(
+        module,
+        "graph_session_records",
+        lambda *_args, **_kwargs: (
+            [{"session_id": "candidate", "path": str(tmp_path)}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: ([contribution("candidate")], []),
+    )
+    original_assert = (
+        module.graph_assert_entity_registry_dependency_current
+    )
+    assertion_count = 0
+
+    def changing_dependency_assert(
+        root: Path,
+        expected_dependency_id: str,
+    ) -> dict[str, Any]:
+        nonlocal assertion_count
+        assertion_count += 1
+        if assertion_count >= 4:
+            raise module.GraphEntityRegistryDependencyChanged(
+                "graph_entity_registry_dependency_changed_during_publish"
+            )
+        return original_assert(root, expected_dependency_id)
+
+    monkeypatch.setattr(
+        module,
+        "graph_assert_entity_registry_dependency_current",
+        changing_dependency_assert,
+    )
+
+    result = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+        atomic_store_rebuild=True,
+    )
+    conn = sqlite3.connect(
+        str(aoa_root / "graph" / "graph.sqlite3")
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(
+            conn
+        )["sha256"]
+    finally:
+        conn.close()
+
+    assert assertion_count == 4
+    assert result["ok"] is False
+    assert result["written"] is False
+    assert (
+        "graph_entity_registry_dependency_changed_during_publish"
+        in result["diagnostics"]
+    )
+    assert after_digest == before_digest
+
+
+def test_graph_legacy_store_requires_full_rebuild_before_maintenance(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-legacy-graph-store.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "legacy-graph-store",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build the legacy graph fixture.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "legacy-graph-store",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    built = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+    assert built["ok"] is True
+
+    graph_db = aoa_root / "graph" / "graph.sqlite3"
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE metadata SET value = '3' "
+        "WHERE key = 'graph_store_schema_version'"
+    )
+    conn.execute(
+        "UPDATE graph_sources SET graph_store_schema_version = 3"
+    )
+    conn.commit()
+    before_digest = module.graph_projection_semantic_digest(conn)[
+        "sha256"
+    ]
+    conn.close()
+
+    result = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        batch_limit=10,
+        mode="deep",
+    )
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(conn)[
+            "sha256"
+        ]
+        stored_schema = conn.execute(
+            "SELECT value FROM metadata "
+            "WHERE key = 'graph_store_schema_version'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert result["maintenance_detail"]["full_rebuild_blocked"] is True
+    assert (
+        "graph_store_requires_full_rebuild_before_maintenance"
+        in result["diagnostics"]
+    )
+    assert stored_schema == "3"
+    assert after_digest == before_digest
+
+
+def test_graph_incremental_maintenance_rolls_back_dependency_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-graph-dependency-rollback.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:10:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "graph-dependency-rollback",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:10:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build the rollback fixture.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-dependency-rollback",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    built = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+    assert built["ok"] is True
+
+    graph_db = aoa_root / "graph" / "graph.sqlite3"
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE graph_sources SET source_sha = 'force-dirty' "
+        "WHERE source_type = 'segment'"
+    )
+    conn.commit()
+    before_digest = module.graph_projection_semantic_digest(conn)[
+        "sha256"
+    ]
+    conn.close()
+
+    original_assert = (
+        module.graph_assert_entity_registry_dependency_current
+    )
+    assertion_count = 0
+
+    def changing_dependency_assert(
+        root: Path,
+        expected_dependency_id: str,
+    ) -> dict[str, Any]:
+        nonlocal assertion_count
+        assertion_count += 1
+        if assertion_count >= 4:
+            raise module.GraphEntityRegistryDependencyChanged(
+                "graph_entity_registry_dependency_changed_before_"
+                "incremental_commit"
+            )
+        return original_assert(root, expected_dependency_id)
+
+    monkeypatch.setattr(
+        module,
+        "graph_assert_entity_registry_dependency_current",
+        changing_dependency_assert,
+    )
+    result = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        batch_limit=10,
+        mode="deep",
+    )
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(conn)[
+            "sha256"
+        ]
+    finally:
+        conn.close()
+
+    assert assertion_count == 4
+    assert result["maintenance_detail"][
+        "dependency_change_rollback"
+    ] is True
+    assert result["maintenance_detail"]["mutation_rolled_back"] is True
+    assert (
+        "graph_entity_registry_dependency_changed_before_"
+        "incremental_commit"
+        in result["diagnostics"]
+    )
+    assert after_digest == before_digest
 
 
 def test_graph_scoped_generation_can_be_current_while_global_is_stale(
@@ -38006,6 +38632,9 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38015,7 +38644,8 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
             raise AssertionError("graph maintenance apply must not run a second post-apply source scan")
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         return (
@@ -38122,6 +38752,9 @@ def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_o
                 "append_only_inserted_edge_count": 0,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38135,7 +38768,8 @@ def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_o
             post_states.append(item)
         return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         observed["source_keys"] = keys
@@ -38228,6 +38862,9 @@ def test_graph_maintenance_explicit_candidate_pool_finds_cheaper_source_beyond_d
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38241,7 +38878,8 @@ def test_graph_maintenance_explicit_candidate_pool_finds_cheaper_source_beyond_d
             post_states.append(item)
         return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         return (
@@ -38321,13 +38959,17 @@ def test_graph_maintenance_dry_exact_plan_uses_bounded_candidate_pool(tmp_path: 
         def source_contribution_ids(self, source_key: str) -> tuple[set[str], set[str]]:
             return {f"old:{source_key}"}, set()
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
     def fake_graph_source_states(**_: Any) -> dict[str, Any]:
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         observed["source_keys"] = keys
@@ -38590,9 +39232,16 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
         record: dict[str, Any],
         *,
         source_keys: set[str] | None = None,
+        entity_registry_index: (
+            dict[tuple[str, str], dict[str, Any]] | None
+        ) = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         contribution_calls.append((str(record.get("session_id") or Path(str(record.get("path") or "")).name), source_keys))
-        return original_graph_contributions_for_record(record, source_keys=source_keys)
+        return original_graph_contributions_for_record(
+            record,
+            source_keys=source_keys,
+            entity_registry_index=entity_registry_index,
+        )
 
     monkeypatch.setattr(module, "graph_contributions_for_record", counted_graph_contributions_for_record)
     inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, refresh_chunk_size=2)
@@ -47170,6 +47819,9 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -47177,8 +47829,11 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
         record: dict[str, Any],
         *,
         source_keys: set[str] | None = None,
+        entity_registry_index: (
+            dict[tuple[str, str], dict[str, Any]] | None
+        ) = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        del record
+        del record, entity_registry_index
         return (
             [
                 {

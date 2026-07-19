@@ -131,6 +131,12 @@ Every projection reports freshness and retains a route back to session,
 segment, raw, or receipt evidence. Generated rows may be rebuilt after
 classifier or schema changes.
 
+The graph has an additional generated dependency: one verified persisted
+entity-registry snapshot is pinned for the complete build or maintenance
+operation. Every source contribution uses the immutable index from that
+snapshot, and both graph metadata and source rows record its dependency
+identity. Runtime aliases are not re-resolved independently per record.
+
 ## 8. Consumer routing
 
 Consumers should start with the cheapest typed route that matches the
@@ -197,6 +203,13 @@ bounded scope never makes a stale global graph current; missing, truncated, or
 unverified contributor coverage never becomes `scope_current`. When a compact
 timeline is selected from a wider neighborhood, both scope states remain
 visible.
+
+Graph freshness also verifies the pinned entity-registry schema, producer
+generation, source fingerprint, and semantic digest against the current
+persisted snapshot and its stronger owner sources. A missing, changed, or
+owner-obsolete dependency blocks graph candidate admission. It does not make a
+resolvable local evidence ref false; that ref remains available through its
+stronger source route.
 
 ## 11. Maintenance coordination
 
@@ -275,6 +288,13 @@ deep/full-rebuild boundary.
 removes only those whose producer PID is absent while holding the shared
 maintenance lease, and leaves live stores and raw evidence untouched. An
 active writer defers cleanup rather than racing publication.
+
+Graph incremental mutation checks its pinned registry dependency before
+mutation and before commit. A dependency race rolls back the transaction.
+Full rebuild publishes a temporary store only after the same recheck, so a
+rejected rebuild leaves the previous graph intact. A graph store from before
+the dependency contract requires an explicit full rebuild; a bounded
+maintenance batch cannot silently upgrade its global semantics.
 
 ## 12. Search and graph pressure
 
