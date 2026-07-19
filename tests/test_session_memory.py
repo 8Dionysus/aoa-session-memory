@@ -67230,6 +67230,128 @@ def test_entity_registry_route_terms_use_stable_projection_ref_and_documents_are
     ) < 1000
 
 
+def test_entity_registry_identity_history_does_not_retain_generated_staging_refs_or_counters(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    skill_path = aoa_root / "skills" / "stable-skill" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\nname: stable-skill\ndescription: Stable owner fixture.\n---\n",
+        encoding="utf-8",
+    )
+    final_db = module.search_db_path(aoa_root)
+    staging_db = final_db.parent / f".{final_db.name}.rebuild-legacy"
+    conn = module.init_search_db(staging_db, rebuild=True)
+    doc = conn.execute(
+        """
+        INSERT INTO documents (
+            id, doc_type, session_id, session_label,
+            session_date, payload_json
+        ) VALUES (
+            'doc', 'event', 'stable', 'stable',
+            '2026-07-19', '{}'
+        )
+        """
+    )
+    route = conn.execute(
+        """
+        INSERT INTO route_terms (layer, key, route_signal)
+        VALUES ('skill', 'stable_skill', 'skill:stable_skill')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO document_routes (doc_rowid, route_id)
+        VALUES (?, ?)
+        """,
+        (doc.lastrowid, route.lastrowid),
+    )
+    conn.commit()
+    conn.close()
+
+    def runtime_entries(_aoa_root: Path) -> list[dict[str, Any]]:
+        return [
+            module.entity_registry_make_entry(
+                kind="skill",
+                key="stable_skill",
+                aliases=["stable-skill"],
+                source_refs=[
+                    module.entity_registry_source_ref(
+                        skill_path,
+                        source_type=(
+                            "aoa_session_memory_source_skills"
+                        ),
+                        status="active",
+                    )
+                ],
+                source_surface="aoa_session_memory_source_skills",
+                owner="aoa-session-memory",
+                status="active",
+            )
+        ]
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        runtime_entries,
+    )
+    first = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        route_terms_db_path=staging_db,
+        observed_source="route-terms",
+    )
+    assert ".rebuild-legacy" in json.dumps(
+        first,
+        ensure_ascii=False,
+    )
+
+    second = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        route_terms_db_path=staging_db,
+        route_terms_source_ref_path=final_db,
+        observed_source="route-terms",
+    )
+    third = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        route_terms_db_path=staging_db,
+        route_terms_source_ref_path=final_db,
+        observed_source="route-terms",
+    )
+    second_entry = next(
+        entry
+        for entry in second["entries"]
+        if entry["entity_id"] == "skill:stable_skill"
+    )
+    third_entry = next(
+        entry
+        for entry in third["entries"]
+        if entry["entity_id"] == "skill:stable_skill"
+    )
+
+    assert ".rebuild-legacy" not in json.dumps(
+        second,
+        ensure_ascii=False,
+    )
+    assert ".rebuild-legacy" not in json.dumps(
+        third,
+        ensure_ascii=False,
+    )
+    assert second_entry["freshness"]["signal_count"] == 1
+    assert third_entry["freshness"]["signal_count"] == 1
+    assert second["semantic_digest"]["sha256"] == third[
+        "semantic_digest"
+    ]["sha256"]
+    assert any(
+        ref.get("path") == str(final_db)
+        for ref in second_entry["source_refs"]
+    )
+
+
 def test_index_maintenance_uses_combined_projection_planning_when_hot_state_is_dirty(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
