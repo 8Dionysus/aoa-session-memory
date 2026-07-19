@@ -3881,6 +3881,197 @@ def test_entity_usage_test_and_validator_admission_rejects_source_inspection(
     ] == "000028"
 
 
+def test_entity_usage_lifecycle_uses_owned_transport_and_test_result_proof(
+    tmp_path: Path,
+) -> None:
+    """Regression derived from sealed raw-first test/validator/script cases."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-18T00-05-00-owned-lifecycle-proof.jsonl"
+    )
+
+    def custom_call(call_id: str, command: str) -> dict[str, Any]:
+        return {
+            "timestamp": "2026-07-18T00:05:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": call_id,
+                "input": (
+                    "const r = await tools.exec_command({"
+                    f'"cmd":{json.dumps(command)}'
+                    "}); text(r.output);"
+                ),
+            },
+        }
+
+    def custom_result(
+        call_id: str,
+        output: str,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp": "2026-07-18T00:05:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Script completed\n"
+                            "Wall time 0.2 seconds\n"
+                            "Output:\n"
+                        ),
+                    },
+                    {"type": "input_text", "text": output},
+                ],
+            },
+        }
+
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T00:05:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "owned-lifecycle-proof",
+                    "cwd": str(workspace),
+                },
+            },
+            custom_call(
+                "call-test-validator",
+                (
+                    "python scripts/validate_mechanics_topology.py && "
+                    "python -m pytest -q "
+                    "tests/test_mechanics_topology.py"
+                ),
+            ),
+            custom_result(
+                "call-foreign",
+                "999 passed in 0.01s\n",
+            ),
+            custom_result(
+                "call-test-validator",
+                (
+                    "[ok] mechanics topology valid\n"
+                    "14 passed in 0.12s\n"
+                ),
+            ),
+            custom_call(
+                "call-script",
+                (
+                    "python scripts/build_local_eval_port_inventory.py "
+                    "--json"
+                ),
+            ),
+            custom_result(
+                "call-script",
+                (
+                    '{"repo_id":"aoa-skills",'
+                    '"validator_ok":true}\n'
+                ),
+            ),
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "owned-lifecycle-proof",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )["ok"] is True
+
+    test_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="test_mechanics_topology.py",
+        kind="test",
+        session="owned-lifecycle-proof",
+        limit=8,
+        per_route_limit=12,
+        consequence_window=4,
+    )
+    test_states = test_chain["usage_lifecycle"]["states"]
+    assert test_states["invoked"]["present"] is True
+    assert test_states["completed"]["status"] == "source_observed"
+    assert test_states["verified"]["status"] == "source_observed"
+    assert test_states["consequence-producing"]["present"] is False
+    assert test_states["failed"]["present"] is False
+    assert test_states["completed"]["evidence_sample"][0]["refs"]["raw"] == (
+        "raw:line:4"
+    )
+    assert test_states["verified"]["evidence_sample"][0]["refs"]["raw"] == (
+        "raw:line:4"
+    )
+    test_result = test_chain["usage_chain"]["chains"][0][
+        "result_or_consequence_events"
+    ][0]
+    assert test_result["refs"]["raw"] == "raw:line:4"
+    assert test_result["relation"] == "same_correlation_id"
+    assert test_result["tool_transport_status"] == "completed"
+    assert test_result["result_status"] is None
+    assert test_result["verification_signals"] == [
+        "delivery_state:tests_green"
+    ]
+    assert all(
+        event["refs"]["raw"] != "raw:line:3"
+        for event in test_chain["usage_chain"]["chains"][0][
+            "result_or_consequence_events"
+        ]
+    )
+    assert (
+        test_chain["usage_lifecycle"]["correlation"][
+            "rejected_context_count"
+        ]
+        >= 1
+    )
+
+    validator_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="validate_mechanics_topology.py",
+        kind="validator",
+        session="owned-lifecycle-proof",
+        limit=8,
+        per_route_limit=12,
+        consequence_window=4,
+    )
+    validator_states = validator_chain["usage_lifecycle"]["states"]
+    assert validator_states["invoked"]["present"] is True
+    assert validator_states["completed"]["status"] == "source_observed"
+    assert validator_states["verified"]["present"] is False
+    assert validator_states["consequence-producing"]["present"] is False
+
+    script_chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="build_local_eval_port_inventory.py",
+        kind="script",
+        session="owned-lifecycle-proof",
+        limit=8,
+        per_route_limit=12,
+        consequence_window=4,
+    )
+    script_states = script_chain["usage_lifecycle"]["states"]
+    assert script_states["invoked"]["present"] is True
+    assert script_states["completed"]["status"] == "source_observed"
+    assert script_states["verified"]["present"] is False
+    assert script_states["consequence-producing"]["present"] is False
+
+
 def test_entity_usage_script_admission_distinguishes_request_from_observed_invocation(
     tmp_path: Path,
 ) -> None:
@@ -16570,6 +16761,33 @@ def test_session_evidence_window_reads_bounded_raw_block_and_correlated_result(
     assert packet["episode"]["episode_id"]
     assert packet["cost_profile"]["emitted_event_count"] == 3
     assert packet["cost_profile"]["related_event_count"] == 2
+    module.attach_session_memory_evidence_envelope(
+        packet,
+        aoa_root=aoa_root,
+        query="raw-evidence-window raw:line:3",
+        route_id="session_evidence_window",
+        route_reason=(
+            "hash-verified bounded raw window with exact correlation"
+        ),
+        route_authority="archived_raw_session_snapshot",
+        budgets={"before": 1, "after": 1, "bounded": True},
+    )
+    envelope = packet["evidence_envelope"]
+    assert envelope["candidate_ids"][0] == (
+        "archived-raw-event:raw-evidence-window:000003"
+    )
+    assert envelope["boundedness"]["result_count"] == 5
+    assert envelope["boundedness"]["returned_result_count"] == 5
+    assert envelope["freshness"]["global"]["status"] == "unresolved"
+    assert envelope["freshness"]["scoped"]["status"] == "current"
+    assert envelope["freshness"]["scoped"]["scope"] == (
+        "raw-evidence-window"
+    )
+    assert envelope["freshness"]["scoped"]["coverage"] == "complete"
+    assert envelope["evidence_refs"][0]["refs"]["raw"] == "raw:line:3"
+    assert envelope["insufficiency_reason"] == ""
+    assert envelope["answer_admission"]["evidence_read_admitted"] is True
+    assert envelope["next_route"]["kind"] == "claim_shape_review"
 
     manifest_path = Path(packet["refs"]["session"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -18948,6 +19166,14 @@ def test_graph_timeline_structured_correlation_admits_source_events_and_rejects_
     assert timeline["quality"]["structured_correlation_accepted_event_count"] == 2
     assert timeline["quality"]["structured_correlation_mention_only_rejected_count"] == 1
     assert timeline["quality"]["structured_correlation_unverifiable_count"] == 0
+    assert timeline["freshness"]["status"] == "scope_unverified"
+    assert (
+        timeline["freshness"]["global_freshness"]["status"]
+        == "unresolved"
+    )
+    assert timeline["freshness"]["scope_freshness"][
+        "does_not_upgrade_global_freshness"
+    ] is True
     assert "structured_correlation_text_mentions_rejected:1" in timeline["diagnostics"]
 
     mention_only = module.graph_timeline(
@@ -18967,6 +19193,11 @@ def test_graph_timeline_structured_correlation_admits_source_events_and_rejects_
     assert mention_only["quality"]["structured_correlation_candidate_count"] == 1
     assert mention_only["quality"]["structured_correlation_accepted_event_count"] == 0
     assert mention_only["quality"]["structured_correlation_mention_only_rejected_count"] == 1
+    assert mention_only["freshness"]["status"] == "scope_unresolved"
+    assert (
+        mention_only["freshness"]["global_freshness"]["status"]
+        == "unresolved"
+    )
     assert "structured_correlation_exact_source_miss" in mention_only["diagnostics"]
 
 
@@ -32510,6 +32741,72 @@ def test_graph_freshness_surfaces_hot_gate_backlog(tmp_path: Path, monkeypatch: 
     assert freshness["latest_queue_maintenance_elapsed_ms"] == 1234
     assert "latest_graph_maintenance_remaining_sources" in freshness["hot_gate_diagnostics"]
     assert freshness["maintenance_recommendation"]["route"] == "bounded_graph_maintenance"
+
+
+def test_bounded_graph_freshness_never_upgrades_global_store_state(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "graph_store_query_state",
+        lambda _aoa_root: {
+            "status": "stale",
+            "generation_identity": {
+                "compatible": False,
+            },
+            "reasons": ["graph_generation_mismatch"],
+        },
+    )
+
+    unresolved = module.graph_freshness(
+        aoa_root,
+        {
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-18T00:00:00Z",
+            "nodes": [],
+            "edges": [],
+        },
+    )
+
+    assert unresolved["status"] == "scope_unresolved"
+    assert unresolved["scope_status"] == "scope_unresolved"
+    assert unresolved["global_freshness"]["status"] == "stale"
+    assert unresolved["global_freshness"]["scope"] == "complete_graph_store"
+    assert unresolved["global_recall_status"] == "partial_stale"
+    assert unresolved["scope_freshness"] == {
+        "status": "scope_unresolved",
+        "evidence_ref_count": 0,
+        "coverage_truncated": False,
+        "does_not_upgrade_global_freshness": True,
+    }
+
+    navigation = module.graph_freshness(
+        aoa_root,
+        {
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-18T00:00:00Z",
+            "nodes": [
+                {
+                    "id": "event:session-1:001:000010",
+                    "refs": {
+                        "raw": "raw:line:10",
+                        "segment": "001.md#event-000010",
+                    },
+                }
+            ],
+            "edges": [],
+        },
+    )
+
+    assert navigation["status"] == "scope_unverified"
+    assert navigation["scope_evidence_ref_count"] == 1
+    assert navigation["global_freshness"]["status"] == "stale"
+    assert navigation["global_recall_status"] == "partial_stale"
+    assert navigation["scope_freshness"][
+        "does_not_upgrade_global_freshness"
+    ] is True
 
 
 def test_graph_freshness_separates_scoped_current_evidence_from_global_stale(tmp_path: Path) -> None:
@@ -59049,6 +59346,263 @@ def test_task_episode_projection_integrity_rejects_unresolved_raw_ref(
     assert integrity["admissible"] is False
     assert integrity["failure_reasons"]["raw_ref_unresolved"] == 1
     assert integrity["raw_digest_status"] == "verified"
+
+
+def test_task_episode_projection_integrity_accepts_exact_owner_ref_chain(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    segment_dir = session_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    manifest_path = session_dir / "session.manifest.json"
+    segment_markdown = segment_dir / "000.md"
+    segment_index_path = segment_dir / "000.index.json"
+    segment_markdown.write_text("# segment\n", encoding="utf-8")
+    write_json(
+        segment_index_path,
+        {
+            "segment_id": "000",
+            "source_range": {"from_line": 7, "to_line": 7},
+            "events": [
+                {
+                    "event_id": "000007",
+                    "line": 7,
+                    "raw_ref": "raw:line:7",
+                }
+            ],
+        },
+    )
+    write_json(
+        manifest_path,
+        {
+            "raw": {"sha256": "sealed-source-digest"},
+            "segments": [
+                {
+                    "segment_id": "000",
+                    "markdown": str(segment_markdown),
+                    "index": str(segment_index_path),
+                    "source_range": {"from_line": 7, "to_line": 7},
+                }
+            ],
+        },
+    )
+    ref = {
+        "event_id": "000007",
+        "line": 7,
+        "raw_ref": "raw:line:7",
+        "segment_ref": str(segment_markdown),
+        "segment_index": str(segment_index_path),
+        "session_ref": str(manifest_path),
+    }
+
+    integrity = module.task_episode_projection_evidence_integrity(
+        {
+            "start_user_ref": ref,
+            "representations": {},
+            "correlation_chain": [],
+        },
+        raw_records_by_line={
+            7: {
+                "event_id": "000007",
+                "line": 7,
+                "raw_ref": "raw:line:7",
+            }
+        },
+        resolved_raw_lines={7},
+        session_dir=session_dir,
+        manifest_path=manifest_path,
+        archived_raw_integrity={
+            "status": "verified",
+            "sha256": "sealed-source-digest",
+        },
+    )
+
+    assert integrity["status"] == "valid"
+    assert integrity["admissible"] is True
+    assert integrity["checked_ref_count"] == 1
+    assert integrity["failure_count"] == 0
+
+
+def test_task_episode_projection_integrity_rejects_ambiguous_owner_and_digest(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    segment_dir = session_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    manifest_path = session_dir / "session.manifest.json"
+    foreign_manifest = session_dir / "foreign.manifest.json"
+    segment_markdown = segment_dir / "000.md"
+    foreign_markdown = segment_dir / "foreign.md"
+    segment_index_path = segment_dir / "000.index.json"
+    for path in (segment_markdown, foreign_markdown):
+        path.write_text("# segment\n", encoding="utf-8")
+    foreign_manifest.write_text("{}\n", encoding="utf-8")
+    write_json(
+        segment_index_path,
+        {
+            "segment_id": "000",
+            "source_range": {"from_line": 7, "to_line": 7},
+            "events": [
+                {
+                    "event_id": "000007",
+                    "line": 7,
+                    "raw_ref": "raw:line:7",
+                }
+            ],
+        },
+    )
+    write_json(
+        manifest_path,
+        {
+            "raw": {"sha256": "declared-digest"},
+            "segments": [
+                {
+                    "segment_id": "000",
+                    "markdown": str(segment_markdown),
+                    "index": str(segment_index_path),
+                    "source_range": {"from_line": 7, "to_line": 7},
+                }
+            ],
+        },
+    )
+    ref = {
+        "event_id": "000099",
+        "line": 7,
+        "raw_ref": "raw:line:8",
+        "segment_ref": str(foreign_markdown),
+        "segment_index": str(segment_index_path),
+        "session_ref": str(foreign_manifest),
+    }
+
+    integrity = module.task_episode_projection_evidence_integrity(
+        {
+            "start_user_ref": ref,
+            "representations": {},
+            "correlation_chain": [],
+        },
+        raw_records_by_line={
+            7: {
+                "event_id": "000007",
+                "line": 7,
+                "raw_ref": "raw:line:7",
+            }
+        },
+        resolved_raw_lines={7},
+        session_dir=session_dir,
+        manifest_path=manifest_path,
+        archived_raw_integrity={
+            "status": "unresolved",
+            "sha256": "observed-other-digest",
+        },
+    )
+
+    assert integrity["status"] == "invalid"
+    assert integrity["admissible"] is False
+    reasons = integrity["failure_reasons"]
+    assert reasons["raw_digest_unverified"] == 1
+    assert reasons["raw_digest_manifest_mismatch"] == 1
+    assert reasons["raw_ref_line_mismatch"] == 1
+    assert reasons["raw_event_identity_mismatch"] == 1
+    assert reasons["segment_ref_not_manifest_owned"] == 1
+    assert reasons["segment_ref_pair_mismatch"] == 1
+    assert reasons["session_ref_not_owner_manifest"] == 1
+    assert reasons["segment_event_ref_unresolved"] == 1
+
+
+def test_episode_semantic_projection_publishes_no_candidate_with_broken_ref(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "broken-episode-ref.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T03:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "broken-episode-ref-session",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T03:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Index only resolvable episode evidence",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-18T03:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Resolvable evidence required",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "broken-episode-ref-session",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(session_index_path, {})
+    episode = session_index["task_episodes"][0]
+    episode["start_user_ref"]["line"] = 999
+    episode["start_user_ref"]["raw_ref"] = "raw:line:999"
+    module.write_json(session_index_path, session_index)
+
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
+
+    assert indexed["ok"] is True
+    projection = indexed["sessions"][0]["episode_semantic_projection"]
+    assert projection["status"] == "invalid_episode_evidence_refs"
+    assert projection["episode_count"] == 0
+    assert projection["rejected_integrity_count"] == 1
+    assert projection["rejected_integrity_samples"][0]["integrity"][
+        "admissible"
+    ] is False
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM episode_semantic_meta"
+    ).fetchone()[0] == 0
+    state = conn.execute(
+        "SELECT status, episode_count FROM episode_semantic_session_state"
+    ).fetchone()
+    conn.close()
+    assert state["status"] == "invalid_episode_evidence_refs"
+    assert state["episode_count"] == 0
 
 
 def test_compositional_episode_query_suppresses_ambiguous_embedded_entity_alias(

@@ -33,11 +33,9 @@
       "expected": {
         "route_type": "mcp",
         "freshness_expectation": {
-          "status": "bounded_current",
+          "status": "graph_store_current",
           "acceptable_statuses": [
-            "bounded_current",
-            "ephemeral_current",
-            "fresh"
+            "graph_store_current"
           ]
         },
         "expected_refs": {
@@ -59,11 +57,9 @@
       "expected": {
         "route_type": "skill",
         "freshness_expectation": {
-          "status": "bounded_current",
+          "status": "graph_store_current",
           "acceptable_statuses": [
-            "bounded_current",
-            "ephemeral_current",
-            "fresh"
+            "graph_store_current"
           ]
         },
         "expected_refs": {
@@ -85,11 +81,9 @@
       "expected": {
         "route_type": "entity",
         "freshness_expectation": {
-          "status": "bounded_current",
+          "status": "scope_unresolved",
           "acceptable_statuses": [
-            "bounded_current",
-            "ephemeral_current",
-            "fresh"
+            "scope_unresolved"
           ]
         },
         "expected_refs": {
@@ -112,8 +106,9 @@
       "expected": {
         "route_type": "mcp",
         "freshness_expectation": {
-          "status": "stale_graph_sidecar",
+          "status": "graph_store_stale",
           "acceptable_statuses": [
+            "graph_store_stale",
             "stale_graph_sidecar",
             "stale"
           ]
@@ -138,11 +133,10 @@
       "expected": {
         "route_type": "skill",
         "freshness_expectation": {
-          "status": "bounded_current",
+          "status": "scope_unresolved",
           "acceptable_statuses": [
-            "bounded_current",
-            "ephemeral_current",
-            "fresh"
+            "scope_unresolved",
+            "scope_unverified"
           ]
         },
         "expected_refs": {
