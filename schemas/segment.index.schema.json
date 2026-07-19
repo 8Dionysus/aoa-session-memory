@@ -2,13 +2,62 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AoA compaction segment index",
   "type": "object",
-  "required": ["schema_version", "segment_id", "events", "by_type", "by_tag"],
+  "required": [
+    "schema_version",
+    "generation_id",
+    "generation_identity",
+    "projection_publish",
+    "segment_id",
+    "source_raw",
+    "source_block",
+    "events",
+    "by_type",
+    "by_tag"
+  ],
   "properties": {
     "schema_version": {"const": 1},
+    "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "generation_identity": {
+      "type": "object",
+      "required": ["generation_id", "projection", "schema_version", "producer", "producer_sha256"],
+      "properties": {
+        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "projection": {"const": "segment_index"},
+        "schema_version": {"type": "integer", "minimum": 1},
+        "producer": {"type": "string", "minLength": 1},
+        "producer_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "projection_publish": {
+      "type": "object",
+      "required": ["schema_version", "publish_id", "source", "processed_watermark", "dependency_generations"],
+      "properties": {
+        "schema_version": {"type": "integer", "minimum": 1},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source": {
+          "type": "object",
+          "required": ["raw_sha256", "raw_bytes", "raw_line_count"],
+          "additionalProperties": true
+        },
+        "processed_watermark": {"type": "object"},
+        "dependency_generations": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
     "segment_id": {"type": "string"},
     "segment_role": {"type": "string"},
     "source_raw": {"type": "string"},
-    "source_range": {"type": "object"},
+    "source_range": {
+      "type": "object",
+      "required": ["from_line", "to_line"],
+      "properties": {
+        "from_line": {"type": "integer", "minimum": 1},
+        "to_line": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "source_block": {"type": "object"},
     "events": {"type": "array", "items": {"type": "object"}},
     "by_type": {"type": "object"},
     "by_tag": {"type": "object"},

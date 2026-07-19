@@ -517,7 +517,7 @@
           "kind": "mcp",
           "required_usage_actions": [
             "called",
-            "used",
+            "invoked",
             "observed"
           ]
         },
@@ -528,7 +528,7 @@
           "required_usage_actions": [
             "called",
             "read",
-            "used",
+            "invoked",
             "validated",
             "observed"
           ]
@@ -579,7 +579,7 @@
             "required_usage_actions": [
               "called",
               "read",
-              "used",
+              "invoked",
               "validated",
               "failed",
               "observed"
@@ -608,7 +608,9 @@
             "edited"
           ],
           "forbidden_usage_actions": [
-            "used"
+            "used",
+            "invoked",
+            "loaded"
           ],
           "required_skill_evidence_states": [
             "edited"
@@ -650,7 +652,9 @@
             "selected"
           ],
           "forbidden_usage_actions": [
-            "used"
+            "used",
+            "invoked",
+            "loaded"
           ],
           "required_skill_evidence_states": [
             "selected"
@@ -671,18 +675,19 @@
           "expected_skill_invocation_claim_allowed": false
         },
         {
-          "name": "structured_selection_is_loaded_dispatch_not_behavior",
+          "name": "structured_selection_is_dispatch_not_load_or_behavior",
           "anchor": "aoa-eval-select",
           "kind": "skill",
           "require_direct_usage": false,
           "max_usage_event_count": 0,
           "require_result_or_consequence": false,
           "required_usage_actions": [
-            "selected",
-            "loaded"
+            "selected"
           ],
           "forbidden_usage_actions": [
             "used",
+            "invoked",
+            "loaded",
             "validated"
           ],
           "required_skill_evidence_states": [
@@ -705,7 +710,7 @@
         "status": "reviewed",
         "reviewer": "source_config",
         "reviewed_at": "2026-07-10",
-        "note": "A reviewed synthetic raw-to-segment archive must keep parent/child skill identity exact, classify artifact mutation, assistant selection, and structured skill selection/payload loading separately, prevent skill-body words from becoming behavioral actions, block invocation claims, and retain foreign correlated output as referenced rejected evidence rather than a consequence."
+        "note": "A reviewed synthetic raw-to-segment archive must keep parent/child skill identity exact, classify artifact mutation and assistant or structured selection without promoting selection to payload load or invocation, prevent skill-body words from becoming behavioral actions, block invocation claims, and retain foreign correlated output as referenced rejected evidence rather than a consequence."
       },
       "expect": {
         "max_failed_count": 0,
@@ -734,8 +739,7 @@
             ],
             "required_usage_actions": [
               "edited",
-              "selected",
-              "loaded"
+              "selected"
             ],
             "required_skill_evidence_states": [
               "edited",

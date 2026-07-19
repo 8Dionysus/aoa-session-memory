@@ -11,7 +11,7 @@ Accepted.
 - Owner surfaces: `scripts/aoa_session_memory.py`, `DESIGN.AGENTS.md`, `docs/decisions/`
 - Surface classes: evidence provenance, episode formation, query routing
 - Projection layers: session lineage, task episode, episode retrieval
-- Guard families: raw preservation, structural fork boundary, exact replay match, local work attribution
+- Guard families: raw preservation, structural fork boundary, transport-intent separation, exact replay match, local work attribution
 - Posture: accepted
 
 ## Context
@@ -102,3 +102,36 @@ replayed and local task episodes, exact parent-evidence consolidation, member
 ref retention, ambiguous or near-match refusal, and local-work non-collapse.
 Manual provenance review remains required before extending this policy to a
 new adapter or projection layer.
+
+## Review Amendment — 2026-07-19
+
+Manual review of a real declared subagent fork exposed two coordinates that
+must not be collapsed into one semantic boundary:
+
+- the adapter's developer bootstrap is a transport/control coordinate and
+  remains the final physical prefix coordinate when present;
+- the following structured child `task_started` event begins child-local work,
+  but does not by itself contain the delegated task semantics.
+
+A structurally parsed inter-agent `NEW_TASK` message may contribute a local
+intent ref. When its task body is encrypted or otherwise unavailable, the
+projection records only the clear delegation envelope and an explicit
+unavailable-content status; it must not infer task details.
+
+Repeated `NEW_TASK` envelopes belong to the same episode only while that
+lifecycle remains open. Their physical refs may remain visible, while the
+transition retains the first admitted initiating delegation ref. A structured
+`task_complete` is terminal for that delegated lifecycle. A later
+`task_started` opens a new structural lifecycle coordinate and its following
+`NEW_TASK` supplies the observable delegated intent. If the runtime omits that
+coordinate, a `NEW_TASK` observed after a terminal episode is the bounded
+semantic fallback for starting a new lifecycle. Matching task names or
+transport identities, especially with encrypted bodies, do not prove that two
+delegations are semantic replays of the same task.
+
+This clarification preserves the original decision: physical replay,
+bootstrap control, each runtime lifecycle start, each terminal completion, and
+delegated intent remain distinct evidence coordinates. Focused regressions and
+an independently sealed real-session fork case verify the separation; the
+private refs and transcript content remain in session-local provenance rather
+than this decision record.

@@ -25,6 +25,12 @@ Portable export includes authored root documents, configuration, schemas,
 hooks, manifests, maps, scripts, skills, stats, and tests. It excludes session
 archives and generated runtime stores by default.
 
+Hidden atomic-publish scratch files marked with `.tmp` are transient writer
+state, not portable source. Export excludes them while continuing to fail on a
+missing or unreadable stable authored file. This permits a live source export
+to overlap an atomic map publication without copying partial bytes or
+requiring the runtime maintenance lease.
+
 An explicit session-inclusive export is a private evidence operation, not a
 normal package release. Such an export must preserve raw-evidence handling and
 must never be treated as public-safe merely because the kernel is portable.

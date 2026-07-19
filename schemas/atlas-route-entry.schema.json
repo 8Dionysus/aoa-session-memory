@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "artifact_identity",
+    "generation_identity",
     "axis",
     "route_key",
     "status",
@@ -23,6 +24,9 @@
     },
     "artifact_identity": {
       "$ref": "#/$defs/artifactIdentity"
+    },
+    "generation_identity": {
+      "$ref": "#/$defs/generationIdentity"
     },
     "axis": {
       "type": "string",
@@ -113,6 +117,44 @@
     }
   },
   "$defs": {
+    "generationIdentity": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "contract_version",
+        "projection",
+        "schema_version",
+        "producer",
+        "producer_sha256",
+        "generation_id"
+      ],
+      "properties": {
+        "contract_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "projection": {
+          "type": "string",
+          "const": "agent_atlas"
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "producer_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "generation_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
     "artifactIdentity": {
       "type": "object",
       "additionalProperties": false,

@@ -376,6 +376,21 @@ Optimized for entity identity, existence, usage candidates, route signals,
 facets, and compact rollups. Registration, mention, selection, invocation,
 behavior, verification, and consequence are separate states.
 
+The registry keeps the compatible typed `kind:key` route ID, but that aggregate
+is not automatically one implementation identity. Schema v2 preserves
+content-aware definition and registration candidates, per-source alias
+provenance, owner/source refs, active versus historical state, and an explicit
+canonicalization verdict. Identical content copies may share one candidate
+while retaining every provenance ref. Distinct active definitions or
+registrations remain competing candidates and block identity attribution until
+the owning sources resolve them. A correction may select one current candidate
+without deleting stale candidate history.
+
+Registry snapshots carry their own producer generation, source fingerprint,
+and processed watermark. A legacy, missing, or incompatible generation is
+navigation-only until rebuilt from current owner sources; read-time
+compatibility must not silently promote it into a resolved identity.
+
 ### Semantic and hybrid projections
 
 Optimized for paraphrase and related episodes across languages. Source kind is
@@ -402,6 +417,35 @@ deferred, blocked, failed, truncated, or unavailable.
 
 The same physical store may host several logical projections. Physical
 separation is an implementation choice, not a design goal.
+
+### Generation and publish identity
+
+Every answer-bearing projection carries a canonical generation identity. The
+identity includes its schema and producer digest plus the policies, models,
+dimensions, tokenization/normalization rules, source fingerprint mode, and
+dependency generations that can change its meaning. Lexical/exact rows,
+episodes, dense vectors, graph contributions, entity registry candidates, and
+Atlas routes from an absent or incompatible generation are not candidates.
+
+The search catalog has its own generation bound to the lexical and exact
+generations. It may route to a shard only when that shard's session state
+carries the expected lexical generation. An incompatible catalog falls back
+visibly to the monolith; an incompatible shard remains stale rather than
+appearing materialized.
+
+Generation identity describes how a projection was built. It is distinct from
+publish identity, which describes one completely visible multi-file
+publication. Atlas root, axis indexes, and projection state share one publish
+epoch. Readers expose no axis whose epoch differs from the root/state epoch.
+A budget-exhausted clean Atlas rebuild leaves the last-good publication
+unchanged; a bounded incremental update publishes completed session changes
+as one new epoch and retains the rest.
+
+Dense vectors are replaced per session inside one SQLite transaction after
+embedding succeeds. A provider or storage failure leaves the prior session
+generation readable. Repeating the same dense input and generation must
+produce identical document hashes and vector bytes even if observation
+timestamps differ.
 
 ## Query and Evidence-Reading Contract
 
@@ -451,6 +495,16 @@ example:
 - `decided_in`;
 - `failed_with`;
 - `recovered_by`.
+
+The materialized relation contract is direction-specific. Its temporal
+coordinates expose the source and target event times, observed ingest/record
+time, projection time, optional validity interval, open bounds, and
+supersession state. Action-to-result, recovery, supersession, causal, and
+explicit before/after families reject inverted event order. Invalid validity
+intervals are rejected as well. This is relation-scoped temporal semantics,
+not a universal bitemporal object model. A typed status without matching
+correlation identity, ordered endpoints, and resolvable evidence refs is not
+an admissible causal relation.
 
 Logical graph views should distinguish at least:
 
@@ -507,6 +561,29 @@ Active sessions need quiet-window/debounce behavior. Resource-heavy work needs
 backpressure, bounded retry, priority, and starvation visibility. A timer or
 systemd success proves only that a launcher ran; it does not prove semantic
 freshness.
+
+Resource-gated maintenance receipts therefore keep four claims independent:
+
+- launcher/process completion;
+- bounded mutation progress inside the selected profile;
+- remaining work and any explicit owner-profile handoff;
+- global semantic completion and freshness.
+
+`completed_with_deferred_handoff` means that the bounded source profile
+finished its control flow and transferred remaining work to a stronger
+profile; it never means that the projections are globally current. Automatic
+timer/retry routes must atomically replace the source retry intent with the
+target-profile intent. Manual routes expose the exact handoff command without
+silently scheduling background work. The retry history records
+`scope_completed_with_deferred_handoff`, not generic completion.
+
+When an episode query encounters a missing or incompatible generation, it
+must not return stale rows. The recovery packet keeps three routes separate:
+a read-only `projection-status` command, an explicit resource-gated deep
+maintenance command, and a repeat query. For a session-scoped temporal query,
+the packet may also expose exact raw endpoint searches, but those hits are
+navigation only until one bounded ordered source read proves the interval
+contents.
 
 The query plane must distinguish:
 

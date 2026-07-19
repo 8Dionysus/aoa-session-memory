@@ -27,6 +27,13 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 
+## atomic publish
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
 ## background starvation
 
 | Decision | Date | Status | Path |
@@ -93,11 +100,23 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 
+## concurrent export
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+
 ## conservative unverified fallback
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
+
+## content-addressed capture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 
 ## context-only admission
 
@@ -207,6 +226,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
 
+## generation compatibility
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
 ## generation identity
 
 | Decision | Date | Status | Path |
@@ -237,6 +262,18 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
+
+## last-good preservation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
+## leakage prevention
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
 
 ## ledger fingerprint verification
 
@@ -281,6 +318,18 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## partial mutation receipts
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+
+## partial-failure rollback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 
 ## privacy
 
@@ -445,6 +494,18 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
+
+## transient-file exclusion
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+
+## transport-intent separation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 
 ## truncation
 

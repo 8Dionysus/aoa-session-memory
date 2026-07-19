@@ -69,6 +69,23 @@ This route also respects resource scheduling. Small, restartable session
 transactions can make observable progress under ordinary maintenance budgets,
 while genuinely incompatible rewrites remain visible as heavy operator work.
 
+### Review amendment — 2026-07-18
+
+A live automatic retry exposed source drift inside the owner implementation.
+The outer maintenance preflight correctly classified a declared additive
+transition as incremental, but the inner index planner still treated the same
+`search_schema_mismatch` reason as an unconditional full rebuild. It created a
+PID-local replacement store, exceeded the cooperative profile deadline, held
+the shared writer lease, and left generated temp storage after cancellation.
+
+The inner planner now derives its rebuild boundary from the same declared
+transition contract as the outer preflight. A structurally ready declared pair
+therefore plans `--no-rebuild` bounded session work all the way through;
+unknown or structurally incomplete transitions still route to deep recovery.
+Maintenance cleanup separately recognizes dead-PID search rebuild temps. That
+cleanup does not make an incompatible transition incremental and never removes
+the live search store.
+
 ## Consequences
 
 - Compatible migrations no longer wait for an unnecessary global rebuild.
@@ -112,3 +129,9 @@ raw refs, completed with a bounded WAL, and avoided a replacement database.
 Owner-neutral regressions cover the declared transition, an unknown version,
 structural drift, and the automatic catch-up branch. Exact measurements and
 private evidence coordinates remain in session provenance.
+
+An additional planner-level regression builds a current structured search
+store, sets its metadata and per-session state to the declared prior schema,
+and verifies that index maintenance selects one bounded incremental update
+with `--no-rebuild`. The live retry and its generated orphan measurements
+remain session/runtime evidence rather than decision-record content.

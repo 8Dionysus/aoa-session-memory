@@ -11,7 +11,7 @@ Accepted.
 - Owner surfaces: `scripts/aoa_session_memory.py`, `tests/test_session_memory.py`, `PIPELINE.md`, `docs/decisions/`
 - Surface classes: automatic maintenance, retry queue, freshness orchestration, bounded scheduling
 - Projection layers: maintenance coordinator, persistent retry queue, generated projection catch-up
-- Guard families: head-of-line blocking, dispatch latency, heavy-work starvation, cooperative work budget, progress honesty
+- Guard families: head-of-line blocking, dispatch latency, heavy-work starvation, cooperative work budget, partial mutation receipts, progress honesty
 - Posture: accepted
 
 ## Context
@@ -44,11 +44,13 @@ shared lease before the host safety timeout is reached.
 ## Decision
 
 Every due retry item receives a dispatch deadline derived from its retry-ready
-time plus the configured wait target for its profile. The dispatcher selects
-the earliest deadline first, then the earlier retry-ready time and stable queue
-key. Hot and catch-up profiles use shorter wait targets. Backlog and deep
-profiles use longer targets but age ahead once their deadlines become older,
-so urgency does not remove heavy-work fairness.
+time plus the configured wait target for its profile. The dispatcher normally
+selects the earliest deadline first, then the earlier retry-ready time and
+stable queue key. Hot and catch-up profiles use shorter wait targets. Once a
+backlog or deep item has breached its longer target, one earliest breached
+heavy item receives the first selection slot; the remaining due items retain
+deadline order. This explicit reservation prevents an overloaded stream of
+already-overdue short work from permanently displacing heavy work.
 
 Automatic profiles define a cooperative maintenance budget separately from
 the host launcher timeout. The worker returns after bounded progress or its
@@ -74,6 +76,21 @@ Separating cooperative work from launcher safety limits shortens ordinary
 lease ownership without turning a timeout into a false failure or claiming
 that partial progress is completion. Exposing the calculation in generated
 packets makes starvation and policy drift reviewable from the access plane.
+
+### Review amendment — 2026-07-18
+
+A sustained-load trial showed that deadline sorting alone did not establish
+the heavy-work consequence claimed above. When short-work arrivals exceed
+dispatcher capacity, older hot deadlines remain earlier than every later
+backlog or deep deadline indefinitely. Policy version 3 therefore adds the
+single breached-heavy reservation described in the decision.
+
+The reservation bounds queue-selection delay only when the dispatcher receives
+bounded execution opportunities. It does not create missing host capacity,
+prove that the selected process will advance a projection, or guarantee every
+profile target under an arrival rate greater than total service capacity.
+Those states remain visible as pending, resource-blocked, deferred, or
+no-progress rather than being reported as semantic freshness.
 
 ## Consequences
 
@@ -120,9 +137,40 @@ and proves that a newly due hot item and an aging backlog item retain their
 intended order. The same regression verifies compact status visibility and
 that a profile cooperative budget is shorter than its launcher timeout.
 
+A deterministic sustained-load trial fixes one dispatcher opportunity per
+minute while three new hot items arrive per minute. It verifies that an
+initial backlog item receives the reserved slot at its 1,200-second target and
+an initial deep item at its 3,600-second target, while excess hot work remains
+honestly pending. The trial records maximum and p95 wait by profile and labels
+its result as queue-selection evidence under declared capacity, not runtime
+semantic progress.
+
 A live automatic A/B trial preserved the same queue and freshness demand:
 retry-time FIFO selected a long backlog cycle first, while the deadline policy
 selected the demanded hot repair, advanced its scoped exact projection, and
 then automatically selected the waiting catch-up profile. Exact retrieval was
 repeated before and after against independently sealed raw evidence. Full
 source, portable, and restart/resource recovery checks remain separate gates.
+
+## Review Amendment — 2026-07-19
+
+A bounded maintenance action can mutate part of a projection and then return a
+deferred or budget-exhausted action status. Progress admission therefore reads
+explicit nested action-result mutation counters as well as top-level applied
+action counts. A non-zero, allowlisted mutation counter such as an indexed,
+reindexed, repaired, updated, or written count proves only the bounded work
+named by that receipt. Generic processed, current, skipped, selected, or
+attempted counts do not prove semantic mutation.
+
+An unhealthy child exit or a deferred action remains unhealthy or incomplete
+even when bounded mutation is proven. The dispatcher records both truths:
+semantic progress occurred, and remaining work still requires a persistent
+retry. Process success, exit status, timer completion, and successful lease
+acquisition continue to be insufficient freshness evidence.
+
+This clarification was forced by a live bounded backlog cycle that committed
+several route-index mutations before exhausting its cooperative budget. The
+previous wrapper ignored the explicit nested mutation receipt, classified the
+cycle as terminal failure, and lost automatic continuation. Focused
+live-shaped regressions now require admitted partial progress and a scheduled
+continuation without promoting the projection to current.

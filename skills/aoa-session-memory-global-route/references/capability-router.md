@@ -2,19 +2,19 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `9d99d67bdef5a17ff4d4fddad9424976704511e4f4b9621fd219c1f152d5fc6e`
+Source graph hash: `f92b3db1c93e386cc0e0d0600384c512df4c2c281c3c3e6e8e8792ca84452c45`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
 |---|---|---|---|---|---|
-| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `871a8e304cf0b73a` |
+| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `eb702bf1cd5bf97b` |
 | `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.0 | `f459356ad356a679` |
 | `aoa-codex-compact-probe` | deferred | The live Codex pre/post-compaction hook path requires an explicit behavioral probe. | Static hook registry inspection is sufficient and no behavioral probe is requested.; The runtime is not Codex. | 1.0.0 | `ef1990131b253144` |
 | `aoa-codex-hooks-status` | deferred | Native Codex hook registration or trust must be inspected for one selected root. | The runtime is not Codex or the question concerns archive content rather than hook state. | 1.0.0 | `adc1e110880d28ee` |
 | `aoa-codex-session-segment-archive` | deferred | A concrete Codex transcript must be archived or a missed archive event must be replayed. | The source is not a Codex transcript or the raw source cannot be read and verified. | 1.0.0 | `b123a7f45def661e` |
 | `aoa-session-archive-init` | deferred | A workspace lacks a valid session-memory root or requires an explicit install or repair. | The selected root is already healthy and no install or repair was requested. | 1.0.0 | `6e4e38be416c608c` |
 | `aoa-session-batch-distill` | deferred | A reviewed set of indexed sessions needs a bounded provisional distillation wave. | Exactly one indexed session is in scope; use first-pass distill.; The operator expects automatic promotion. | 1.0.0 | `653ff014b7b39c0f` |
-| `aoa-session-first-pass-distill` | deferred | One indexed session needs provisional candidate extraction. | The task asks for reviewed truth; final promotion; or a multi-session conveyor. | 1.0.0 | `f6bcf44dd42212e6` |
+| `aoa-session-first-pass-distill` | deferred | One indexed session needs provisional candidate extraction. | The task asks for reviewed truth; final promotion; or a multi-session conveyor. | 1.0.0 | `2b577834951dd51f` |
 | `aoa-session-history-import` | deferred | Historical Codex JSONL sources must be discovered and imported into one selected root. | Only the current live transcript needs archiving or the history source is not explicitly bound. | 1.0.0 | `9aa0e6b23b0a92fa` |
 | `aoa-session-manual-review` | deferred | Provisional candidates require bounded human review and owner resolution. | No provisional candidate or evidence packet exists. | 1.0.0 | `2f8c40371a91adf6` |
 | `aoa-session-memory-audit` | deferred | Completion or release readiness must be assessed across source; portable; and live axes. | Only one root health question exists; use doctor. | 1.0.0 | `abfdda57b01071c7` |

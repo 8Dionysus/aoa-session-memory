@@ -4,6 +4,8 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-07-19 | [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+| 2026-07-18 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 | 2026-07-18 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 | 2026-07-18 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 | 2026-07-17 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |

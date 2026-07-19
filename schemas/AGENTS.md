@@ -12,6 +12,8 @@ or naming semantics by themselves.
 - `atlas-route-entry.schema.json` describes generated atlas route entries.
 - `hook-receipt.schema.json` describes persisted hook receipts.
 - `incident.schema.json` describes diagnostic incidents.
+- `raw-capture-state.schema.json` distinguishes preserved-but-unindexed raw
+  evidence from a capture committed with one session projection generation.
 - `segment.index.schema.json` describes generated segment event indexes.
   It includes route-signal projections such as `by_route_layer` and
   `by_route_signal`.

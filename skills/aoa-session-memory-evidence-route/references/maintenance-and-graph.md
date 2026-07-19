@@ -21,6 +21,39 @@ unrouted tails and monolith fallback until their replacement is proven.
 Dirty-only maintenance may inherit the recorded omission policy; inspect its
 resolution instead of guessing rollback or slim mode.
 
+## Resource-gated completion
+
+Read `completion_semantics` before reporting an
+`auto-maintenance-resource` run. Process completion, bounded semantic
+progress, global completion, and global freshness are independent claims.
+`completed_with_deferred_handoff` means that the selected bounded profile
+finished its control flow and handed remaining work to a stronger profile; it
+does not make the projections globally current.
+
+For timer or retry origins, require `automatic_retry.target_queue_key` or
+`handoff_queue_key` to name the stronger queued profile, and require retry
+history disposition `scope_completed_with_deferred_handoff`. For a manual
+origin, return the exact handoff command without claiming that background work
+was scheduled. Neither exit code nor a successful systemd result proves
+semantic freshness.
+
+## Generation and partial publication
+
+For generation or partial-publish suspicion, read `projection-status` before
+widening retrieval. A shard fan-out packet with
+`search_catalog_generation_incompatible_fallback_monolith` is an explicit
+fallback, not an empty semantic result; preserve its catalog generation and
+refresh command.
+
+Atlas routes are usable only when the root, every referenced axis, and
+`maps/index-state.json` share the expected generation and publish epoch.
+`atlas_axis_publish_epoch_mismatch` or `atlas_publish_epoch_incomplete`
+requires the clean Atlas rebuild route, never a scoped incremental repair. A
+clean rebuild reporting `deferred_budget_exhausted_no_publish` preserved the
+last-good Atlas and published no new route epoch. Dense `store_failed`
+likewise preserves prior committed session vectors; use sparse or raw fallback
+and repair that session instead of admitting the attempted dense generation.
+
 ## Graph pressure
 
 Use `graph-high-fanout-policy` before proposing compaction or pruning. It is a
@@ -46,4 +79,3 @@ completion of the outer maintenance profile.
 
 No maintenance result may authorize another mutation merely because the
 previous gate or validator is green.
-

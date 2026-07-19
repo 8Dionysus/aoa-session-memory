@@ -4,6 +4,8 @@
     "SESSION_META",
     "CONTEXT_STATE",
     "USER_INTENT",
+    "INTER_AGENT_TASK",
+    "INTER_AGENT_MESSAGE",
     "ASSISTANT_REASONING_BOUNDARY",
     "ASSISTANT_PLAN",
     "ASSISTANT_MESSAGE",
@@ -48,6 +50,7 @@
       "session_lifecycle",
       "context_memory",
       "communication",
+      "agent_communication",
       "agent_cognition",
       "tool_interaction",
       "workspace_navigation",
@@ -66,6 +69,7 @@
     "phases": [
       "start",
       "request",
+      "communicate",
       "plan",
       "act",
       "inspect",
@@ -86,6 +90,7 @@
     "actors": [
       "user",
       "assistant",
+      "agent",
       "tool",
       "codex_runtime",
       "unknown"

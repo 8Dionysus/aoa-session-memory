@@ -46,6 +46,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 
+## concurrent generation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+
 ## decision record
 
 | Decision | Date | Status | Path |
@@ -151,11 +157,23 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 
+## physical storage transition
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
 ## portability
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## portable export
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
 
 ## portable source
 
@@ -163,6 +181,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 | [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
+
+## public-safe copy boundary
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
 
 ## query presentation
 
@@ -197,6 +221,18 @@
 | [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
 | [AOA-SM-D-0014 Session-Scoped Structured Prompt-Visibility Probe](../AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md` |
 
+## raw preservation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
+## recovery
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
 ## resource scheduling
 
 | Decision | Date | Status | Path |
@@ -227,6 +263,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
+
+## session indexing
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 
 ## skill evidence
 

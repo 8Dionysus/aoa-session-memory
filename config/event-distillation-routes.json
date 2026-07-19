@@ -2,6 +2,8 @@
   "schema_version": 1,
   "routes": {
     "USER_INTENT": ["intent_pattern", "prompt_template", "requirement_shape"],
+    "INTER_AGENT_TASK": ["delegation_pattern", "task_contract", "handoff_quality"],
+    "INTER_AGENT_MESSAGE": ["coordination_pattern", "agent_handoff", "communication_quality"],
     "ASSISTANT_REASONING_BOUNDARY": ["reasoning_boundary", "transition_context", "agent_process_gap"],
     "ASSISTANT_PLAN": ["planning_quality", "missed_step", "reusable_plan"],
     "TOOL_CALL": ["tool_usage_pattern", "tool_sequence", "automation_macro"],

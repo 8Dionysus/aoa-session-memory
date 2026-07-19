@@ -34,6 +34,14 @@ Readable source JSONL is mirrored into the local archive before semantic
 processing. Source metadata records origin, size, line count, and digest.
 Missing or unreadable raw material remains an explicit diagnostic state.
 
+Capture and indexing advance independently. When bounded foreground work
+cannot publish a complete session generation, it preserves a content-addressed
+raw snapshot and atomically advances `raw/capture.latest.json`. A capture ahead
+of the indexed digest makes dependent answer projections stale; it does not
+replace the last-good `raw/session.raw.jsonl`, manifest, segments, or indexes.
+Repeated capture of identical bytes is idempotent. Operational hook
+observations remain outside the semantic projection.
+
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.
 
@@ -69,11 +77,29 @@ agent events, goals, decisions, errors, and open threads.
 When raw metadata declares a fork, the manifest also records the parent and the
 structural child-work boundary. Replayed pre-boundary material stays preserved
 in raw evidence but is scoped separately from local fork work in task episodes.
+An adapter bootstrap immediately before `task_started` is a transport
+coordinate, not a delegated intent. The structured child task-start begins the
+local scope but contributes no task semantics by itself. A parsed inter-agent
+`NEW_TASK` envelope may contribute the initiating intent; unavailable or
+encrypted task content remains explicitly unavailable. Repeated envelopes may
+share one episode only while its lifecycle is open and must not overwrite the
+first admitted initiating delegation ref. `task_complete` closes that
+lifecycle; a later `task_started` opens a new structural episode whose
+`NEW_TASK` supplies intent. Without that coordinate, a post-terminal
+`NEW_TASK` is the bounded new-lifecycle fallback. Matching transport names do
+not prove semantic replay.
 Retrieval may consolidate it with an unambiguous parent episode only after an
 exact relevant-evidence comparison, and must retain both physical routes.
 
 The repository registry and archive indexes point to sessions. They do not
 replace the per-session manifest or raw evidence.
+
+Session raw, blocks, segment Markdown and indexes, manifest, session index, and
+indexed capture state publish as one validated file generation. Readers abstain
+while its publish journal exists. An interrupted replacement restores the
+complete prior generation and removes its stage and backup; it never repairs a
+mixed tree in place. Physical raw-block compression and confirmed plaintext
+removal use the same boundary while keeping stable evidence refs.
 
 ## 6. Count-only accounting
 
@@ -192,11 +218,16 @@ maintenance success.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
-latency, while longer backlog and deep targets age into priority instead of
-being permanently displaced. Automatic profiles also use a cooperative work
+latency. Once a backlog or deep target is breached, one earliest breached
+heavy item receives the first selection slot, after which ordinary deadline
+order continues. This reservation prevents an overloaded short-work stream
+from permanently displacing heavy work; it bounds queue selection only when
+the dispatcher receives execution opportunities and does not invent host
+capacity or semantic progress. Automatic profiles also use a cooperative work
 budget distinct from the longer host launcher timeout; explicit overrides
-remain visible. Queue and status packets expose the order, deadlines, breaches,
-and selected item. These scheduling signals do not make a projection current.
+remain visible. Queue and status packets expose the policy version, order,
+deadlines, breaches, fairness reservation, and selected item. These scheduling
+signals do not make a projection current.
 
 Observed query demand is a bounded scheduling input, not evidence authority.
 An automatic scoped profile may prepend only the configured bounded set of
@@ -217,6 +248,14 @@ advancing any actionable source while work remains reports a retryable
 `resource_blocked_graph_drip_no_progress`, not completion. Reports expose the
 existing queue count, reserve, requested top-up, progress, and remaining work.
 
+Conversely, a child may commit bounded mutations and then return deferred or
+budget-exhausted. Explicit allowlisted mutation counters in the action result
+admit only that bounded progress; generic processed, current, attempted,
+selected, or skipped counts do not. The wrapper must preserve both facts:
+mutation occurred and remaining work needs a persistent retry. Neither the
+child exit code nor the outer action status may erase an explicit mutation
+receipt or promote partial work to global freshness.
+
 Incremental maintenance repairs only dirty source contributions when possible.
 Missing schemas, corrupt stores, or large policy migrations route to explicit
 rebuilds. Interrupted generated-store temporary files are cleanup candidates;
@@ -226,8 +265,16 @@ A search schema mismatch is incremental only for an owner-declared additive
 version pair whose live store still has documents, route indexes, route terms,
 and no structural schema diagnostic. The first committed dirty-session repair
 may advance the store epoch; every untouched session remains dirty until its
-own projection state is regenerated. Unknown or structurally incomplete
-transitions keep the deep/full-rebuild boundary.
+own projection state is regenerated. Both outer preflight and the inner index
+planner use this same transition contract; a bounded automatic profile must
+not silently reinterpret an admitted incremental transition as a PID-local
+full rebuild. Unknown or structurally incomplete transitions keep the
+deep/full-rebuild boundary.
+
+`maintenance-cleanup` recognizes PID-tagged graph and search rebuild temps,
+removes only those whose producer PID is absent while holding the shared
+maintenance lease, and leaves live stores and raw evidence untouched. An
+active writer defers cleanup rather than racing publication.
 
 ## 12. Search and graph pressure
 

@@ -30,7 +30,53 @@
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"},
     "hooks_seen": {"type": "array", "items": {"type": "string"}},
-    "raw": {"type": "object"},
+    "raw": {
+      "type": "object",
+      "properties": {
+        "path": {"type": ["string", "null"]},
+        "source_path": {"type": ["string", "null"]},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "line_count": {"type": "integer", "minimum": 0},
+        "indexing_status": {"type": "string"},
+        "blocks_index": {"type": "string"},
+        "compaction_events": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "metadata_generation": {
+      "type": "object",
+      "required": ["schema_version", "projection", "fingerprint", "generation_id", "source_kind"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "projection": {"const": "session_metadata_dependency"},
+        "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_kind": {"const": "session_manifest_owner_metadata"}
+      },
+      "additionalProperties": true
+    },
+    "index_schema": {
+      "type": "object",
+      "required": ["session_index_generation_id", "segment_index_generation_id", "projection_publish"],
+      "properties": {
+        "session_index_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "segment_index_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "projection_publish": {"$ref": "#/$defs/projectionPublish"}
+      },
+      "additionalProperties": true
+    },
+    "raw_blocks": {
+      "type": "object",
+      "required": ["blocks"],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/rawBlock"}
+        }
+      },
+      "additionalProperties": true
+    },
     "lineage": {
       "type": "object",
       "required": [
@@ -94,5 +140,66 @@
     "segments": {"type": "array", "items": {"type": "object"}},
     "latest_event_count": {"type": "integer", "minimum": 0}
   },
+  "$defs": {
+    "projectionPublish": {
+      "type": "object",
+      "required": ["schema_version", "publish_id", "source", "processed_watermark", "dependency_generations"],
+      "properties": {
+        "schema_version": {"type": "integer", "minimum": 1},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source": {
+          "type": "object",
+          "required": ["raw_sha256", "raw_bytes", "raw_line_count"],
+          "properties": {
+            "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "raw_bytes": {"type": "integer", "minimum": 0},
+            "raw_line_count": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": true
+        },
+        "processed_watermark": {
+          "type": "object",
+          "required": ["to_line", "to_timestamp"],
+          "properties": {
+            "to_line": {"type": "integer", "minimum": 0},
+            "to_timestamp": {"type": "string"}
+          },
+          "additionalProperties": true
+        },
+        "dependency_generations": {
+          "type": "object",
+          "required": ["session_index", "segment_index", "task_episode_source"],
+          "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "rawBlock": {
+      "type": "object",
+      "required": ["block_id", "rel", "path", "sha256", "storage_mode"],
+      "properties": {
+        "block_id": {"type": "string", "minLength": 1},
+        "rel": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "storage_mode": {"enum": ["plain_raw_jsonl_v1", "compressed_gzip_v1"]},
+        "plain_removed": {"type": "boolean"},
+        "compressed_path": {"type": "string"},
+        "compressed_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"archive_status": {"const": "indexed"}}},
+      "then": {
+        "required": ["raw", "raw_blocks", "index_schema", "metadata_generation"],
+        "properties": {
+          "raw": {"required": ["path", "bytes", "sha256", "line_count", "indexing_status"]}
+        }
+      }
+    }
+  ],
   "additionalProperties": true
 }
