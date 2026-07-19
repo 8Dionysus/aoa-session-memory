@@ -70940,6 +70940,7 @@ def test_portable_copy_ignores_atomic_publish_scratch_files(
     authored = source / ".template-source"
     authored.write_text("portable authored content\n", encoding="utf-8")
     transient_names = [
+        ".aoa-json-deadbeef.tmp",
         ".index.json.123.456.tmp",
         ".graph.sqlite3.123.rebuild.tmp",
         ".graph.sqlite3.123.rebuild.tmp-journal",
