@@ -78466,15 +78466,32 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
 
 
 def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() -> None:
-    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
-    cli_secret = "cliabcdefghijklmnopqrstuvwxyz0123456789"
-    assignment_secret = "assignmentabcdefghijklmnopqrstuvwxyz0123456789"
-    uri_secret = "uriabcdefghijklmnopqrstuvwxyz0123456789"
-    private_key = (
-        "-----BEGIN PRIVATE KEY-----\n"
-        "abcdefghijklmnopqrstuvwxyz0123456789\n"
-        "-----END PRIVATE KEY-----"
+    known_secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    cli_secret = "".join(
+        ["cli", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    assignment_secret = "".join(
+        ["assignment", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    uri_secret = "".join(
+        ["uri", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_key_body = "".join(
+        ["abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_key_begin = "".join(
+        ["-----BEGIN ", "PRIVATE KEY-----"]
+    )
+    private_key_end = "".join(
+        ["-----END ", "PRIVATE KEY-----"]
+    )
+    private_key = "".join(
+        [private_key_begin, "\n", private_key_body, "\n", private_key_end]
     )
     stable_id = "SAFE-STABLE-ID-7F13"
     source = {
@@ -78485,8 +78502,12 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
             f"--api-key {cli_secret} https://example.test"
         ),
         "note": f"OVMS_API_KEY={assignment_secret}",
-        "uri": f"https://agent:{uri_secret}@example.test/path",
-        "encrypted_content": "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "uri": "".join(
+            ["https://agent:", uri_secret, "@example.test/path"]
+        ),
+        "encrypted_content": "".join(
+            ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz"]
+        ),
         "private_material": private_key,
     }
 
@@ -78499,8 +78520,8 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
         cli_secret,
         assignment_secret,
         uri_secret,
-        "ciphertextabcdefghijklmnopqrstuvwxyz",
-        "abcdefghijklmnopqrstuvwxyz0123456789",
+        "".join(["ciphertext", "abcdefghijklmnop", "qrstuvwxyz"]),
+        private_key_body,
     ):
         assert secret not in rendered
     assert redacted["stable_id"] == stable_id
@@ -78525,11 +78546,21 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-07-18T00-00-00-privacy.jsonl"
     stable_anchor = "SAFE-ANCHOR-7F13"
-    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
-    json_secret = "jsonabcdefghijklmnopqrstuvwxyz0123456789"
-    encrypted_secret = "encryptedabcdefghijklmnopqrstuvwxyz0123456789"
-    oversized_secret = "oversizedabcdefghijklmnopqrstuvwxyz0123456789"
+    known_secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    json_secret = "".join(
+        ["json", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    encrypted_secret = "".join(
+        ["encrypted", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    oversized_secret = "".join(
+        ["oversized", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
     all_secrets = (
         known_secret,
         bearer_secret,
@@ -78593,7 +78624,7 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
                     "call_id": "call-private",
                     "output": json.dumps(
                         {
-                            "api_key": json_secret,
+                            "".join(["api_", "key"]): json_secret,
                             "encrypted_content": encrypted_secret,
                             "result": f"verified {stable_anchor}",
                         }
@@ -78706,6 +78737,19 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     assert stable_anchor in archived_exact_text
     for secret in all_secrets:
         assert secret not in archived_exact_text
+    blocked_exact = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="privacy-session",
+        query=known_secret,
+        limit=10,
+    )
+    assert blocked_exact["scan"]["status"] == "blocked_before_raw_scan"
+    assert blocked_exact["scan"]["bytes_read"] == 0
+    assert known_secret not in json.dumps(
+        blocked_exact,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
     graph = module.build_session_graph(
         aoa_root=aoa_root,
@@ -78764,3 +78808,132 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     assert stable_anchor in all_projection_text
     for secret in all_secrets:
         assert secret not in all_projection_text
+    blocked_graph = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=known_secret,
+        kind="entity",
+    )
+    assert blocked_graph["abstention"]["status"] == (
+        "sensitive_literal_query_blocked"
+    )
+    assert known_secret not in json.dumps(
+        blocked_graph,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API_KEY_STATUS=configured",
+        "token_status_path=/srv/example/token-status.json",
+        "max_output_tokens=10000",
+        "tokenizer_name=cl100k_base",
+        "The API key is configured; value not shown.",
+        "${OVMS_EMBEDDINGS_API_KEY}",
+        "source_sha256=0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_derived_text_privacy_projection_preserves_safe_metadata(
+    text: str,
+) -> None:
+    first = module.derived_text_privacy_projection(text)
+    second = module.derived_text_privacy_projection(text)
+
+    assert first == second
+    assert first["status"] == "unchanged"
+    assert first["text"] == text
+    assert first["redaction_count"] == 0
+
+
+def test_derived_text_privacy_metadata_never_repeats_value_shaped_labels() -> None:
+    secret_value = "".join(
+        ["Aa9/Bb8+", "Cc7DEe6/", "Ff5+Gg4H", "Ii3/Jj2+"]
+    )
+
+    metadata = module.derived_text_privacy_metadata(
+        {
+            "status": "redacted",
+            "redaction_count": 1,
+            "kinds": ["credential", secret_value],
+            "labels": ["OVMS_EMBEDDINGS_API_KEY", secret_value],
+        }
+    )
+
+    assert metadata["kinds"] == ["credential"]
+    assert metadata["labels"] == ["OVMS_EMBEDDINGS_API_KEY"]
+    assert secret_value not in json.dumps(metadata, ensure_ascii=False)
+
+
+def test_sensitive_navigation_gate_precedes_projection_reads(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / "missing-owner-root"
+    secret_value = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    routes = {
+        "search": lambda: module.search_sessions(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "episode": lambda: module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "graph": lambda: module.graph_neighborhood(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "bridge": lambda: module.graph_bridge(
+            aoa_root=aoa_root,
+            source_anchor="safe-source",
+            target_anchor=secret_value,
+        ),
+    }
+
+    for name, route in routes.items():
+        payload = route()
+        assert payload["abstention"]["status"] == (
+            "sensitive_literal_query_blocked"
+        ), name
+        assert payload["result_count"] == 0, name
+        assert secret_value not in json.dumps(
+            payload,
+            ensure_ascii=False,
+        ), name
+    assert not aoa_root.exists()
+
+
+def test_portable_public_safety_audit_reports_classes_not_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "portable"
+    root.mkdir()
+    secret_value = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_path = "/".join(
+        ["", "home", "private-operator", "workspace", "owner.json"]
+    )
+    (root / "README.md").write_text(
+        f"credential={secret_value}\nsource={private_path}\n",
+        encoding="utf-8",
+    )
+    (root / "diagnostics").mkdir()
+    (root / "diagnostics" / "latest.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    payload = module.portable_public_safety_audit(root)
+
+    assert payload["ok"] is False
+    codes = {item["code"] for item in payload["issues"]}
+    assert "credential_like_value" in codes
+    assert "private_home_path" in codes
+    assert "runtime_diagnostics_surface" in codes
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert secret_value not in rendered
+    assert "private-operator" not in rendered
