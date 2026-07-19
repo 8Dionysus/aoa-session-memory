@@ -5671,8 +5671,153 @@ def test_episode_projection_rejects_legacy_empty_source_without_generation_ident
     freshness = module.episode_semantic_projection_state(aoa_root, records=[record])
     assert freshness["dirty_session_count"] == 1
     assert freshness["source_fingerprint_mode"] == module.EPISODE_SEMANTIC_SOURCE_FINGERPRINT_MODE
-    assert freshness["truth_status"] == "bounded_header_plus_stat_source_compared_episode_projection_watermarks"
+    assert freshness["truth_status"] == (
+        "bounded_declared_semantic_digest_plus_stat_observation_compared_episode_projection_state"
+    )
     assert "episode_semantic_source_fingerprint_changed" in freshness["dirty_sessions"][0]["reasons"]
+
+
+def test_episode_source_identity_is_semantic_and_rejects_digest_tampering(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-techniques"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-06-19T01-00-00-semantic-digest.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-19T01:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "episode-semantic-digest",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-06-19T01:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Inspect semantic episode digest stability",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-06-19T01:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The semantic episode digest is verified.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "episode-semantic-digest",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "episode-semantic-digest",
+    )
+    session_dir = Path(record["path"])
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(index_path, {})
+    declared_digest = session_index["task_episode_semantic_digest"]
+    assert declared_digest["version"] == (
+        module.TASK_EPISODE_SEMANTIC_DIGEST_VERSION
+    )
+    assert declared_digest["mode"] == (
+        module.TASK_EPISODE_SEMANTIC_DIGEST_MODE
+    )
+    assert declared_digest == (
+        module.task_episode_semantic_digest_for_session_index(
+            session_index,
+            logical_root=session_dir,
+        )
+    )
+
+    before = module.episode_semantic_source_fingerprint(
+        record,
+        manifest=manifest,
+        source_probe=module.episode_semantic_source_index_probe(index_path),
+    )
+    module.write_json(index_path, session_index)
+    after_clock_only_rewrite = module.episode_semantic_source_fingerprint(
+        record,
+        manifest=manifest,
+        source_probe=module.episode_semantic_source_index_probe(index_path),
+    )
+    assert after_clock_only_rewrite["fingerprint"] == before["fingerprint"]
+
+    tampered_index = module.read_json(index_path, {})
+    assert tampered_index["task_episodes"]
+    tampered_index["task_episodes"][0]["status"] = "tampered-status"
+    module.write_json(index_path, tampered_index)
+    tampered = module.episode_semantic_source_fingerprint(
+        record,
+        manifest=manifest,
+        source_probe=module.episode_semantic_source_index_probe(index_path),
+        session_index=tampered_index,
+    )
+    assert tampered["task_episode_semantic_digest_integrity"] == "mismatch"
+    assert tampered["fingerprint"] != before["fingerprint"]
+    assert "task_episode_semantic_digest_mismatch" in (
+        module.generated_session_index_stale_reasons_for_session(
+            session_dir,
+            tampered_index,
+        )
+    )
+
+    conn = module.init_search_db(
+        module.search_db_path(aoa_root),
+        rebuild=False,
+        create_indexes=False,
+    )
+    rejected = module.insert_episode_semantic_projection_for_session(
+        conn,
+        session_dir=session_dir,
+        projection_state=module.session_projection_fingerprint(
+            record,
+            include_rendered_markdown=False,
+        ),
+        indexed_at="2026-06-19T01:01:00Z",
+        generation_identity=(
+            module.session_memory_expected_generation_identities(aoa_root)[
+                "episode_semantic"
+            ]
+        ),
+    )
+    conn.close()
+    assert rejected["source_generation_compatible"] is False
+    assert "task_episode_semantic_digest_mismatch" in (
+        rejected["source_generation_reasons"]
+    )
 
 
 def test_episode_projection_queue_releases_unstarted_budget_work_and_recovers_restart(
@@ -30935,6 +31080,16 @@ def test_atlas_no_clean_updates_selected_session_without_losing_other_entries(tm
     assert incremental["ok"] is True
     assert incremental["selected_count"] == 1
     assert incremental["entry_count"] == before_count
+    assert incremental["publish_id"] == full["publish_id"]
+    assert incremental["publish_identity_version"] == (
+        module.ATLAS_PUBLISH_IDENTITY_VERSION
+    )
+    projection_state = module.read_atlas_projection_state(aoa_root)
+    assert projection_state["session_count"] == 2
+    assert set(projection_state["sessions"]) == {
+        "atlas-alpha",
+        "atlas-beta",
+    }
     by_time_after = module.read_json(aoa_root / "maps" / "by-time" / "index.json", {})
     assert any(entry.get("session") == alpha["session_label"] for entry in by_time_after["entries"])
     assert any(entry.get("session") == beta["session_label"] for entry in by_time_after["entries"])
@@ -30991,6 +31146,9 @@ def test_atlas_publish_epoch_hides_partial_axis_and_clean_budget_failure_keeps_l
         clean=True,
     )
     assert baseline["ok"] is True
+    assert baseline["publish_identity_version"] == (
+        module.ATLAS_PUBLISH_IDENTITY_VERSION
+    )
     assert module.atlas_publish_state(aoa_root)["complete"] is True
 
     def semantic_atlas_snapshot() -> list[tuple[str, Any]]:
@@ -31021,11 +31179,44 @@ def test_atlas_publish_epoch_hides_partial_axis_and_clean_budget_failure_keeps_l
     )
     assert repeated["ok"] is True
     assert semantic_atlas_snapshot() == semantic_before
+    assert repeated["publish_id"] == baseline["publish_id"]
+
+    baseline_manifest_path = (
+        Path(baseline_record["path"]) / "session.manifest.json"
+    )
+    changed_manifest = module.read_json(baseline_manifest_path, {})
+    changed_manifest["work_context"]["work_name"] = "atlas-last-good-updated"
+    module.write_json(baseline_manifest_path, changed_manifest)
+    changed = module.build_agent_atlas(
+        aoa_root=aoa_root,
+        selected_records=[baseline_record],
+        clean=True,
+    )
+    assert changed["ok"] is True
+    assert changed["publish_id"] != repeated["publish_id"]
 
     root_path = aoa_root / "maps" / "index.json"
     state_path = module.atlas_projection_state_path(aoa_root)
     root_before = root_path.read_bytes()
     state_before = state_path.read_bytes()
+
+    with monkeypatch.context() as failure_patch:
+        failure_patch.setattr(
+            module,
+            "atlas_entries_for_session",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("synthetic atlas extraction failure")
+            ),
+        )
+        failed = module.build_agent_atlas(
+            aoa_root=aoa_root,
+            selected_records=[baseline_record],
+            clean=True,
+        )
+    assert failed["status"] == "failed_no_publish"
+    assert failed["publish_status"] == "not_published"
+    assert root_path.read_bytes() == root_before
+    assert state_path.read_bytes() == state_before
 
     second_record = atlas_record("atlas-deferred-new-source")
     ticks = iter([0.0, 0.5, 2.0, 2.5])
@@ -41421,6 +41612,8 @@ def test_route_layer_readiness_treats_api_plugin_as_optional_operational_signals
                 "segment_index": segment_generation,
                 "task_episode_source": episode_source_generation,
             },
+            "session_id": "optional-operational-taxonomy",
+            "display": {"label": session_dir.name},
             "route_signal_schema_version": module.ROUTE_SIGNAL_SCHEMA_VERSION,
             "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
             "agent_event_schema_version": (
@@ -41436,6 +41629,18 @@ def test_route_layer_readiness_treats_api_plugin_as_optional_operational_signals
                 module.GOAL_LIFECYCLE_SCHEMA_VERSION
             ),
             "agent_event_counts": {},
+            "task_episode_semantic_digest": (
+                module.task_episode_semantic_digest(
+                    session_id="optional-operational-taxonomy",
+                    display={"label": session_dir.name},
+                    task_episodes=[],
+                    source_generation_id=(
+                        episode_source_generation["generation_id"]
+                    ),
+                    projection_publish=projection_publish,
+                    logical_root=session_dir,
+                )
+            ),
             "task_episode_counts": {},
             "task_episodes": [],
             "goal_lifecycle_counts": {},
@@ -60012,6 +60217,12 @@ def test_episode_semantic_projection_publishes_no_candidate_with_broken_ref(
     episode = session_index["task_episodes"][0]
     episode["start_user_ref"]["line"] = 999
     episode["start_user_ref"]["raw_ref"] = "raw:line:999"
+    session_index["task_episode_semantic_digest"] = (
+        module.task_episode_semantic_digest_for_session_index(
+            session_index,
+            logical_root=session_dir,
+        )
+    )
     module.write_json(session_index_path, session_index)
 
     indexed = module.search_index_sessions(
@@ -67143,7 +67354,18 @@ def test_entity_registry_and_catalog_semantic_digests_ignore_publication_clocks_
         "aoa_root": str(root_a),
         "source_db_path": str(root_a / "search" / "aoa-search.sqlite3"),
         "source_db_mtime": 1.0,
-        "sessions": [{"session_id": "stable", "source_fingerprint": "stable"}],
+        "sessions": [
+            {
+                "session_id": "stable",
+                "source_fingerprint": "stable",
+                "source_latest_mtime": 1.0,
+                "monolith_source_latest_mtime": 1.0,
+                "freshness": {
+                    "status": "current",
+                    "last_indexed_at": "2026-07-19T00:00:00Z",
+                },
+            }
+        ],
     }
     catalog_b = {
         **catalog_a,
@@ -67151,14 +67373,28 @@ def test_entity_registry_and_catalog_semantic_digests_ignore_publication_clocks_
         "aoa_root": str(root_b),
         "source_db_path": str(root_b / "search" / "aoa-search.sqlite3"),
         "source_db_mtime": 2.0,
+        "sessions": [
+            {
+                **catalog_a["sessions"][0],
+                "source_latest_mtime": 2.0,
+                "monolith_source_latest_mtime": 2.0,
+                "freshness": {
+                    "status": "current",
+                    "last_indexed_at": "2026-07-19T01:00:00Z",
+                },
+            }
+        ],
     }
-    assert module.search_catalog_semantic_digest(
+    catalog_digest_a = module.search_catalog_semantic_digest(
         catalog_a,
         aoa_root=root_a,
-    )["sha256"] == module.search_catalog_semantic_digest(
+    )
+    catalog_digest_b = module.search_catalog_semantic_digest(
         catalog_b,
         aoa_root=root_b,
-    )["sha256"]
+    )
+    assert catalog_digest_a["version"] == 2
+    assert catalog_digest_a["sha256"] == catalog_digest_b["sha256"]
 
 
 def test_entity_registry_route_terms_use_stable_projection_ref_and_documents_are_stable(
@@ -69991,6 +70227,10 @@ def test_session_projection_reindex_is_atomic_restartable_and_semantically_deter
         "semantic_digest"
     ]
     first_publish_id = first["projection_publish"]["publish_id"]
+    first_episode_digest = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        {},
+    )["task_episode_semantic_digest"]
     second = module.reindex_session_from_raw(aoa_root, record)
     second_digest = second["publish_result"]["validation"][
         "semantic_digest"
@@ -69999,6 +70239,10 @@ def test_session_projection_reindex_is_atomic_restartable_and_semantically_deter
     assert second["status"] == "reindexed"
     assert first_publish_id == second["projection_publish"]["publish_id"]
     assert first_digest == second_digest
+    assert first_episode_digest == module.read_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        {},
+    )["task_episode_semantic_digest"]
 
     manifest = module.read_json(
         session_dir / "session.manifest.json",
