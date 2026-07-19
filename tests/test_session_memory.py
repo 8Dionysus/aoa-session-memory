@@ -40819,6 +40819,50 @@ def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     assert "raw refs before promoting any claim" in identity["consumer_expectation"]
 
 
+def test_atlas_entry_filename_and_atomic_json_write_survive_utf8_name_limit(
+    tmp_path: Path,
+) -> None:
+    route_key = (
+        "/srv/AbyssOS/.aoa/sessions/2026-06-11__006__"
+        + "у-меня-складывается-впечатление-что-" * 8
+    )
+    session_label = (
+        "2026-06-11__002__"
+        + "у-меня-складывается-впечатление-что-для-всех-" * 8
+    )
+    suffix = "__g25daaef5d050__c5a5741b14775.json"
+
+    name = module.atlas_entry_filename(
+        route_key,
+        session_label,
+        suffix,
+    )
+    sibling = module.atlas_entry_filename(
+        route_key,
+        session_label + "другая-сессия",
+        suffix,
+    )
+
+    assert len(name.encode("utf-8")) <= module.ATLAS_ENTRY_FILENAME_MAX_BYTES
+    assert name.endswith(suffix)
+    assert sibling != name
+    target = tmp_path / name
+    module.write_json(target, {"ok": True, "route_key": route_key})
+    assert module.read_json(target, {})["ok"] is True
+    assert not list(tmp_path.glob(".aoa-json-*.tmp"))
+
+
+def test_atomic_json_write_uses_short_temp_name_for_legal_name_max_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / (("x" * 250) + ".json")
+
+    module.write_json(target, {"status": "published"})
+
+    assert module.read_json(target, {}) == {"status": "published"}
+    assert not list(tmp_path.glob(".aoa-json-*.tmp"))
+
+
 def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
