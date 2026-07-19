@@ -109,7 +109,7 @@
         "content": [
           {
             "type": "input_text",
-            "text": "<skill>\n<name>aoa-eval-select</name>\n<path>/srv/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md</path>\n---\nname: aoa-eval-select\ndescription: Select an existing eval surface before mutation.\n---\n\n# aoa-eval-select\n\n## Procedure\n1. Inspect local owner surfaces.\n2. Validate the selected route only after inspection.\n\n## Embedded negative examples\n- Use skill aoa-tdd-slice.\n- Do not edit the workspace.\n- Go ahead and implement the change.\n</skill>"
+            "text": "<skill>\n<name>aoa-eval-select</name>\n<path>/srv/example/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md</path>\n---\nname: aoa-eval-select\ndescription: Select an existing eval surface before mutation.\n---\n\n# aoa-eval-select\n\n## Procedure\n1. Inspect local owner surfaces.\n2. Validate the selected route only after inspection.\n\n## Embedded negative examples\n- Use skill aoa-tdd-slice.\n- Do not edit the workspace.\n- Go ahead and implement the change.\n</skill>"
           }
         ]
       }

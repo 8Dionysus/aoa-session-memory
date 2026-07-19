@@ -115,8 +115,20 @@ workspace/.aoa
 ```
 
 A live workspace may contain private session archives, generated search/graph
-stores, and diagnostics. A clean portable bundle excludes those runtime
-surfaces by default.
+stores, and diagnostics. A portable bundle always excludes those runtime
+surfaces; private evidence transfer belongs to a separate owner-to-owner
+migration route.
+
+Before publication, run the same bounded public-safety gate used by
+`export-bundle`:
+
+```bash
+python3 scripts/aoa_session_memory.py portable-public-safety-audit \
+  --aoa-root /path/to/portable/.aoa
+```
+
+The gate fails closed on runtime evidence, credential-like values, private
+host paths, or incomplete scan coverage without echoing matched values.
 
 ## Quick Start
 

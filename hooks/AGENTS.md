@@ -36,7 +36,7 @@ understanding layer.
 Use the narrowest applicable check:
 
 ```bash
-python3 scripts/aoa_session_memory.py validate --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
-python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
-python3 scripts/aoa_session_memory.py doctor --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
+python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```

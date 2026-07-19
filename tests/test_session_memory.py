@@ -559,7 +559,7 @@ def test_readable_slug_removes_banned_topology_terms() -> None:
     )["name"] == "Continue real naming work"
     assert module.phase_candidate_name(
         "000",
-        ["/home/dionysus/Загрузки/aoa-session-dist-exp(идея).md Вот тут лежит диалог с важной идеей"],
+        ["/home/example/Загрузки/aoa-session-dist-exp(идея).md Вот тут лежит диалог с важной идеей"],
         [],
         module.Counter(),
     )["name"] == "Вот тут лежит диалог с важной идеей"
@@ -622,7 +622,7 @@ def test_phase_candidate_review_turns_weak_names_into_actionable_queue_items() -
         evidence_refs=["raw:line:12"],
         linked_signals={
             "primary_user_intent": "",
-            "support_paths": ["/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py"],
+            "support_paths": ["/srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py"],
             "support_event_types": {"COMMAND": 4, "VERIFICATION": 2},
         },
     )
@@ -1120,7 +1120,7 @@ def test_task_episode_semantics_admits_compact_success_observation_but_not_sourc
             "payload": {
                 "type": "function_call",
                 "name": "exec_command",
-                "arguments": json.dumps({"cmd": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}),
+                "arguments": json.dumps({"cmd": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}),
                 "call_id": "call-source-read",
             },
         },
@@ -2462,7 +2462,7 @@ def test_custom_exec_mixed_read_and_write_does_not_promote_skill_to_inspected() 
             "call_id": "call-mixed-custom-exec",
             "input": (
                 "const reads = await Promise.all(["
-                "tools.exec_command({cmd: 'sed -n \'1,80p\' /srv/AbyssOS/.aoa/skills/example/SKILL.md'}),"
+                "tools.exec_command({cmd: 'sed -n \'1,80p\' /srv/example/AbyssOS/.aoa/skills/example/SKILL.md'}),"
                 "tools.exec_command({cmd: 'cp source.txt generated.txt'})"
                 "]); text(reads.length);"
             ),
@@ -5463,7 +5463,7 @@ def test_episode_ref_expansion_recovers_source_aware_typed_anchors(tmp_path: Pat
                     "type": "function_call",
                     "name": "exec_command",
                     "arguments": json.dumps(
-                        {"cmd": "sed -n '1,220p' /srv/AbyssOS/aoa-skills/tests/test_validate_skills_questbook_contract.py"}
+                        {"cmd": "sed -n '1,220p' /srv/example/AbyssOS/aoa-skills/tests/test_validate_skills_questbook_contract.py"}
                     ),
                     "call_id": "call-source-read",
                 },
@@ -5474,7 +5474,7 @@ def test_episode_ref_expansion_recovers_source_aware_typed_anchors(tmp_path: Pat
                 "payload": {
                     "type": "function_call",
                     "name": "exec_command",
-                    "arguments": json.dumps({"cmd": "sed -n '1,80p' /home/dionysus/.codex/memories/MEMORY.md"}),
+                    "arguments": json.dumps({"cmd": "sed -n '1,80p' /home/example/.codex/memories/MEMORY.md"}),
                     "call_id": "call-memory-read",
                 },
             },
@@ -5539,7 +5539,7 @@ def test_episode_legacy_normalization_rebuilds_raw_evidence_and_scrubs_old_edges
                     "type": "function_call",
                     "name": "exec_command",
                     "arguments": json.dumps(
-                        {"cmd": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}
+                        {"cmd": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}
                     ),
                     "call_id": "call-source-read",
                 },
@@ -5589,7 +5589,7 @@ def test_episode_legacy_normalization_rebuilds_raw_evidence_and_scrubs_old_edges
             "role": "result",
             "event_type": "COMMAND_OUTPUT",
             "outcome": "succeeded",
-            "linked_action": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md",
+            "linked_action": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md",
             "refs": {"raw": "raw:line:3"},
         },
         {
@@ -8163,7 +8163,7 @@ def test_asserted_mutation_alignment_requires_typed_action_and_correlation_owned
         line=12,
         text=(
             "sed -n '1,240p' "
-            "/srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"
+            "/srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"
         ),
         event_type="FILE_READ",
         correlation_id="call-read-skill",
@@ -11138,7 +11138,7 @@ def test_issue_resolution_requires_implementation_mutation_and_distinct_verifica
 
     documentation_only = json.loads(json.dumps(episode))
     documentation_only["representations"]["actions"][0]["text"] = (
-        "*** Begin Patch\n*** Update File: /home/dionysus/research/census/OWNER_PACKETS.md\n"
+        "*** Begin Patch\n*** Update File: /home/example/research/census/OWNER_PACKETS.md\n"
         "+describe the future release-wrapper repair"
     )
     unresolved_docs = module.episode_issue_resolution_alignment(documentation_only, terms)
@@ -15943,7 +15943,7 @@ def test_live_tail_merge_preserves_each_source_local_ranking() -> None:
 
 def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_diagnostic_lanes() -> None:
     cases = {
-        "/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py": "exact_literal",
+        "/srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py": "exact_literal",
         "was aoa-session-memory CLI, MCP, or a session-memory skill actually invoked in this span?": "entity_usage",
         "какой terminal stack уже стоял и чего не хватало перед установкой Ghostty": "temporal_state",
         "MV3 background fix -> restart failure -> safer process selection -> successful capture": "causal_chain",
@@ -18029,7 +18029,7 @@ def test_session_evidence_window_preserves_custom_tool_transport_completion(
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-custom-tool-window.jsonl"
     command = (
         "const r = await tools.exec_command({"
-        '"cmd":"sed -n \'1,80p\' /srv/AbyssOS/.aoa/skills/example/SKILL.md",'
+        '"cmd":"sed -n \'1,80p\' /srv/example/AbyssOS/.aoa/skills/example/SKILL.md",'
         '"workdir":"/home/dionysus"'
         "}); text(r.output);"
     )
@@ -19028,7 +19028,7 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
                     "arguments": json.dumps(
                         {
                             "cmd": (
-                                "rg -n session /home/dionysus/.codex/memories/MEMORY.md "
+                                "rg -n session /home/example/.codex/memories/MEMORY.md "
                                 f"{repo}/AGENTS.md"
                             )
                         }
@@ -22955,7 +22955,7 @@ def structured_skill_test_payload(
 
 def test_structured_skill_input_is_selected_and_loaded_without_false_behavioral_actions() -> None:
     structured_skill_text = structured_skill_test_envelope(
-        path="/srv/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md",
+        path="/srv/example/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md",
         frontmatter=(
             "---\nname: aoa-eval-select\n"
             "description: Select an existing eval surface before mutation.\n---"
@@ -23079,19 +23079,19 @@ def test_namespaced_structured_skill_accepts_quoted_leaf_frontmatter_name() -> N
     additional_envelopes = [
         (
             "imagegen",
-            "/home/dionysus/.codex/skills/.system/imagegen/SKILL.md",
+            "/home/example/.codex/skills/.system/imagegen/SKILL.md",
             "imagegen",
             "imagegen",
         ),
         (
             "review",
-            "/home/dionysus/.codex/skills/review/SKILL.md",
+            "/home/example/.codex/skills/review/SKILL.md",
             "review",
             "review",
         ),
         (
             "openai-docs",
-            "/home/dionysus/.codex/skills/.system/openai-docs/SKILL.md",
+            "/home/example/.codex/skills/.system/openai-docs/SKILL.md",
             "openai-docs",
             "openai_docs",
         ),
@@ -33176,6 +33176,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert all(sample["evidence"]["has_raw_ref"] for sample in quality["samples"])
     assert any(
         ref.get("raw_preview", {}).get("status") == "available"
+        and ref.get("raw_preview", {}).get("representation_status")
+        == "raw_semantic_text"
         for sample in quality["samples"]
         for ref in sample["evidence"]["sample_refs"]
     )
@@ -36873,8 +36875,8 @@ def test_graph_source_recommendation_routes_mostly_missing_partial_store_to_rebu
             "source_sha_mismatch": 62,
             "missing_graph_source_path": 71,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "store_only_rebuild"
@@ -36899,8 +36901,8 @@ def test_graph_source_recommendation_routes_ledger_store_mismatch_to_budgeted_re
         reason_group_counts={
             "graph_source_ledger_store_count_mismatch": 260,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "budgeted_graph_maintenance"
@@ -36924,8 +36926,8 @@ def test_graph_source_recommendation_routes_mostly_missing_ledger_mismatch_to_re
             "graph_source_ledger_store_count_mismatch": 3962,
             "latest_graph_maintenance_remaining_sources": 4753,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "store_only_rebuild"
@@ -36947,15 +36949,15 @@ def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> 
             "graph_source_ledger_store_count_mismatch": 4146,
             "latest_graph_maintenance_remaining_sources": 4698,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "budgeted_graph_maintenance"
     assert recommendation["reason"] == "mixed_or_medium_backlog"
     assert "graph-maintenance all" in recommendation["command"]
-    assert "--workspace-root /srv/AbyssOS" in recommendation["command"]
-    assert "--aoa-root /srv/AbyssOS/.aoa" in recommendation["command"]
+    assert "--workspace-root /srv/example/AbyssOS" in recommendation["command"]
+    assert "--aoa-root /srv/example/AbyssOS/.aoa" in recommendation["command"]
     assert "--apply" in recommendation["command"]
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in recommendation["command"]
@@ -36972,8 +36974,8 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
         orphaned_count=0,
         blocked_count=10,
         reason_group_counts={"source_sha_mismatch": 618},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 618,
@@ -37008,8 +37010,8 @@ def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
         orphaned_count=0,
         blocked_count=0,
         reason_group_counts={"latest_graph_maintenance_remaining_sources": 612},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 612,
@@ -37045,8 +37047,8 @@ def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() 
         orphaned_count=0,
         blocked_count=10,
         reason_group_counts={"source_sha_mismatch": 593},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 593,
@@ -37076,8 +37078,8 @@ def test_graph_source_recommendation_switches_near_budget_progress_to_heavy_tail
         orphaned_count=0,
         blocked_count=0,
         reason_group_counts={"source_sha_mismatch": 593},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 450,
@@ -37129,7 +37131,7 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
         "source_keys": ["segment:from-queue:001"],
         "use_queue": True,
         "queue_update": {
-            "path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json",
+            "path": "/srv/example/AbyssOS/.aoa/graph/maintenance-queue.json",
             "queued_count": 427,
             "removed_count": 17,
         },
@@ -37139,7 +37141,7 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
     latest_scoped_queue = {
         "target": "all",
         "use_queue": True,
-        "maintenance_detail": {"queue_path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json"},
+        "maintenance_detail": {"queue_path": "/srv/example/AbyssOS/.aoa/graph/maintenance-queue.json"},
         "source_state": {"selection_scope": "selected_sessions"},
         "generated_at": "2026-06-28T08:03:30Z",
     }
@@ -40976,7 +40978,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     session_meta = {
         "timestamp": "2026-05-24T00:00:01Z",
         "type": "session_meta",
-        "payload": {"id": "session-id-is-not-a-tool-correlation", "cwd": "/srv/AbyssOS", "model": "gpt-5"},
+        "payload": {"id": "session-id-is-not-a-tool-correlation", "cwd": "/srv/example/AbyssOS", "model": "gpt-5"},
     }
     session_meta_event = module.classify_raw_event(json.dumps(session_meta), session_meta, 2)
     session_meta_signals = {f"{signal['layer']}:{signal['key']}" for signal in session_meta_event.facets.get("route_signals", [])}
@@ -41232,7 +41234,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-source-output",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [{"type": "read", "cmd": "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py", "path": "src/aoa_sdk/recurrence/rollout.py"}],
             "aggregated_output": (
                 'notes="Use this when SessionStart, UserPromptSubmit, or Stop recurrence snippets are missing or stale." '
@@ -41271,9 +41273,9 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
         "payload": {
             "type": "exec_command_end",
             "call_id": "call-local-read",
-            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' /srv/8Dionysus/README.md"],
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' /srv/example/8Dionysus/README.md"],
             "cwd": "/srv",
-            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' /srv/8Dionysus/README.md", "path": "/srv/8Dionysus/README.md"}],
+            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' /srv/example/8Dionysus/README.md", "path": "/srv/example/8Dionysus/README.md"}],
             "aggregated_output": "This local README mentions GitHub, Gmail, Google Drive, calendar, web search, browser, snapshot, stale risk.",
             "exit_code": 0,
             "status": "completed",
@@ -41313,7 +41315,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "function_call",
             "name": "exec_command",
             "call_id": "call-gh",
-            "arguments": json.dumps({"cmd": "gh pr view 1 --json title,url", "workdir": "/srv/AbyssOS"}),
+            "arguments": json.dumps({"cmd": "gh pr view 1 --json title,url", "workdir": "/srv/example/AbyssOS"}),
         },
     }
     gh_command_event = module.classify_raw_event(json.dumps(gh_command), gh_command, 11)
@@ -41329,7 +41331,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "function_call",
             "name": "exec_command",
             "call_id": "call-redirect",
-            "arguments": json.dumps({"cmd": "rg --files /srv/aoa-sdk 2>/dev/null", "workdir": "/srv"}),
+            "arguments": json.dumps({"cmd": "rg --files /srv/example/aoa-sdk 2>/dev/null", "workdir": "/srv"}),
         },
     }
     shell_redirect_event = module.classify_raw_event(json.dumps(shell_redirect_command), shell_redirect_command, 12)
@@ -41338,7 +41340,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     }
 
     assert "path:dev_null" not in shell_redirect_signals
-    assert "path:srv_aoa_sdk" in shell_redirect_signals
+    assert "path:srv_example_aoa_sdk" in shell_redirect_signals
 
     git_ref_output = {
         "timestamp": "2026-05-24T00:00:04.925Z",
@@ -41349,7 +41351,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "output": (
                 "Process exited with code 0\n"
                 "Output:\n"
-                "[info] target_repo=/srv/aoa-sdk\n"
+                "[info] target_repo=/srv/example/aoa-sdk\n"
                 "[info] compare_ref=origin/main\n"
                 "[info] merge_base=main/origin/main\n"
                 "[info] diff_range=main...origin/main\n"
@@ -41360,7 +41362,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     git_ref_event = module.classify_raw_event(json.dumps(git_ref_output), git_ref_output, 13)
     git_ref_signals = {f"{signal['layer']}:{signal['key']}" for signal in git_ref_event.facets["route_signals"]}
 
-    assert "path:srv_aoa_sdk" in git_ref_signals
+    assert "path:srv_example_aoa_sdk" in git_ref_signals
     assert "path:origin_main" not in git_ref_signals
     assert "path:main_origin_main" not in git_ref_signals
     assert "path:origin_main_head" not in git_ref_signals
@@ -41388,7 +41390,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-exit-code-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' scripts/validate_recurrence_manifests.py"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [
                 {
                     "type": "read",
@@ -41439,7 +41441,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "call_id": "call-token-count",
             "command": ["/usr/bin/zsh", "-lc", "ls -1 /srv"],
             "cwd": "/srv",
-            "aggregated_output": "Original token count: 838\nOutput:\n/srv/abyss-stack/Configs/config-templates/README.md\n",
+            "aggregated_output": "Original token count: 838\nOutput:\n/srv/example/abyss-stack/Configs/config-templates/README.md\n",
             "exit_code": 0,
             "status": "completed",
         },
@@ -41459,7 +41461,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-raw-path-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' docs/versioning.md"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' docs/versioning.md", "path": "docs/versioning.md"}],
             "aggregated_output": "Routed reads must not fall back to raw path loads.",
             "exit_code": 0,
@@ -41481,7 +41483,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-archive-repair-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml"],
-            "cwd": "/srv/aoa-playbooks",
+            "cwd": "/srv/example/aoa-playbooks",
             "parsed_cmd": [
                 {"type": "read", "cmd": "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml", "path": "quests/AOA-PB-Q-0014.yaml"}
             ],
@@ -41507,7 +41509,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "python3 scripts/aoa_session_memory.py reindex-sessions all --write-report",
-                    "workdir": "/srv/AbyssOS/.aoa",
+                    "workdir": "/srv/example/AbyssOS/.aoa",
                 }
             ),
         },
@@ -41759,7 +41761,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "sed -n '1,160p' mcp/services/aoa-memo-mcp/src/aoa_memo_mcp/core.py",
-                    "workdir": "/srv/AbyssOS/aoa-memo",
+                    "workdir": "/srv/example/AbyssOS/aoa-memo",
                 }
             ),
         },
@@ -41782,7 +41784,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "pytest mcp/services/aoa-memo-mcp/tests/test_memo_mcp.py::test_smoke_aoa_memo_mcp",
-                    "workdir": "/srv/AbyssOS/aoa-memo",
+                    "workdir": "/srv/example/AbyssOS/aoa-memo",
                 }
             ),
         },
@@ -41907,7 +41909,7 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
                 "payload": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Check /srv/AbyssOS/bad\u0000path before reindex."}],
+                    "content": [{"type": "input_text", "text": "Check /srv/example/AbyssOS/bad\u0000path before reindex."}],
                 },
             },
         ],
@@ -41929,7 +41931,7 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
     session_dir = Path(record["path"])
     segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
 
-    assert module.work_context_root_for_path("/srv/AbyssOS/bad\x00path") is None
+    assert module.work_context_root_for_path("/srv/example/AbyssOS/bad\x00path") is None
     for event in segment_index["events"]:
         for signal in event["facets"]["route_signals"]:
             assert "\x00" not in str(signal.get("detail", ""))
@@ -42002,7 +42004,7 @@ def test_atlas_entry_filename_and_atomic_json_write_survive_utf8_name_limit(
     tmp_path: Path,
 ) -> None:
     route_key = (
-        "/srv/AbyssOS/.aoa/sessions/2026-06-11__006__"
+        "/srv/example/AbyssOS/.aoa/sessions/2026-06-11__006__"
         + "у-меня-складывается-впечатление-что-" * 8
     )
     session_label = (
@@ -42079,7 +42081,7 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
                                 "без внешних подключений, потом commit push merge. Отвечай по-русски, "
                                 "preserve before distill, не терять changelog, сначала AGENTS/DESIGN, "
                                 "landed slices. Проверь source generated runtime diagnostics portable bundle "
-                                "local overlay memory external snapshot. Entity path graph repo /srv/AbyssOS/aoa-techniques "
+                                "local overlay memory external snapshot. Entity path graph repo /srv/example/AbyssOS/aoa-techniques "
                                 "tests skills hooks MCP issues PRs OPENAI_API_KEY package model. MEMORY.md memory_summary.md "
                                 "Use skill aoa-decision and skills/aoa-session-search/SKILL.md. "
                                 "OpenAI Responses API plugin://gmail@openai-curated Codex sub-agent "
@@ -47417,7 +47419,7 @@ def test_session_memory_timer_status_flags_stale_graph_drip_overrides(monkeypatc
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 75 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 225",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 75 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 225",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47451,7 +47453,7 @@ def test_session_memory_timer_status_accepts_profile_default_graph_drip(monkeypa
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47493,7 +47495,7 @@ def test_session_memory_timer_status_flags_elapsed_timer_without_next_run(monkey
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47538,7 +47540,7 @@ def test_session_memory_timer_status_allows_running_timer_without_next_run(monke
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource catchup --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_catchup --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource catchup --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_catchup --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47562,7 +47564,7 @@ def test_session_memory_timer_status_uses_unit_file_fallback_when_systemctl_prob
         "\n".join(
             [
                 "[Service]",
-                "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
             ]
         ),
         encoding="utf-8",
@@ -71055,7 +71057,7 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
                     "type": "function_call",
                     "name": "exec_command",
                     "call_id": "call-cache",
-                    "arguments": json.dumps({"cmd": "rm -rf /srv/AbyssOS/.aoa/scripts/__pycache__ /srv/AbyssOS/.aoa/tests/.pytest_cache"}),
+                    "arguments": json.dumps({"cmd": "rm -rf /srv/example/AbyssOS/.aoa/scripts/__pycache__ /srv/example/AbyssOS/.aoa/tests/.pytest_cache"}),
                 },
             },
             {
@@ -71065,7 +71067,7 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
                     "type": "function_call",
                     "name": "exec_command",
                     "call_id": "call-find-cache",
-                    "arguments": json.dumps({"cmd": "find /srv/AbyssOS/.aoa -type d -name __pycache__ -prune -exec rm -rf {} +"}),
+                    "arguments": json.dumps({"cmd": "find /srv/example/AbyssOS/.aoa -type d -name __pycache__ -prune -exec rm -rf {} +"}),
                 },
             },
             {
@@ -73276,6 +73278,16 @@ def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_pa
     )
 
     assert payload["target_aoa_root"] == str(target.resolve())
+    assert payload["public_safety"]["ok"] is True
+    assert payload["public_safety"]["issue_count"] == 0
+    portable_sessions_index = json.loads(
+        (
+            target
+            / module.SESSION_ROOT
+            / module.SESSIONS_INDEX_JSON
+        ).read_text(encoding="utf-8")
+    )
+    assert portable_sessions_index["sessions_root"] == "sessions"
     hook_example = json.loads((target / "hooks" / "codex-hooks.user.example.json").read_text(encoding="utf-8"))
     rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered_hooks
@@ -73369,7 +73381,7 @@ def test_portable_artifact_manifest_fingerprints_complete_skill_system() -> None
         }:
             continue
         text = path.read_text(encoding="utf-8")
-        assert "/srv/AbyssOS" not in text, path
+        assert "/srv/example/AbyssOS" not in text, path
         assert "/home/" not in text, path
         assert "~/.codex" not in text, path
 
@@ -73453,6 +73465,10 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Approved user-level session-memory skill sources are available"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+    assert statuses[
+        "Portable bundle is public-safe and free of runtime evidence"
+    ] == "covered"
+    assert payload["public_safety"]["ok"] is True
 
     maintenance = module.session_memory_maintenance_status(
         workspace_root=workspace,
@@ -73493,6 +73509,32 @@ def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
     assert (kag_dir / "manifest.json").exists()
     assert not stale_dir.exists()
     assert not stale_file.exists()
+
+
+def test_export_bundle_rejects_session_flag_before_force_clear(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    target = tmp_path / "existing-target"
+    target.mkdir()
+    sentinel = target / "operator-owned.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+
+    code = module.command_export_bundle(
+        SimpleNamespace(
+            source_aoa_root=str(SCRIPT.parents[1]),
+            target_dir=str(target),
+            with_sessions=True,
+            no_tests=False,
+            force=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["status"] == "rejected_before_target_mutation"
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
 def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> None:
@@ -75183,7 +75225,7 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
             {
                 "timestamp": "2026-05-16T00:00:02Z",
                 "type": "response_item",
-                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-owner", "arguments": json.dumps({"cmd": "rg -n TODO /srv/aoa-sdk/README.md"})},
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-owner", "arguments": json.dumps({"cmd": "rg -n TODO /srv/example/aoa-sdk/README.md"})},
             },
         ],
     )
@@ -75204,7 +75246,7 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
 
     assert planned["results"][0]["project_grounding"]["status"] == "workspace_fallback_grounded"
     assert owner["status"] == "resolved_from_evidence"
-    assert owner["owner_root"] == "/srv/aoa-sdk"
+    assert owner["owner_root"] == "/srv/example/aoa-sdk"
     assert owner["confidence"] == "medium"
 
 
@@ -75219,7 +75261,7 @@ def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
             {
                 "timestamp": "2026-05-17T10:00:01Z",
                 "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Files mentioned by the user:\n- /srv/AbyssOS/.aoa/DESIGN.md"}]},
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Files mentioned by the user:\n- /srv/example/AbyssOS/.aoa/DESIGN.md"}]},
             },
             {
                 "timestamp": "2026-05-17T10:00:02Z",
@@ -75517,7 +75559,7 @@ def test_naming_wave_uses_raw_request_after_setup_prefix_title(tmp_path: Path) -
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-19T00-40-00-setup-prefix.jsonl"
     prompt = (
-        "Работай в /srv/work/rios-de-color. Отвечай только на русском. "
+        "Работай в /srv/example/work/rios-de-color. Отвечай только на русском. "
         "Сначала прочитай: 1. AGENTS.md 2. AUDIT_STATE.md 3. ROADMAP_MAY.md. "
         "Проверь SocratiCode по runbook."
     )
@@ -75901,7 +75943,7 @@ def test_naming_evidence_quality_warns_on_command_output_only_refs(tmp_path: Pat
             {
                 "timestamp": "2026-05-20T00:00:02Z",
                 "type": "response_item",
-                "payload": {"type": "function_call_output", "output": "sed: can't read /srv/AbyssOS/docs/START_HERE.md: No such file or directory"},
+                "payload": {"type": "function_call_output", "output": "sed: can't read /srv/example/AbyssOS/docs/START_HERE.md: No such file or directory"},
             },
         ],
     )
@@ -76988,3 +77030,620 @@ def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> No
     assert not legacy_dir.exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"][0]["session_label"] == "2026-05-13__001__backfill-readable-names"
+
+
+def test_derived_text_privacy_gate_preserves_raw_and_excludes_credential_values(
+    tmp_path: Path,
+) -> None:
+    """Synthetic reproduction derived from a manually observed real-session leak."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    module.copy_portable_bundle(
+        source_aoa_root=SCRIPT.parents[1],
+        target_aoa_root=aoa_root,
+    )
+    transcript = (
+        tmp_path
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "07"
+        / "19"
+        / "rollout-2026-07-19T00-00-00-derived-privacy.jsonl"
+    )
+    secret_label = "OVMS_EMBEDDINGS_API_KEY"
+    secret_value = "".join(
+        [
+            "Aa9/",
+            "Bb8+",
+            "Cc7D",
+            "Ee6/",
+            "Ff5+",
+            "Gg4H",
+            "Ii3/",
+            "Jj2+",
+            "Kk1L",
+            "Mm0/",
+            "Nn9+",
+            "Pp8Q",
+            "Rr7/",
+            "Ss6+",
+            "Tt5U",
+            "Vv4/",
+        ]
+    )
+    assignment = f"{secret_label}={secret_value}"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "derived-privacy-session",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"Find configuration evidence for {secret_label}"
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-private-command",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                f"export {assignment}; "
+                                "python3 -c 'print(\"configured\")'"
+                            ),
+                            "workdir": str(workspace),
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-private-command",
+                    "output": (
+                        "Process exited with code 0\n"
+                        f"Output:\n{assignment}\nconfigured"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"Observed {assignment} in runtime output.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:05Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "agent_message",
+                    "message_type": "MESSAGE",
+                    "author": "agent-a",
+                    "recipient": "agent-b",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Message Type: MESSAGE\n"
+                                "Payload:\n"
+                                f"Check {assignment} without persisting it."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:06Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "exec_command_begin",
+                    "call_id": "event-private-command",
+                    "command": [
+                        "/usr/bin/zsh",
+                        "-lc",
+                        f"env {assignment} true",
+                    ],
+                },
+            },
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "derived-privacy-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    record = module.resolve_session_record(
+        aoa_root,
+        "derived-privacy-session",
+    )
+    session_dir = module.session_dir_from_record(record)
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    segment_markdown = next(
+        (session_dir / "segments").glob("*.md")
+    )
+    assert secret_value in transcript.read_text(encoding="utf-8")
+    assert secret_value in raw_path.read_text(encoding="utf-8")
+    assert secret_value in segment_markdown.read_text(encoding="utf-8")
+
+    derived_json_paths = [
+        session_dir / "session.manifest.json",
+        session_dir / "session.index.json",
+        *sorted((session_dir / "segments").glob("*.index.json")),
+        aoa_root / module.REGISTRY_NAME,
+        aoa_root / module.SESSION_NAME_INDEX_JSON,
+    ]
+    for path in derived_json_paths:
+        text = path.read_text(encoding="utf-8")
+        assert secret_value not in text, path
+    segment_index_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(
+            (session_dir / "segments").glob("*.index.json")
+        )
+    )
+    assert secret_label in segment_index_text
+    assert "<redacted:credential>" in segment_index_text
+    assert (
+        '"derived_text_privacy"' in segment_index_text
+    )
+
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )
+    assert indexed["ok"] is True
+    maintained = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        batch_limit=10,
+    )
+    assert maintained["ok"] is True
+
+    def sqlite_values(path: Path) -> list[bytes]:
+        values: list[bytes] = []
+        conn = sqlite3.connect(str(path))
+        try:
+            table_names = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' ORDER BY name"
+                )
+                if row[0]
+            ]
+            for table_name in table_names:
+                quoted = table_name.replace('"', '""')
+                try:
+                    rows = conn.execute(
+                        f'SELECT * FROM "{quoted}"'
+                    )
+                except sqlite3.Error:
+                    continue
+                for row in rows:
+                    for value in row:
+                        if isinstance(value, str):
+                            values.append(value.encode("utf-8"))
+                        elif isinstance(value, bytes):
+                            values.append(value)
+                            for decompress in (
+                                module.zlib.decompress,
+                                module.gzip.decompress,
+                            ):
+                                try:
+                                    values.append(decompress(value))
+                                except Exception:
+                                    pass
+        finally:
+            conn.close()
+        return values
+
+    search_db = module.search_db_path(aoa_root)
+    graph_db = module.graph_paths(aoa_root)["store"]
+    assert search_db.is_file()
+    assert graph_db.is_file()
+    for db_path in (search_db, graph_db):
+        assert all(
+            secret_value.encode("utf-8") not in value
+            for value in sqlite_values(db_path)
+        ), db_path
+
+    label_search = module.search_sessions(
+        aoa_root=aoa_root,
+        query=secret_label,
+        session="derived-privacy-session",
+        limit=10,
+    )
+    assert label_search["ok"] is True
+    assert label_search["result_count"] >= 1
+    assert secret_value not in json.dumps(
+        label_search,
+        ensure_ascii=False,
+    )
+
+    exact_label = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="derived-privacy-session",
+        query=secret_label,
+        limit=10,
+    )
+    assert exact_label["result_count"] >= 1
+    assert secret_value not in json.dumps(
+        exact_label,
+        ensure_ascii=False,
+    )
+    exact_value = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="derived-privacy-session",
+        query=secret_value,
+        limit=10,
+    )
+    assert exact_value["scan"]["status"] == "blocked_before_raw_scan"
+    assert exact_value["scan"]["bytes_read"] == 0
+    assert (
+        exact_value["diagnostics"]
+        == ["sensitive_literal_query_blocked_before_raw_scan"]
+    )
+    assert secret_value not in json.dumps(
+        exact_value,
+        ensure_ascii=False,
+    )
+    live_value = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session="derived-privacy-session",
+        query=secret_value,
+    )
+    assert live_value["scan"]["status"] == "blocked_before_raw_scan"
+    assert secret_value not in json.dumps(
+        live_value,
+        ensure_ascii=False,
+    )
+
+    preview = module.raw_semantic_preview(
+        raw_path,
+        "raw:line:3",
+    )
+    assert preview["status"] == "raw_semantic_text_redacted"
+    assert secret_label in preview["text"]
+    assert secret_value not in json.dumps(
+        preview,
+        ensure_ascii=False,
+    )
+    graph_label = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=secret_label,
+        kind="entity",
+    )
+    assert secret_value not in json.dumps(
+        graph_label,
+        ensure_ascii=False,
+    )
+    graph_value = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=secret_value,
+        kind="entity",
+    )
+    assert (
+        graph_value["abstention"]["status"]
+        == "sensitive_literal_query_blocked"
+    )
+    assert secret_value not in json.dumps(
+        graph_value,
+        ensure_ascii=False,
+    )
+
+    portable_root = tmp_path / "portable" / ".aoa"
+    exported = module.copy_portable_bundle(
+        source_aoa_root=aoa_root,
+        target_aoa_root=portable_root,
+    )
+    assert exported["include_sessions"] is False
+    assert exported["public_safety"]["ok"] is True
+    portable_text = b"\n".join(
+        path.read_bytes()
+        for path in portable_root.rglob("*")
+        if path.is_file()
+    )
+    assert secret_value.encode("utf-8") not in portable_text
+    assert not any(
+        path.is_dir()
+        for path in (portable_root / "sessions").iterdir()
+    )
+    with pytest.raises(
+        ValueError,
+        match="portable bundles cannot include session archives",
+    ):
+        module.copy_portable_bundle(
+            source_aoa_root=aoa_root,
+            target_aoa_root=tmp_path / "private-portable",
+            include_sessions=True,
+        )
+
+    generation = module.session_index_generation_identity()
+    assert (
+        generation["derived_text_privacy_policy_version"]
+        == module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API_KEY_STATUS=configured",
+        "token_status_path=/srv/example/token-status.json",
+        "max_output_tokens=10000",
+        "tokenizer_name=cl100k_base",
+        "The API key is configured; value not shown.",
+        "${OVMS_EMBEDDINGS_API_KEY}",
+        "source_sha256=0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_derived_text_privacy_gate_preserves_safe_metadata(
+    text: str,
+) -> None:
+    first = module.derived_text_privacy_projection(text)
+    second = module.derived_text_privacy_projection(text)
+
+    assert first == second
+    assert first["status"] == "unchanged"
+    assert first["text"] == text
+    assert first["redaction_count"] == 0
+
+
+def test_derived_text_privacy_metadata_rejects_value_shaped_labels() -> None:
+    secret_value = "".join(
+        [
+            "Aa9/",
+            "Bb8+",
+            "Cc7D",
+            "Ee6/",
+            "Ff5+",
+            "Gg4H",
+            "Ii3/",
+            "Jj2+",
+        ]
+    )
+
+    metadata = module.derived_text_privacy_metadata(
+        {
+            "status": "redacted",
+            "redaction_count": 1,
+            "kinds": ["credential", secret_value],
+            "labels": ["OVMS_EMBEDDINGS_API_KEY", secret_value],
+        }
+    )
+
+    assert metadata["kinds"] == ["credential"]
+    assert metadata["labels"] == ["OVMS_EMBEDDINGS_API_KEY"]
+    assert secret_value not in json.dumps(metadata, ensure_ascii=False)
+
+
+def test_portable_public_safety_audit_blocks_without_disclosing_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "portable"
+    root.mkdir()
+    secret_value = "".join(
+        [
+            "Zz9/",
+            "Yy8+",
+            "Xx7W",
+            "Vv6/",
+            "Uu5+",
+            "Tt4S",
+            "Rr3/",
+            "Qq2+",
+        ]
+    )
+    private_home = "/".join(
+        ["", "home", "private-operator", "workspace", "owner.json"]
+    )
+    (root / "README.md").write_text(
+        f"API_KEY={secret_value}\nsource={private_home}\n",
+        encoding="utf-8",
+    )
+    (root / "diagnostics").mkdir()
+    (root / "diagnostics" / "latest.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (root / "search").mkdir()
+    (root / "search" / "aoa-search.sqlite3").write_bytes(
+        b"SQLite format 3\x00"
+    )
+    session_dir = root / "sessions" / "2026-07-19__001__private"
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        root / module.REGISTRY_NAME,
+        {
+            "schema_version": 1,
+            "sessions": [
+                {
+                    "session_id": "private",
+                    "path": str(session_dir),
+                }
+            ],
+        },
+    )
+
+    payload = module.portable_public_safety_audit(root)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "blocked"
+    codes = {item["code"] for item in payload["issues"]}
+    assert "credential_like_value" in codes
+    assert "private_home_path" in codes
+    assert "runtime_diagnostics_surface" in codes
+    assert "runtime_search_surface" in codes
+    assert "session_archive_surface" in codes
+    assert "nonempty_session_registry" in codes
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert secret_value not in rendered
+    assert "private-operator" not in rendered
+
+
+def test_portable_public_safety_audit_accepts_bounded_clean_tree(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "portable"
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True)
+    (root / "README.md").write_text(
+        "Use /home/example/workspace or /srv/example/workspace.\n"
+        "API_KEY_STATUS=configured; API key value not shown.\n",
+        encoding="utf-8",
+    )
+    (sessions / module.SESSIONS_AGENTS_MARKDOWN).write_text(
+        "# Sessions\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        sessions / module.SESSIONS_INDEX_JSON,
+        {
+            "schema_version": 1,
+            "artifact_type": "sessions_directory_index",
+            "session_count": 0,
+        },
+    )
+    (sessions / module.SESSIONS_INDEX_MARKDOWN).write_text(
+        "# Session index\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        root / module.REGISTRY_NAME,
+        {"schema_version": 1, "sessions": []},
+    )
+
+    first = module.portable_public_safety_audit(root)
+    second = module.portable_public_safety_audit(root)
+
+    assert first["ok"] is True
+    assert first["status"] == "current"
+    assert first["issue_count"] == 0
+    assert first["issues"] == []
+    for field in ("ok", "status", "issue_count", "scanned_files"):
+        assert first[field] == second[field]
+
+
+def test_sensitive_navigation_gate_precedes_search_and_graph_reads(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / "missing-owner-root"
+    secret_value = "".join(
+        [
+            "Aa9/",
+            "Bb8+",
+            "Cc7D",
+            "Ee6/",
+            "Ff5+",
+            "Gg4H",
+            "Ii3/",
+            "Jj2+",
+        ]
+    )
+    routes = {
+        "search": lambda: module.search_sessions(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "episode": lambda: module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "entity_state": lambda: module.episode_entity_state_search(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "agent_event": lambda: module.agent_event_route_search(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "live_episode": lambda: module.live_tail_episode_search(
+            aoa_root=aoa_root,
+            session="synthetic-session",
+            query=secret_value,
+        ),
+        "neighborhood": lambda: module.graph_neighborhood(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "timeline": lambda: module.graph_timeline(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "shortest_path": lambda: module.graph_shortest_path(
+            aoa_root=aoa_root,
+            source_anchor="safe-source",
+            target_anchor=secret_value,
+        ),
+        "bridge": lambda: module.graph_bridge(
+            aoa_root=aoa_root,
+            source_anchor="safe-source",
+            target_anchor=secret_value,
+        ),
+        "cooccurrence": lambda: module.graph_cooccurrence(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "graphrag": lambda: module.graph_rag_packet(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "graph_explain": lambda: module.graph_explain_packet(
+            aoa_root=aoa_root,
+            intent=secret_value,
+        ),
+    }
+
+    for name, route in routes.items():
+        payload = route()
+        assert payload["abstention"]["status"] == (
+            "sensitive_literal_query_blocked"
+        ), name
+        assert payload["result_count"] == 0, name
+        assert secret_value not in json.dumps(
+            payload,
+            ensure_ascii=False,
+        ), name
+    assert not aoa_root.exists()
