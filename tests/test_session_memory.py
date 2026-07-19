@@ -31095,6 +31095,47 @@ def test_atlas_no_clean_updates_selected_session_without_losing_other_entries(tm
     assert any(entry.get("session") == beta["session_label"] for entry in by_time_after["entries"])
 
 
+def test_projection_semantic_fingerprint_ignores_operational_source_mtime(
+    tmp_path: Path,
+) -> None:
+    maps_root = tmp_path / "maps"
+    state_path = maps_root / "index-state.json"
+    payload = {
+        "artifact_type": "atlas_projection_state",
+        "publish_id": "stable-content",
+        "sessions": {
+            "session-one": {
+                "source_fingerprint": "source-content-a",
+                "source_latest_mtime": 100.0,
+            }
+        },
+    }
+    module.write_json(state_path, payload)
+    first = module.projection_semantic_file_fingerprint(
+        state_path,
+        logical_root=maps_root,
+    )
+
+    payload["sessions"]["session-one"]["source_latest_mtime"] = 200.0
+    module.write_json(state_path, payload)
+    second = module.projection_semantic_file_fingerprint(
+        state_path,
+        logical_root=maps_root,
+    )
+
+    payload["sessions"]["session-one"]["source_fingerprint"] = (
+        "source-content-b"
+    )
+    module.write_json(state_path, payload)
+    changed = module.projection_semantic_file_fingerprint(
+        state_path,
+        logical_root=maps_root,
+    )
+
+    assert first == second
+    assert changed["sha256"] != second["sha256"]
+
+
 def test_atlas_publish_epoch_hides_partial_axis_and_clean_budget_failure_keeps_last_good(
     tmp_path: Path,
     monkeypatch: Any,
@@ -59710,6 +59751,7 @@ def test_episode_queue_resets_exhausted_retry_when_generation_changes(
 
 def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
@@ -59768,14 +59810,23 @@ def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
 
     first = module.search_index_sessions(
         aoa_root=aoa_root,
         target="all",
         rebuild=True,
-        include_entity_registry=False,
+        include_entity_registry=True,
     )
     assert first["ok"] is True
+    first_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
     db_path = module.search_db_path(aoa_root)
     conn = module.connect_existing_search_db(db_path)
     first_digest = module.search_projection_semantic_digest(conn)
@@ -59785,14 +59836,24 @@ def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
         aoa_root=aoa_root,
         target="all",
         rebuild=True,
-        include_entity_registry=False,
+        include_entity_registry=True,
     )
     assert second["ok"] is True
+    second_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
     conn = module.connect_existing_search_db(db_path)
     second_digest = module.search_projection_semantic_digest(conn)
     conn.close()
 
     assert first_digest["sha256"] == second_digest["sha256"]
+    assert first_registry["semantic_digest"]["sha256"] == (
+        second_registry["semantic_digest"]["sha256"]
+    )
+    assert first_registry["source_fingerprint"] == second_registry[
+        "source_fingerprint"
+    ]
     assert first_digest["table_counts"] == second_digest["table_counts"]
     assert first_digest["table_counts"]["documents"] > 0
     assert first_digest["table_counts"][
