@@ -1,0 +1,35 @@
+{
+  "schema_version": "aoa_skill_home_port_v2",
+  "contract_ref": "aoa-skills:schemas/skill-home-port.schema.json",
+  "owner_repo": "aoa-session-memory",
+  "owner_ref": "skills/AGENTS.md",
+  "bundles": [
+    {
+      "name": "aoa-session-memory-global-route",
+      "path": "skills/aoa-session-memory-global-route",
+      "version": "1.0.0",
+      "lifecycle": "admitted",
+      "visibility": "advertised",
+      "admission_ref": "docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md"
+    },
+    {
+      "name": "aoa-session-memory-evidence-route",
+      "path": "skills/aoa-session-memory-evidence-route",
+      "version": "1.0.0",
+      "lifecycle": "admitted",
+      "visibility": "advertised",
+      "admission_ref": "docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md"
+    }
+  ],
+  "exposure": {
+    "runtime": "codex",
+    "scope": "user",
+    "profile": "os-user-default",
+    "mode": "profile-selected",
+    "skills": [
+      "aoa-session-memory-global-route",
+      "aoa-session-memory-evidence-route"
+    ]
+  }
+}
+

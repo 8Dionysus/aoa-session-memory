@@ -1,0 +1,1035 @@
+schema_version: aoa-capability-family-v1
+family_id: session-memory
+title: Session-memory capability home
+description: Owner-local semantic tree and typed execution contracts for portable session-memory procedures.
+owner: &family_owner
+  repo: aoa-session-memory
+  surface: capabilities/families/session-memory.yaml
+  authority: authored
+nodes:
+  - id: aoa-session-memory
+    title: AoA session memory
+    description: Navigate, capture, query, curate, and assure evidence-preserving agent session memory.
+    kind: capability
+    contract_level: navigation
+    primary_parent: null
+    owner: *family_owner
+    lifecycle: &navigation_lifecycle
+      state: active
+      version: 1.0.0
+      visibility: internal
+      evidence_state: owner-verified
+      health: healthy
+    keywords: [session-memory, sessions, evidence, память-сессий]
+
+  - id: session-memory.use
+    title: Use session memory
+    description: Route and answer bounded questions from session-memory evidence.
+    kind: capability
+    contract_level: navigation
+    primary_parent: aoa-session-memory
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [use, route, query, evidence, поиск]
+
+  - id: session-memory.use.route
+    title: Route session-memory work
+    description: Select the smallest applicable session-memory capability without widening prompt-visible context.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.use
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [route, router, applicability, маршрутизация]
+
+  - id: session-memory.use.query
+    title: Query session memory
+    description: Retrieve bounded source-linked evidence or rehydration context.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.use
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [query, search, evidence, rehydrate, запрос]
+
+  - id: session-memory.stewardship
+    title: Steward session memory
+    description: Preserve, project, curate, name, and assure session-memory evidence.
+    kind: capability
+    contract_level: navigation
+    primary_parent: aoa-session-memory
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [stewardship, archive, curate, assure, хранение]
+
+  - id: session-memory.stewardship.capture
+    title: Capture session evidence
+    description: Create an evidence-preserving root and ingest raw session sources without fabricating memory.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.stewardship
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [capture, archive, import, raw, захват]
+
+  - id: session-memory.stewardship.project
+    title: Project session evidence
+    description: Rebuild deterministic session and search projections from preserved raw evidence.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.stewardship
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [project, reindex, generated, projection, индекс]
+
+  - id: session-memory.stewardship.curate
+    title: Curate session evidence
+    description: Distill and review candidate lessons without promoting raw experience automatically.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.stewardship
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [curate, distill, review, candidate, дистилляция]
+
+  - id: session-memory.stewardship.name
+    title: Name session evidence
+    description: Assess naming readiness, discover phases, and apply reviewed semantic names.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.stewardship
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [name, naming, phase, semantic-title, именование]
+
+  - id: session-memory.stewardship.assure
+    title: Assure session memory
+    description: Diagnose health, audit readiness, and stress evidence-preserving boundaries.
+    kind: capability
+    contract_level: navigation
+    primary_parent: session-memory.stewardship
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [assure, doctor, audit, stress, health, проверка]
+
+  - id: session-memory.adapters
+    title: Session-memory adapters
+    description: Bind portable session-memory capabilities to one named runtime without redefining their identity.
+    kind: capability
+    contract_level: navigation
+    primary_parent: aoa-session-memory
+    owner: *family_owner
+    lifecycle: *navigation_lifecycle
+    keywords: [adapter, runtime, binding, адаптер]
+
+  - id: session-memory.adapters.codex
+    title: Codex adapter
+    description: Bind Codex hook, compaction, and transcript semantics to portable session-memory contracts.
+    kind: adapter
+    contract_level: navigation
+    primary_parent: session-memory.adapters
+    owner:
+      repo: aoa-session-memory
+      surface: hooks/README.md
+      authority: authored
+    lifecycle: *navigation_lifecycle
+    keywords: [codex, hooks, compaction, transcript]
+
+  - id: skill.aoa-session-memory-global-route
+    title: Global session-memory router
+    description: Use in any Codex session when the user mentions `.aoa`, session memory, Codex transcripts, compaction, prior session rehydration, hook failures, or AoA session-memory validation.
+    purpose: Select the narrowest owner capability and preserve source, runtime, and proof boundaries.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.use.route
+    owner:
+      repo: aoa-session-memory
+      surface: skills/aoa-session-memory-global-route/SKILL.md
+      authority: authored
+    lifecycle:
+      state: experimental
+      version: 1.0.0
+      visibility: advertised
+      evidence_state: manual-baseline
+      health: challenger
+    applicability:
+      use_when: [The request names session memory, .aoa, transcripts, compaction, rehydration, hooks, or session-memory validation.]
+      do_not_use_when: [A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required.]
+      ambiguous_when: [The request mentions memory generically without a session, transcript, or .aoa anchor.]
+    abi:
+      inputs:
+        - {name: request, type: session-memory-request, required: true, description: One user request requiring owner routing.}
+      outputs:
+        - {name: selection, type: capability-selection, required: true, description: One bounded capability selection or explicit handoff.}
+    binding: {kind: skill, ref: skills/aoa-session-memory-global-route/SKILL.md, operation: route, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [filesystem read access, session-memory capability router]
+      verification: [The selected package trigger and negative applicability match the request., The selected owner and effects are stated before execution.]
+      termination: [Stop after one bounded selection, handoff, or honest no-fit result.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Selecting from topical similarity alone., Treating generated routing output as procedure authority., Widening to raw evidence before a typed route is exhausted.]
+    trust: &read_trust
+      public_safe: true
+      requires_human_approval: false
+      posture: authored-procedure
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-memory-global-route/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain, rationale: It is the compact globally visible entrypoint and has a distinct routing output ABI.}
+    procedure: &standard_skill_procedure
+      ref: skills/aoa-session-memory-global-route/SKILL.md
+      required_sections: [Trigger Boundary, Procedure, Verification, Stop Line]
+      runtime_adaptation: Resolve logical roots through the active installation before invoking any adapter-specific command.
+    security: &read_security
+      permissions: [read-owner-source]
+      network: forbidden
+      external_dependencies: []
+      untrusted_input: treat-as-data
+    keywords: [aoa, session-memory, transcripts, compaction, rehydration, hooks, router, память, сессия, архив, сжатие, маршрутизация]
+
+  - id: skill.aoa-session-memory-evidence-route
+    title: Prior-session evidence route
+    description: Use when an agent needs evidence from prior `.aoa` sessions about how a skill, MCP, hook, tool, API, goal, eval, test, validator, script, decision, error, receipt, or other recurring operational entity was used, what happened nearby, and which raw or segment refs prove it.
+    purpose: Return bounded, fresh, source-linked session evidence while keeping mention, selection, behavior, verification, and consequence distinct.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.use.query
+    owner:
+      repo: aoa-session-memory
+      surface: skills/aoa-session-memory-evidence-route/SKILL.md
+      authority: authored
+    lifecycle: &advertised_lifecycle
+      state: experimental
+      version: 1.0.0
+      visibility: advertised
+      evidence_state: manual-baseline
+      health: challenger
+    applicability:
+      use_when: [The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs.]
+      do_not_use_when: [Current repository or runtime state is the stronger source and no historical behavior question remains.]
+      ambiguous_when: [The user asks what a component does but does not ask how it behaved previously.]
+    abi:
+      inputs:
+        - {name: question, type: prior-session-evidence-question, required: true, description: Entity-anchored historical question.}
+        - {name: search_evidence, type: search-evidence-packet, required: false, description: Optional typed search packet from the search capability.}
+      outputs:
+        - {name: packet, type: evidence-packet, required: true, description: Bounded evidence packet with freshness and source refs.}
+    binding: {kind: skill, ref: skills/aoa-session-memory-evidence-route/SKILL.md, operation: route-evidence, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [read-only session-memory MCP or portable CLI, archived evidence refs]
+      verification: [Every important claim has a raw, segment, session, receipt, or owner ref., Freshness and truncation are explicit., Skill evidence does not overstate invocation or effect.]
+      termination: [Stop when the bounded packet answers the question or exposes the exact next evidence expansion.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Treating route counts as truth., Inferring invocation from selection or a skill read., Broad raw scanning before typed routes., Hiding stale or truncated providers.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-memory-evidence-route/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain, rationale: "It has a distinct historical-evidence trigger, evidence-packet ABI, and proof-ceiling failure modes."}
+    procedure:
+      <<: *standard_skill_procedure
+      ref: skills/aoa-session-memory-evidence-route/SKILL.md
+    security: *read_security
+    keywords: [prior-session, evidence, raw-ref, segment-ref, usage-chain, mcp, skill-attribution, доказательство, история, использование, использовался, сырой-ref, сырым, ссылкам, раньше, произошло, последствие]
+
+  - id: skill.aoa-session-search
+    title: Portable session search
+    description: Use when an agent needs to build or query the portable `.aoa` SQLite search index for archived Codex sessions, with evidence refs and freshness checks.
+    purpose: Query or explicitly refresh the portable search projection without confusing index state with evidence truth.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.use.query
+    owner:
+      repo: aoa-session-memory
+      surface: skills/aoa-session-search/SKILL.md
+      authority: authored
+    lifecycle: &deferred_lifecycle
+      state: experimental
+      version: 1.0.0
+      visibility: deferred
+      evidence_state: hypothesis
+      health: challenger
+    applicability:
+      use_when: [A bounded archive query or explicit portable search-index refresh is required.]
+      do_not_use_when: [A current file, owner API, or typed entity route answers the question without archive search.]
+      ambiguous_when: [The request says search without identifying current source versus prior-session evidence.]
+    abi:
+      inputs:
+        - {name: query, type: session-query, required: true, description: Query and bounded filters.}
+        - {name: indexed_sessions, type: indexed-session-set, required: false, description: Optional refreshed session projection.}
+      outputs:
+        - {name: results, type: search-evidence-packet, required: true, description: Ranked results with freshness and evidence refs.}
+    binding: {kind: skill, ref: skills/aoa-session-search/SKILL.md, operation: query-or-refresh, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [python3, session-memory CLI, SQLite]
+      verification: [Provider freshness is explicit., Results preserve source refs and filters., Any refresh reports changed projection state.]
+      termination: [Stop at a bounded result set, honest miss, or explicit stale-provider recovery route.]
+      effects: [read-only, runtime-mutation]
+      reversibility: reversible
+      failure_modes: [Using search snippets as source authority., Refreshing or shrinking indexes without explicit intent., Falling through to broad text after a typed route succeeds.]
+    trust: &mutation_trust
+      public_safe: true
+      requires_human_approval: true
+      posture: authored-procedure
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-search/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain, rationale: Query and index-recovery share one stable search trigger; maintenance details remain internal modes and references.}
+    procedure:
+      <<: *standard_skill_procedure
+      ref: skills/aoa-session-search/SKILL.md
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Rebuild the derived SQLite projection from preserved session indexes., Keep raw archives unchanged.]
+      postconditions: [Provider status names the resulting freshness state., Search results remain source-linked.]
+    security: &mutation_security
+      permissions: [read-session-archives, write-derived-session-index]
+      network: forbidden
+      external_dependencies: []
+      untrusted_input: treat-as-data
+    keywords: [search, sqlite, fts, provider, freshness, index, поиск]
+
+  - id: skill.aoa-session-rehydrate
+    title: Bounded session rehydration
+    description: Use when an agent needs to resume, inspect, or continue from an archived `.aoa` session without loading the full raw transcript.
+    purpose: Recover the smallest sufficient context from generated session surfaces and resolvable evidence refs.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.use.query
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-rehydrate/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A named archived session must be resumed or inspected without full raw loading.]
+      do_not_use_when: [The current active session already contains the required state or raw forensic review is explicitly required.]
+      ambiguous_when: [The user asks to remember generally without naming prior session scope.]
+    abi:
+      inputs:
+        - {name: target, type: session-target, required: true, description: "Session id, label, or resolvable handle."}
+      outputs:
+        - {name: packet, type: rehydration-packet, required: true, description: Bounded continuation context and evidence refs.}
+    binding: {kind: skill, ref: skills/aoa-session-rehydrate/SKILL.md, operation: rehydrate, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, read access to generated session surfaces]
+      verification: [The target resolves uniquely., The packet preserves source refs and open-thread boundaries.]
+      termination: [Stop after sufficient bounded context or an exact unresolved-target handoff.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Loading full raw evidence prematurely., Mixing multiple sessions., Presenting stale generated context as current runtime truth.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-rehydrate/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: It has a distinct continuation ABI but lacks current behavioral lift evidence.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-rehydrate/SKILL.md}
+    security: *read_security
+    keywords: [rehydrate, resume, continuation, session-target, rehydrate-session, восстановление]
+
+  - id: skill.aoa-session-archive-init
+    title: Session-memory root initialization
+    description: Use when a `.aoa` session-memory root must be created, installed, checked, repaired, or prepared for Codex hook-based session archiving.
+    purpose: Create or repair the portable root contract before any adapter writes session evidence.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.capture
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-archive-init/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A workspace lacks a valid session-memory root or requires an explicit install or repair.]
+      do_not_use_when: [The selected root is already healthy and no install or repair was requested.]
+      ambiguous_when: [The path exists but source, install, and runtime roles have not been classified.]
+    abi:
+      inputs:
+        - {name: binding, type: workspace-root-binding, required: true, description: Logical workspace and target session-memory roots.}
+      outputs:
+        - {name: root, type: memory-root-binding, required: true, description: Initialized root plus rendered adapter bindings.}
+    binding: {kind: skill, ref: skills/aoa-session-archive-init/SKILL.md, operation: initialize, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [python3, session-memory CLI, write access to selected target root]
+      verification: [Validate reports the target root contract current., Rendered hooks name the selected logical roots.]
+      termination: [Stop after verified install, no-op current state, or preserved conflict.]
+      effects: [repo-write, runtime-mutation]
+      reversibility: conditionally-reversible
+      failure_modes: [Overwriting existing evidence., Confusing standalone source with live root., Installing host-wide hooks without explicit authorization.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-archive-init/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Initialization has a distinct target-root ABI and destructive-conflict failure modes.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-archive-init/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Preserve existing evidence and restore any installer backup., Re-run validation before retry.]
+      postconditions: [Target root validates., Existing session evidence remains present.]
+    security: *mutation_security
+    keywords: [init, install, repair, workspace-root, hooks, инициализация]
+
+  - id: skill.aoa-codex-session-segment-archive
+    title: Codex transcript segment archive
+    description: Use when a Codex raw transcript must be archived into `.aoa` compaction-interval segments with raw preservation, segment indexes, manifests, and registry updates.
+    purpose: Adapt one Codex transcript into evidence-preserving session-memory raw blocks and projections.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.adapters.codex
+    owner: {repo: aoa-session-memory, surface: skills/aoa-codex-session-segment-archive/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A concrete Codex transcript must be archived or a missed archive event must be replayed.]
+      do_not_use_when: [The source is not a Codex transcript or the raw source cannot be read and verified.]
+      ambiguous_when: [A runtime transcript handle exists but its ownership or session identity is unresolved.]
+    abi:
+      inputs:
+        - {name: transcript, type: codex-transcript, required: true, description: Verified raw Codex JSONL source and session identity.}
+      outputs:
+        - {name: archive, type: archived-session-set, required: true, description: "Raw-preserving archive, manifests, segments, and registry refs."}
+    binding: {kind: skill, ref: skills/aoa-codex-session-segment-archive/SKILL.md, operation: archive, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [python3, session-memory CLI, readable Codex transcript]
+      verification: [Raw source identity and hashes are preserved., Segment boundaries and indexes validate., Registry points to the archive.]
+      termination: [Stop after idempotent verified archive or raw-diagnostic handoff.]
+      effects: [runtime-mutation, generated-write]
+      reversibility: conditionally-reversible
+      failure_modes: [Fabricating memory when raw is unreadable., Reordering compaction boundaries., Replacing existing raw evidence.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-codex-session-segment-archive/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: adapter-specific, disposition: retain-deferred, rationale: Codex transcript semantics are adapter-specific while the resulting archive ABI is portable.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-codex-session-segment-archive/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Keep raw source untouched., Route unreadable sources to aoa-session-raw-diagnostic., Reindex derived surfaces from preserved raw blocks.]
+      postconditions: [Archive manifests and segment indexes validate., Raw hashes remain resolvable.]
+    security: *mutation_security
+    keywords: [codex, transcript, archive, compaction, segment, raw-preservation]
+
+  - id: skill.aoa-session-history-import
+    title: Codex history import
+    description: Use when historical Codex JSONL sessions from `<codex-history-root>` need to be discovered, dry-run checked, and sequentially imported into `.aoa` archives.
+    purpose: Discover and import historical Codex sessions through a preview-first, evidence-preserving adapter.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.capture
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-history-import/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [Historical Codex JSONL sources must be discovered and imported into one selected root.]
+      do_not_use_when: [Only the current live transcript needs archiving or the history source is not explicitly bound.]
+      ambiguous_when: [A host history location is assumed but not resolved by the Codex adapter.]
+    abi:
+      inputs:
+        - {name: source, type: codex-history-source, required: true, description: Adapter-resolved history root and import filters.}
+      outputs:
+        - {name: archives, type: archived-session-set, required: true, description: Imported archive set with skip and failure receipts.}
+    binding: {kind: skill, ref: skills/aoa-session-history-import/SKILL.md, operation: import, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [python3, session-memory CLI, readable Codex history root]
+      verification: [Dry-run inventory is reviewed before apply., Every import has an archive or explicit skip or failure receipt., Existing archives remain intact.]
+      termination: [Stop after the bounded batch is fully receipted or a preserved blocker prevents continuation.]
+      effects: [runtime-mutation, generated-write]
+      reversibility: conditionally-reversible
+      failure_modes: [Assuming a fixed user home., Bulk apply without dry run., Parallel import that violates sequential archive locking.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-history-import/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: adapter-specific, disposition: retain-deferred, rationale: Host history discovery is Codex-specific and the bounded batch contract is independently useful.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-history-import/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Preserve imported raw blocks and remove only explicitly identified derived duplicates., Resume from recorded skip and failure receipts.]
+      postconditions: [Every considered source has a terminal receipt., Registry and indexes validate.]
+    security: *mutation_security
+    keywords: [history-import, codex-history, dry-run, sequential-import, historical-sessions]
+
+  - id: skill.aoa-session-raw-diagnostic
+    title: Raw-source diagnostic
+    description: Use when a `.aoa` hook or manual archive pass cannot read the raw Codex transcript and must write an incident plus diagnostic record instead of fake memory.
+    purpose: Fail closed on unreadable raw evidence and preserve one diagnostic recovery route.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.capture
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-raw-diagnostic/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A transcript read failed during hook or manual archive processing.]
+      do_not_use_when: [The raw source is readable or no concrete archive failure exists.]
+      ambiguous_when: [A derived projection is missing but raw readability has not been tested.]
+    abi:
+      inputs:
+        - {name: failure, type: raw-read-failure, required: true, description: "Concrete source path, error, event, and session identity."}
+      outputs:
+        - {name: diagnostic, type: diagnostic-record, required: true, description: Incident and diagnostic refs with no fabricated archive content.}
+    binding: {kind: skill, ref: skills/aoa-session-raw-diagnostic/SKILL.md, operation: record-diagnostic, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [session-memory CLI, write access to diagnostics]
+      verification: [Incident and diagnostic records name the source failure., No synthetic raw or segment content was created.]
+      termination: [Stop after a verified diagnostic record and explicit recovery route.]
+      effects: [runtime-mutation]
+      reversibility: reversible
+      failure_modes: [Inventing a placeholder archive., Hiding the source error., Retrying without resolving permissions or source identity.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-raw-diagnostic/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: It is the explicit fail-closed recovery capability for raw-read failure.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-raw-diagnostic/SKILL.md}
+    mutation:
+      preview_required: false
+      explicit_apply_required: true
+      rollback_or_recovery: [Correct source access or identity, then rerun the original archive route., Keep the diagnostic as evidence.]
+      postconditions: [Diagnostic is resolvable., No fake session archive exists.]
+    security: *mutation_security
+    keywords: [raw-failure, diagnostic, incident, fail-closed, unreadable-transcript]
+
+  - id: skill.aoa-session-reindex
+    title: Session projection rebuild
+    description: Use when existing `.aoa` session archives need generated segment Markdown and indexes rebuilt from preserved raw JSONL after taxonomy, classifier, relationship, or index-schema changes.
+    purpose: Deterministically rebuild derived session projections without changing raw evidence.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.project
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-reindex/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [Preserved archives require projection rebuild after source-owned classifier, schema, taxonomy, or relation changes.]
+      do_not_use_when: [Raw evidence itself is missing or the request only needs a query against a current index.]
+      ambiguous_when: [Provider freshness is stale but the owning projection has not been identified.]
+    abi:
+      inputs:
+        - {name: archives, type: archived-session-set, required: true, description: Preserved raw archive set and rebuild scope.}
+      outputs:
+        - {name: indexes, type: indexed-session-set, required: true, description: "Rebuilt segments, indexes, and projection receipts."}
+    binding: {kind: skill, ref: skills/aoa-session-reindex/SKILL.md, operation: reindex, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [python3, session-memory CLI, write access to derived projection paths]
+      verification: [Raw source hashes remain unchanged., Generated parity and provider freshness pass., Registry and doctor remain healthy.]
+      termination: [Stop after bounded rebuild parity or a precise source-integrity blocker.]
+      effects: [generated-write, runtime-mutation]
+      reversibility: reversible
+      failure_modes: [Mutating raw evidence., Reindexing all sessions before a focused trial., Claiming current provider freshness without status verification.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-reindex/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Projection rebuild has a distinct archive-to-index ABI and raw-preservation invariant.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-reindex/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Rebuild again from preserved raw blocks., Restore only generated snapshots when a consumer requires rollback.]
+      postconditions: [Generated projections match current source contracts., Raw hashes are unchanged.]
+    security: *mutation_security
+    keywords: [reindex, rebuild, projection, classifier, schema, raw-preservation]
+
+  - id: skill.aoa-session-first-pass-distill
+    title: First-pass session distillation
+    description: Use when an indexed `.aoa` session needs provisional first-pass distillation into lessons, decisions, failures, and automation candidates without promoting them to reviewed truth.
+    purpose: Extract provisional candidates from one indexed session while preserving their unreviewed status and refs.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.curate
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-first-pass-distill/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [One indexed session needs provisional candidate extraction.]
+      do_not_use_when: [The task asks for reviewed truth, final promotion, or a multi-session conveyor.]
+      ambiguous_when: [The session is not indexed or its evidence freshness is unknown.]
+    abi:
+      inputs:
+        - {name: session, type: indexed-session, required: true, description: One indexed session and bounded evidence refs.}
+      outputs:
+        - {name: candidates, type: promotion-candidate-set, required: true, description: "Unreviewed lessons, decisions, failures, and automation candidates."}
+    binding: {kind: skill, ref: skills/aoa-session-first-pass-distill/SKILL.md, operation: distill-one, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, indexed session evidence]
+      verification: [Every candidate carries source refs and provisional status., No candidate is promoted automatically.]
+      termination: [Stop after bounded candidate output or an evidence-insufficiency result.]
+      effects: [generated-write]
+      reversibility: reversible
+      failure_modes: [Promoting a plausible lesson as truth., Dropping contrary evidence., Reading one successful output as recurring practice.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-first-pass-distill/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Single-session provisional extraction has a distinct scope and review handoff.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-first-pass-distill/SKILL.md}
+    mutation:
+      preview_required: false
+      explicit_apply_required: true
+      rollback_or_recovery: [Delete or supersede only the generated provisional artifact, never source evidence., Return weak candidates to manual review.]
+      postconditions: [All output remains explicitly provisional., Evidence refs resolve.]
+    security: *mutation_security
+    keywords: [distill, first-pass, provisional, lesson, decision, failure, candidate]
+
+  - id: skill.aoa-session-batch-distill
+    title: Batch session distillation
+    description: Use when many indexed `.aoa` sessions need a first-wave distillation conveyor that separates safe automatic first-pass artifacts from manual review and mechanics-improvement queues.
+    purpose: Apply bounded first-pass extraction across a reviewed session set and separate terminal review queues.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.curate
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-batch-distill/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A reviewed set of indexed sessions needs a bounded provisional distillation wave.]
+      do_not_use_when: [Exactly one indexed session is in scope; use first-pass distill., The operator expects automatic promotion.]
+      ambiguous_when: [Naming or indexing quality is too weak to define the batch safely.]
+    abi:
+      inputs:
+        - {name: sessions, type: indexed-session-set, required: true, description: Reviewed bounded session set.}
+      outputs:
+        - {name: candidates, type: promotion-candidate-set, required: true, description: Provisional candidates and separated review queues.}
+    binding: {kind: skill, ref: skills/aoa-session-batch-distill/SKILL.md, operation: distill-batch, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, indexed sessions, maintenance coordination]
+      verification: [Every session has a terminal result., Candidate and manual-review queues remain separate., No promotion occurs.]
+      termination: [Stop after the declared wave is fully receipted or a resource or evidence gate blocks it.]
+      effects: [generated-write, runtime-mutation]
+      reversibility: reversible
+      failure_modes: [Unbounded batch size., Hiding skipped or failed sessions., Mixing mechanics-improvement pressure with accepted knowledge.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-batch-distill/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: "Batch orchestration has distinct resource, completeness, and queue-separation failure modes."}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-batch-distill/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Resume from per-session receipts., Remove or supersede only generated provisional wave artifacts.]
+      postconditions: [Every scoped session has a terminal receipt., Review queues remain unpromoted.]
+    security: *mutation_security
+    keywords: [batch-distill, conveyor, wave, manual-review-queue, mechanics-queue]
+
+  - id: skill.aoa-session-manual-review
+    title: Session candidate manual review
+    description: Use when `.aoa` first-wave manual review lanes need bounded review packets, owner-aware evidence samples, or an unpromoted promotion-candidate queue.
+    purpose: Prepare and review bounded candidate packets without transferring owner or promotion authority.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.curate
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-manual-review/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [Provisional candidates require bounded human review and owner resolution.]
+      do_not_use_when: [No provisional candidate or evidence packet exists.]
+      ambiguous_when: [The destination owner is unresolved or evidence is insufficient.]
+    abi:
+      inputs:
+        - {name: candidates, type: promotion-candidate-set, required: true, description: Provisional candidates with evidence refs.}
+      outputs:
+        - {name: review, type: reviewed-candidate-disposition, required: true, description: "Reviewed keep, reject, revise, or handoff dispositions without promotion."}
+    binding: {kind: skill, ref: skills/aoa-session-manual-review/SKILL.md, operation: review, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, human review, owner source access]
+      verification: [Owner resolution precedes project-specific interpretation., Each disposition cites evidence and remaining uncertainty., Promotion remains a separate owner action.]
+      termination: [Stop after every packet has a reviewed disposition or explicit evidence blocker.]
+      effects: [generated-write, human-decision]
+      reversibility: conditionally-reversible
+      failure_modes: [Treating review as promotion., Reviewing without owner source., Overwriting contrary or rejected evidence.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-manual-review/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Human review has a distinct disposition ABI and non-promotion authority boundary.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-manual-review/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Supersede an incorrect review disposition while preserving its evidence trail., Return unresolved packets to intake.]
+      postconditions: [Every decision names reviewer posture, owner, evidence, and promotion boundary.]
+    security:
+      permissions: [read-session-evidence, write-review-packets, human-review]
+      network: forbidden
+      external_dependencies: []
+      untrusted_input: treat-as-data
+    keywords: [manual-review, owner-resolution, review-packet, promotion-candidate, human-gate]
+
+  - id: skill.aoa-session-naming-readiness
+    title: Session naming readiness
+    description: Use before broad session renaming or semantic naming work to classify `.aoa` session archives by naming readiness, lower-layer blockers, and phase-discovery needs.
+    purpose: Classify naming readiness before any semantic title mutation.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.name
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-naming-readiness/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A naming wave or broad semantic renaming is being considered.]
+      do_not_use_when: [A single reviewed name is already ready for explicit application.]
+      ambiguous_when: [Index or title freshness is unknown.]
+    abi:
+      inputs:
+        - {name: sessions, type: indexed-session-set, required: true, description: Session set and current naming/index posture.}
+      outputs:
+        - {name: readiness, type: naming-readiness-report, required: true, description: "Ready, blocked, and phase-discovery-needed classifications."}
+    binding: {kind: skill, ref: skills/aoa-session-naming-readiness/SKILL.md, operation: assess-readiness, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, current naming policy and indexes]
+      verification: [Every classified session names its evidence and blocker., The report performs no rename.]
+      termination: [Stop after a bounded readiness report and next route per class.]
+      effects: [read-only, generated-write]
+      reversibility: reversible
+      failure_modes: [Treating readiness as approval to rename., Hiding lower-layer index blockers., Forcing one title onto multi-phase sessions.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-naming-readiness/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Readiness assessment is a non-mutating gate with a distinct classification output.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-naming-readiness/SKILL.md}
+    mutation:
+      preview_required: false
+      explicit_apply_required: true
+      rollback_or_recovery: [Regenerate the derived report from current indexes.]
+      postconditions: [No session name changed., Each class has a bounded next route.]
+    security: *mutation_security
+    keywords: [naming-readiness, naming, blockers, phase-discovery, semantic-title]
+
+  - id: skill.aoa-session-phase-discovery
+    title: Session phase discovery
+    description: Use for long `.aoa` Codex session archives that need phase/topic candidate extraction before applying semantic session names.
+    purpose: Extract reviewable phase candidates from long sessions before name application.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.name
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-phase-discovery/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A long or multi-topic session needs phase candidates before semantic naming.]
+      do_not_use_when: [A short session already has one reviewed semantic name.]
+      ambiguous_when: [The target session or its current index cannot be resolved uniquely.]
+    abi:
+      inputs:
+        - {name: readiness, type: naming-readiness-report, required: true, description: Readiness record identifying phase-discovery need.}
+      outputs:
+        - {name: phases, type: phase-candidate-set, required: true, description: Evidence-linked phase and title candidates.}
+    binding: {kind: skill, ref: skills/aoa-session-phase-discovery/SKILL.md, operation: discover-phases, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, indexed session and bounded raw refs]
+      verification: [Phase candidates cite bounded evidence spans., Candidate names remain unapplied.]
+      termination: [Stop after reviewable phase candidates or an explicit insufficient-evidence result.]
+      effects: [generated-write]
+      reversibility: reversible
+      failure_modes: [Applying names during discovery., Treating every topical mention as a phase., Reading unbounded raw content.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-phase-discovery/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Phase extraction has a distinct evidence-span output and precedes any naming mutation.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-phase-discovery/SKILL.md}
+    mutation:
+      preview_required: false
+      explicit_apply_required: true
+      rollback_or_recovery: [Regenerate or reject candidate artifacts without changing the archive.]
+      postconditions: [No session names changed., Phase candidates carry source refs.]
+    security: *mutation_security
+    keywords: [phase-discovery, topics, long-session, semantic-name, evidence-span]
+
+  - id: skill.aoa-session-naming-wave
+    title: Reviewed session naming wave
+    description: Use when many `.aoa` session archives need fast, reviewable semantic naming across readiness, sync/reindex preflight, review plans, guarded apply, and quality audit.
+    purpose: Build, review, apply, and audit one explicit semantic naming wave.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.name
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-naming-wave/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A reviewed bounded set of phase or title candidates is ready for a guarded naming wave.]
+      do_not_use_when: [Readiness, phase candidates, review approval, or current index freshness is missing.]
+      ambiguous_when: [The wave mixes sessions with incompatible readiness classes.]
+    abi:
+      inputs:
+        - {name: phases, type: phase-candidate-set, required: true, description: Reviewed phase and title candidates.}
+      outputs:
+        - {name: names, type: named-session-set, required: true, description: "Applied names, receipts, and quality audit refs."}
+    binding: {kind: skill, ref: skills/aoa-session-naming-wave/SKILL.md, operation: name-wave, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, reviewed naming plan, write access to selected root]
+      verification: [Preflight is current., Apply uses only reviewed plan entries., Quality audit resolves every changed session.]
+      termination: [Stop after audited apply, reviewed no-op, or preserved conflict requiring a new plan.]
+      effects: [runtime-mutation, human-decision]
+      reversibility: conditionally-reversible
+      failure_modes: [Applying an unreviewed plan., Renaming while reindex mutates the same sessions., Losing old-name and new-name receipts.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-naming-wave/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: "Naming wave has an explicit reviewed mutation boundary, receipts, and quality audit."}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-naming-wave/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Use old-name and new-name receipts to prepare a reviewed reverse plan., Reindex after recovery.]
+      postconditions: [Every applied name has a receipt., Naming quality audit passes or names the exact failed entries.]
+    security:
+      permissions: [read-session-evidence, write-session-names, human-review]
+      network: forbidden
+      external_dependencies: []
+      untrusted_input: treat-as-data
+    keywords: [naming-wave, semantic-name, guarded-apply, quality-audit, rename]
+
+  - id: skill.aoa-session-memory-doctor
+    title: Session-memory doctor
+    description: Use when the `.aoa` session-memory filesystem contract, registry, generated indexes, naming policy, live hooks, or Codex grounding need health checks.
+    purpose: Diagnose one selected root and expose owner-specific recovery without claiming completion.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.assure
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-memory-doctor/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A selected session-memory root needs current health diagnosis.]
+      do_not_use_when: [The task asks for release completion rather than root health; use audit.]
+      ambiguous_when: [Source, bundle, and live root have not been distinguished.]
+    abi:
+      inputs:
+        - {name: root, type: memory-root-binding, required: true, description: Explicit logical root and optional adapter binding.}
+      outputs:
+        - {name: health, type: health-report, required: true, description: Split-axis health report with recovery routes.}
+    binding: {kind: skill, ref: skills/aoa-session-memory-doctor/SKILL.md, operation: diagnose, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [python3, session-memory CLI, read access to selected root]
+      verification: [Report identifies the exact root and source revision., Health axes and recovery routes remain separate.]
+      termination: [Stop after current health report or a precise inaccessible-root blocker.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Checking the wrong root., Treating one healthy axis as overall completion., Repairing without a separate request.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-memory-doctor/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Doctor has a distinct root-health ABI and no mutation authority.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-memory-doctor/SKILL.md}
+    security: *read_security
+    keywords: [doctor, health, registry, indexes, hooks, grounding, diagnosis]
+
+  - id: skill.aoa-session-memory-audit
+    title: Session-memory completion audit
+    description: Use when the `.aoa` session-memory bundle needs a completion-readiness audit across raw preservation, compaction topology, hooks, tests, and standalone GitHub readiness.
+    purpose: Assess source, standalone, runtime, and release readiness without collapsing them into one green slice.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.assure
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-memory-audit/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [Completion or release readiness must be assessed across source, portable, and live axes.]
+      do_not_use_when: [Only one root health question exists; use doctor.]
+      ambiguous_when: [The claimed release target or standalone source is unresolved.]
+    abi:
+      inputs:
+        - {name: root, type: memory-root-binding, required: true, description: "Source, standalone, and optional live-root bindings."}
+        - {name: names, type: named-session-set, required: false, description: Optional naming-wave receipts requiring audit.}
+      outputs:
+        - {name: audit, type: readiness-audit, required: true, description: Evidence-linked readiness axes and remaining debt.}
+    binding: {kind: skill, ref: skills/aoa-session-memory-audit/SKILL.md, operation: audit, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [session-memory CLI, source and standalone validation surfaces]
+      verification: [Each readiness claim names its owner check and artifact., Remaining debt is explicit., Raw-preservation and privacy boundaries are inspected.]
+      termination: [Stop after a split-axis readiness verdict and exact remaining routes.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Calling a source-only green check complete., Auditing a dirty unrelated checkout as canonical truth., Omitting standalone or live axes.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-memory-audit/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Audit has a distinct completion-readiness claim boundary beyond doctor health.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-memory-audit/SKILL.md}
+    security: *read_security
+    keywords: [audit, readiness, portable, raw-preservation, release, completion]
+
+  - id: skill.aoa-session-memory-stress-pass
+    title: Session-memory stress pass
+    description: Use for `.aoa` large-session checks, logical compaction boundary validation, bounded archive inspection, and `stress-pass` diagnostics.
+    purpose: Exercise large-session and compaction-boundary invariants without unbounded evidence loading.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.assure
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-memory-stress-pass/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A large archive or logical compaction boundary requires bounded stress validation.]
+      do_not_use_when: [A normal root health or release readiness check is sufficient.]
+      ambiguous_when: [The target session size or compaction topology is unknown.]
+    abi:
+      inputs:
+        - {name: target, type: session-target, required: true, description: One large or boundary-sensitive session.}
+      outputs:
+        - {name: report, type: stress-report, required: true, description: Bounded stress diagnostics and evidence refs.}
+    binding: {kind: skill, ref: skills/aoa-session-memory-stress-pass/SKILL.md, operation: stress, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [session-memory CLI, bounded archive read access]
+      verification: [Logical boundaries and raw refs agree., Inspection and output budgets are explicit.]
+      termination: [Stop after bounded diagnostics or a declared budget blocker.]
+      effects: [read-only, generated-write]
+      reversibility: reversible
+      failure_modes: [Loading an entire huge transcript., Equating physical blocks with logical compaction intervals., Hiding truncation.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-session-memory-stress-pass/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: Stress validation has separate scale and boundary failure modes.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-memory-stress-pass/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Delete only the generated stress diagnostic after review; never alter archived evidence.]
+      postconditions: [Any written report is bounded and source-linked., Raw and generated session archives are unchanged.]
+    security: *read_security
+    keywords: [stress-pass, large-session, compaction-boundary, bounded-inspection]
+
+  - id: skill.aoa-codex-hooks-status
+    title: Codex hooks status
+    description: Use when AoA Codex hooks must be inspected, trusted, or compared against expected `.aoa` commands in the native Codex hook registry.
+    purpose: Compare native Codex hook registry state with rendered session-memory adapter expectations.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.adapters.codex
+    owner: {repo: aoa-session-memory, surface: skills/aoa-codex-hooks-status/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [Native Codex hook registration or trust must be inspected for one selected root.]
+      do_not_use_when: [The runtime is not Codex or the question concerns archive content rather than hook state.]
+      ambiguous_when: [Expected roots or hook profile have not been resolved.]
+    abi:
+      inputs:
+        - {name: root, type: memory-root-binding, required: true, description: Selected root and rendered Codex hook expectations.}
+      outputs:
+        - {name: runtime, type: codex-hook-runtime, required: true, description: "Current hook registry, trust, and drift status."}
+    binding: {kind: skill, ref: skills/aoa-codex-hooks-status/SKILL.md, operation: inspect-hooks, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [Codex CLI, session-memory CLI, native hook registry read access]
+      verification: [Every expected event is compared by exact rendered command., Trust and registration are reported separately.]
+      termination: [Stop after current status or a precise unavailable-Codex blocker.]
+      effects: [read-only]
+      reversibility: not-applicable
+      failure_modes: [Inferring enablement from source config., Checking legacy hook surfaces., Trusting mismatched root commands.]
+    trust: *read_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-codex-hooks-status/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: adapter-specific, disposition: retain-deferred, rationale: Native hook registry and event names are Codex-specific.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-codex-hooks-status/SKILL.md}
+    security:
+      permissions: [read-codex-hook-registry, read-owner-source]
+      network: forbidden
+      external_dependencies: [Codex CLI]
+      untrusted_input: treat-as-data
+    keywords: [codex-hooks, hook-registry, trust, command-drift, native-hooks]
+
+  - id: skill.aoa-codex-compact-probe
+    title: Codex compaction probe
+    description: Use when the live Codex PreCompact and PostCompact hook path must be proven through `.aoa` using the Codex app-server compact probe.
+    purpose: Execute one explicit Codex adapter probe and verify pre/post-compaction evidence flow.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.adapters.codex
+    owner: {repo: aoa-session-memory, surface: skills/aoa-codex-compact-probe/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [The live Codex pre/post-compaction hook path requires an explicit behavioral probe.]
+      do_not_use_when: [Static hook registry inspection is sufficient and no behavioral probe is requested., The runtime is not Codex.]
+      ambiguous_when: [Hook registration is stale or untrusted.]
+    abi:
+      inputs:
+        - {name: runtime, type: codex-hook-runtime, required: true, description: Current trusted Codex hook runtime status.}
+      outputs:
+        - {name: report, type: compaction-probe-report, required: true, description: Probe receipts and pre/post-compaction evidence refs.}
+    binding: {kind: skill, ref: skills/aoa-codex-compact-probe/SKILL.md, operation: probe-compaction, availability: available}
+    execution:
+      freedom: deterministic
+      tool_requirements: [Codex app-server, session-memory CLI, live hook execution]
+      verification: [Both PreCompact and PostCompact receipts resolve., Probe session identity and selected roots match., No production session is mistaken for the synthetic probe.]
+      termination: [Stop after verified two-sided probe or an exact hook/runtime blocker.]
+      effects: [runtime-mutation]
+      reversibility: reversible
+      failure_modes: [Running without explicit operator intent., Probing an untrusted hook registry., Claiming success from one side only.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: skills/aoa-codex-compact-probe/SKILL.md, ref: capability-home-v1, role: owner-skill-procedure, authority: authored}
+      optional_refs: []
+    classification: {category: adapter-specific, disposition: retain-deferred, rationale: The app-server compact probe is a Codex-only behavioral adapter with explicit effects.}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-codex-compact-probe/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Remove only explicitly identified synthetic probe state after preserving receipts., Repair hook trust before retry.]
+      postconditions: [Both hook events have matching receipts., Doctor remains healthy.]
+    security:
+      permissions: [invoke-codex-app-server, write-probe-session, read-hook-receipts]
+      network: forbidden
+      external_dependencies: [Codex app-server]
+      untrusted_input: runtime-policy-enforced
+    keywords: [codex, compact-probe, precompact, postcompact, app-server, behavioral-probe]
+
+relations:
+  - {kind: hands-off-to, source: skill.aoa-session-search, target: skill.aoa-session-memory-evidence-route, condition: A bounded search packet answers the historical entity question and preserves source refs.}
+  - {kind: hands-off-to, source: skill.aoa-session-archive-init, target: skill.aoa-codex-hooks-status, condition: The initialized root emits the memory-root binding consumed by Codex hook inspection.}
+  - {kind: hands-off-to, source: skill.aoa-codex-hooks-status, target: skill.aoa-codex-compact-probe, condition: Current trusted hook runtime status is required before the behavioral compact probe.}
+  - {kind: hands-off-to, source: skill.aoa-codex-session-segment-archive, target: skill.aoa-session-reindex, condition: Newly archived sessions may be projected only after raw preservation validates.}
+  - {kind: hands-off-to, source: skill.aoa-session-history-import, target: skill.aoa-session-reindex, condition: The bounded import set is complete and raw-preserving before projection rebuild.}
+  - {kind: produces, source: skill.aoa-session-reindex, target: skill.aoa-session-search, condition: Current indexed-session output supplies the optional search projection input.}
+  - {kind: hands-off-to, source: skill.aoa-session-first-pass-distill, target: skill.aoa-session-manual-review, condition: Provisional candidates require owner-aware manual disposition before any promotion.}
+  - {kind: hands-off-to, source: skill.aoa-session-batch-distill, target: skill.aoa-session-manual-review, condition: The batch candidate queue remains provisional and enters bounded manual review.}
+  - {kind: hands-off-to, source: skill.aoa-session-naming-readiness, target: skill.aoa-session-phase-discovery, condition: A readiness record explicitly classifies the session as requiring phase discovery.}
+  - {kind: hands-off-to, source: skill.aoa-session-phase-discovery, target: skill.aoa-session-naming-wave, condition: Phase candidates were reviewed and provide the naming-wave input ABI.}
+  - {kind: hands-off-to, source: skill.aoa-session-naming-wave, target: skill.aoa-session-memory-audit, condition: Applied naming receipts require quality and readiness audit.}
+  - {kind: specializes, source: skill.aoa-session-batch-distill, target: skill.aoa-session-first-pass-distill, condition: Batch distillation repeats the same provisional extraction across a bounded reviewed set with completeness receipts.}
+  - {kind: generalizes, source: skill.aoa-session-first-pass-distill, target: skill.aoa-session-batch-distill, condition: Single-session extraction is the reusable procedure generalized by bounded batch orchestration.}
+  - {kind: conflicts-with, source: skill.aoa-session-naming-wave, target: skill.aoa-session-reindex, condition: Do not mutate names and rebuild projections for the same session set concurrently.}
+  - {kind: conflicts-with, source: skill.aoa-session-reindex, target: skill.aoa-session-naming-wave, condition: Do not rebuild projections and mutate names for the same session set concurrently.}
+  - {kind: verified-by, source: skill.aoa-session-archive-init, target: skill.aoa-session-memory-doctor, condition: Root initialization completes only after doctor validates the selected root.}
+  - {kind: verifies, source: skill.aoa-session-memory-doctor, target: skill.aoa-session-archive-init, condition: Doctor verifies initialization postconditions without acquiring install authority.}
+  - {kind: verified-by, source: skill.aoa-session-history-import, target: skill.aoa-session-memory-doctor, condition: Imported archives complete only after registry and root health checks.}
+  - {kind: verifies, source: skill.aoa-session-memory-doctor, target: skill.aoa-session-history-import, condition: Doctor verifies import postconditions without rewriting archives.}
+  - {kind: verified-by, source: skill.aoa-session-reindex, target: skill.aoa-session-memory-doctor, condition: Projection rebuild completes only after current provider and root health checks.}
+  - {kind: verifies, source: skill.aoa-session-memory-doctor, target: skill.aoa-session-reindex, condition: Doctor verifies rebuilt projections without becoming projection authority.}
+  - {kind: verified-by, source: skill.aoa-session-naming-wave, target: skill.aoa-session-memory-audit, condition: Naming mutation completes only after receipt and quality audit.}
+  - {kind: verifies, source: skill.aoa-session-memory-audit, target: skill.aoa-session-naming-wave, condition: Audit verifies naming receipts without authoring names.}

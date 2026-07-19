@@ -25,8 +25,8 @@ Run from the source root unless validating a standalone checkout:
 
 ```bash
 python3 scripts/aoa_session_memory.py audit \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root>
 ```
 
 For the clean standalone bundle, use portable-bundle mode. It checks source,
@@ -36,8 +36,8 @@ the repo:
 
 ```bash
 python3 scripts/aoa_session_memory.py audit \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/bundles/aoa-session-memory \
+  --workspace-root <workspace-root> \
+  --aoa-root <portable-source-root> \
   --portable-bundle
 ```
 
@@ -50,8 +50,11 @@ skipped.
 - `completion_ready=true`
 - `remaining=[]`
 - user-level router skill is installed for the current Codex user
-- standalone repo points at `/srv/AbyssOS/bundles/aoa-session-memory`
-- origin is `git@github.com:8Dionysus/aoa-session-memory.git` on this host
+- standalone repo points at `<portable-source-root>`
+- when the selected release or install profile declares an owner remote, the
+  observed standalone origin matches that runtime binding
+- an offline or remote-free portable bundle reports the origin check as
+  explicitly not applicable instead of inventing a host-specific remote
 - clean standalone bundle audit uses `audit_mode=portable_bundle`
 
 ## Stop Line

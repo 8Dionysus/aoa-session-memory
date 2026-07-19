@@ -1,0 +1,433 @@
+{
+  "schema_version": "aoa_session_memory_skill_system_comparison_v1",
+  "generated_at": "2026-07-19T00:30:45Z",
+  "owner_repo": "aoa-session-memory",
+  "source_revision_under_test": "34448f45b58782687fefcfc24695878f32d7a0a8",
+  "baseline_revision": "2741dbaaf00af819cadcac309ea5ee6ead46db05",
+  "capability_graph_hash": "9d99d67bdef5a17ff4d4fddad9424976704511e4f4b9621fd219c1f152d5fc6e",
+  "authority": {
+    "proof_authority": false,
+    "promotion_allowed": false,
+    "benefit_verdict": false,
+    "owner": "aoa-evals",
+    "claim_limit": "Reviewed public-safe comparison evidence below central proof authority; no lifecycle promotion or general behavioral-lift claim."
+  },
+  "environment": {
+    "runtime": "mixed Codex collaboration trials plus one isolated ephemeral Codex CLI no-skill trial",
+    "condition_models": {
+      "no_skill": "gpt-5.6-sol",
+      "other_conditions": "unreported_by_collaboration_runtime"
+    },
+    "host_class": "isolated_local_synthetic_workspaces",
+    "network": "denied",
+    "permissions": [
+      "read owner source",
+      "mutate assigned disposable workspace only"
+    ],
+    "seed": "not_applicable_deterministic_fixture",
+    "tokens": "reported for no_skill only; unreported for four collaboration conditions",
+    "raw_agent_traces_committed": false
+  },
+  "task": {
+    "id": "synthetic-import-replay-reindex-doctor",
+    "fixture_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+    "fixture_bytes": 732,
+    "fixture_lines": 4,
+    "acceptance_criteria": [
+      "preview import without creating the session archive",
+      "apply exactly one import",
+      "repeat import idempotently",
+      "rebuild the selected derived projection",
+      "preserve raw bytes",
+      "finish with an ordinary green doctor and one usable archive"
+    ]
+  },
+  "conditions": [
+    {
+      "id": "no_skill",
+      "evidence_id": "no-skill-clean-v3-20260718",
+      "skill_exposure": [],
+      "capability_or_generated_router_exposure": false,
+      "prompt_visible_skill_count": 0,
+      "local_skill_body_count": 20,
+      "local_skill_bodies_readable": false,
+      "runtime": "Codex CLI 0.144.6 ephemeral exec",
+      "model": "gpt-5.6-sol",
+      "model_reasoning_effort": "xhigh",
+      "task_prompt_sha256": "ab074c4fdd46901dbefd519803e6db9dbd9b4c62414cf19411b32fc6dbc443b2",
+      "catalog_probe_sha256": "d862c8d3f3a9b7a6c36eb10616cf81fcc8edb714a2c3ddad44c6f794a2868274",
+      "catalog_probe_skill_instruction_marker_count": 0,
+      "owner_source_read_scope": [
+        "scripts/aoa_session_memory.py"
+      ],
+      "owner_source_inspection_count": 1,
+      "disabled_runtime_surfaces": [
+        "skills",
+        "plugins",
+        "plugin_sharing",
+        "apps",
+        "hooks",
+        "memories",
+        "multi_agent"
+      ],
+      "result": "passed",
+      "imported_sessions": 1,
+      "event_count": 4,
+      "segment_count": 2,
+      "raw_block_count": 2,
+      "replay_status": "skipped_existing",
+      "doctor_status": "current",
+      "raw_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+      "receipt_sha256": {
+        "import_preview": "410968eeba0a6135251812c008de7e63f69750dffb4fa76afadbed778051129c",
+        "import_apply": "340043f205bb8eeb3e84f0fd59fcc3257d366fe9eda5c8aafed49aa2327be25c",
+        "import_replay": "575d274aa195172822fb737156528d9d6d98c8ea94e43b49a6c6e7b498be9a6b",
+        "reindex_preview": "5a98fb48e865875fa4449136dcf15d88db3d7242be58f8421fa32daa0d82c4af",
+        "reindex_apply": "6ec3e291628d0ab5317c03e3c77f6f2b9a1b6eed8bfe79ab191091ed2086dbd3"
+      },
+      "core_execution_time_ms": "unreported",
+      "command_count": {
+        "substantive_owner_cli": 7,
+        "total_shell": 16
+      },
+      "runtime_usage": {
+        "input_tokens": 689564,
+        "cached_input_tokens": 623616,
+        "output_tokens": 10902,
+        "reasoning_output_tokens": 3332
+      },
+      "intervention": "none",
+      "recovery": "none"
+    },
+    {
+      "id": "baseline_direct",
+      "skill_exposure": [
+        {
+          "name": "aoa-session-history-import",
+          "skill_sha256": "008ef838bdcbb3a7fd6e2f7b1d3ebd19d297407f4f52f96c536dbd6ccfcf1218"
+        },
+        {
+          "name": "aoa-session-reindex",
+          "skill_sha256": "bdcf6c3e849fce0a7836e7c7ec9f56fe0063def643c75efe380df0c327390dc5"
+        },
+        {
+          "name": "aoa-session-memory-doctor",
+          "skill_sha256": "5a5c0e76328eb6f672445c53771b1210d682144ee8e6cfc3d369d0c9a6c9f236"
+        }
+      ],
+      "result": "passed",
+      "imported_sessions": 1,
+      "event_count": 4,
+      "segment_count": 2,
+      "raw_block_count": 2,
+      "replay_status": "skipped_existing",
+      "doctor_status": "current",
+      "raw_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+      "core_execution_time_ms": "unreported",
+      "command_count": "unreported_total",
+      "intervention": "none",
+      "recovery": "none"
+    },
+    {
+      "id": "candidate_composed_direct",
+      "skill_exposure": [
+        {
+          "name": "aoa-session-history-import",
+          "version": "1.0.0",
+          "package_fingerprint": "9aa0e6b23b0a92faaa5d610ebc71373495ddb2cf82913c547c522ebc120e9643",
+          "skill_sha256": "21056563a7e7273e03b28021e43af197e94b3b794b090984ca9d75304cb420cb"
+        },
+        {
+          "name": "aoa-session-reindex",
+          "version": "1.0.0",
+          "package_fingerprint": "5749a8e863003dac55160da16ce2290ecbd9aba1382a119d2e656fb4c6fba0e8",
+          "skill_sha256": "85eb7df9325e52c4dc7515d321360ce6833a53926b851cad0a41637c405484e1"
+        },
+        {
+          "name": "aoa-session-memory-doctor",
+          "version": "1.0.0",
+          "package_fingerprint": "fb5ba247e4863ec800cc6f985199c9955c9616c82d22e222ac57dde01213a135",
+          "skill_sha256": "74026742c9e8d4f569e882de9ec1d266f7a7fde5905ad39d9280bc77a24d5b03"
+        }
+      ],
+      "result": "passed_after_workspace_recovery",
+      "imported_sessions": 1,
+      "event_count": 4,
+      "segment_count": 2,
+      "raw_block_count": 2,
+      "replay_status": "skipped_existing",
+      "doctor_status": "current",
+      "raw_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+      "core_execution_time_ms": "unreported",
+      "command_count": "unreported_total",
+      "intervention": "none",
+      "recovery": "replace no-tests runtime install with full portable install after doctor rejected missing tests/AGENTS.md"
+    },
+    {
+      "id": "candidate_single_skill",
+      "skill_exposure": [
+        {
+          "name": "aoa-session-history-import",
+          "version": "1.0.0",
+          "package_fingerprint": "9aa0e6b23b0a92faaa5d610ebc71373495ddb2cf82913c547c522ebc120e9643",
+          "skill_sha256": "21056563a7e7273e03b28021e43af197e94b3b794b090984ca9d75304cb420cb"
+        }
+      ],
+      "result": "passed",
+      "imported_sessions": 1,
+      "event_count": 4,
+      "segment_count": 2,
+      "raw_block_count": 2,
+      "replay_status": "skipped_existing",
+      "doctor_status": "current",
+      "raw_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+      "core_execution_time_ms": 12100,
+      "command_count": {
+        "core": 9,
+        "total_shell": 36
+      },
+      "intervention": "none",
+      "recovery": "none"
+    },
+    {
+      "id": "candidate_retrieval",
+      "skill_exposure": [
+        {
+          "name": "aoa-session-memory-global-route",
+          "version": "1.0.0",
+          "package_fingerprint": "f459356ad356a67927afa6ca4ce9d85e70848f3848b25d488e8fdb036ac39256"
+        },
+        {
+          "name": "aoa-session-archive-init",
+          "version": "1.0.0",
+          "package_fingerprint": "6e4e38be416c608c77b6fd6aecc84e69400d33e98e711ed08e911da62aa15935"
+        },
+        {
+          "name": "aoa-session-history-import",
+          "version": "1.0.0",
+          "package_fingerprint": "9aa0e6b23b0a92faaa5d610ebc71373495ddb2cf82913c547c522ebc120e9643"
+        },
+        {
+          "name": "aoa-session-reindex",
+          "version": "1.0.0",
+          "package_fingerprint": "5749a8e863003dac55160da16ce2290ecbd9aba1382a119d2e656fb4c6fba0e8"
+        },
+        {
+          "name": "aoa-session-memory-doctor",
+          "version": "1.0.0",
+          "package_fingerprint": "fb5ba247e4863ec800cc6f985199c9955c9616c82d22e222ac57dde01213a135"
+        }
+      ],
+      "route": {
+        "compact_candidates": [
+          "skill.aoa-session-memory-global-route",
+          "skill.aoa-session-memory-evidence-route"
+        ],
+        "full_skill_order": [
+          "skill.aoa-session-history-import",
+          "skill.aoa-session-reindex",
+          "skill.aoa-session-archive-init",
+          "skill.aoa-session-memory-doctor",
+          "skill.aoa-session-memory-evidence-route",
+          "skill.aoa-session-memory-global-route",
+          "skill.aoa-session-search"
+        ],
+        "plan_status": "ready",
+        "plan_id": "dag-7200d46330c6e06a"
+      },
+      "result": "passed",
+      "imported_sessions": 1,
+      "event_count": 4,
+      "segment_count": 2,
+      "raw_block_count": 2,
+      "replay_status": "skipped_existing",
+      "doctor_status": "current",
+      "raw_sha256": "068b7d3430d7d95e94adaef581d8deba8503041e520b1007dcfd9e9be0ca015b",
+      "routing_and_planning_time_ms": 780,
+      "core_execution_time_ms": 9950,
+      "command_count": {
+        "substantive": 11,
+        "exec_total": 58
+      },
+      "intervention": "supply the exact workspace and history inputs after the first planner call reported missing bindings",
+      "recovery": "none"
+    }
+  ],
+  "independent_review": {
+    "reviewer": "root owner-check",
+    "source_clean_before_and_after": true,
+    "workspaces_rechecked": 5,
+    "no_skill_prompt_isolation_verified": true,
+    "no_skill_preview_receipt_pass": true,
+    "no_skill_forbidden_source_mutation_count": 0,
+    "no_skill_raw_block_ref_audit": "reader_ready_3_of_3",
+    "doctor_pass_count": 5,
+    "raw_identity_pass_count": 5,
+    "import_apply_pass_count": 5,
+    "replay_idempotence_pass_count": 5,
+    "reindex_pass_count": 5
+  },
+  "deterministic_comparisons": {
+    "short_description_vs_full_contract": {
+      "case": "full-contract-improves-hook-route",
+      "expected": "skill.aoa-codex-hooks-status",
+      "compact_rank": 5,
+      "full_contract_rank": 1,
+      "result": "full_contract_improved_this_case"
+    },
+    "flat_set_vs_semantic_routing": {
+      "positive_cases": 22,
+      "flat_compact_top1": 22,
+      "semantic_two_stage_top1": 22,
+      "flat_prompt_visible_skill_count": 20,
+      "semantic_prompt_visible_skill_count": 2,
+      "flat_prompt_visible_bytes": 3897,
+      "semantic_prompt_visible_bytes": 532,
+      "diagnostic_microbench_rounds": 100,
+      "flat_mean_ms_per_query": 1.0219,
+      "semantic_mean_ms_per_query": 2.3378,
+      "result": "equal_curated_accuracy_smaller_initial_context_but_slower_two_stage_route",
+      "timing_claim_limit": "single local diagnostic run, not a stable latency verdict"
+    },
+    "single_skill_vs_composition": {
+      "single_result": "passed",
+      "composed_result": "passed_after_workspace_recovery",
+      "result": "no_correctness_lift_detected_on_this_task"
+    },
+    "compatible_vs_related_incompatible": {
+      "compatible_status": "ready",
+      "compatible_execution_stages": [
+        [
+          "skill.aoa-session-history-import"
+        ],
+        [
+          "skill.aoa-session-reindex"
+        ],
+        [
+          "skill.aoa-session-memory-doctor",
+          "skill.aoa-session-search"
+        ]
+      ],
+      "incompatible_status": "blocked",
+      "incompatible_blocker": "version incompatibility: skill.aoa-session-search vs skill.aoa-session-memory-evidence-route",
+      "result": "typed_composition_admitted_the_compatible_set_and_blocked_the_incompatible_set"
+    },
+    "isolated_vs_coexistence": {
+      "positive_cases": 22,
+      "same_expected_rank": 22,
+      "rank_regressions": 0,
+      "result": "no_coexistence_rank_regression_in_current_corpus"
+    }
+  },
+  "routing_metrics": {
+    "positive_case_count": 22,
+    "top1_count": 22,
+    "hit_at_3_count": 22,
+    "negative_owner_case_count": 4,
+    "correct_owner_abstention_count": 4,
+    "near_neighbor_case_count": 5,
+    "near_neighbor_expected_candidate_count": 5,
+    "near_neighbor_excluded_collision_count": 0,
+    "retrieval_recall_at_3": 1.0,
+    "owner_abstention_rate": 1.0,
+    "composition_validity": "compatible_ready_and_incompatible_blocked",
+    "provenance_preservation": "five_of_five_raw_sha256_matches",
+    "artifact_correctness": "five_of_five_import_replay_reindex_doctor_trials_passed"
+  },
+  "comparative_findings": [
+    {
+      "comparison": "no_skill_vs_candidate",
+      "finding": "Both passed; no correctness lift is established."
+    },
+    {
+      "comparison": "baseline_direct_vs_candidate_direct",
+      "finding": "Both passed; no candidate correctness lift is established."
+    },
+    {
+      "comparison": "candidate_direct_vs_candidate_retrieval",
+      "finding": "Both passed; retrieval found and planned the needed set but did not improve task correctness."
+    },
+    {
+      "comparison": "single_skill_vs_composed_skills",
+      "finding": "Both passed; composition did not improve correctness on this task."
+    },
+    {
+      "comparison": "compact_description_vs_full_contract",
+      "finding": "Full-contract reranking improved the selected hook case from rank 5 to rank 1."
+    },
+    {
+      "comparison": "flat_vs_semantic",
+      "finding": "Current curated accuracy was equal; semantic routing reduced initial visible bytes by 86.3 percent while adding local routing time."
+    }
+  ],
+  "observed_failure_and_recovery": {
+    "id": "doctor-rejected-no-tests-runtime-shape",
+    "observation_count": 1,
+    "impact": "One candidate composed-direct forward trial needed a full reinstall solely because the intentional no-tests runtime shape had no owner-bound marker.",
+    "classification": "runtime-install and doctor contract mismatch",
+    "follow_up": "The owner installer now emits a workspace/root-bound runtime install profile. Doctor accepts a wholly absent tests tree only when that profile explicitly records include_tests=false; accidental or partial test-tree loss remains an error, and source/export completion still requires all portable tests."
+  },
+  "rejected_trial_findings": {
+    "relative_cli_roots": {
+      "status": "converted_to_regression",
+      "finding": "A rejected rehearsal persisted cwd-dependent archive refs when relative workspace, AoA, and history roots were accepted without normalization.",
+      "repair": "CLI roots are canonicalized before archive writes; a regression imports with relative roots and reindexes from a different working directory.",
+      "claim_limit": "The rejected rehearsal is failure evidence only and is not counted as a successful no-skill condition."
+    }
+  },
+  "owner_local_eval_execution": {
+    "validator_owner_revision": "f836f94fd8a04dc914b5cab700757bf05b096aa8",
+    "dependency_owner_revision": "6f53e97cecb74877cf1d91432d685a72cf6771b8",
+    "source_revision": "cafa4e247303351dc3db32b550179a951d0ddb1e",
+    "ci_hermeticity_repair": "The SQLite compact-copy test now sets zero fixture headroom explicitly; the production 25 GiB default is unchanged.",
+    "initial_unbound_attempt": {
+      "suite_id": "session-memory-skill-routing",
+      "pre_state": "ready",
+      "post_state": "ready",
+      "exit_code": 2,
+      "failure": "AOA_SKILLS_ROOT runtime binding absent",
+      "receipt_sha256": "14f64a9d7670263f83dcdfdb0cc714ce749466b77622ff3546c50a28d1a66c4f"
+    },
+    "bound_runs": [
+      {
+        "suite_id": "session-memory-skill-routing",
+        "pre_state": "ready",
+        "post_state": "ready",
+        "exit_code": 0,
+        "passed": 12,
+        "sidecar_sha256": "ebd6107463ed6e5b31caba04d9b98e9a47dda1cf0a4826cf9a685653b693af8b",
+        "receipt_sha256": "d62bcb4e6dc8cd13009c07749f69567a11b007a2407dada960ac20d8f6623da9"
+      },
+      {
+        "suite_id": "session-memory-skill-behavior",
+        "pre_state": "ready",
+        "post_state": "ready",
+        "exit_code": 0,
+        "passed": 14,
+        "sidecar_sha256": "e14e2aedcb84c74c8b71c7414305c7e7743f2c27cab108c9ee3bfc4cb3d284ba",
+        "receipt_sha256": "36387649213ad0de68e6a4a2c3a4c4db9f98afc33af58fc1399e3b2974d3f6be"
+      }
+    ],
+    "environment_capture": "interpreter, platform, dependency inventory, pytest config refs, selected environment",
+    "authority_boundary": "owner-local execution receipts only; no verdict, scoring, regression, proof acceptance, promotion, or runtime reproducibility claim"
+  },
+  "conclusion": {
+    "measurable_correctness_benefit_over_no_skill": false,
+    "measurable_correctness_benefit_over_baseline": false,
+    "supported_local_effects": [
+      "smaller prompt-visible catalogue",
+      "one full-contract reranking improvement",
+      "typed compatible/incompatible composition gating",
+      "stable isolated/coexistence ranks on the current corpus"
+    ],
+    "unsupported_claims": [
+      "general behavioral lift",
+      "model-controlled causal lift across all five conditions",
+      "token reduction",
+      "stable latency improvement",
+      "cross-runtime identity",
+      "lifecycle promotion"
+    ],
+    "required_lifecycle": "experimental"
+  }
+}

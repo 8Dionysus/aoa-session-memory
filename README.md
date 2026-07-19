@@ -178,6 +178,18 @@ python3 scripts/aoa_session_memory.py usage-chain \
   aoa-session-memory-mcp --kind mcp
 ```
 
+Validate and preview admission of an immutable reviewed skill-use receipt:
+
+```bash
+python3 scripts/aoa_session_memory.py skill-usage-receipt validate RECEIPT.json
+python3 scripts/aoa_session_memory.py skill-usage-receipt record RECEIPT.json
+```
+
+Only an explicit second call with `--apply` writes the receipt. A current
+reviewed receipt can support invocation, deflection, and verification claims,
+plus an effect-attribution candidate. It cannot issue a benefit or promotion
+verdict; that authority remains with `aoa-evals`.
+
 Inspect one task interval:
 
 ```bash

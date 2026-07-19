@@ -1,0 +1,145 @@
+{
+  "schema_version": "aoa_session_memory_skill_behavior_cases_v1",
+  "owner_repo": "aoa-session-memory",
+  "authority": false,
+  "claim_limit": "Controlled fixture execution proves only the named behavior, effect boundary, and recovery invariant; it is not a no-skill comparison, benefit verdict, or promotion decision.",
+  "sandbox": {
+    "filesystem": "ephemeral pytest tmp_path plus read-only owner source guard",
+    "home": "ephemeral per-case HOME and CODEX_HOME",
+    "network": "forbidden and fail-closed for in-process socket connections",
+    "private_sessions": "forbidden",
+    "source_mutation": "forbidden"
+  },
+  "critical_branches": [
+    "session-memory.use.route",
+    "session-memory.use.query",
+    "session-memory.stewardship.capture",
+    "session-memory.stewardship.project",
+    "session-memory.stewardship.curate",
+    "session-memory.stewardship.name",
+    "session-memory.stewardship.assure",
+    "session-memory.adapters.codex"
+  ],
+  "cases": [
+    {
+      "id": "route-global-owner-cli",
+      "critical_branch": "session-memory.use.route",
+      "skill_ids": ["skill.aoa-session-memory-global-route"],
+      "runner": "local:capability-route",
+      "scenario_kind": "positive",
+      "expected_effects": ["read-only"],
+      "acceptance": "The real owner CLI admits the session-memory owner and selects the advertised global router first without mutation."
+    },
+    {
+      "id": "query-bounded-retrieval-packet",
+      "critical_branch": "session-memory.use.query",
+      "skill_ids": ["skill.aoa-session-search", "skill.aoa-session-rehydrate"],
+      "runner": "legacy:test_retrieval_packet_routes_continuation_to_refs_and_phase_candidates",
+      "scenario_kind": "positive",
+      "expected_effects": ["read-only"],
+      "acceptance": "A fixture archive produces a bounded continuation packet with resolvable raw refs, phase candidates, and an explicit next route."
+    },
+    {
+      "id": "query-skill-attribution-ceiling",
+      "critical_branch": "session-memory.use.query",
+      "skill_ids": ["skill.aoa-session-memory-evidence-route"],
+      "runner": "legacy:test_live_scenario_corpus_runs_reviewed_skill_fixture_on_empty_archive",
+      "scenario_kind": "negative-attribution",
+      "expected_effects": ["read-only"],
+      "acceptance": "Selection, loading, edits, false correlation, and missing invocation remain distinct in a reviewed synthetic fixture."
+    },
+    {
+      "id": "capture-history-preview-apply-idempotence",
+      "critical_branch": "session-memory.stewardship.capture",
+      "skill_ids": ["skill.aoa-session-history-import"],
+      "runner": "legacy:test_import_codex_sessions_dry_run_import_and_skip",
+      "scenario_kind": "preview-apply-replay",
+      "expected_effects": ["runtime-mutation", "generated-write"],
+      "acceptance": "Preview writes only its requested report, apply archives byte-identical raw, replay skips the existing session, doctor stays current, and audit gains no new remaining gate while covering raw, compaction, and segment topology."
+    },
+    {
+      "id": "project-reindex-from-preserved-raw",
+      "critical_branch": "session-memory.stewardship.project",
+      "skill_ids": ["skill.aoa-session-reindex"],
+      "runner": "legacy:test_reindex_sessions_regenerates_universal_indexes_from_raw",
+      "scenario_kind": "recovery",
+      "expected_effects": ["generated-write", "runtime-mutation"],
+      "acceptance": "A damaged generated index is rebuilt from preserved raw without changing its SHA-256, while an explicit raw-byte bound produces a structured skip."
+    },
+    {
+      "id": "curate-batch-preview-apply",
+      "critical_branch": "session-memory.stewardship.curate",
+      "skill_ids": ["skill.aoa-session-batch-distill"],
+      "runner": "legacy:test_batch_distill_builds_first_wave_queue_and_applies",
+      "scenario_kind": "preview-apply",
+      "expected_effects": ["generated-write", "runtime-mutation"],
+      "acceptance": "Preview exposes provisional lanes and grounding; apply writes only provisional distillation without promotion."
+    },
+    {
+      "id": "name-reviewed-wave-preview-apply-verify",
+      "critical_branch": "session-memory.stewardship.name",
+      "skill_ids": ["skill.aoa-session-naming-wave"],
+      "runner": "legacy:test_naming_wave_build_apply_and_audit_semantic_names",
+      "scenario_kind": "preview-apply-postcondition",
+      "expected_effects": ["runtime-mutation", "human-decision"],
+      "acceptance": "Preview leaves the archive unchanged, apply records a reviewed semantic name, and audit verifies evidence without physical relabel."
+    },
+    {
+      "id": "name-instruction-envelope-is-data",
+      "critical_branch": "session-memory.stewardship.name",
+      "skill_ids": ["skill.aoa-session-naming-wave"],
+      "runner": "legacy:test_naming_wave_evidence_skips_agents_instruction_envelope",
+      "scenario_kind": "prompt-data-injection",
+      "expected_effects": ["runtime-mutation", "human-decision"],
+      "acceptance": "An AGENTS instruction envelope in transcript data is excluded from naming evidence in favor of the actual request."
+    },
+    {
+      "id": "assure-doctor-bounded-read",
+      "critical_branch": "session-memory.stewardship.assure",
+      "skill_ids": ["skill.aoa-session-memory-doctor"],
+      "runner": "legacy:test_doctor_default_skips_deep_segment_index_event_parse",
+      "scenario_kind": "positive",
+      "expected_effects": ["read-only"],
+      "acceptance": "The default doctor path performs bounded structural health checks without deep event parsing or source mutation."
+    },
+    {
+      "id": "codex-adapter-hook-archive",
+      "critical_branch": "session-memory.adapters.codex",
+      "skill_ids": ["skill.aoa-codex-session-segment-archive"],
+      "runner": "legacy:test_hook_archives_raw_and_builds_segments",
+      "scenario_kind": "positive-effect",
+      "expected_effects": ["runtime-mutation", "generated-write"],
+      "acceptance": "A synthetic Codex hook event preserves raw input and produces segment, manifest, registry, and hook evidence inside the sandbox root."
+    },
+    {
+      "id": "codex-adapter-hook-status-read-only",
+      "critical_branch": "session-memory.adapters.codex",
+      "skill_ids": ["skill.aoa-codex-hooks-status"],
+      "runner": "legacy:test_codex_hooks_status_inspects_registry_without_mutating_trust",
+      "scenario_kind": "positive",
+      "expected_effects": ["read-only"],
+      "proof_scope": "procedure-core",
+      "acceptance": "The hooks-status procedure compares every required native Codex event and exact rendered command, reports trust separately, and does not call the trust writer on its default path."
+    },
+    {
+      "id": "codex-adapter-protocol-output",
+      "critical_branch": "session-memory.adapters.codex",
+      "skill_ids": [],
+      "capability_ids": ["session-memory.adapters.codex"],
+      "runner": "legacy:test_codex_hook_output_uses_only_protocol_fields",
+      "scenario_kind": "negative-interface",
+      "expected_effects": ["read-only"],
+      "proof_scope": "adapter-interface-invariant",
+      "acceptance": "Hook responses expose only the supported Codex protocol fields and do not leak internal session-memory payloads."
+    },
+    {
+      "id": "portable-install-path-traversal-rejected",
+      "critical_branch": "session-memory.stewardship.assure",
+      "skill_ids": ["skill.aoa-session-memory-audit"],
+      "runner": "legacy:test_install_user_skill_rejects_unknown_named_skill",
+      "scenario_kind": "path-injection",
+      "expected_effects": ["read-only"],
+      "acceptance": "An unsupported traversal-shaped skill identity is rejected without installing or mutating a destination."
+    }
+  ]
+}

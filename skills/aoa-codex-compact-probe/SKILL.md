@@ -25,8 +25,8 @@ Run only after `codex-hooks-status` is green or after the user approved
 
 ```bash
 python3 scripts/aoa_session_memory.py codex-compact-probe \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --trust-hooks
 ```
 

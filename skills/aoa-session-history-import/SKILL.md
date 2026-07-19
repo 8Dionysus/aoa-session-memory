@@ -1,6 +1,6 @@
 ---
 name: aoa-session-history-import
-description: Use when historical Codex JSONL sessions from `~/.codex/sessions` need to be discovered, dry-run checked, and sequentially imported into `.aoa` archives.
+description: Use when historical Codex JSONL sessions from `<codex-history-root>` need to be discovered, dry-run checked, and sequentially imported into `.aoa` archives.
 license: Apache-2.0
 metadata:
   aoa_scope: session-memory
@@ -28,8 +28,8 @@ Start with a dry run:
 
 ```bash
 python3 scripts/aoa_session_memory.py import-codex-sessions \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --dry-run \
   --write-report
@@ -39,8 +39,8 @@ If the dry-run count is coherent, run the import:
 
 ```bash
 python3 scripts/aoa_session_memory.py import-codex-sessions \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 21 \
   --write-report
 ```
@@ -52,8 +52,8 @@ broad import:
 
 ```bash
 python3 scripts/aoa_session_memory.py sweep-codex-sessions \
-  --workspace-root /srv/AbyssOS \
-  --aoa-root /srv/AbyssOS/.aoa \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
   --since-days 7 \
   --min-age-sec 60 \
   --dry-run \

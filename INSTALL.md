@@ -59,6 +59,13 @@ questions. A clean portable bundle may validate without runtime sessions;
 doctor evaluates the selected installation; audit can still report missing
 live grounding.
 
+An install created with `--no-tests` is a supported runtime shape. The owner
+installer records that choice in a runtime-only install profile. `doctor`
+accepts an absent test tree only when that profile is valid and bound to the
+selected workspace and AoA root; accidental test-tree loss still fails.
+Source/export completion and standalone release proof require the full
+portable test suite.
+
 For the Codex adapter, grounding validates the effective context and
 auto-compaction contract. Explicit configuration wins when present; otherwise
 the command resolves the selected model defaults through `codex debug models`

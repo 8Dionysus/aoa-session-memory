@@ -13,17 +13,14 @@ Use this as the top-level router for the AoA session-memory bundle.
 
 ## Source Root
 
-On this machine the live source root is:
+Resolve three logical roots before acting:
 
-```text
-/srv/AbyssOS/.aoa
-```
+- `<workspace-root>`: the selected project workspace;
+- `<aoa-root>`: the active installed session-memory root;
+- `<portable-source-root>`: the standalone owner source when source/export
+  work is required.
 
-The local standalone mirror is:
-
-```text
-/srv/AbyssOS/bundles/aoa-session-memory
-```
+Concrete paths are runtime bindings, not portable skill identity.
 
 ## Trigger Boundary
 
@@ -52,24 +49,27 @@ Use this skill in any Codex session when the task touches:
   naming quality audit
 - phase discovery, `phase-discovery`, `review-phase-name`, or session naming
   candidate layers
-- historical Codex session import from `~/.codex/sessions`
+- historical Codex session import from `<codex-history-root>`
 - first-wave batch distillation or historical session review queues
 - preparing or validating the portable `aoa-session-memory` bundle
 
 ## Procedure
 
-1. Read `/srv/AbyssOS/.aoa/AGENTS.md` and classify the task before loading
+1. Read `<aoa-root>/AGENTS.md` and classify the task before loading
    deeper context.
 2. Read only the owning surface: `DESIGN.md` for architecture or boundaries,
    `DESIGN.AGENTS.md` for query/access behavior, the relevant `PIPELINE.md`
    section for operations, `INSTALL.md` for portability, `NAMING.md` for names,
    or `READINESS.md` for proof posture.
-3. Choose the narrow bundle skill from `/srv/AbyssOS/.aoa/skills/`.
-4. Use `/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py` for commands.
+3. Read
+   [references/capability-router.md](references/capability-router.md), verify
+   its source hash against the generated graph when composition matters, and
+   choose the smallest applicable bundle.
+4. Use `<aoa-root>/scripts/aoa_session_memory.py` for commands.
 5. Keep historical raw/session material intact unless the user explicitly asks
    for a repair.
 6. If the task changes portable behavior, export to
-   `/srv/AbyssOS/bundles/aoa-session-memory` and validate both source and
+   `<portable-source-root>` and validate both source and
    standalone surfaces.
 7. If the user-level router itself is missing or stale, run
    `install-user-skill` from the active install root instead of hand-writing a
@@ -77,36 +77,26 @@ Use this skill in any Codex session when the task touches:
 
 ## Skill Routing
 
-- New install or incomplete root: `aoa-session-archive-init`
-- Raw transcript to archive: `aoa-codex-session-segment-archive`
-- Raw missing or hook error: `aoa-session-raw-diagnostic`
-- Resume from archive: `aoa-session-rehydrate`
-- Provisional lesson extraction: `aoa-session-first-pass-distill`
-- Historical Codex JSONL import: `aoa-session-history-import`
-- First-wave historical-session conveyor: `aoa-session-batch-distill`
-- Manual review packets and promotion queue:
-  `aoa-session-manual-review`
-- Regenerate generated indexes after taxonomy/classifier changes:
-  `aoa-session-reindex`
-- Portable search index, provider gates, retrieval packets, and evidence-routed
-  retrieval:
-  `aoa-session-search`
-- Cross-session evidence for how a skill, MCP, hook, tool, API, goal, eval,
-  test, validator, script, decision, error, receipt, or recurring operational
-  entity was used, what happened nearby, which graph refs apply, and which
-  raw/segment refs prove it:
-  `aoa-session-memory-evidence-route`
-- Naming queue, phase-discovery routing, and pre-rename checks:
-  `aoa-session-naming-readiness`
-- Mass semantic naming waves, guarded batch apply, and naming quality audit:
-  `aoa-session-naming-wave`
-- Long-session phase/topic candidate extraction and guarded candidate apply:
-  `aoa-session-phase-discovery`
-- Large archive / compaction stress: `aoa-session-memory-stress-pass`
-- Completion readiness: `aoa-session-memory-audit`
-- Filesystem and live hook health: `aoa-session-memory-doctor`
-- Native Codex hook trust: `aoa-codex-hooks-status`
-- Live PreCompact/PostCompact proof: `aoa-codex-compact-probe`
+Use the generated router card for exact package names, positive and negative
+applicability, visibility, version, and fingerprint. Its stable branches are:
+
+- `use.route` for top-level selection;
+- `use.query` for evidence, search, and rehydration;
+- `stewardship.capture`, `.project`, `.curate`, `.name`, and `.assure`;
+- `adapters.codex` for Codex hooks, transcripts, and compaction.
+
+For more than one capability, use the full generated graph and task-local DAG
+planner. Do not select a set from topical similarity alone.
+
+## Verification
+
+- The chosen capability's positive trigger matches and its negative trigger
+  does not.
+- The selected package version/fingerprint matches the current generated
+  router and installed runtime receipt when available.
+- Required inputs, permissions, effects, and verifier are known before action.
+- The prompt-visible set remains the two admitted routers unless a separate
+  routing eval and owner decision changes it.
 
 ## Stop Line
 

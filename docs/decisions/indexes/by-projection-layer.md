@@ -45,6 +45,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 
+## deep retrieval
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
 ## dense vectors
 
 | Decision | Date | Status | Path |
@@ -202,6 +208,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 
+## runtime receipt
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
 ## search repair
 
 | Decision | Date | Status | Path |
@@ -221,6 +233,12 @@
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
+
+## semantic tree
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 
 ## session document search
 
@@ -253,6 +271,12 @@
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
 
+## task-local DAG
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
 ## temporal interval
 
 | Decision | Date | Status | Path |
@@ -271,3 +295,9 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
+
+## typed relation graph
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |

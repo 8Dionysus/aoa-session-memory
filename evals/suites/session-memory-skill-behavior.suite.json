@@ -1,0 +1,80 @@
+{
+  "schema_version": "local_eval_suite_execution_v1",
+  "suite_id": "session-memory-skill-behavior",
+  "owner_repo": "aoa-session-memory",
+  "suite_note_ref": "evals/suites/session-memory-skill-behavior.suite.md",
+  "runner": {
+    "kind": "python_pytest",
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tests/test_skill_behavioral_sandbox.py"
+    ],
+    "cwd": "."
+  },
+  "entrypoint_ref": "tests/test_skill_behavioral_sandbox.py",
+  "timeout_seconds": 180,
+  "success_exit_codes": [
+    0
+  ],
+  "tracked_sources": [
+    {
+      "path": "tests/test_skill_behavioral_sandbox.py",
+      "kind": "file",
+      "sha256": "65dafaafbaeaeb3213373f4d7c29300f76ed6ebc9740bb39be5ac8180d32637e"
+    },
+    {
+      "path": "tests/test_session_memory.py",
+      "kind": "file",
+      "sha256": "bea2e505304564df624aa27ec51deb22f9c1b3bf4337d0a2ce2ccd54193943bd"
+    },
+    {
+      "path": "evals/cases/session-memory-skill-behavior.v1.json",
+      "kind": "file",
+      "sha256": "0d5162f8651e1e3d895da2c633d57eeb68ce034062820f28b87ec96cd6bf08d3"
+    },
+    {
+      "path": "capabilities",
+      "kind": "tree",
+      "sha256": "a0d676b80f5bc1166e0d2e2c96d553da9837524d41b5c57f9ca9fdebbc1e2920"
+    },
+    {
+      "path": "skills",
+      "kind": "tree",
+      "sha256": "52a62ce46be5b18a6f26190c4d1a609ee3243b5772c7e347f19d28f1291ce3eb"
+    },
+    {
+      "path": "config",
+      "kind": "tree",
+      "sha256": "904a953fafefcb4c23b13c9b53d71deea5448f5bf8167ce4265298459877ca0e"
+    },
+    {
+      "path": "scripts/aoa_session_memory.py",
+      "kind": "file",
+      "sha256": "e8ee9389068f45b394691087081c3d4603b18b6800a9eb06c65b6000dcf40b9a"
+    },
+    {
+      "path": "scripts/capability_route.py",
+      "kind": "file",
+      "sha256": "dc72319aad1c15df52ee7d01f99b0d0c54d0272c52193a0059ca61349efe00a1"
+    },
+    {
+      "path": "generated/capability_graph.json",
+      "kind": "file",
+      "sha256": "58b36aed538e2c3cff4b68f67ecb17d50f5b9bdb00fd94daedc5ee4bb7cef5af"
+    }
+  ],
+  "auto_run_allowed": false,
+  "proof_authority": false,
+  "promotion_allowed": false,
+  "readiness_scope": "source-contract-ready",
+  "runtime_reproducibility_proven": false,
+  "jit_revalidation_required": true,
+  "execution_receipt_required": true,
+  "environment_capture_required": true,
+  "authority_boundary": "owner-local execution support only; no verdict, scoring, regression, proof doctrine, proof acceptance, or promotion authority"
+}
