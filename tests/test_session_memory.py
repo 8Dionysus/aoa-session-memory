@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -64597,6 +64598,149 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
+def test_doctor_accepts_runtime_install_without_local_tests(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "RuntimeWorkspace"
+    aoa_root = workspace / ".aoa"
+    install_payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_tests=False,
+        overwrite=True,
+    )
+
+    assert not (aoa_root / "tests").exists()
+    assert install_payload["install_profile"]["include_tests"] is False
+    install_profile_path = aoa_root / module.INSTALL_PROFILE_PATH
+    assert install_profile_path.is_file()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "current"
+    assert payload["truth_status"] == (
+        "doctor_runtime_filesystem_contract_with_tests_excluded"
+    )
+    assert payload["runtime_optional_absent_root_files"] == (
+        module.REQUIRED_TEST_ROOT_FILES
+    )
+    assert payload["runtime_install_profile"]["valid"] is True
+    assert payload["runtime_install_profile"]["include_tests"] is False
+    assert payload["problems"] == []
+    assert any(
+        "source/export completion still requires the full portable tests"
+        in warning
+        for warning in payload["warnings"]
+    )
+
+    install_profile_path.unlink()
+    unmarked_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    unmarked_payload = json.loads(unmarked_result.stdout)
+    assert unmarked_result.returncode == 1
+    assert unmarked_payload["ok"] is False
+    assert unmarked_payload["runtime_install_profile"]["present"] is False
+    assert "missing required root file: tests/AGENTS.md" in (
+        unmarked_payload["problems"]
+    )
+
+    module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_tests=False,
+        overwrite=True,
+    )
+    (aoa_root / "tests").mkdir()
+    (aoa_root / "tests" / "AGENTS.md").write_text(
+        "# Partial test tree\n",
+        encoding="utf-8",
+    )
+    partial_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    partial_payload = json.loads(partial_result.stdout)
+
+    assert partial_result.returncode == 1
+    assert partial_payload["ok"] is False
+    assert partial_payload["runtime_optional_absent_root_files"] == []
+    assert "missing required root file: tests/test_session_memory.py" in (
+        partial_payload["problems"]
+    )
+
+    full_install = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        include_tests=True,
+        overwrite=True,
+    )
+    assert full_install["install_profile"]["include_tests"] is True
+    shutil.rmtree(aoa_root / "tests")
+    lost_tests_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    lost_tests_payload = json.loads(lost_tests_result.stdout)
+    assert lost_tests_result.returncode == 1
+    assert lost_tests_payload["runtime_install_profile"]["valid"] is True
+    assert lost_tests_payload["runtime_install_profile"]["include_tests"] is True
+    assert lost_tests_payload["runtime_optional_absent_root_files"] == []
+    assert "missing required root file: tests/AGENTS.md" in (
+        lost_tests_payload["problems"]
+    )
+
+
 def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     target = tmp_path / "aoa-session-memory"
@@ -65093,6 +65237,118 @@ def test_import_codex_sessions_dry_run_import_and_skip(tmp_path: Path) -> None:
     assert audit_statuses[
         "Segment topology matches raw compaction boundaries"
     ] == "covered"
+
+
+def test_relative_cli_roots_persist_absolute_import_paths_and_reindex(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "relative-root-workspace"
+    aoa_root = workspace / ".aoa"
+    source_root = workspace / "codex-history"
+    transcript = (
+        source_root
+        / "2026"
+        / "07"
+        / "18"
+        / "rollout-2026-07-18T12-00-00-relative-root-session.jsonl"
+    )
+    module.copy_portable_bundle(
+        source_aoa_root=SCRIPT.parents[1],
+        target_aoa_root=aoa_root,
+        overwrite=True,
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "relative-root-session",
+                    "cwd": str(workspace),
+                    "timestamp": "2026-07-18T12:00:00Z",
+                },
+            },
+            {
+                "timestamp": "2026-07-18T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Preserve paths across working directories.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    imported = subprocess.run(
+        [
+            sys.executable,
+            ".aoa/scripts/aoa_session_memory.py",
+            "import-codex-sessions",
+            "--workspace-root",
+            ".",
+            "--aoa-root",
+            ".aoa",
+            "--source-root",
+            "codex-history",
+            "--since",
+            "2026-07-18",
+            "--until",
+            "2026-07-18",
+            "--full",
+        ],
+        cwd=workspace,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    imported_payload = json.loads(imported.stdout)
+
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    assert imported_payload["counts"] == {"imported": 1}
+    assert imported_payload["aoa_root"] == str(aoa_root.resolve())
+    assert imported_payload["source_root"] == str(source_root.resolve())
+    result = imported_payload["results"][0]
+    session_dir = Path(result["session_dir"])
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(encoding="utf-8")
+    )
+    assert Path(result["raw_path"]).is_absolute()
+    assert Path(manifest["raw"]["path"]).is_absolute()
+    assert Path(manifest["raw"]["source_path"]).is_absolute()
+    assert Path(manifest["source"]["transcript_path"]).is_absolute()
+
+    elsewhere = tmp_path / "different-working-directory"
+    elsewhere.mkdir()
+    reindexed = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "reindex-sessions",
+            "relative-root-session",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--full",
+        ],
+        cwd=elsewhere,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    reindexed_payload = json.loads(reindexed.stdout)
+
+    assert reindexed.returncode == 0, reindexed.stdout + reindexed.stderr
+    assert reindexed_payload["counts"] == {"reindexed": 1}
+    assert reindexed_payload["results"][0]["event_count"] == 2
+    assert reindexed_payload["results"][0]["raw_block_count"] == 1
 
 
 def test_sweep_codex_sessions_repairs_missing_and_stale_transcripts(tmp_path: Path) -> None:
