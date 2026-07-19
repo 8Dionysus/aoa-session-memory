@@ -7105,6 +7105,37 @@ def test_index_maintenance_reports_capture_deferral_after_archived_search_repair
     module.search_index_sessions(aoa_root=aoa_root, target="all")
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
 
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-18T00:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Archived semantic change requiring search repair.",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
     record = module.resolve_session_record(aoa_root, session_id)
     session_index_path = (
         module.session_dir_from_record(record) / module.SESSION_INDEX_JSON
@@ -7118,7 +7149,7 @@ def test_index_maintenance_reports_capture_deferral_after_archived_search_repair
         handle.write(
             json.dumps(
                 {
-                    "timestamp": "2026-06-18T00:00:02Z",
+                    "timestamp": "2026-06-18T00:00:03Z",
                     "type": "response_item",
                     "payload": {
                         "type": "message",
@@ -33680,6 +33711,134 @@ def test_graph_source_fingerprint_tracks_contrib_payload_mode(tmp_path: Path, mo
     assert first["source_sha"] != second["source_sha"]
 
 
+def test_graph_source_fingerprint_uses_semantic_content_and_logical_paths(
+    tmp_path: Path,
+) -> None:
+    def sources(root: Path, updated_at: str) -> list[Path]:
+        root.mkdir(parents=True)
+        manifest = root / "session.manifest.json"
+        session_index = root / "session.index.json"
+        write_json(
+            manifest,
+            {
+                "updated_at": updated_at,
+                "path": str(manifest),
+                "session_id": "graph-semantic",
+            },
+        )
+        write_json(
+            session_index,
+            {
+                "reindexed_at": updated_at,
+                "path": str(session_index),
+                "meaning": "stable",
+            },
+        )
+        return [manifest, session_index]
+
+    paths_a = sources(tmp_path / "root-a", "2026-07-19T00:00:00Z")
+    paths_b = sources(tmp_path / "root-b", "2026-07-19T01:00:00Z")
+    first = module.graph_source_metadata(
+        source_type="session",
+        session_id="graph-semantic",
+        session_label="graph-semantic",
+        source_paths=paths_a,
+        identity={"path": str(paths_a[0]), "updated_at": "old"},
+        source_hash_mode="exact",
+    )
+    second = module.graph_source_metadata(
+        source_type="session",
+        session_id="graph-semantic",
+        session_label="graph-semantic",
+        source_paths=paths_b,
+        identity={"path": str(paths_b[0]), "updated_at": "new"},
+        source_hash_mode="exact",
+    )
+
+    assert first["source_sha"] == second["source_sha"]
+    assert first["source_fingerprint_mode"] == module.GRAPH_SOURCE_FINGERPRINT_MODE
+
+    future = time.time() + 30
+    os.utime(paths_b[1], (future, future))
+    touched = module.graph_source_metadata(
+        source_type="session",
+        session_id="graph-semantic",
+        session_label="graph-semantic",
+        source_paths=paths_b,
+        identity={"path": str(paths_b[0]), "updated_at": "later"},
+        source_hash_mode="exact",
+    )
+    assert touched["source_sha"] == second["source_sha"]
+    assert touched["source_mtime"] > second["source_mtime"]
+
+    changed = json.loads(paths_b[1].read_text(encoding="utf-8"))
+    changed["meaning"] = "changed"
+    write_json(paths_b[1], changed)
+    changed_source = module.graph_source_metadata(
+        source_type="session",
+        session_id="graph-semantic",
+        session_label="graph-semantic",
+        source_paths=paths_b,
+        identity={"path": str(paths_b[0])},
+        source_hash_mode="exact",
+    )
+    assert changed_source["source_sha"] != first["source_sha"]
+
+
+def test_graph_projection_semantic_digest_excludes_operational_source_locators() -> None:
+    def connection(path: str, mtime: float) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE graph_sources (
+                source_key TEXT PRIMARY KEY,
+                source_type TEXT,
+                session_id TEXT,
+                session_label TEXT,
+                segment_id TEXT,
+                source_path TEXT,
+                source_paths_json TEXT,
+                source_sha TEXT,
+                source_mtime REAL,
+                graph_schema_version INTEGER,
+                graph_store_schema_version INTEGER,
+                graph_event_route_signal_edge_policy TEXT,
+                route_signal_classifier_version INTEGER,
+                generation_id TEXT,
+                generation_identity_json TEXT,
+                indexed_at TEXT,
+                status TEXT,
+                diagnostic TEXT,
+                node_count INTEGER,
+                edge_count INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO graph_sources VALUES (
+                'session:stable', 'session', 'stable', 'stable', '',
+                ?, ?, 'semantic-source-sha', ?, 2, 3, 'edge-policy',
+                7, 'generation', '{}', ?, 'current', '', 2, 1
+            )
+            """,
+            (path, json.dumps([path]), mtime, f"2026-07-19T00:00:{int(mtime):02d}Z"),
+        )
+        return conn
+
+    first = connection("/host-a/.aoa/session.index.json", 1.0)
+    second = connection("/host-b/.aoa/session.index.json", 2.0)
+    try:
+        digest_a = module.graph_projection_semantic_digest(first)
+        digest_b = module.graph_projection_semantic_digest(second)
+    finally:
+        first.close()
+        second.close()
+
+    assert digest_a["version"] == 2
+    assert digest_a["sha256"] == digest_b["sha256"]
+
+
 def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
 
@@ -38916,7 +39075,9 @@ def test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses(t
         source_hash_stats=exact_stats,
         source_hash_mode="exact",
     )
-    assert exact["source_sha"] != first["source_sha"]
+    # Exact mode re-reads the files, but semantic identity must not depend on
+    # the raw-hash implementation when canonical JSON content is unchanged.
+    assert exact["source_sha"] == first["source_sha"]
     assert exact_stats["persistent_hit"] == 0
     assert exact_stats["computed"] == 2
 
@@ -41768,8 +41929,10 @@ def test_index_maintenance_repair_limit_bounds_route_schema_drift(tmp_path: Path
     repo.mkdir(parents=True)
     aoa_root = workspace / ".aoa"
     session_ids = ["route-batch-alpha", "route-batch-beta", "route-batch-gamma"]
+    transcripts: dict[str, Path] = {}
     for index, session_id in enumerate(session_ids):
         transcript = tmp_path / f"rollout-2026-06-04T00-0{index}-00-{session_id}.jsonl"
+        transcripts[session_id] = transcript
         write_jsonl(
             transcript,
             [
@@ -41792,7 +41955,42 @@ def test_index_maintenance_repair_limit_bounds_route_schema_drift(tmp_path: Path
 
     module.search_index_sessions(aoa_root=aoa_root, target="all")
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
-    for session_id in session_ids:
+    for index, session_id in enumerate(session_ids):
+        transcript = transcripts[session_id]
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": f"2026-06-04T00:0{index}:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        "Route schema semantic update "
+                                        f"{session_id}."
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
         record = module.resolve_session_record(aoa_root, session_id)
         session_index_path = module.session_dir_from_record(record) / module.SESSION_INDEX_JSON
         session_index = module.read_json(session_index_path, {})
@@ -41907,8 +42105,10 @@ def test_index_maintenance_keeps_query_demand_ahead_of_same_cycle_route_backlog(
     ]
     demanded_session_id = "query-demanded-projection"
     session_ids = [*route_session_ids, demanded_session_id]
+    transcripts: dict[str, Path] = {}
     for index, session_id in enumerate(session_ids):
         transcript = tmp_path / f"rollout-2026-06-05T00-0{index}-00-{session_id}.jsonl"
+        transcripts[session_id] = transcript
         write_jsonl(
             transcript,
             [
@@ -41962,7 +42162,42 @@ def test_index_maintenance_keeps_query_demand_ahead_of_same_cycle_route_backlog(
     module.search_index_sessions(aoa_root=aoa_root, target="all")
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
 
-    for session_id in route_session_ids:
+    for index, session_id in enumerate(route_session_ids):
+        transcript = transcripts[session_id]
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": f"2026-06-05T00:0{index}:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        "Same-cycle route semantic update "
+                                        f"{session_id}."
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
         record = module.resolve_session_record(aoa_root, session_id)
         session_index_path = module.session_dir_from_record(record) / module.SESSION_INDEX_JSON
         session_index = module.read_json(session_index_path, {})
@@ -44716,6 +44951,104 @@ def test_auto_maintenance_resource_launch_preserves_budget_exhausted_child_progr
         "route_projection_dependency_coherence_unverified"
         in payload["diagnostics"]
     )
+
+
+def test_auto_maintenance_resource_launch_preserves_bounded_graph_progress(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    child = {
+        "schema_version": 1,
+        "artifact_type": "session_memory_auto_maintenance",
+        "ok": True,
+        "status": "applied_with_remaining_backlog",
+        "mutates": True,
+        "apply": True,
+        "profile": "deep",
+        "target": "all",
+        "expected_remaining_backlog": True,
+        "expected_catchup_remaining": False,
+        "maintenance": {
+            "ok": True,
+            "apply": True,
+            "action_counts": {"applied": 7},
+            "actions": [
+                {
+                    "id": "graph_maintenance",
+                    "status": "applied",
+                    "needed": True,
+                    "result": {
+                        "ok": True,
+                        "selected_count": 250,
+                        "processed_count": 250,
+                        "remaining_count": 203,
+                        "budget_exhausted": False,
+                    },
+                }
+            ],
+        },
+        "diagnostics": [],
+    }
+    child_report = (
+        aoa_root
+        / "diagnostics"
+        / "child-auto-maintenance-graph-remaining.json"
+    )
+    child_report.parent.mkdir(parents=True)
+    module.write_json(child_report, child)
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "medium", "kind": "indexing"},
+                "execution": {
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout_tail": (
+                        f'... "report_json": "{child_report}" ...'
+                    ),
+                },
+            }
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="timer_deep",
+        graph_drip_on_block=False,
+    )
+
+    evidence = payload["child_progress_evidence"]
+    queue = module.auto_maintenance_retry_queue_status(aoa_root)
+    assert payload["status"] == "applied_with_remaining_backlog"
+    assert payload["child_progressed_with_remaining"] is True
+    assert evidence["verified"] is True
+    assert evidence["graph_remaining_work"] is True
+    assert evidence["remaining_graph_count"] == 203
+    assert evidence["graph_progress_evidence"]["selected_count"] == 250
+    assert payload["automatic_retry"]["status"] == "scheduled"
+    assert set(queue["items"]) == {"deep:all"}
 
 
 def test_maintenance_child_bounded_progress_requires_progress_and_remaining_work() -> None:
@@ -56012,6 +56345,66 @@ def test_projection_catchup_dry_run_without_work_routes_to_verify(tmp_path: Path
     assert "projection-catchup" not in route["command"]
 
 
+def test_deep_projection_catchup_preserves_profile_neutral_remaining_backlog(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    auto_payload = {
+        "artifact_type": "session_memory_auto_maintenance",
+        "ok": True,
+        "status": "applied_with_remaining_backlog",
+        "mutates": True,
+        "apply": True,
+        "profile": "deep",
+        "expected_remaining_backlog": True,
+        "expected_catchup_remaining": False,
+        "deferred_graph_after": False,
+        "maintenance": {
+            "selected_count": 12,
+            "route_drift_count": 0,
+            "search_repair_remaining_count": 0,
+            "atlas_repair_remaining_count": 0,
+            "token_backfill": {"counts": {"planned": 0}},
+            "final_search_index": {"status": "current", "needs_refresh": False},
+            "final_atlas_index": {"status": "current", "needs_refresh": False},
+            "final_entity_registry": {"status": "current", "needs_maintenance": False},
+            "final_graph_store": {"status": "stale", "needs_maintenance": True},
+            "actions": [
+                {
+                    "id": "graph_maintenance",
+                    "status": "applied",
+                    "needed": True,
+                    "result": {"selected_count": 250, "remaining_count": 203},
+                }
+            ],
+        },
+        "diagnostics": [],
+    }
+    monkeypatch.setattr(module, "auto_maintenance", lambda **_kwargs: auto_payload)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "current", "catalog_status": "current"},
+    )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target="all",
+        profile="deep",
+        apply=True,
+    )
+
+    assert payload["expected_remaining_backlog"] is True
+    assert payload["expected_catchup_remaining"] is False
+    assert payload["expected_projection_remaining"] is True
+    assert payload["projection_completeness"]["status"] == "remaining_backlog"
+    assert payload["next_route"]["id"] == "rerun_projection_catchup"
+    assert payload["next_route"]["status"] == "remaining_backlog"
+
+
 def test_projection_status_keeps_cached_completeness_unverified_without_live_refresh(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -66531,6 +66924,310 @@ def test_projection_fingerprint_pair_matches_individual_modes(tmp_path: Path) ->
     assert atlas_pair == module.session_projection_fingerprint(record, include_rendered_markdown=True)
     assert str(segment_md) not in search_pair["source_paths"]
     assert str(segment_md) in atlas_pair["source_paths"]
+
+
+def test_projection_fingerprint_is_semantic_root_neutral_and_keeps_freshness_clock(
+    tmp_path: Path,
+) -> None:
+    def fixture(root: Path, updated_at: str) -> tuple[dict[str, Any], Path]:
+        session_dir = root / "session"
+        segments = session_dir / "segments"
+        raw_path = session_dir / "raw" / "session.raw.jsonl"
+        segments.mkdir(parents=True)
+        write_jsonl(
+            raw_path,
+            [
+                {
+                    "timestamp": "2026-07-19T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "semantic-fingerprint"},
+                }
+            ],
+        )
+        segment_index = segments / "000.index.json"
+        segment_markdown = segments / "000.md"
+        write_json(
+            segment_index,
+            {
+                "updated_at": updated_at,
+                "path": str(segment_index),
+                "events": [{"event_id": "000001", "meaning": "stable"}],
+            },
+        )
+        segment_markdown.write_text(
+            "---\n"
+            f"updated_at: {updated_at}\n"
+            "---\n\n"
+            f"# Segment at {session_dir}\n",
+            encoding="utf-8",
+        )
+        write_json(
+            session_dir / module.SESSION_INDEX_JSON,
+            {
+                "updated_at": updated_at,
+                "session_path": str(session_dir),
+                "meaning": "stable",
+            },
+        )
+        (session_dir / module.SESSION_INDEX_MARKDOWN).write_text(
+            "---\n"
+            f"updated_at: {updated_at}\n"
+            "---\n\n"
+            f"# Session at {session_dir}\n",
+            encoding="utf-8",
+        )
+        write_json(
+            session_dir / "session.manifest.json",
+            {
+                "session_id": "semantic-fingerprint",
+                "session_label": "semantic-fingerprint",
+                "updated_at": updated_at,
+                "display": {"date": "2026-07-19", "label": "semantic-fingerprint"},
+                "raw": {
+                    "path": str(raw_path),
+                    "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+                    "line_count": 1,
+                },
+                "segments": [
+                    {
+                        "segment_id": "000",
+                        "index": str(segment_index),
+                        "markdown": str(segment_markdown),
+                    }
+                ],
+            },
+        )
+        return (
+            {
+                "session_id": "semantic-fingerprint",
+                "session_label": "semantic-fingerprint",
+                "path": str(session_dir),
+            },
+            session_dir,
+        )
+
+    record_a, session_a = fixture(
+        tmp_path / "root-a",
+        "2026-07-19T00:00:00Z",
+    )
+    record_b, session_b = fixture(
+        tmp_path / "root-b",
+        "2026-07-19T01:00:00Z",
+    )
+    future = time.time() + 30
+    os.utime(session_b / module.SESSION_INDEX_JSON, (future, future))
+
+    search_a, atlas_a = module.session_projection_fingerprint_pair(record_a)
+    search_b, atlas_b = module.session_projection_fingerprint_pair(record_b)
+
+    assert search_a["fingerprint"] == search_b["fingerprint"]
+    assert atlas_a["fingerprint"] == atlas_b["fingerprint"]
+    assert search_b["latest_source_mtime"] > search_a["latest_source_mtime"]
+    assert all(str(tmp_path) not in path for path in search_a["source_logical_paths"])
+    assert all(str(tmp_path) not in path for path in atlas_b["source_logical_paths"])
+
+    changed = json.loads((session_b / module.SESSION_INDEX_JSON).read_text(encoding="utf-8"))
+    changed["meaning"] = "changed"
+    write_json(session_b / module.SESSION_INDEX_JSON, changed)
+    changed_search = module.session_projection_fingerprint(
+        record_b,
+        include_rendered_markdown=False,
+    )
+    assert changed_search["fingerprint"] != search_a["fingerprint"]
+
+
+def test_search_projection_semantic_digest_excludes_freshness_clocks_and_locators(
+    tmp_path: Path,
+) -> None:
+    def database(root: Path, mtime: float) -> sqlite3.Connection:
+        conn = module.init_search_db(root / "search.sqlite3", rebuild=True)
+        conn.execute(
+            """
+            INSERT INTO session_index_state (
+                session_id, session_label, source_fingerprint,
+                source_latest_mtime, search_schema_version,
+                route_signal_classifier_version, indexed_at,
+                document_count, projection_fingerprint_mode,
+                generation_id, generation_identity_json
+            ) VALUES ('stable', 'stable', 'semantic-source', ?, '1', 1, ?, 0, ?, 'g', '{}')
+            """,
+            (mtime, f"2026-07-19T00:00:0{int(mtime)}Z", module.SEARCH_PROJECTION_FINGERPRINT_MODE),
+        )
+        conn.execute(
+            """
+            INSERT INTO search_freshness_state (
+                session_id, session_label, session_dir,
+                source_fingerprint, source_latest_mtime, status,
+                reason, last_checked, last_indexed_at,
+                deferred_live_reason, live_transcript_path,
+                live_transcript_mtime, search_schema_version,
+                route_signal_classifier_version, document_count,
+                updated_at, projection_fingerprint_mode,
+                generation_id, generation_identity_json
+            ) VALUES (
+                'stable', 'stable', ?, 'semantic-source', ?, 'current',
+                '', ?, ?, '', ?, ?, '1', 1, 0, ?, ?, 'g', '{}'
+            )
+            """,
+            (
+                str(root / "session"),
+                mtime,
+                f"2026-07-19T00:00:0{int(mtime)}Z",
+                f"2026-07-19T00:00:0{int(mtime)}Z",
+                str(root / "rollout.jsonl"),
+                mtime,
+                f"2026-07-19T00:00:0{int(mtime)}Z",
+                module.SEARCH_PROJECTION_FINGERPRINT_MODE,
+            ),
+        )
+        conn.commit()
+        return conn
+
+    first = database(tmp_path / "root-a", 1.0)
+    second = database(tmp_path / "root-b", 2.0)
+    try:
+        digest_a = module.search_projection_semantic_digest(first)
+        digest_b = module.search_projection_semantic_digest(second)
+    finally:
+        first.close()
+        second.close()
+
+    assert digest_a["version"] == 2
+    assert digest_a["sha256"] == digest_b["sha256"]
+
+
+def test_entity_registry_and_catalog_semantic_digests_ignore_publication_clocks_and_roots(
+    tmp_path: Path,
+) -> None:
+    def registry(root: Path, generated_at: str, mtime: float) -> dict[str, Any]:
+        return {
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": generated_at,
+            "generated_at_epoch": mtime,
+            "aoa_root": str(root),
+            "registry_path": str(root / "maps" / "entity-registry.json"),
+            "processed_watermark": {"latest_source_mtime": mtime},
+            "entries": [
+                {
+                    "entity_id": "tool:stable",
+                    "kind": "tool",
+                    "canonical_key": "stable",
+                    "freshness": {"generated_at": generated_at},
+                    "source_refs": [
+                        {
+                            "source_type": "search_route_terms",
+                            "path": str(root / "search" / "aoa-search.sqlite3"),
+                            "mtime": mtime,
+                            "sha256": "stable-content",
+                        }
+                    ],
+                }
+            ],
+        }
+
+    root_a = tmp_path / "root-a" / ".aoa"
+    root_b = tmp_path / "root-b" / ".aoa"
+    registry_a = registry(root_a, "2026-07-19T00:00:00Z", 1.0)
+    registry_b = registry(root_b, "2026-07-19T01:00:00Z", 2.0)
+    assert module.entity_registry_semantic_digest(
+        registry_a,
+        aoa_root=root_a,
+    )["sha256"] == module.entity_registry_semantic_digest(
+        registry_b,
+        aoa_root=root_b,
+    )["sha256"]
+
+    catalog_a = {
+        "artifact_type": "session_memory_search_catalog",
+        "generated_at": "2026-07-19T00:00:00Z",
+        "aoa_root": str(root_a),
+        "source_db_path": str(root_a / "search" / "aoa-search.sqlite3"),
+        "source_db_mtime": 1.0,
+        "sessions": [{"session_id": "stable", "source_fingerprint": "stable"}],
+    }
+    catalog_b = {
+        **catalog_a,
+        "generated_at": "2026-07-19T01:00:00Z",
+        "aoa_root": str(root_b),
+        "source_db_path": str(root_b / "search" / "aoa-search.sqlite3"),
+        "source_db_mtime": 2.0,
+    }
+    assert module.search_catalog_semantic_digest(
+        catalog_a,
+        aoa_root=root_a,
+    )["sha256"] == module.search_catalog_semantic_digest(
+        catalog_b,
+        aoa_root=root_b,
+    )["sha256"]
+
+
+def test_entity_registry_route_terms_use_stable_projection_ref_and_documents_are_stable(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    final_db = module.search_db_path(aoa_root)
+    staging_db = final_db.parent / f".{final_db.name}.rebuild-fixture"
+    conn = module.init_search_db(staging_db, rebuild=True)
+    doc = conn.execute(
+        """
+        INSERT INTO documents (id, doc_type, session_id, session_label, session_date, payload_json)
+        VALUES ('doc', 'event', 'stable', 'stable', '2026-07-19', '{}')
+        """
+    )
+    route = conn.execute(
+        "INSERT INTO route_terms (layer, key, route_signal) VALUES ('tool', 'stable', 'tool:stable')"
+    )
+    conn.execute(
+        "INSERT INTO document_routes (doc_rowid, route_id) VALUES (?, ?)",
+        (doc.lastrowid, route.lastrowid),
+    )
+    conn.commit()
+    conn.close()
+
+    entries = module.entity_registry_entries_from_route_terms(
+        aoa_root,
+        db_path=staging_db,
+        source_ref_path=final_db,
+    )
+    assert entries
+    assert entries[0]["source_refs"][0]["path"] == str(final_db)
+    assert "rebuild-fixture" not in json.dumps(entries, ensure_ascii=False)
+
+    snapshots = iter(
+        [
+            {
+                "artifact_type": "entity_registry_snapshot",
+                "generated_at": generated_at,
+                "truth_status": "generated_entity_registry_navigation_not_source_truth",
+                "semantic_digest": {"version": 1, "sha256": "stable-semantic"},
+                "generation_identity": {"generation_id": "stable-generation"},
+                "entries": entries,
+            }
+            for generated_at in (
+                "2026-07-19T00:00:00Z",
+                "2026-07-19T01:00:00Z",
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        module,
+        "build_entity_registry",
+        lambda **_kwargs: next(snapshots),
+    )
+    first_docs = module.search_documents_for_entity_registry(aoa_root)
+    second_docs = module.search_documents_for_entity_registry(aoa_root)
+
+    assert first_docs == second_docs
+    assert all(not doc["raw_sha256"] for doc in first_docs)
+    assert all(
+        "rebuild-fixture" not in json.dumps(doc, ensure_ascii=False)
+        for doc in first_docs
+    )
+    assert max(
+        len(json.dumps(module.search_doc_payload(doc), ensure_ascii=False))
+        for doc in first_docs
+    ) < 1000
 
 
 def test_index_maintenance_uses_combined_projection_planning_when_hot_state_is_dirty(tmp_path: Path, monkeypatch: Any) -> None:
