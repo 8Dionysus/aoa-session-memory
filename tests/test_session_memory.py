@@ -20849,6 +20849,22 @@ def test_entity_registry_canonicalization_preserves_collisions_and_correction_hi
         for ref in candidate["source_refs"]
     )
 
+    fourth = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=False,
+        include_runtime=True,
+        observed_source="none",
+    )
+    fourth_entry = next(
+        entry
+        for entry in fourth["entries"]
+        if entry["kind"] == "skill"
+        and entry["canonical_key"] == "collision_skill"
+    )
+    assert fourth["source_fingerprint"] == third["source_fingerprint"]
+    assert fourth["semantic_digest"]["sha256"] == third["semantic_digest"]["sha256"]
+    assert fourth_entry["alias_provenance"] == third_entry["alias_provenance"]
+
 
 def test_entity_registry_v1_snapshot_is_read_only_compatible_but_not_identity_admitted(
     tmp_path: Path,
@@ -21342,7 +21358,10 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
     assert any(candidate["route_signal"] == "route_next_action:repair" for candidate in next_action_candidates)
 
 
-def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observed(tmp_path: Path) -> None:
+def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / module.ENTITY_REGISTRY_PATH.parent).mkdir(parents=True)
     previous_entry = module.entity_registry_make_entry(
@@ -21439,10 +21458,15 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
     conn.commit()
     conn.close()
 
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
     payload = module.build_entity_registry(
         aoa_root=aoa_root,
         write=True,
-        include_runtime=False,
+        include_runtime=True,
         observed_source="route-rollup",
     )
     entries = {(entry["kind"], entry["canonical_key"]): entry for entry in payload["entries"]}
@@ -21453,6 +21477,20 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
     assert retained["source_surface"] == "archived_route_terms"
     assert retained["retained_from_snapshot"]["reason"] == "fast_observed_route_uses_operational_rollup"
     assert "observed_entity_retained_from_previous_snapshot" in retained["freshness"]["diagnostics"]
+
+    rebuilt = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=False,
+        include_runtime=True,
+        observed_source="route-rollup",
+    )
+    rebuilt_entries = {
+        (entry["kind"], entry["canonical_key"]): entry
+        for entry in rebuilt["entries"]
+    }
+    assert rebuilt["source_fingerprint"] == payload["source_fingerprint"]
+    assert rebuilt["semantic_digest"]["sha256"] == payload["semantic_digest"]["sha256"]
+    assert rebuilt_entries[("script", "fast_rollup_script")]["status"] == "observed"
 
 
 def test_entity_registry_auto_uses_stale_materialized_rollup_before_route_terms(tmp_path: Path) -> None:
