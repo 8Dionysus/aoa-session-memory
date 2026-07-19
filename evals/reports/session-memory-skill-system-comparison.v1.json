@@ -1,6 +1,6 @@
 {
   "schema_version": "aoa_session_memory_skill_system_comparison_v1",
-  "generated_at": "2026-07-18T23:53:01Z",
+  "generated_at": "2026-07-19T00:30:45Z",
   "owner_repo": "aoa-session-memory",
   "source_revision_under_test": "34448f45b58782687fefcfc24695878f32d7a0a8",
   "baseline_revision": "2741dbaaf00af819cadcac309ea5ee6ead46db05",
@@ -378,6 +378,8 @@
   "owner_local_eval_execution": {
     "validator_owner_revision": "f836f94fd8a04dc914b5cab700757bf05b096aa8",
     "dependency_owner_revision": "6f53e97cecb74877cf1d91432d685a72cf6771b8",
+    "source_revision": "cafa4e247303351dc3db32b550179a951d0ddb1e",
+    "ci_hermeticity_repair": "The SQLite compact-copy test now sets zero fixture headroom explicitly; the production 25 GiB default is unchanged.",
     "initial_unbound_attempt": {
       "suite_id": "session-memory-skill-routing",
       "pre_state": "ready",
@@ -394,7 +396,7 @@
         "exit_code": 0,
         "passed": 12,
         "sidecar_sha256": "ebd6107463ed6e5b31caba04d9b98e9a47dda1cf0a4826cf9a685653b693af8b",
-        "receipt_sha256": "90e48d3fc59e7cf4166c8471d0dd46316dc32965c9822275906865f694dedf3d"
+        "receipt_sha256": "d62bcb4e6dc8cd13009c07749f69567a11b007a2407dada960ac20d8f6623da9"
       },
       {
         "suite_id": "session-memory-skill-behavior",
@@ -402,8 +404,8 @@
         "post_state": "ready",
         "exit_code": 0,
         "passed": 14,
-        "sidecar_sha256": "24912eba39bf0a9c3b73f39f60343b5703c4ac0b76f633f84e9f41fd721902f4",
-        "receipt_sha256": "0a035e425d2ddc061949b00ea6fc530a08d6d22ed6b6f260fee2255d28abd635"
+        "sidecar_sha256": "e14e2aedcb84c74c8b71c7414305c7e7743f2c27cab108c9ee3bfc4cb3d284ba",
+        "receipt_sha256": "36387649213ad0de68e6a4a2c3a4c4db9f98afc33af58fc1399e3b2974d3f6be"
       }
     ],
     "environment_capture": "interpreter, platform, dependency inventory, pytest config refs, selected environment",

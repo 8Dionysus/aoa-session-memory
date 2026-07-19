@@ -118,6 +118,12 @@ regression. With the exact landed `aoa-skills` owner revision bound, routing
 passed 12 tests and behavioral sandboxing passed 14 tests. Both sidecars were
 still `ready` after execution.
 
+GitHub CI later exposed an environment-dependent 25 GiB headroom assumption in
+an existing SQLite compact-copy test. The test now sets an explicit zero
+headroom only for its disposable fixture; the production default is unchanged.
+Both suites were JIT-revalidated and rerun successfully on source revision
+`cafa4e247303351dc3db32b550179a951d0ddb1e`.
+
 The execution receipts capture interpreter, platform, dependency inventory,
 pytest configuration refs, selected environment, sidecar digests, and JIT
 state. They remain owner-local execution evidence with no verdict, regression,
