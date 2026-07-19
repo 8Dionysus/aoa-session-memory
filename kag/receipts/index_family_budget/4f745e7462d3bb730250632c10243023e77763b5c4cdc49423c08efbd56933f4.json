@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 17534222,
+  "allowed_tracked_bytes": 18246477,
+  "approved_by": "repository-owner",
+  "base_ref": "2741dbaaf00af819cadcac309ea5ee6ead46db05",
+  "changed_generated_bytes": 17534222,
+  "changed_generated_files": 318,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "4f745e7462d3bb730250632c10243023e77763b5c4cdc49423c08efbd56933f4",
+  "reason": "Committed CI-hermeticity evidence now has stable owner revision provenance; admit this digest-bound derived KAG family as the exact projection of that reviewed public source without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 18246477,
+  "tracked_bytes_max": 13631488
+}
