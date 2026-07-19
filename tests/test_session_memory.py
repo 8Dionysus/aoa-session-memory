@@ -12024,6 +12024,11 @@ def test_episode_temporal_span_prefers_explicit_quoted_message_anchors() -> None
     assert temporal_span["anchor_parse_basis"] == (
         "explicit_quoted_anchor_pair"
     )
+    assert temporal_span["left_match_policy"] == "normalized_exact_phrase"
+    assert temporal_span["right_match_policy"] == "normalized_exact_phrase"
+    assert temporal_span["quoted_anchor_source_policy"] == (
+        "canonical_message_required"
+    )
     assert temporal_span["left_text"] == "Ты завис"
     assert temporal_span["right_text"] == "Продолжай"
     assert [
@@ -12032,6 +12037,101 @@ def test_episode_temporal_span_prefers_explicit_quoted_message_anchors() -> None
     assert [
         term["token"] for term in temporal_span["right_terms"]
     ] == ["продолжай"]
+
+
+def test_episode_temporal_quoted_message_anchor_rejects_later_semantic_reflection(
+    tmp_path: Path,
+) -> None:
+    """Regression derived from sealed real case EPI-RECOVERY-001."""
+    raw_path = tmp_path / "quoted-message-interval.raw.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {
+                "timestamp": "2026-06-11T01:55:21Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Ты завис"}],
+                },
+            },
+            {
+                "timestamp": "2026-06-11T01:58:33Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "На связи. Не завис, но поздно дал статус.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-06-11T01:58:52Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Проверка продолжена."}
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-06-11T01:59:07Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Продолжай"}],
+                },
+            },
+        ],
+    )
+    temporal_span = module.episode_temporal_span_query(
+        "Что произошло между сообщениями 'Ты завис' и 'Продолжай'?"
+    )
+    candidates = [
+        {
+            "doc_id": "episode_semantic:quoted-message-session:task-0001",
+            "session_id": "quoted-message-session",
+            "task_episode_id": "task-0001",
+            "event_range": {"from_line": 1, "to_line": 4},
+            "temporal_span": {
+                "active": True,
+                "status": "temporal_span_unresolved_or_unordered",
+            },
+        }
+    ]
+
+    hydrated, report = module.episode_temporal_scoped_raw_hydration(
+        raw_path=raw_path,
+        segments=[],
+        results=candidates,
+        temporal_span=temporal_span,
+        max_raw_bytes=1024 * 1024,
+        max_lines=100,
+    )
+    qualified, gate = module.episode_temporal_relation_gate(
+        hydrated,
+        temporal_span,
+    )
+
+    assert report["qualified_candidate_count"] == 1
+    assert gate["status"] == "qualified_ordered_spans_available"
+    evidence = qualified[0]["temporal_span"]
+    assert evidence["left"]["refs"]["raw"] == "raw:line:1"
+    assert evidence["right"]["refs"]["raw"] == "raw:line:4"
+    assert evidence["left"]["explicit_quoted_anchor_proven"] is True
+    assert evidence["right"]["explicit_quoted_anchor_proven"] is True
+    assert [
+        item["refs"]["raw"]
+        for item in evidence["interval_contents"]["events"]
+    ] == ["raw:line:2", "raw:line:3"]
 
 
 def test_episode_temporal_span_query_parses_after_action_relation() -> None:
@@ -15670,6 +15770,7 @@ def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_di
         "почему зелёный downstream canary мог не проверить соседние репозитории": "causal_chain",
         "почему search projection stale и что в maintenance queue": "freshness_diagnostic",
         "что произошло между stale search-provider-status и git add README PIPELINE READINESS": "temporal_state",
+        "Какие части mechanics в aoa-sdk сильнее всего изменились после v0.2.3?": "quantitative_comparison",
         "": "insufficient_evidence",
     }
 
@@ -15678,6 +15779,86 @@ def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_di
         assert intent["primary"] == expected, (query, intent)
         assert intent["confidence"] in {"high", "medium", "low"}
         assert intent["signals"] or expected == "insufficient_evidence"
+
+
+def test_memory_query_intent_preserves_negative_polarity_and_quantitative_gate(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    negative_query = "В этой сессии вообще не запускали tmux?"
+    quantitative_query = (
+        "Какие части mechanics в aoa-sdk сильнее всего изменились "
+        "после v0.2.3?"
+    )
+
+    negative_intent = module.memory_query_intent(negative_query)
+    negative_plan = module.memory_query_plan(
+        aoa_root=aoa_root,
+        query=negative_query,
+        session="negative-usage-session",
+    )
+    quantitative_intent = module.memory_query_intent(
+        quantitative_query
+    )
+    quantitative_plan = module.memory_query_plan(
+        aoa_root=aoa_root,
+        query=quantitative_query,
+        session="quantitative-session",
+    )
+
+    assert negative_intent["primary"] == "entity_usage"
+    assert negative_intent["claim_shape"] == {
+        "kind": "negative_claim",
+        "underlying_kind": "usage",
+        "polarity": "negative",
+        "negative_polarity_detected": True,
+        "requires_complete_bounded_scope": True,
+        "requires_current_owner_evidence": False,
+        "retrieval_candidates_are_claims": False,
+    }
+    assert "explicit_negative_claim_polarity" in (
+        negative_intent["signals"]
+    )
+    assert negative_plan["answer_admission"]["admitted"] is False
+    assert negative_plan["answer_admission"]["claim_shape"] == (
+        "negative_claim"
+    )
+    negative_gate = negative_plan["answer_admission"][
+        "claim_shape_gate"
+    ]
+    assert negative_gate["kind"] == "negative_claim"
+    assert negative_gate["admitted"] is False
+    assert negative_gate["required_next_route"] == (
+        "complete_bounded_raw_or_typed_scope_read"
+    )
+    assert "otherwise return unresolved" in negative_plan["stop_rule"]
+
+    assert quantitative_intent["primary"] == (
+        "quantitative_comparison"
+    )
+    assert quantitative_intent["claim_shape"]["kind"] == (
+        "quantitative_comparison"
+    )
+    constrained = module.memory_query_intent(
+        "Найди точный вызов без graph expansion"
+    )
+    assert constrained["claim_shape"]["polarity"] == "unspecified"
+    assert constrained["claim_shape"][
+        "negative_polarity_detected"
+    ] is False
+    assert quantitative_plan["answer_admission"]["admitted"] is False
+    assert quantitative_plan["answer_admission"]["claim_shape"] == (
+        "quantitative_comparison"
+    )
+    assert quantitative_plan["answer_admission"]["status"] in {
+        "requires_correlated_quantitative_evidence_read",
+        "requires_bounded_raw_evidence_read",
+    }
+    assert quantitative_plan["answer_admission"][
+        "claim_shape_gate"
+    ]["required_next_route"] == (
+        "episode_search_with_quantitative_raw_hydration"
+    )
 
 
 def test_memory_query_intent_keeps_short_ru_paraphrase_and_completion_question_out_of_closeout_literal_lane() -> None:
