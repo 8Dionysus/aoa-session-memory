@@ -60140,6 +60140,232 @@ def test_generation_identity_is_canonical_deterministic_and_dependency_bound(
     )
 
 
+def test_evaluation_generation_pin_invalidates_projection_and_raw_drift(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "evaluation-generation-pin"
+    transcript = tmp_path / "evaluation-generation-pin.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-07-18T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Seal this evidence before evaluation.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The generation is ready for a bounded check.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+
+    before = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert before["ok"] is True
+    assert before["scope"]["session_ids"] == [session_id]
+    assert before["sources"][0]["raw"]["digest_verified"] is True
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    conn.execute(
+        "UPDATE session_index_state SET document_count = document_count + 1 "
+        "WHERE session_id = ?",
+        (session_id,),
+    )
+    conn.commit()
+    conn.close()
+    projection_after = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    projection_comparison = module.evaluation_generation_compare(
+        before,
+        projection_after,
+    )
+    assert projection_comparison["ok"] is False
+    assert projection_comparison["status"] == (
+        "invalidated_generation_drift"
+    )
+    assert "sqlite_projections" in projection_comparison[
+        "changed_components"
+    ]
+    assert projection_comparison["answer_or_score_admissible"] is False
+
+    pin = module.evaluation_generation_pin_capture_payload(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert pin["ok"] is True
+    record = module.resolve_session_record(aoa_root, session_id)
+    session_dir = module.session_dir_from_record(record)
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(encoding="utf-8")
+    )
+    raw_path = module.projection_path_from_ref(
+        manifest["raw"]["path"],
+        base=session_dir,
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    raw_check = module.evaluation_generation_pin_check_payload(
+        aoa_root=aoa_root,
+        pin=pin,
+    )
+    assert raw_check["ok"] is False
+    assert raw_check["status"] == (
+        "refused_incomplete_generation_snapshot"
+    )
+    assert "sources" in raw_check["changed_components"]
+    assert "after_snapshot_incomplete" in raw_check["reasons"]
+    assert raw_check["answer_or_score_admissible"] is False
+
+
+def test_generation_pinned_evaluation_refuses_interleaved_generation(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    before = {
+        "schema_version": module.EVALUATION_GENERATION_SNAPSHOT_SCHEMA_VERSION,
+        "ok": True,
+        "status": "captured",
+        "root": str(aoa_root.resolve()),
+        "scope": {
+            "mode": "explicit_sessions",
+            "session_count": 1,
+            "session_ids": ["sealed-session"],
+        },
+        "expected_generations": {"graph": "generation-a"},
+        "source_identity_sha256": "source-a",
+        "sqlite_projection_identity_sha256": "projection-a",
+        "projection_artifact_identity_sha256": "artifact-a",
+        "identity_sha256": "snapshot-a",
+        "stable_at_capture": True,
+        "diagnostics": [],
+    }
+    after = {
+        **before,
+        "sqlite_projection_identity_sha256": "projection-b",
+        "identity_sha256": "snapshot-b",
+    }
+    snapshots = iter([before, after])
+    monkeypatch.setattr(
+        module,
+        "evaluation_generation_snapshot",
+        lambda **_: next(snapshots),
+    )
+
+    payload = module.generation_pinned_evaluation(
+        aoa_root=aoa_root,
+        sessions=["sealed-session"],
+        artifact_type="fixture_evaluation",
+        evaluator=lambda: {
+            "artifact_type": "fixture_evaluation",
+            "ok": True,
+            "results": [{"candidate_id": "must-not-be-scored"}],
+        },
+    )
+
+    assert payload["ok"] is False
+    assert payload["status"] == "invalidated_generation_drift"
+    assert payload["evaluation_result_admissible"] is False
+    assert payload["results"] == [
+        {"candidate_id": "must-not-be-scored"}
+    ]
+    assert payload["truth_status"] == (
+        "evaluation_candidates_invalidated_not_scored"
+    )
+    assert payload["generation_pin"]["changed_components"] == [
+        "sqlite_projections"
+    ]
+    assert payload["generation_pin"]["answer_or_score_admissible"] is False
+
+
+def test_generation_pinned_evaluation_refuses_active_projection_writer(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    evaluator_called = False
+
+    def evaluator() -> dict[str, Any]:
+        nonlocal evaluator_called
+        evaluator_called = True
+        return {"ok": True, "results": []}
+
+    monkeypatch.setattr(
+        module,
+        "run_with_maintenance_lock",
+        lambda *_args, **_kwargs: {
+            "artifact_type": "session_memory_maintenance_lock_conflict",
+            "ok": True,
+            "status": "skipped_lock_held",
+            "blocking_owner": {"owner_job": "automatic-catchup"},
+        },
+    )
+
+    payload = module.generation_pinned_evaluation(
+        aoa_root=aoa_root,
+        artifact_type="fixture_evaluation",
+        evaluator=evaluator,
+    )
+
+    assert evaluator_called is False
+    assert payload["ok"] is False
+    assert payload["status"] == "refused_active_projection_writer"
+    assert payload["evaluation_result_admissible"] is False
+    assert payload["generation_pin"]["reasons"] == [
+        "maintenance_lease_conflict"
+    ]
+
+
 def test_evidence_envelope_preserves_refs_budgets_and_empty_page_truncation(
     tmp_path: Path,
 ) -> None:
